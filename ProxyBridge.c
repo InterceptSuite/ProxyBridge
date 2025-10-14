@@ -142,7 +142,7 @@ int main(int argc, char **argv)
         fprintf(stderr, " | |_) | '__/ _ \\ \\/ / | | | |  _ \\| '__| |/ _` |/ _` |/ _ \\\n");
         fprintf(stderr, " |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/\n");
         fprintf(stderr, " |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|\n");
-        fprintf(stderr, "                      |___/                      |___/       \n");
+        fprintf(stderr, "                      |___/                      |___/  V1.0     \n");
         fprintf(stderr, "\tAuthor: Sourav Kalal/InterceptSuite\n");
         fprintf(stderr, "\tGitHub: https://github.com/InterceptSuite/ProxyBridge\n");
         fprintf(stderr, "\tRedirect Windows Traffic to Socks5/HTTP Proxy\n\n");
