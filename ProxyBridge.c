@@ -144,7 +144,8 @@ int main(int argc, char **argv)
         fprintf(stderr, " |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|\n");
         fprintf(stderr, "                      |___/                      |___/       \n");
         fprintf(stderr, "\tAuthor: Sourav Kalal/InterceptSuite\n");
-        fprintf(stderr, "\tProject: https://github.com/InterceptSuite/ProxyBridge\n\n");
+        fprintf(stderr, "\tGitHub: https://github.com/InterceptSuite/ProxyBridge\n");
+        fprintf(stderr, "\tRedirect Windows Traffic to Socks5/HTTP Proxy\n\n");
         fprintf(stderr, "Usage: %s <process-name.exe> [OPTIONS]\n\n", argv[0]);
         fprintf(stderr, "Options:\n");
         fprintf(stderr, "  --proxy <url>         Proxy URL (default: socks5://127.0.0.1:4444)\n");
