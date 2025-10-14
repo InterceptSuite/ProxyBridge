@@ -26,10 +26,11 @@
 
 // Configuration
 #define MAXBUF          0xFFFF
-#define SOCKS5_PROXY_IP  "127.0.0.1"
-#define SOCKS5_PROXY_PORT 4444
+#define DEFAULT_SOCKS5_IP  "127.0.0.1"
+#define DEFAULT_SOCKS5_PORT 4444
 #define LOCAL_PROXY_PORT 34010
 #define MAX_PROCESS_NAME 256
+#define MAX_PROXY_URL 512
 
 // SOCKS5 protocol constants
 #define SOCKS5_VERSION      0x05
@@ -51,6 +52,8 @@ static CONNECTION_INFO *connection_list = NULL;
 typedef struct {
     UINT16 local_proxy_port;
     char target_process[MAX_PROCESS_NAME];
+    char proxy_ip[64];
+    UINT16 proxy_port;
 } PROXY_CONFIG;
 
 typedef struct {
@@ -67,8 +70,12 @@ typedef struct {
 // Global
 static HANDLE lock;
 
+static char g_proxy_ip[64] = DEFAULT_SOCKS5_IP;
+static UINT16 g_proxy_port = DEFAULT_SOCKS5_PORT;
+
 // Function prototypes
 static UINT32 parse_ipv4(const char *ip);
+static BOOL parse_proxy_url(const char *url, char *ip, UINT16 *port);
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
 static DWORD WINAPI local_proxy_server(LPVOID arg);
 static DWORD WINAPI connection_handler(LPVOID arg);
@@ -116,25 +123,41 @@ int main(int argc, char **argv)
     DWORD exclude_pid = 0;
     BOOL use_exclude_pid = FALSE;
     char target_process[MAX_PROCESS_NAME] = {0};
+    int i;
 
-    if (argc < 2 || argc > 4)
+    if (argc < 2)
     {
         fprintf(stderr, "ProxyBridge - Transparent SOCKS5 Traffic Redirector\n\n");
-        fprintf(stderr, "Usage: %s <process-name.exe> [-pid <exclude-process-id>]\n\n", argv[0]);
+        fprintf(stderr, "Usage: %s <process-name.exe> [OPTIONS]\n\n", argv[0]);
+        fprintf(stderr, "Options:\n");
+        fprintf(stderr, "  --proxy <url>    Proxy URL (default: socks5://127.0.0.1:4444)\n");
+        fprintf(stderr, "  -pid <id>        Exclude process ID from redirection\n\n");
         fprintf(stderr, "Examples:\n");
-        fprintf(stderr, "  %s chrome.exe           - Redirect all chrome.exe traffic\n", argv[0]);
-        fprintf(stderr, "  %s firefox.exe -pid 1234 - Redirect firefox, exclude PID 1234\n\n", argv[0]);
-        fprintf(stderr, "SOCKS5 Proxy: %s:%d\n", SOCKS5_PROXY_IP, SOCKS5_PROXY_PORT);
+        fprintf(stderr, "  %s chrome.exe\n", argv[0]);
+        fprintf(stderr, "  %s firefox.exe --proxy socks5://127.0.0.1:9050\n", argv[0]);
+        fprintf(stderr, "  %s chrome.exe --proxy socks5://192.168.1.100:1080 -pid 1234\n\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
     strncpy(target_process, argv[1], MAX_PROCESS_NAME - 1);
     target_process[MAX_PROCESS_NAME - 1] = '\0';
 
-    if (argc == 4 && strcmp(argv[2], "-pid") == 0)
+    for (i = 2; i < argc; i++)
     {
-        exclude_pid = (DWORD)atoi(argv[3]);
-        use_exclude_pid = TRUE;
+        if (strcmp(argv[i], "--proxy") == 0 && i + 1 < argc)
+        {
+            if (!parse_proxy_url(argv[i + 1], g_proxy_ip, &g_proxy_port))
+            {
+                error("Invalid proxy URL: %s", argv[i + 1]);
+            }
+            i++;
+        }
+        else if (strcmp(argv[i], "-pid") == 0 && i + 1 < argc)
+        {
+            exclude_pid = (DWORD)atoi(argv[i + 1]);
+            use_exclude_pid = TRUE;
+            i++;
+        }
     }
 
     lock = CreateMutex(NULL, FALSE, NULL);
@@ -169,7 +192,7 @@ int main(int argc, char **argv)
 
     message("ProxyBridge started");
     message("Local proxy: localhost:%d", LOCAL_PROXY_PORT);
-    message("SOCKS5 proxy: %s:%d", SOCKS5_PROXY_IP, SOCKS5_PROXY_PORT);
+    message("SOCKS5 proxy: %s:%d", g_proxy_ip, g_proxy_port);
     message("Redirecting traffic from: %s", target_process);
     if (use_exclude_pid)
     {
@@ -312,6 +335,56 @@ static UINT32 parse_ipv4(const char *ip)
         return 0;
     }
     return (a << 0) | (b << 8) | (c << 16) | (d << 24);
+}
+
+
+static BOOL parse_proxy_url(const char *url, char *ip, UINT16 *port)
+{
+    char temp_url[MAX_PROXY_URL];
+    char *protocol, *host, *port_str;
+
+    if (url == NULL || strlen(url) >= MAX_PROXY_URL)
+    {
+        return FALSE;
+    }
+
+    strncpy(temp_url, url, MAX_PROXY_URL - 1);
+    temp_url[MAX_PROXY_URL - 1] = '\0';
+
+    protocol = temp_url;
+    if (strncmp(protocol, "socks5://", 9) == 0)
+    {
+        host = protocol + 9;
+    }
+    else if (strncmp(protocol, "socks://", 8) == 0)
+    {
+        host = protocol + 8;
+    }
+    else
+    {
+        host = protocol;
+    }
+
+    port_str = strrchr(host, ':');
+    if (port_str == NULL)
+    {
+        return FALSE;
+    }
+
+    *port_str = '\0';
+    port_str++;
+
+    int port_num = atoi(port_str);
+    if (port_num <= 0 || port_num > 65535)
+    {
+        return FALSE;
+    }
+    *port = (UINT16)port_num;
+
+    strncpy(ip, host, 63);
+    ip[63] = '\0';
+
+    return TRUE;
 }
 
 static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
@@ -605,7 +678,7 @@ static DWORD WINAPI connection_handler(LPVOID arg)
     free(config);
 
     // Connect to SOCKS5 proxy
-    socks5_ip = parse_ipv4(SOCKS5_PROXY_IP);
+    socks5_ip = parse_ipv4(g_proxy_ip);
     socks_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (socks_sock == INVALID_SOCKET)
     {
@@ -617,7 +690,7 @@ static DWORD WINAPI connection_handler(LPVOID arg)
     memset(&socks_addr, 0, sizeof(socks_addr));
     socks_addr.sin_family = AF_INET;
     socks_addr.sin_addr.s_addr = socks5_ip;
-    socks_addr.sin_port = htons(SOCKS5_PROXY_PORT);
+    socks_addr.sin_port = htons(g_proxy_port);
 
     if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
     {
