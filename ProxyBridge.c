@@ -28,7 +28,7 @@
 #define MAXBUF          0xFFFF
 #define DEFAULT_SOCKS5_IP  "127.0.0.1"
 #define DEFAULT_SOCKS5_PORT 4444
-#define LOCAL_PROXY_PORT 34010  ### DO NOT EDIT, For some stupid reason other ports are detected as malware by #fuck Windows
+#define LOCAL_PROXY_PORT 34010  // DO NOT EDIT, For some stupid reason other ports are detected as malware by #fuck Windows
 #define MAX_PROCESS_NAME 256
 #define MAX_PROXY_URL 512
 
@@ -136,7 +136,15 @@ int main(int argc, char **argv)
 
     if (argc < 2)
     {
-        fprintf(stderr, "ProxyBridge - Transparent Proxy Traffic Redirector\n\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "  ____                        ____       _     _            \n");
+        fprintf(stderr, " |  _ \\ _ __ _____  ___   _  | __ ) _ __(_) __| | __ _  ___ \n");
+        fprintf(stderr, " | |_) | '__/ _ \\ \\/ / | | | |  _ \\| '__| |/ _` |/ _` |/ _ \\\n");
+        fprintf(stderr, " |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/\n");
+        fprintf(stderr, " |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|\n");
+        fprintf(stderr, "                      |___/                      |___/       \n");
+        fprintf(stderr, "\tAuthor: Sourav Kalal/InterceptSuite\n");
+        fprintf(stderr, "\tProject: https://github.com/InterceptSuite/ProxyBridge\n\n");
         fprintf(stderr, "Usage: %s <process-name.exe> [OPTIONS]\n\n", argv[0]);
         fprintf(stderr, "Options:\n");
         fprintf(stderr, "  --proxy <url>         Proxy URL (default: socks5://127.0.0.1:4444)\n");
