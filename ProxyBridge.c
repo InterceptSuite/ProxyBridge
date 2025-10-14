@@ -121,8 +121,8 @@ int main(int argc, char **argv)
     PWINDIVERT_IPHDR ip_header;
     PWINDIVERT_TCPHDR tcp_header;
     PROXY_CONFIG *config;
-    DWORD exclude_pid = 0;
-    BOOL use_exclude_pid = FALSE;
+    char exclude_process[MAX_PROCESS_NAME] = {0};
+    BOOL use_exclude = FALSE;
     char target_process[MAX_PROCESS_NAME] = {0};
     int i;
 
@@ -131,13 +131,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "ProxyBridge - Transparent SOCKS5 Traffic Redirector\n\n");
         fprintf(stderr, "Usage: %s <process-name.exe> [OPTIONS]\n\n", argv[0]);
         fprintf(stderr, "Options:\n");
-        fprintf(stderr, "  --proxy <url>       Proxy URL (default: socks5://127.0.0.1:4444)\n");
-        fprintf(stderr, "  --relay-port <port> Local relay port (default: 34010)\n");
-        fprintf(stderr, "  -pid <id>           Exclude process ID from redirection\n\n");
+        fprintf(stderr, "  --proxy <url>         Proxy URL (default: socks5://127.0.0.1:4444)\n");
+        fprintf(stderr, "  --relay-port <port>   Local relay port (default: 37123)\n");
+        fprintf(stderr, "  --exclude <process>   Exclude process from redirection\n\n");
         fprintf(stderr, "Examples:\n");
         fprintf(stderr, "  %s chrome.exe\n", argv[0]);
         fprintf(stderr, "  %s firefox.exe --proxy socks5://127.0.0.1:9050\n", argv[0]);
-        fprintf(stderr, "  %s chrome.exe --relay-port 40000 -pid 1234\n\n", argv[0]);
+        fprintf(stderr, "  %s chrome.exe --exclude InterceptSuite.exe\n\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
@@ -164,10 +164,11 @@ int main(int argc, char **argv)
             g_local_relay_port = (UINT16)port;
             i++;
         }
-        else if (strcmp(argv[i], "-pid") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "--exclude") == 0 && i + 1 < argc)
         {
-            exclude_pid = (DWORD)atoi(argv[i + 1]);
-            use_exclude_pid = TRUE;
+            strncpy(exclude_process, argv[i + 1], MAX_PROCESS_NAME - 1);
+            exclude_process[MAX_PROCESS_NAME - 1] = '\0';
+            use_exclude = TRUE;
             i++;
         }
     }
@@ -206,9 +207,9 @@ int main(int argc, char **argv)
     message("Local relay: localhost:%d", g_local_relay_port);
     message("SOCKS5 proxy: %s:%d", g_proxy_ip, g_proxy_port);
     message("Redirecting traffic from: %s", target_process);
-    if (use_exclude_pid)
+    if (use_exclude)
     {
-        message("Excluding PID %lu (direct connection)", exclude_pid);
+        message("Excluding process: %s (direct connection)", exclude_process);
     }
 
     handle = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, priority, 0);
@@ -240,12 +241,9 @@ int main(int argc, char **argv)
         if (addr.Outbound)
         {
             // Check if we should exclude this process (proxy app)
-            if (use_exclude_pid)
+            if (use_exclude)
             {
-                DWORD conn_pid = get_process_id_from_connection(
-                    ip_header->SrcAddr, ntohs(tcp_header->SrcPort));
-
-                if (conn_pid == exclude_pid)
+                if (is_target_process(ip_header->SrcAddr, ntohs(tcp_header->SrcPort), exclude_process))
                 {
                     // Excluded process - forward unchanged
                     WinDivertSend(handle, packet, packet_len, NULL, &addr);
