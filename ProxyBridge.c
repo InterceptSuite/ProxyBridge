@@ -72,6 +72,7 @@ static HANDLE lock;
 
 static char g_proxy_ip[64] = DEFAULT_SOCKS5_IP;
 static UINT16 g_proxy_port = DEFAULT_SOCKS5_PORT;
+static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
 
 // Function prototypes
 static UINT32 parse_ipv4(const char *ip);
@@ -130,12 +131,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "ProxyBridge - Transparent SOCKS5 Traffic Redirector\n\n");
         fprintf(stderr, "Usage: %s <process-name.exe> [OPTIONS]\n\n", argv[0]);
         fprintf(stderr, "Options:\n");
-        fprintf(stderr, "  --proxy <url>    Proxy URL (default: socks5://127.0.0.1:4444)\n");
-        fprintf(stderr, "  -pid <id>        Exclude process ID from redirection\n\n");
+        fprintf(stderr, "  --proxy <url>       Proxy URL (default: socks5://127.0.0.1:4444)\n");
+        fprintf(stderr, "  --relay-port <port> Local relay port (default: 34010)\n");
+        fprintf(stderr, "  -pid <id>           Exclude process ID from redirection\n\n");
         fprintf(stderr, "Examples:\n");
         fprintf(stderr, "  %s chrome.exe\n", argv[0]);
         fprintf(stderr, "  %s firefox.exe --proxy socks5://127.0.0.1:9050\n", argv[0]);
-        fprintf(stderr, "  %s chrome.exe --proxy socks5://192.168.1.100:1080 -pid 1234\n\n", argv[0]);
+        fprintf(stderr, "  %s chrome.exe --relay-port 40000 -pid 1234\n\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
@@ -150,6 +152,16 @@ int main(int argc, char **argv)
             {
                 error("Invalid proxy URL: %s", argv[i + 1]);
             }
+            i++;
+        }
+        else if (strcmp(argv[i], "--relay-port") == 0 && i + 1 < argc)
+        {
+            int port = atoi(argv[i + 1]);
+            if (port <= 0 || port > 65535)
+            {
+                error("Invalid relay port: %s (must be 1-65535)", argv[i + 1]);
+            }
+            g_local_relay_port = (UINT16)port;
             i++;
         }
         else if (strcmp(argv[i], "-pid") == 0 && i + 1 < argc)
@@ -173,7 +185,7 @@ int main(int argc, char **argv)
         error("Failed to allocate memory");
     }
     strncpy(config->target_process, target_process, MAX_PROCESS_NAME - 1);
-    config->local_proxy_port = LOCAL_PROXY_PORT;
+    config->local_proxy_port = g_local_relay_port;
 
     proxy_thread = CreateThread(NULL, 1, local_proxy_server, (LPVOID)config, 0, NULL);
     if (proxy_thread == NULL)
@@ -188,10 +200,10 @@ int main(int argc, char **argv)
     // need both outbound (to check process) and inbound (return traffic from proxy)
     snprintf(filter, sizeof(filter),
         "tcp and (outbound or (tcp.DstPort == %d or tcp.SrcPort == %d))",
-        LOCAL_PROXY_PORT, LOCAL_PROXY_PORT);
+        g_local_relay_port, g_local_relay_port);
 
     message("ProxyBridge started");
-    message("Local proxy: localhost:%d", LOCAL_PROXY_PORT);
+    message("Local relay: localhost:%d", g_local_relay_port);
     message("SOCKS5 proxy: %s:%d", g_proxy_ip, g_proxy_port);
     message("Redirecting traffic from: %s", target_process);
     if (use_exclude_pid)
@@ -242,7 +254,7 @@ int main(int argc, char **argv)
             }
 
             // Check if this is traffic FROM local proxy going back to target process
-            if (tcp_header->SrcPort == htons(LOCAL_PROXY_PORT))
+            if (tcp_header->SrcPort == htons(g_local_relay_port))
             {
                 // This is return traffic from local proxy
                 // Need to restore original source port for the connection
@@ -284,7 +296,7 @@ int main(int argc, char **argv)
 
                 // redirect to local proxy by reflecting the packet
                 UINT32 temp_addr = ip_header->DstAddr;
-                tcp_header->DstPort = htons(LOCAL_PROXY_PORT);
+                tcp_header->DstPort = htons(g_local_relay_port);
                 ip_header->DstAddr = ip_header->SrcAddr;
                 ip_header->SrcAddr = temp_addr;
                 addr.Outbound = FALSE;
@@ -299,7 +311,7 @@ int main(int argc, char **argv)
         else
         {
             // Inbound traffic - check if it's TO local proxy (from target process)
-            if (tcp_header->DstPort == htons(LOCAL_PROXY_PORT))
+            if (tcp_header->DstPort == htons(g_local_relay_port))
             {
                 // traffic going to local proxy
 
