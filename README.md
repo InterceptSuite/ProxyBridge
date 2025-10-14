@@ -10,6 +10,6 @@ ProxyBridge redirects TCP traffic from specific applications through a SOCKS5 pr
 - UDP Support
 - IP v6
 - All traffic redirection
-- HTTP Proxy support
+- Allow Direct Connection DNS Over TCP
 
 Its still in early stage, may contain bugs, the current focus is on fixing bugs and its still experimental and may contain security issues as its not tested for security bugs.

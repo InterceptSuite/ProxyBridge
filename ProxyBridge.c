@@ -28,9 +28,15 @@
 #define MAXBUF          0xFFFF
 #define DEFAULT_SOCKS5_IP  "127.0.0.1"
 #define DEFAULT_SOCKS5_PORT 4444
-#define LOCAL_PROXY_PORT 34010
+#define LOCAL_PROXY_PORT 34010  ### DO NOT EDIT, For some stupid reason other ports are detected as malware by #fuck Windows
 #define MAX_PROCESS_NAME 256
 #define MAX_PROXY_URL 512
+
+// Proxy types
+typedef enum {
+    PROXY_TYPE_SOCKS5,
+    PROXY_TYPE_HTTP
+} PROXY_TYPE;
 
 // SOCKS5 protocol constants
 #define SOCKS5_VERSION      0x05
@@ -73,11 +79,13 @@ static HANDLE lock;
 static char g_proxy_ip[64] = DEFAULT_SOCKS5_IP;
 static UINT16 g_proxy_port = DEFAULT_SOCKS5_PORT;
 static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
+static PROXY_TYPE g_proxy_type = PROXY_TYPE_SOCKS5;
 
 // Function prototypes
 static UINT32 parse_ipv4(const char *ip);
-static BOOL parse_proxy_url(const char *url, char *ip, UINT16 *port);
+static BOOL parse_proxy_url(const char *url, char *ip, UINT16 *port, PROXY_TYPE *type);
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
+static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
 static DWORD WINAPI local_proxy_server(LPVOID arg);
 static DWORD WINAPI connection_handler(LPVOID arg);
 static DWORD WINAPI transfer_handler(LPVOID arg);
@@ -128,15 +136,17 @@ int main(int argc, char **argv)
 
     if (argc < 2)
     {
-        fprintf(stderr, "ProxyBridge - Transparent SOCKS5 Traffic Redirector\n\n");
+        fprintf(stderr, "ProxyBridge - Transparent Proxy Traffic Redirector\n\n");
         fprintf(stderr, "Usage: %s <process-name.exe> [OPTIONS]\n\n", argv[0]);
         fprintf(stderr, "Options:\n");
         fprintf(stderr, "  --proxy <url>         Proxy URL (default: socks5://127.0.0.1:4444)\n");
+        fprintf(stderr, "                        Supported: socks5://host:port, http://host:port\n");
         fprintf(stderr, "  --relay-port <port>   Local relay port (default: 37123)\n");
         fprintf(stderr, "  --exclude <process>   Exclude process from redirection\n\n");
         fprintf(stderr, "Examples:\n");
         fprintf(stderr, "  %s chrome.exe\n", argv[0]);
         fprintf(stderr, "  %s firefox.exe --proxy socks5://127.0.0.1:9050\n", argv[0]);
+        fprintf(stderr, "  %s chrome.exe --proxy http://127.0.0.1:8080\n", argv[0]);
         fprintf(stderr, "  %s chrome.exe --exclude InterceptSuite.exe\n\n", argv[0]);
         exit(EXIT_FAILURE);
     }
@@ -148,7 +158,7 @@ int main(int argc, char **argv)
     {
         if (strcmp(argv[i], "--proxy") == 0 && i + 1 < argc)
         {
-            if (!parse_proxy_url(argv[i + 1], g_proxy_ip, &g_proxy_port))
+            if (!parse_proxy_url(argv[i + 1], g_proxy_ip, &g_proxy_port, &g_proxy_type))
             {
                 error("Invalid proxy URL: %s", argv[i + 1]);
             }
@@ -205,7 +215,8 @@ int main(int argc, char **argv)
 
     message("ProxyBridge started");
     message("Local relay: localhost:%d", g_local_relay_port);
-    message("SOCKS5 proxy: %s:%d", g_proxy_ip, g_proxy_port);
+    message("%s proxy: %s:%d", g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
+            g_proxy_ip, g_proxy_port);
     message("Redirecting traffic from: %s", target_process);
     if (use_exclude)
     {
@@ -348,12 +359,17 @@ static UINT32 parse_ipv4(const char *ip)
 }
 
 
-static BOOL parse_proxy_url(const char *url, char *ip, UINT16 *port)
+static BOOL parse_proxy_url(const char *url, char *ip, UINT16 *port, PROXY_TYPE *type)
 {
     char temp_url[MAX_PROXY_URL];
     char *protocol, *host, *port_str;
 
-    if (url == NULL || strlen(url) >= MAX_PROXY_URL)
+    if (url == NULL || ip == NULL || port == NULL || type == NULL)
+    {
+        return FALSE;
+    }
+
+    if (strlen(url) >= MAX_PROXY_URL)
     {
         return FALSE;
     }
@@ -364,14 +380,23 @@ static BOOL parse_proxy_url(const char *url, char *ip, UINT16 *port)
     protocol = temp_url;
     if (strncmp(protocol, "socks5://", 9) == 0)
     {
+        *type = PROXY_TYPE_SOCKS5;
         host = protocol + 9;
     }
     else if (strncmp(protocol, "socks://", 8) == 0)
     {
+        *type = PROXY_TYPE_SOCKS5;
         host = protocol + 8;
+    }
+    else if (strncmp(protocol, "http://", 7) == 0)
+    {
+        *type = PROXY_TYPE_HTTP;
+        host = protocol + 7;
     }
     else
     {
+        // Default to SOCKS5 if no protocol specified
+        *type = PROXY_TYPE_SOCKS5;
         host = protocol;
     }
 
@@ -586,6 +611,68 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 }
 
 
+static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
+{
+    char request[512];
+    char response[4096];
+    int len;
+    char *status_line;
+    int status_code;
+
+    message("HTTP: Connecting to %d.%d.%d.%d:%d",
+        (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
+
+    len = snprintf(request, sizeof(request),
+        "CONNECT %d.%d.%d.%d:%d HTTP/1.1\r\n"
+        "Host: %d.%d.%d.%d:%d\r\n"
+        "Proxy-Connection: keep-alive\r\n"
+        "\r\n",
+        (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
+        (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
+
+
+    if (send(s, request, len, 0) != len)
+    {
+        warning("HTTP: Failed to send CONNECT request");
+        return -1;
+    }
+
+    len = recv(s, response, sizeof(response) - 1, 0);
+    if (len <= 0)
+    {
+        warning("HTTP: Failed to receive response");
+        return -1;
+    }
+    response[len] = '\0';
+
+    status_line = response;
+    if (strncmp(status_line, "HTTP/1.", 7) != 0)
+    {
+        warning("HTTP: Invalid response format");
+        return -1;
+    }
+
+    status_code = 0;
+    char *code_start = strchr(status_line, ' ');
+    if (code_start != NULL)
+    {
+        status_code = atoi(code_start + 1);
+    }
+
+    if (status_code != 200)
+    {
+        warning("HTTP: CONNECT failed with status %d", status_code);
+        return -1;
+    }
+
+    message("HTTP: Connection established");
+    return 0;
+}
+
+
 static DWORD WINAPI local_proxy_server(LPVOID arg)
 {
     PROXY_CONFIG *config = (PROXY_CONFIG *)arg;
@@ -704,18 +791,29 @@ static DWORD WINAPI connection_handler(LPVOID arg)
 
     if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
     {
-        warning("Failed to connect to SOCKS5 proxy (%d)", WSAGetLastError());
+        warning("Failed to connect to proxy (%d)", WSAGetLastError());
         closesocket(client_sock);
         closesocket(socks_sock);
         return 0;
     }
 
-    // Perform SOCKS5 handshake
-    if (socks5_connect(socks_sock, dest_ip, dest_port) != 0)
+    if (g_proxy_type == PROXY_TYPE_SOCKS5)
     {
-        closesocket(client_sock);
-        closesocket(socks_sock);
-        return 0;
+        if (socks5_connect(socks_sock, dest_ip, dest_port) != 0)
+        {
+            closesocket(client_sock);
+            closesocket(socks_sock);
+            return 0;
+        }
+    }
+    else if (g_proxy_type == PROXY_TYPE_HTTP)
+    {
+        if (http_connect(socks_sock, dest_ip, dest_port) != 0)
+        {
+            closesocket(client_sock);
+            closesocket(socks_sock);
+            return 0;
+        }
     }
 
     // Create bidirectional forwarding threads
