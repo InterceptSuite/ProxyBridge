@@ -156,6 +156,11 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
                 }
+                else if (action == RULE_ACTION_BLOCK)
+                {
+                    // Drop the packet - don't send it anywhere
+                    continue;
+                }
                 else if (action == RULE_ACTION_PROXY)
             {
                 UINT16 src_port = ntohs(tcp_header->SrcPort);
@@ -890,7 +895,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     PROCESS_RULE *rule = rules_list;
     while (rule != NULL)
     {
-        log_message("Rule: %s -> %s", rule->process_name, rule->action == RULE_ACTION_PROXY ? "PROXY" : "DIRECT");
+        const char *action_str = (rule->action == RULE_ACTION_PROXY) ? "PROXY" :
+                                 (rule->action == RULE_ACTION_BLOCK) ? "BLOCK" : "DIRECT";
+        log_message("Rule: %s -> %s", rule->process_name, action_str);
         rule_count++;
         rule = rule->next;
     }
