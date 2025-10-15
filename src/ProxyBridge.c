@@ -180,7 +180,13 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                         snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
                             (orig_dest_ip >> 0) & 0xFF, (orig_dest_ip >> 8) & 0xFF,
                             (orig_dest_ip >> 16) & 0xFF, (orig_dest_ip >> 24) & 0xFF);
-                        g_connection_callback(process_name, pid, dest_ip_str, orig_dest_port);
+
+                        char proxy_info[128];
+                        snprintf(proxy_info, sizeof(proxy_info), "Redirect Proxy %s://%s:%d",
+                            g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
+                            g_proxy_ip, g_proxy_port);
+
+                        g_connection_callback(process_name, pid, dest_ip_str, orig_dest_port, proxy_info);
                     }
                 }
 
