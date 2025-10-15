@@ -16,6 +16,11 @@ extern "C" {
 typedef void (*LogCallback)(const char* message);
 typedef void (*ConnectionCallback)(const char* process_name, DWORD pid, UINT16 src_port, const char* dest_ip, UINT16 dest_port);
 
+typedef enum {
+    PROXY_TYPE_HTTP = 0,
+    PROXY_TYPE_SOCKS5 = 1
+} ProxyType;
+
 typedef struct {
     const char* target_process;
     const char* exclude_process;
@@ -28,6 +33,7 @@ typedef struct {
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void);
 PROXYBRIDGE_API BOOL ProxyBridge_Stop(void);
 PROXYBRIDGE_API BOOL ProxyBridge_SetConfig(const ProxyBridgeConfig* config);
+PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port);
 
 #ifdef __cplusplus
 }

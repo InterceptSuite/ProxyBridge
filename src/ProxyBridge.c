@@ -1,7 +1,6 @@
-#define PROXYBRIDGE_EXPORTS
-#include "ProxyBridge.h"
 #include <winsock2.h>
 #include <windows.h>
+#include "ProxyBridge.h"
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <psapi.h>
@@ -18,11 +17,6 @@
 #define DEFAULT_SOCKS5_PORT 4444
 #define LOCAL_PROXY_PORT 34010
 #define MAX_PROCESS_NAME 256
-
-typedef enum {
-    PROXY_TYPE_SOCKS5,
-    PROXY_TYPE_HTTP
-} PROXY_TYPE;
 
 #define SOCKS5_VERSION 0x05
 #define SOCKS5_CMD_CONNECT 0x01
@@ -61,7 +55,7 @@ static char g_exclude_process[MAX_PROCESS_NAME] = "";
 static char g_proxy_ip[64] = DEFAULT_SOCKS5_IP;
 static UINT16 g_proxy_port = DEFAULT_SOCKS5_PORT;
 static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
-static PROXY_TYPE g_proxy_type = PROXY_TYPE_SOCKS5;
+static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
 static BOOL g_use_exclude = FALSE;
 static LogCallback g_log_callback = NULL;
 static ConnectionCallback g_connection_callback = NULL;
@@ -78,7 +72,6 @@ static void log_message(const char *msg, ...)
 }
 
 static UINT32 parse_ipv4(const char *ip);
-static BOOL parse_proxy_url(const char *url, char *ip, UINT16 *port, PROXY_TYPE *type);
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
 static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
 static DWORD WINAPI local_proxy_server(LPVOID arg);
@@ -217,74 +210,10 @@ static UINT32 parse_ipv4(const char *ip)
 {
     unsigned int a, b, c, d;
     if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
-    {
         return 0;
-    }
     if (a > 255 || b > 255 || c > 255 || d > 255)
-    {
         return 0;
-    }
     return (a << 0) | (b << 8) | (c << 16) | (d << 24);
-}
-
-
-static BOOL parse_proxy_url(const char *url, char *ip, UINT16 *port, PROXY_TYPE *type)
-{
-    char temp_url[512];
-    char *protocol, *host, *port_str;
-
-    if (url == NULL || ip == NULL || port == NULL || type == NULL)
-        return FALSE;
-
-    if (strlen(url) >= 512)
-        return FALSE;
-
-    strncpy(temp_url, url, 511);
-    temp_url[511] = '\0';
-
-    protocol = temp_url;
-    if (strncmp(protocol, "socks5://", 9) == 0)
-    {
-        *type = PROXY_TYPE_SOCKS5;
-        host = protocol + 9;
-    }
-    else if (strncmp(protocol, "socks://", 8) == 0)
-    {
-        *type = PROXY_TYPE_SOCKS5;
-        host = protocol + 8;
-    }
-    else if (strncmp(protocol, "http://", 7) == 0)
-    {
-        *type = PROXY_TYPE_HTTP;
-        host = protocol + 7;
-    }
-    else
-    {
-        // Default to SOCKS5 if no protocol specified
-        *type = PROXY_TYPE_SOCKS5;
-        host = protocol;
-    }
-
-    port_str = strrchr(host, ':');
-    if (port_str == NULL)
-    {
-        return FALSE;
-    }
-
-    *port_str = '\0';
-    port_str++;
-
-    int port_num = atoi(port_str);
-    if (port_num <= 0 || port_num > 65535)
-    {
-        return FALSE;
-    }
-    *port = (UINT16)port_num;
-
-    strncpy(ip, host, 63);
-    ip[63] = '\0';
-
-    return TRUE;
 }
 
 static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
@@ -852,33 +781,16 @@ static void remove_connection(UINT16 src_port)
 
 PROXYBRIDGE_API BOOL ProxyBridge_SetConfig(const ProxyBridgeConfig* config)
 {
-    if (running)
-    {
-        if (g_log_callback) g_log_callback("[SetConfig] Already running!");
+    if (running || config == NULL)
         return FALSE;
-    }
 
-    if (config == NULL)
-    {
-        return FALSE;
-    }
-
-    // Set callbacks first so we can use logging
     g_log_callback = config->log_callback;
     g_connection_callback = config->connection_callback;
-
-    if (g_log_callback) g_log_callback("[SetConfig] Starting configuration...");
 
     if (config->target_process && config->target_process[0] != '\0')
     {
         strncpy(g_target_process, config->target_process, MAX_PROCESS_NAME - 1);
         g_target_process[MAX_PROCESS_NAME - 1] = '\0';
-        if (g_log_callback)
-        {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "[SetConfig] Target process: %s", g_target_process);
-            g_log_callback(msg);
-        }
     }
 
     if (config->exclude_process && config->exclude_process[0] != '\0')
@@ -886,49 +798,10 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetConfig(const ProxyBridgeConfig* config)
         strncpy(g_exclude_process, config->exclude_process, MAX_PROCESS_NAME - 1);
         g_exclude_process[MAX_PROCESS_NAME - 1] = '\0';
         g_use_exclude = TRUE;
-        if (g_log_callback)
-        {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "[SetConfig] Exclude process: %s", g_exclude_process);
-            g_log_callback(msg);
-        }
-    }
-
-    if (config->proxy_url && config->proxy_url[0] != '\0')
-    {
-        if (g_log_callback)
-        {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "[SetConfig] Parsing proxy URL: %s", config->proxy_url);
-            g_log_callback(msg);
-        }
-
-        if (!parse_proxy_url(config->proxy_url, g_proxy_ip, &g_proxy_port, &g_proxy_type))
-        {
-            if (g_log_callback) g_log_callback("[SetConfig] Failed to parse proxy URL!");
-            return FALSE;
-        }
-
-        if (g_log_callback)
-        {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "[SetConfig] Proxy: %s:%d (type=%d)", g_proxy_ip, g_proxy_port, g_proxy_type);
-            g_log_callback(msg);
-        }
     }
 
     if (config->relay_port > 0)
-    {
         g_local_relay_port = config->relay_port;
-        if (g_log_callback)
-        {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "[SetConfig] Relay port: %d", g_local_relay_port);
-            g_log_callback(msg);
-        }
-    }
-
-    if (g_log_callback) g_log_callback("[SetConfig] Configuration complete!");
 
     return TRUE;
 }
@@ -1041,6 +914,22 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
     ReleaseMutex(lock);
 
     log_message("ProxyBridge stopped");
+
+    return TRUE;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port)
+{
+    if (running || proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
+        return FALSE;
+
+    if (parse_ipv4(proxy_ip) == 0)
+        return FALSE;
+
+    strncpy(g_proxy_ip, proxy_ip, sizeof(g_proxy_ip) - 1);
+    g_proxy_ip[sizeof(g_proxy_ip) - 1] = '\0';
+    g_proxy_port = proxy_port;
+    g_proxy_type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
 
     return TRUE;
 }
