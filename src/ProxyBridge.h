@@ -14,7 +14,7 @@ extern "C" {
 #endif
 
 typedef void (*LogCallback)(const char* message);
-typedef void (*ConnectionCallback)(const char* process_name, DWORD pid, UINT16 src_port, const char* dest_ip, UINT16 dest_port);
+typedef void (*ConnectionCallback)(const char* process_name, DWORD pid, const char* dest_ip, UINT16 dest_port);
 
 typedef enum {
     PROXY_TYPE_HTTP = 0,

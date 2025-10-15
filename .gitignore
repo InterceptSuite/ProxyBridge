@@ -3,3 +3,5 @@
 *.sys
 *.zip
 *.py
+build/**
+*.pyc
