@@ -64,6 +64,7 @@ static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
 static PROXY_TYPE g_proxy_type = PROXY_TYPE_SOCKS5;
 static BOOL g_use_exclude = FALSE;
 static LogCallback g_log_callback = NULL;
+static ConnectionCallback g_connection_callback = NULL;
 
 static void log_message(const char *msg, ...)
 {
@@ -93,135 +94,21 @@ static BOOL is_connection_tracked(UINT16 src_port);
 static void remove_connection(UINT16 src_port);
 
 
-int main(int argc, char **argv)
+static DWORD WINAPI packet_processor(LPVOID arg)
 {
-    HANDLE handle, proxy_thread;
-    char filter[512];
-    INT16 priority = 123;
     unsigned char packet[MAXBUF];
     UINT packet_len;
     WINDIVERT_ADDRESS addr;
     PWINDIVERT_IPHDR ip_header;
     PWINDIVERT_TCPHDR tcp_header;
-    PROXY_CONFIG *config;
-    char exclude_process[MAX_PROCESS_NAME] = {0};
-    BOOL use_exclude = FALSE;
-    char target_process[MAX_PROCESS_NAME] = {0};
-    int i;
 
-    if (argc < 2)
+    while (running)
     {
-        fprintf(stderr, "\n");
-        fprintf(stderr, "  ____                        ____       _     _            \n");
-        fprintf(stderr, " |  _ \\ _ __ _____  ___   _  | __ ) _ __(_) __| | __ _  ___ \n");
-        fprintf(stderr, " | |_) | '__/ _ \\ \\/ / | | | |  _ \\| '__| |/ _` |/ _` |/ _ \\\n");
-        fprintf(stderr, " |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/\n");
-        fprintf(stderr, " |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|\n");
-        fprintf(stderr, "                      |___/                      |___/  V1.0     \n");
-        fprintf(stderr, "\tAuthor: Sourav Kalal/InterceptSuite\n");
-        fprintf(stderr, "\tGitHub: https://github.com/InterceptSuite/ProxyBridge\n");
-        fprintf(stderr, "\tRedirect Windows Traffic to Socks5/HTTP Proxy\n\n");
-        fprintf(stderr, "Usage: %s <process-name.exe> [OPTIONS]\n\n", argv[0]);
-        fprintf(stderr, "Options:\n");
-        fprintf(stderr, "  --proxy <url>         Proxy URL (default: socks5://127.0.0.1:4444)\n");
-        fprintf(stderr, "                        Supported: socks5://host:port, http://host:port\n");
-        fprintf(stderr, "  --relay-port <port>   Local relay port (default: 37123)\n");
-        fprintf(stderr, "  --exclude <process>   Exclude process from redirection\n\n");
-        fprintf(stderr, "Examples:\n");
-        fprintf(stderr, "  %s chrome.exe\n", argv[0]);
-        fprintf(stderr, "  %s firefox.exe --proxy socks5://127.0.0.1:9050\n", argv[0]);
-        fprintf(stderr, "  %s chrome.exe --proxy http://127.0.0.1:8080\n", argv[0]);
-        fprintf(stderr, "  %s chrome.exe --exclude InterceptSuite.exe\n\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-
-    strncpy(target_process, argv[1], MAX_PROCESS_NAME - 1);
-    target_process[MAX_PROCESS_NAME - 1] = '\0';
-
-    for (i = 2; i < argc; i++)
-    {
-        if (strcmp(argv[i], "--proxy") == 0 && i + 1 < argc)
+        if (!WinDivertRecv(windivert_handle, packet, sizeof(packet), &packet_len, &addr))
         {
-            if (!parse_proxy_url(argv[i + 1], g_proxy_ip, &g_proxy_port, &g_proxy_type))
-            {
-                error("Invalid proxy URL: %s", argv[i + 1]);
-            }
-            i++;
-        }
-        else if (strcmp(argv[i], "--relay-port") == 0 && i + 1 < argc)
-        {
-            int port = atoi(argv[i + 1]);
-            if (port <= 0 || port > 65535)
-            {
-                error("Invalid relay port: %s (must be 1-65535)", argv[i + 1]);
-            }
-            g_local_relay_port = (UINT16)port;
-            i++;
-        }
-        else if (strcmp(argv[i], "--exclude") == 0 && i + 1 < argc)
-        {
-            strncpy(exclude_process, argv[i + 1], MAX_PROCESS_NAME - 1);
-            exclude_process[MAX_PROCESS_NAME - 1] = '\0';
-            use_exclude = TRUE;
-            i++;
-        }
-    }
-
-    lock = CreateMutex(NULL, FALSE, NULL);
-    if (lock == NULL)
-    {
-        error("Failed to create mutex (%lu)", GetLastError());
-    }
-
-    // Start local proxy server
-    config = (PROXY_CONFIG *)malloc(sizeof(PROXY_CONFIG));
-    if (config == NULL)
-    {
-        error("Failed to allocate memory");
-    }
-    strncpy(config->target_process, target_process, MAX_PROCESS_NAME - 1);
-    config->local_proxy_port = g_local_relay_port;
-
-    proxy_thread = CreateThread(NULL, 1, local_proxy_server, (LPVOID)config, 0, NULL);
-    if (proxy_thread == NULL)
-    {
-        error("Failed to create proxy thread (%lu)", GetLastError());
-    }
-    CloseHandle(proxy_thread);
-
-    Sleep(500);  // Wait for proxy to start   - Should not edit the time
-
-    // Build WinDivert filter - capture all TCP traffic to/from local proxy port
-    // need both outbound (to check process) and inbound (return traffic from proxy)
-    snprintf(filter, sizeof(filter),
-        "tcp and (outbound or (tcp.DstPort == %d or tcp.SrcPort == %d))",
-        g_local_relay_port, g_local_relay_port);
-
-    message("ProxyBridge started");
-    message("Local relay: localhost:%d", g_local_relay_port);
-    message("%s proxy: %s:%d", g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
-            g_proxy_ip, g_proxy_port);
-    message("Redirecting traffic from: %s", target_process);
-    if (use_exclude)
-    {
-        message("Excluding process: %s (direct connection)", exclude_process);
-    }
-
-    handle = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, priority, 0);
-    if (handle == INVALID_HANDLE_VALUE)
-    {
-        error("Failed to open WinDivert (%lu)", GetLastError());
-    }
-
-    WinDivertSetParam(handle, WINDIVERT_PARAM_QUEUE_LENGTH, 8192);
-    WinDivertSetParam(handle, WINDIVERT_PARAM_QUEUE_TIME, 2000);
-
-    // Main packet processing loop
-    while (TRUE)
-    {
-        if (!WinDivertRecv(handle, packet, sizeof(packet), &packet_len, &addr))
-        {
-            warning("Failed to receive packet (%lu)", GetLastError());
+            if (GetLastError() == ERROR_INVALID_HANDLE)
+                break;
+            log_message("Failed to receive packet (%lu)", GetLastError());
             continue;
         }
 
@@ -229,80 +116,72 @@ int main(int argc, char **argv)
             NULL, NULL, &tcp_header, NULL, NULL, NULL, NULL, NULL);
 
         if (ip_header == NULL || tcp_header == NULL)
-        {
             continue;
-        }
 
         if (addr.Outbound)
         {
-            // Check if we should exclude this process (proxy app)
-            if (use_exclude)
+            if (g_use_exclude)
             {
-                if (is_target_process(ip_header->SrcAddr, ntohs(tcp_header->SrcPort), exclude_process))
+                if (is_target_process(ip_header->SrcAddr, ntohs(tcp_header->SrcPort), g_exclude_process))
                 {
-                    // Excluded process - forward unchanged
-                    WinDivertSend(handle, packet, packet_len, NULL, &addr);
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
                 }
             }
 
-            // Check if this is traffic FROM local proxy going back to target process
             if (tcp_header->SrcPort == htons(g_local_relay_port))
             {
-                // This is return traffic from local proxy
-                // Need to restore original source port for the connection
-                // Need to figure out UDP case to handle connection
                 UINT16 dst_port = ntohs(tcp_header->DstPort);
                 UINT32 orig_dest_ip;
                 UINT16 orig_dest_port;
 
                 if (get_connection(dst_port, &orig_dest_ip, &orig_dest_port))
-                {
                     tcp_header->SrcPort = htons(orig_dest_port);
-                }
 
-                // Reflect it back
                 UINT32 temp_addr = ip_header->DstAddr;
                 ip_header->DstAddr = ip_header->SrcAddr;
                 ip_header->SrcAddr = temp_addr;
                 addr.Outbound = FALSE;
 
-                // Remove connection if this is FIN or RST
                 if (tcp_header->Fin || tcp_header->Rst)
-                {
                     remove_connection(dst_port);
-                }
             }
-            // FAST PATH: Check if connection already tracked (avoids slow process lookup)
             else if (is_connection_tracked(ntohs(tcp_header->SrcPort)))
             {
                 UINT16 src_port = ntohs(tcp_header->SrcPort);
 
-                // Remove connection if this is FIN or RST
                 if (tcp_header->Fin || tcp_header->Rst)
-                {
                     remove_connection(src_port);
-                }
 
-                // redirect to local proxy by reflecting the packet
                 UINT32 temp_addr = ip_header->DstAddr;
                 tcp_header->DstPort = htons(g_local_relay_port);
                 ip_header->DstAddr = ip_header->SrcAddr;
                 ip_header->SrcAddr = temp_addr;
                 addr.Outbound = FALSE;
             }
-            // SLOW PATH: Check if this is from our target process (requires process lookup)
-            else if (is_target_process(ip_header->SrcAddr, ntohs(tcp_header->SrcPort), target_process))
+            else if (is_target_process(ip_header->SrcAddr, ntohs(tcp_header->SrcPort), g_target_process))
             {
                 UINT16 src_port = ntohs(tcp_header->SrcPort);
                 UINT32 src_ip = ip_header->SrcAddr;
                 UINT32 orig_dest_ip = ip_header->DstAddr;
                 UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
 
-                // Track this connection so future packets use fast path
                 add_connection(src_port, src_ip, orig_dest_ip, orig_dest_port);
 
-                // redirect to local proxy by reflecting the packet
+                if (g_connection_callback != NULL)
+                {
+                    char process_name[MAX_PROCESS_NAME];
+                    DWORD pid = get_process_id_from_connection(src_ip, src_port);
+                    if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
+                    {
+                        char dest_ip_str[32];
+                        snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
+                            (orig_dest_ip >> 0) & 0xFF, (orig_dest_ip >> 8) & 0xFF,
+                            (orig_dest_ip >> 16) & 0xFF, (orig_dest_ip >> 24) & 0xFF);
+                        g_connection_callback(process_name, pid, src_port, dest_ip_str, orig_dest_port);
+                    }
+                }
+
                 UINT32 temp_addr = ip_header->DstAddr;
                 tcp_header->DstPort = htons(g_local_relay_port);
                 ip_header->DstAddr = ip_header->SrcAddr;
@@ -311,37 +190,28 @@ int main(int argc, char **argv)
             }
             else
             {
-                // not our target process, forward unchanged
-                WinDivertSend(handle, packet, packet_len, NULL, &addr);
+                WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                 continue;
             }
         }
         else
         {
-            // Inbound traffic - check if it's TO local proxy (from target process)
-            if (tcp_header->DstPort == htons(g_local_relay_port))
+            if (tcp_header->DstPort != htons(g_local_relay_port))
             {
-                // traffic going to local proxy
-
-            }
-            else
-            {
-                // other inbound traffic, forward unchanged
-                WinDivertSend(handle, packet, packet_len, NULL, &addr);
+                WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                 continue;
             }
         }
 
         WinDivertHelperCalcChecksums(packet, packet_len, &addr, 0);
-        if (!WinDivertSend(handle, packet, packet_len, NULL, &addr))
+        if (!WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr))
         {
-            warning("Failed to send packet (%lu)", GetLastError());
+            log_message("Failed to send packet (%lu)", GetLastError());
         }
     }
 
     return 0;
 }
-
 
 static UINT32 parse_ipv4(const char *ip)
 {
@@ -360,21 +230,17 @@ static UINT32 parse_ipv4(const char *ip)
 
 static BOOL parse_proxy_url(const char *url, char *ip, UINT16 *port, PROXY_TYPE *type)
 {
-    char temp_url[MAX_PROXY_URL];
+    char temp_url[512];
     char *protocol, *host, *port_str;
 
     if (url == NULL || ip == NULL || port == NULL || type == NULL)
-    {
         return FALSE;
-    }
 
-    if (strlen(url) >= MAX_PROXY_URL)
-    {
+    if (strlen(url) >= 512)
         return FALSE;
-    }
 
-    strncpy(temp_url, url, MAX_PROXY_URL - 1);
-    temp_url[MAX_PROXY_URL - 1] = '\0';
+    strncpy(temp_url, url, 511);
+    temp_url[511] = '\0';
 
     protocol = temp_url;
     if (strncmp(protocol, "socks5://", 9) == 0)
@@ -541,7 +407,7 @@ static BOOL is_target_process(UINT32 src_ip, UINT16 src_port, const char *target
         static BOOL first_match = TRUE;
         if (first_match)
         {
-            message("Detected target process: %s (PID: %lu) on port %d",
+            log_message("Detected target process: %s (PID: %lu) on port %d",
                     process_name, pid, src_port);
             first_match = FALSE;
         }
@@ -557,29 +423,26 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
     unsigned char buf[512];
     int len;
 
-    message("SOCKS5: Connecting to %d.%d.%d.%d:%d",
+    log_message("SOCKS5: Connecting to %d.%d.%d.%d:%d",
         (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
         (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
 
-    // Step 1: Authentication method selection
     buf[0] = SOCKS5_VERSION;
     buf[1] = 0x01;
     buf[2] = SOCKS5_AUTH_NONE;
     if (send(s, (char*)buf, 3, 0) != 3)
     {
-        warning("SOCKS5: Failed to send auth methods");
+        log_message("SOCKS5: Failed to send auth methods");
         return -1;
     }
 
-    // Step 2: Receive authentication response
     len = recv(s, (char*)buf, 2, 0);
     if (len != 2 || buf[0] != SOCKS5_VERSION || buf[1] != SOCKS5_AUTH_NONE)
     {
-        warning("SOCKS5: Auth method rejected");
+        log_message("SOCKS5: Auth method rejected");
         return -1;
     }
 
-    // Step 3: Send CONNECT request
     buf[0] = SOCKS5_VERSION;
     buf[1] = SOCKS5_CMD_CONNECT;
     buf[2] = 0x00;
@@ -593,19 +456,18 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 
     if (send(s, (char*)buf, 10, 0) != 10)
     {
-        warning("SOCKS5: Failed to send CONNECT");
+        log_message("SOCKS5: Failed to send CONNECT");
         return -1;
     }
 
-    // Step 4: Receive CONNECT response
     len = recv(s, (char*)buf, 10, 0);
     if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
     {
-        warning("SOCKS5: CONNECT failed (reply=%d)", len > 1 ? buf[1] : -1);
+        log_message("SOCKS5: CONNECT failed (reply=%d)", len > 1 ? buf[1] : -1);
         return -1;
     }
 
-    message("SOCKS5: Connection established");
+    log_message("SOCKS5: Connection established");
     return 0;
 }
 
@@ -618,7 +480,7 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
     char *status_line;
     int status_code;
 
-    message("HTTP: Connecting to %d.%d.%d.%d:%d",
+    log_message("HTTP: Connecting to %d.%d.%d.%d:%d",
         (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
         (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
 
@@ -632,17 +494,16 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
         (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
         (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
 
-
     if (send(s, request, len, 0) != len)
     {
-        warning("HTTP: Failed to send CONNECT request");
+        log_message("HTTP: Failed to send CONNECT request");
         return -1;
     }
 
     len = recv(s, response, sizeof(response) - 1, 0);
     if (len <= 0)
     {
-        warning("HTTP: Failed to receive response");
+        log_message("HTTP: Failed to receive response");
         return -1;
     }
     response[len] = '\0';
@@ -650,48 +511,45 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
     status_line = response;
     if (strncmp(status_line, "HTTP/1.", 7) != 0)
     {
-        warning("HTTP: Invalid response format");
+        log_message("HTTP: Invalid response format");
         return -1;
     }
 
     status_code = 0;
     char *code_start = strchr(status_line, ' ');
     if (code_start != NULL)
-    {
         status_code = atoi(code_start + 1);
-    }
 
     if (status_code != 200)
     {
-        warning("HTTP: CONNECT failed with status %d", status_code);
+        log_message("HTTP: CONNECT failed with status %d", status_code);
         return -1;
     }
 
-    message("HTTP: Connection established");
+    log_message("HTTP: Connection established");
     return 0;
 }
 
 
 static DWORD WINAPI local_proxy_server(LPVOID arg)
 {
-    PROXY_CONFIG *config = (PROXY_CONFIG *)arg;
-    UINT16 local_port = config->local_proxy_port;
     WSADATA wsa_data;
     struct sockaddr_in addr;
     SOCKET listen_sock;
     int on = 1;
 
-    free(config);
-
     if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0)
     {
-        error("WSAStartup failed (%lu)", GetLastError());
+        log_message("WSAStartup failed (%lu)", GetLastError());
+        return 1;
     }
 
     listen_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_sock == INVALID_SOCKET)
     {
-        error("Socket creation failed (%d)", WSAGetLastError());
+        log_message("Socket creation failed (%d)", WSAGetLastError());
+        WSACleanup();
+        return 1;
     }
 
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
@@ -699,31 +557,42 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(local_port);
+    addr.sin_port = htons(g_local_relay_port);
 
     if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR)
     {
-        error("Bind failed (%d)", WSAGetLastError());
+        log_message("Bind failed (%d)", WSAGetLastError());
+        closesocket(listen_sock);
+        WSACleanup();
+        return 1;
     }
 
     if (listen(listen_sock, 16) == SOCKET_ERROR)
     {
-        error("Listen failed (%d)", WSAGetLastError());
+        log_message("Listen failed (%d)", WSAGetLastError());
+        closesocket(listen_sock);
+        WSACleanup();
+        return 1;
     }
 
-    message("Local proxy listening on port %d", local_port);
+    log_message("Local proxy listening on port %d", g_local_relay_port);
 
-    while (TRUE)
+    while (running)
     {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(listen_sock, &read_fds);
+        struct timeval timeout = {1, 0};
+
+        if (select(0, &read_fds, NULL, NULL, &timeout) <= 0)
+            continue;
+
         struct sockaddr_in client_addr;
         int addr_len = sizeof(client_addr);
         SOCKET client_sock = accept(listen_sock, (struct sockaddr *)&client_addr, &addr_len);
 
         if (client_sock == INVALID_SOCKET)
-        {
-            warning("Accept failed (%d)", WSAGetLastError());
             continue;
-        }
 
         CONNECTION_CONFIG *conn_config = (CONNECTION_CONFIG *)malloc(sizeof(CONNECTION_CONFIG));
         if (conn_config == NULL)
@@ -738,8 +607,7 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
         UINT16 client_port = ntohs(client_addr.sin_port);
         if (!get_connection(client_port, &conn_config->orig_dest_ip, &conn_config->orig_dest_port))
         {
-
-            warning("Connection from port %d not found in tracking table", client_port);
+            log_message("Connection from port %d not found in tracking table", client_port);
             closesocket(client_sock);
             free(conn_config);
             continue;
@@ -749,7 +617,7 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
                                           (LPVOID)conn_config, 0, NULL);
         if (conn_thread == NULL)
         {
-            warning("CreateThread failed (%lu)", GetLastError());
+            log_message("CreateThread failed (%lu)", GetLastError());
             closesocket(client_sock);
             free(conn_config);
             continue;
@@ -757,6 +625,8 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
         CloseHandle(conn_thread);
     }
 
+    closesocket(listen_sock);
+    WSACleanup();
     return 0;
 }
 
@@ -778,7 +648,7 @@ static DWORD WINAPI connection_handler(LPVOID arg)
     socks_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (socks_sock == INVALID_SOCKET)
     {
-        warning("Socket creation failed (%d)", WSAGetLastError());
+        log_message("Socket creation failed (%d)", WSAGetLastError());
         closesocket(client_sock);
         return 0;
     }
@@ -790,7 +660,7 @@ static DWORD WINAPI connection_handler(LPVOID arg)
 
     if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
     {
-        warning("Failed to connect to proxy (%d)", WSAGetLastError());
+        log_message("Failed to connect to proxy (%d)", WSAGetLastError());
         closesocket(client_sock);
         closesocket(socks_sock);
         return 0;
@@ -834,7 +704,7 @@ static DWORD WINAPI connection_handler(LPVOID arg)
     HANDLE thread1 = CreateThread(NULL, 1, transfer_handler, (LPVOID)config1, 0, NULL);
     if (thread1 == NULL)
     {
-        warning("CreateThread failed (%lu)", GetLastError());
+        log_message("CreateThread failed (%lu)", GetLastError());
         closesocket(client_sock);
         closesocket(socks_sock);
         free(config1);
@@ -852,9 +722,6 @@ static DWORD WINAPI connection_handler(LPVOID arg)
     return 0;
 }
 
-/*
- * Transfer handler thread - forwards data bidirectionally
- */
 static DWORD WINAPI transfer_handler(LPVOID arg)
 {
     TRANSFER_CONFIG *config = (TRANSFER_CONFIG *)arg;
@@ -892,9 +759,6 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
     return 0;
 }
 
-/*
- * Add connection to tracking list
- */
 static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port)
 {
     WaitForSingleObject(lock, INFINITE);
@@ -930,9 +794,6 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
     ReleaseMutex(lock);
 }
 
-/*
- * Check if connection is tracked (fast path check)
- */
 static BOOL is_connection_tracked(UINT16 src_port)
 {
     BOOL tracked = FALSE;
@@ -949,9 +810,6 @@ static BOOL is_connection_tracked(UINT16 src_port)
     return tracked;
 }
 
-/*
- * Get connection info from tracking list
- */
 static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port)
 {
     BOOL found = FALSE;
@@ -974,9 +832,6 @@ static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port)
     return found;
 }
 
-/*
- * Remove connection from tracking list
- */
 static void remove_connection(UINT16 src_port)
 {
     WaitForSingleObject(lock, INFINITE);
@@ -993,4 +848,218 @@ static void remove_connection(UINT16 src_port)
         conn_ptr = &(*conn_ptr)->next;
     }
     ReleaseMutex(lock);
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_SetConfig(const ProxyBridgeConfig* config)
+{
+    if (running)
+    {
+        if (g_log_callback) g_log_callback("[SetConfig] Already running!");
+        return FALSE;
+    }
+
+    if (config == NULL)
+    {
+        return FALSE;
+    }
+
+    // Set callbacks first so we can use logging
+    g_log_callback = config->log_callback;
+    g_connection_callback = config->connection_callback;
+
+    if (g_log_callback) g_log_callback("[SetConfig] Starting configuration...");
+
+    if (config->target_process && config->target_process[0] != '\0')
+    {
+        strncpy(g_target_process, config->target_process, MAX_PROCESS_NAME - 1);
+        g_target_process[MAX_PROCESS_NAME - 1] = '\0';
+        if (g_log_callback)
+        {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "[SetConfig] Target process: %s", g_target_process);
+            g_log_callback(msg);
+        }
+    }
+
+    if (config->exclude_process && config->exclude_process[0] != '\0')
+    {
+        strncpy(g_exclude_process, config->exclude_process, MAX_PROCESS_NAME - 1);
+        g_exclude_process[MAX_PROCESS_NAME - 1] = '\0';
+        g_use_exclude = TRUE;
+        if (g_log_callback)
+        {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "[SetConfig] Exclude process: %s", g_exclude_process);
+            g_log_callback(msg);
+        }
+    }
+
+    if (config->proxy_url && config->proxy_url[0] != '\0')
+    {
+        if (g_log_callback)
+        {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "[SetConfig] Parsing proxy URL: %s", config->proxy_url);
+            g_log_callback(msg);
+        }
+
+        if (!parse_proxy_url(config->proxy_url, g_proxy_ip, &g_proxy_port, &g_proxy_type))
+        {
+            if (g_log_callback) g_log_callback("[SetConfig] Failed to parse proxy URL!");
+            return FALSE;
+        }
+
+        if (g_log_callback)
+        {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "[SetConfig] Proxy: %s:%d (type=%d)", g_proxy_ip, g_proxy_port, g_proxy_type);
+            g_log_callback(msg);
+        }
+    }
+
+    if (config->relay_port > 0)
+    {
+        g_local_relay_port = config->relay_port;
+        if (g_log_callback)
+        {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "[SetConfig] Relay port: %d", g_local_relay_port);
+            g_log_callback(msg);
+        }
+    }
+
+    if (g_log_callback) g_log_callback("[SetConfig] Configuration complete!");
+
+    return TRUE;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
+{
+    char filter[512];
+    INT16 priority = 123;
+
+    if (running)
+        return FALSE;
+
+    if (lock == NULL)
+    {
+        lock = CreateMutex(NULL, FALSE, NULL);
+        if (lock == NULL)
+            return FALSE;
+    }
+
+    running = TRUE;
+
+    proxy_thread = CreateThread(NULL, 1, local_proxy_server, NULL, 0, NULL);
+    if (proxy_thread == NULL)
+    {
+        running = FALSE;
+        return FALSE;
+    }
+
+    Sleep(500);
+
+    snprintf(filter, sizeof(filter),
+        "tcp and (outbound or (tcp.DstPort == %d or tcp.SrcPort == %d))",
+        g_local_relay_port, g_local_relay_port);
+
+    windivert_handle = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, priority, 0);
+    if (windivert_handle == INVALID_HANDLE_VALUE)
+    {
+        log_message("Failed to open WinDivert (%lu)", GetLastError());
+        running = FALSE;
+        WaitForSingleObject(proxy_thread, INFINITE);
+        CloseHandle(proxy_thread);
+        proxy_thread = NULL;
+        return FALSE;
+    }
+
+    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_LENGTH, 8192);
+    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 2000);
+
+    packet_thread = CreateThread(NULL, 1, packet_processor, NULL, 0, NULL);
+    if (packet_thread == NULL)
+    {
+        WinDivertClose(windivert_handle);
+        windivert_handle = INVALID_HANDLE_VALUE;
+        running = FALSE;
+        WaitForSingleObject(proxy_thread, INFINITE);
+        CloseHandle(proxy_thread);
+        proxy_thread = NULL;
+        return FALSE;
+    }
+
+    log_message("ProxyBridge started");
+    log_message("Local relay: localhost:%d", g_local_relay_port);
+    log_message("%s proxy: %s:%d", g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5", g_proxy_ip, g_proxy_port);
+
+    if (g_target_process[0] != '\0')
+        log_message("Redirecting traffic from: %s", g_target_process);
+    else
+        log_message("No target process set - checking all connections");
+
+    if (g_use_exclude)
+        log_message("Excluding process: %s (direct connection)", g_exclude_process);
+
+    return TRUE;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
+{
+    if (!running)
+        return FALSE;
+
+    running = FALSE;
+
+    if (windivert_handle != INVALID_HANDLE_VALUE)
+    {
+        WinDivertClose(windivert_handle);
+        windivert_handle = INVALID_HANDLE_VALUE;
+    }
+
+    if (packet_thread != NULL)
+    {
+        WaitForSingleObject(packet_thread, 5000);
+        CloseHandle(packet_thread);
+        packet_thread = NULL;
+    }
+
+    if (proxy_thread != NULL)
+    {
+        WaitForSingleObject(proxy_thread, 5000);
+        CloseHandle(proxy_thread);
+        proxy_thread = NULL;
+    }
+
+    WaitForSingleObject(lock, INFINITE);
+    while (connection_list != NULL)
+    {
+        CONNECTION_INFO *to_free = connection_list;
+        connection_list = connection_list->next;
+        free(to_free);
+    }
+    ReleaseMutex(lock);
+
+    log_message("ProxyBridge stopped");
+
+    return TRUE;
+}
+
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
+{
+    switch (fdwReason)
+    {
+        case DLL_PROCESS_ATTACH:
+            break;
+        case DLL_PROCESS_DETACH:
+            if (running)
+                ProxyBridge_Stop();
+            if (lock != NULL)
+            {
+                CloseHandle(lock);
+                lock = NULL;
+            }
+            break;
+    }
+    return TRUE;
 }
