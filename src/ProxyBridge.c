@@ -800,9 +800,6 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetConfig(const ProxyBridgeConfig* config)
         g_use_exclude = TRUE;
     }
 
-    if (config->relay_port > 0)
-        g_local_relay_port = config->relay_port;
-
     return TRUE;
 }
 

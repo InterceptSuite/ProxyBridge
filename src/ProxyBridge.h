@@ -25,7 +25,6 @@ typedef struct {
     const char* target_process;
     const char* exclude_process;
     const char* proxy_url;
-    UINT16 relay_port;
     LogCallback log_callback;
     ConnectionCallback connection_callback;
 } ProxyBridgeConfig;
