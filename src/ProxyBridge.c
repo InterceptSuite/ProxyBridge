@@ -19,8 +19,10 @@
 #define MAX_PROCESS_NAME 256
 
 typedef struct PROCESS_RULE {
+    UINT32 rule_id;
     char process_name[MAX_PROCESS_NAME];
     RuleAction action;
+    BOOL enabled;
     struct PROCESS_RULE *next;
 } PROCESS_RULE;
 
@@ -51,6 +53,7 @@ typedef struct {
 
 static CONNECTION_INFO *connection_list = NULL;
 static PROCESS_RULE *rules_list = NULL;
+static UINT32 g_next_rule_id = 1;
 static HANDLE lock = NULL;
 static HANDLE windivert_handle = INVALID_HANDLE_VALUE;
 static HANDLE packet_thread = NULL;
@@ -321,6 +324,12 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port)
     PROCESS_RULE *rule = rules_list;
     while (rule != NULL)
     {
+        if (!rule->enabled)
+        {
+            rule = rule->next;
+            continue;
+        }
+
         strncpy(target_without_exe, rule->process_name, MAX_PROCESS_NAME - 1);
         target_without_exe[MAX_PROCESS_NAME - 1] = '\0';
 
@@ -778,22 +787,24 @@ static void remove_connection(UINT16 src_port)
     ReleaseMutex(lock);
 }
 
-PROXYBRIDGE_API BOOL ProxyBridge_AddRule(const char* process_name, RuleAction action)
+PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, RuleAction action)
 {
     if (running || process_name == NULL || process_name[0] == '\0')
-        return FALSE;
+        return 0;
 
     PROCESS_RULE *rule = (PROCESS_RULE *)malloc(sizeof(PROCESS_RULE));
     if (rule == NULL)
-        return FALSE;
+        return 0;
 
+    rule->rule_id = g_next_rule_id++;
     strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
     rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
     rule->action = action;
+    rule->enabled = TRUE;
     rule->next = rules_list;
     rules_list = rule;
 
-    return TRUE;
+    return rule->rule_id;
 }
 
 PROXYBRIDGE_API BOOL ProxyBridge_ClearRules(void)
@@ -807,8 +818,45 @@ PROXYBRIDGE_API BOOL ProxyBridge_ClearRules(void)
         rules_list = rules_list->next;
         free(to_free);
     }
-
+    
+    g_next_rule_id = 1;
     return TRUE;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id)
+{
+    if (rule_id == 0)
+        return FALSE;
+
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+        {
+            rule->enabled = TRUE;
+            return TRUE;
+        }
+        rule = rule->next;
+    }
+    return FALSE;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id)
+{
+    if (rule_id == 0)
+        return FALSE;
+
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+        {
+            rule->enabled = FALSE;
+            return TRUE;
+        }
+        rule = rule->next;
+    }
+    return FALSE;
 }
 
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port)
