@@ -24,14 +24,14 @@ typedef enum {
 typedef struct {
     const char* target_process;
     const char* exclude_process;
-    LogCallback log_callback;
-    ConnectionCallback connection_callback;
 } ProxyBridgeConfig;
 
-PROXYBRIDGE_API BOOL ProxyBridge_Start(void);
-PROXYBRIDGE_API BOOL ProxyBridge_Stop(void);
 PROXYBRIDGE_API BOOL ProxyBridge_SetConfig(const ProxyBridgeConfig* config);
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port);
+PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback);
+PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
+PROXYBRIDGE_API BOOL ProxyBridge_Start(void);
+PROXYBRIDGE_API BOOL ProxyBridge_Stop(void);
 
 #ifdef __cplusplus
 }

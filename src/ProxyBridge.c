@@ -784,9 +784,6 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetConfig(const ProxyBridgeConfig* config)
     if (running || config == NULL)
         return FALSE;
 
-    g_log_callback = config->log_callback;
-    g_connection_callback = config->connection_callback;
-
     if (config->target_process && config->target_process[0] != '\0')
     {
         strncpy(g_target_process, config->target_process, MAX_PROCESS_NAME - 1);
@@ -801,6 +798,16 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetConfig(const ProxyBridgeConfig* config)
     }
 
     return TRUE;
+}
+
+PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback)
+{
+    g_log_callback = callback;
+}
+
+PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback)
+{
+    g_connection_callback = callback;
 }
 
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
