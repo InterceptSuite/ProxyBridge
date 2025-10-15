@@ -18,6 +18,12 @@
 #define LOCAL_PROXY_PORT 34010
 #define MAX_PROCESS_NAME 256
 
+typedef struct PROCESS_RULE {
+    char process_name[MAX_PROCESS_NAME];
+    RuleAction action;
+    struct PROCESS_RULE *next;
+} PROCESS_RULE;
+
 #define SOCKS5_VERSION 0x05
 #define SOCKS5_CMD_CONNECT 0x01
 #define SOCKS5_ATYP_IPV4 0x01
@@ -44,19 +50,17 @@ typedef struct {
 } TRANSFER_CONFIG;
 
 static CONNECTION_INFO *connection_list = NULL;
+static PROCESS_RULE *rules_list = NULL;
 static HANDLE lock = NULL;
 static HANDLE windivert_handle = INVALID_HANDLE_VALUE;
 static HANDLE packet_thread = NULL;
 static HANDLE proxy_thread = NULL;
 static BOOL running = FALSE;
 
-static char g_target_process[MAX_PROCESS_NAME] = "";
-static char g_exclude_process[MAX_PROCESS_NAME] = "";
 static char g_proxy_ip[64] = DEFAULT_SOCKS5_IP;
 static UINT16 g_proxy_port = DEFAULT_SOCKS5_PORT;
 static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
 static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
-static BOOL g_use_exclude = FALSE;
 static LogCallback g_log_callback = NULL;
 static ConnectionCallback g_connection_callback = NULL;
 
@@ -80,7 +84,7 @@ static DWORD WINAPI transfer_handler(LPVOID arg);
 static DWORD WINAPI packet_processor(LPVOID arg);
 static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port);
 static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
-static BOOL is_target_process(UINT32 src_ip, UINT16 src_port, const char *target_name);
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port);
 static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port);
 static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port);
 static BOOL is_connection_tracked(UINT16 src_port);
@@ -113,15 +117,6 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 
         if (addr.Outbound)
         {
-            if (g_use_exclude)
-            {
-                if (is_target_process(ip_header->SrcAddr, ntohs(tcp_header->SrcPort), g_exclude_process))
-                {
-                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
-                    continue;
-                }
-            }
-
             if (tcp_header->SrcPort == htons(g_local_relay_port))
             {
                 UINT16 dst_port = ntohs(tcp_header->DstPort);
@@ -152,7 +147,16 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 ip_header->SrcAddr = temp_addr;
                 addr.Outbound = FALSE;
             }
-            else if (is_target_process(ip_header->SrcAddr, ntohs(tcp_header->SrcPort), g_target_process))
+            else
+            {
+                RuleAction action = check_process_rule(ip_header->SrcAddr, ntohs(tcp_header->SrcPort));
+
+                if (action == RULE_ACTION_DIRECT)
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
+                else if (action == RULE_ACTION_PROXY)
             {
                 UINT16 src_port = ntohs(tcp_header->SrcPort);
                 UINT32 src_ip = ip_header->SrcAddr;
@@ -180,11 +184,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 ip_header->DstAddr = ip_header->SrcAddr;
                 ip_header->SrcAddr = temp_addr;
                 addr.Outbound = FALSE;
-            }
-            else
-            {
-                WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
-                continue;
+                }
             }
         }
         else
@@ -293,7 +293,7 @@ static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
 }
 
 
-static BOOL is_target_process(UINT32 src_ip, UINT16 src_port, const char *target_name)
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port)
 {
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
@@ -302,48 +302,36 @@ static BOOL is_target_process(UINT32 src_ip, UINT16 src_port, const char *target
 
     pid = get_process_id_from_connection(src_ip, src_port);
     if (pid == 0)
-    {
-        return FALSE;
-    }
+        return RULE_ACTION_DIRECT;
 
     if (!get_process_name_from_pid(pid, process_name, sizeof(process_name)))
-    {
-        return FALSE;
-    }
+        return RULE_ACTION_DIRECT;
 
-    strncpy(target_without_exe, target_name, MAX_PROCESS_NAME - 1);
-    target_without_exe[MAX_PROCESS_NAME - 1] = '\0';
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        strncpy(target_without_exe, rule->process_name, MAX_PROCESS_NAME - 1);
+        target_without_exe[MAX_PROCESS_NAME - 1] = '\0';
 
-    char *dot = strrchr(target_without_exe, '.');
-    if (dot && _stricmp(dot, ".exe") == 0)
-    {
-        *dot = '\0';
-    }
+        char *dot = strrchr(target_without_exe, '.');
+        if (dot && _stricmp(dot, ".exe") == 0)
+            *dot = '\0';
 
-    if (strrchr(target_name, '.') == NULL)
-    {
-        snprintf(target_with_exe, MAX_PROCESS_NAME, "%s.exe", target_name);
-    }
-    else
-    {
-        strncpy(target_with_exe, target_name, MAX_PROCESS_NAME - 1);
-    }
+        if (strrchr(rule->process_name, '.') == NULL)
+            snprintf(target_with_exe, MAX_PROCESS_NAME, "%s.exe", rule->process_name);
+        else
+            strncpy(target_with_exe, rule->process_name, MAX_PROCESS_NAME - 1);
 
-    if (_stricmp(process_name, target_name) == 0 ||
-        _stricmp(process_name, target_with_exe) == 0 ||
-        _stricmp(process_name, target_without_exe) == 0)
-    {
-        static BOOL first_match = TRUE;
-        if (first_match)
+        if (_stricmp(process_name, rule->process_name) == 0 ||
+            _stricmp(process_name, target_with_exe) == 0 ||
+            _stricmp(process_name, target_without_exe) == 0)
         {
-            log_message("Detected target process: %s (PID: %lu) on port %d",
-                    process_name, pid, src_port);
-            first_match = FALSE;
+            return rule->action;
         }
-        return TRUE;
+        rule = rule->next;
     }
 
-    return FALSE;
+    return RULE_ACTION_DIRECT;
 }
 
 
@@ -779,23 +767,51 @@ static void remove_connection(UINT16 src_port)
     ReleaseMutex(lock);
 }
 
-PROXYBRIDGE_API BOOL ProxyBridge_SetConfig(const ProxyBridgeConfig* config)
+PROXYBRIDGE_API BOOL ProxyBridge_AddRule(const char* process_name, RuleAction action)
 {
-    if (running || config == NULL)
+    if (running || process_name == NULL || process_name[0] == '\0')
         return FALSE;
 
-    if (config->target_process && config->target_process[0] != '\0')
+    PROCESS_RULE *rule = (PROCESS_RULE *)malloc(sizeof(PROCESS_RULE));
+    if (rule == NULL)
+        return FALSE;
+
+    strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
+    rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
+    rule->action = action;
+    rule->next = rules_list;
+    rules_list = rule;
+
+    return TRUE;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_ClearRules(void)
+{
+    if (running)
+        return FALSE;
+
+    while (rules_list != NULL)
     {
-        strncpy(g_target_process, config->target_process, MAX_PROCESS_NAME - 1);
-        g_target_process[MAX_PROCESS_NAME - 1] = '\0';
+        PROCESS_RULE *to_free = rules_list;
+        rules_list = rules_list->next;
+        free(to_free);
     }
 
-    if (config->exclude_process && config->exclude_process[0] != '\0')
-    {
-        strncpy(g_exclude_process, config->exclude_process, MAX_PROCESS_NAME - 1);
-        g_exclude_process[MAX_PROCESS_NAME - 1] = '\0';
-        g_use_exclude = TRUE;
-    }
+    return TRUE;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port)
+{
+    if (running || proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
+        return FALSE;
+
+    if (parse_ipv4(proxy_ip) == 0)
+        return FALSE;
+
+    strncpy(g_proxy_ip, proxy_ip, sizeof(g_proxy_ip) - 1);
+    g_proxy_ip[sizeof(g_proxy_ip) - 1] = '\0';
+    g_proxy_port = proxy_port;
+    g_proxy_type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
 
     return TRUE;
 }
@@ -870,13 +886,16 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     log_message("Local relay: localhost:%d", g_local_relay_port);
     log_message("%s proxy: %s:%d", g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5", g_proxy_ip, g_proxy_port);
 
-    if (g_target_process[0] != '\0')
-        log_message("Redirecting traffic from: %s", g_target_process);
-    else
-        log_message("No target process set - checking all connections");
-
-    if (g_use_exclude)
-        log_message("Excluding process: %s (direct connection)", g_exclude_process);
+    int rule_count = 0;
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        log_message("Rule: %s -> %s", rule->process_name, rule->action == RULE_ACTION_PROXY ? "PROXY" : "DIRECT");
+        rule_count++;
+        rule = rule->next;
+    }
+    if (rule_count == 0)
+        log_message("No rules configured - all traffic will be direct");
 
     return TRUE;
 }
@@ -922,22 +941,6 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
     return TRUE;
 }
 
-PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port)
-{
-    if (running || proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
-        return FALSE;
-
-    if (parse_ipv4(proxy_ip) == 0)
-        return FALSE;
-
-    strncpy(g_proxy_ip, proxy_ip, sizeof(g_proxy_ip) - 1);
-    g_proxy_ip[sizeof(g_proxy_ip) - 1] = '\0';
-    g_proxy_port = proxy_port;
-    g_proxy_type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
-
-    return TRUE;
-}
-
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 {
     switch (fdwReason)
@@ -951,6 +954,12 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
             {
                 CloseHandle(lock);
                 lock = NULL;
+            }
+            while (rules_list != NULL)
+            {
+                PROCESS_RULE *to_free = rules_list;
+                rules_list = rules_list->next;
+                free(to_free);
             }
             break;
     }

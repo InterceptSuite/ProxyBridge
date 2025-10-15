@@ -21,12 +21,13 @@ typedef enum {
     PROXY_TYPE_SOCKS5 = 1
 } ProxyType;
 
-typedef struct {
-    const char* target_process;
-    const char* exclude_process;
-} ProxyBridgeConfig;
+typedef enum {
+    RULE_ACTION_PROXY = 0,
+    RULE_ACTION_DIRECT = 1
+} RuleAction;
 
-PROXYBRIDGE_API BOOL ProxyBridge_SetConfig(const ProxyBridgeConfig* config);
+PROXYBRIDGE_API BOOL ProxyBridge_AddRule(const char* process_name, RuleAction action);
+PROXYBRIDGE_API BOOL ProxyBridge_ClearRules(void);
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port);
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback);
 PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
