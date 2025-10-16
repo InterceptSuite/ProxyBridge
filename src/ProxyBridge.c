@@ -59,6 +59,7 @@ static HANDLE windivert_handle = INVALID_HANDLE_VALUE;
 static HANDLE packet_thread = NULL;
 static HANDLE proxy_thread = NULL;
 static BOOL running = FALSE;
+static DWORD g_current_process_id = 0;  // PID of the process that loaded this DLL
 
 static char g_proxy_ip[64] = DEFAULT_SOCKS5_IP;
 static UINT16 g_proxy_port = DEFAULT_SOCKS5_PORT;
@@ -313,14 +314,22 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port)
     char process_name[MAX_PROCESS_NAME];
     char target_with_exe[MAX_PROCESS_NAME];
     char target_without_exe[MAX_PROCESS_NAME];
+    RuleAction wildcard_action = RULE_ACTION_DIRECT;
+    BOOL wildcard_found = FALSE;
 
     pid = get_process_id_from_connection(src_ip, src_port);
     if (pid == 0)
         return RULE_ACTION_DIRECT;
 
+    // Auto-exclude: Always bypass the process that loaded this DLL (prevents loops)
+    //// DOO NOT Remove THIS - If * rule is used, not checking our own process will cause loop
+    if (pid == g_current_process_id)
+        return RULE_ACTION_DIRECT;
+
     if (!get_process_name_from_pid(pid, process_name, sizeof(process_name)))
         return RULE_ACTION_DIRECT;
 
+    // First pass: Check specific process rules and save wildcard
     PROCESS_RULE *rule = rules_list;
     while (rule != NULL)
     {
@@ -330,6 +339,16 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port)
             continue;
         }
 
+        // If this is a wildcard rule, save it for later but don't process it yet
+        if (strcmp(rule->process_name, "*") == 0 || strcmp(rule->process_name, "ANY") == 0)
+        {
+            wildcard_action = rule->action;
+            wildcard_found = TRUE;
+            rule = rule->next;
+            continue;  // Skip to next rule
+        }
+
+        // Process specific process name matching
         strncpy(target_without_exe, rule->process_name, MAX_PROCESS_NAME - 1);
         target_without_exe[MAX_PROCESS_NAME - 1] = '\0';
 
@@ -346,11 +365,16 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port)
             _stricmp(process_name, target_with_exe) == 0 ||
             _stricmp(process_name, target_without_exe) == 0)
         {
-            return rule->action;
+            return rule->action;  // Specific match found - return immediately
         }
         rule = rule->next;
     }
 
+    // Second pass: No specific match found, use wildcard if it exists
+    if (wildcard_found)
+        return wildcard_action;
+
+    // No match at all - default to DIRECT
     return RULE_ACTION_DIRECT;
 }
 
@@ -818,7 +842,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_ClearRules(void)
         rules_list = rules_list->next;
         free(to_free);
     }
-    
+
     g_next_rule_id = 1;
     return TRUE;
 }
@@ -1007,6 +1031,8 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
     switch (fdwReason)
     {
         case DLL_PROCESS_ATTACH:
+            // Store the PID of the process that loaded this DLL
+            g_current_process_id = GetCurrentProcessId();
             break;
         case DLL_PROCESS_DETACH:
             if (running)
