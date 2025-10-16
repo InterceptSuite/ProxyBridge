@@ -813,7 +813,7 @@ static void remove_connection(UINT16 src_port)
 
 PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, RuleAction action)
 {
-    if (running || process_name == NULL || process_name[0] == '\0')
+    if (process_name == NULL || process_name[0] == '\0')
         return 0;
 
     PROCESS_RULE *rule = (PROCESS_RULE *)malloc(sizeof(PROCESS_RULE));
@@ -885,7 +885,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id)
 
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port)
 {
-    if (running || proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
+    if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
         return FALSE;
 
     if (parse_ipv4(proxy_ip) == 0)

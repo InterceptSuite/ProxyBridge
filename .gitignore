@@ -5,3 +5,5 @@
 *.py
 build/**
 *.pyc
+gui/target/**
+gui/**
