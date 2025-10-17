@@ -1,7 +1,10 @@
 param(
     [Parameter(Mandatory=$false)]
     [ValidateSet('msvc', 'gcc', 'auto')]
-    [string]$Compiler = 'auto'
+    [string]$Compiler = 'auto',
+
+    [Parameter(Mandatory=$false)]
+    [switch]$NoSign
 )
 
 $WinDivertPath = "C:\WinDivert-2.2.2-A"
@@ -203,25 +206,29 @@ if ($success) {
         Write-Host $publishResult
     }
 
-    Write-Host "`nSigning binaries..." -ForegroundColor Green
-    $filesToSign = Get-ChildItem $OutputDir -Include *.exe,*.dll -Recurse
-    $signedCount = 0
-    $skippedCount = 0
+    if (-not $NoSign) {
+        Write-Host "`nSigning binaries..." -ForegroundColor Green
+        $filesToSign = Get-ChildItem $OutputDir -Include *.exe,*.dll -Recurse
+        $signedCount = 0
+        $skippedCount = 0
 
-    foreach ($file in $filesToSign) {
-        if ($file.Name -like "WinDivert*") {
-            Write-Host "  Skipped: $($file.Name) (WinDivert is already EV signed)" -ForegroundColor Yellow
-            $skippedCount++
-        } else {
-            if (Sign-Binary -FilePath $file.FullName) {
-                $signedCount++
+        foreach ($file in $filesToSign) {
+            if ($file.Name -like "WinDivert*") {
+                Write-Host "  Skipped: $($file.Name) (WinDivert is already EV signed)" -ForegroundColor Yellow
+                $skippedCount++
+            } else {
+                if (Sign-Binary -FilePath $file.FullName) {
+                    $signedCount++
+                }
             }
         }
-    }
 
-    Write-Host "`nSigning Summary:" -ForegroundColor Cyan
-    Write-Host "  Signed: $signedCount files" -ForegroundColor Green
-    Write-Host "  Skipped: $skippedCount files (WinDivert)" -ForegroundColor Yellow
+        Write-Host "`nSigning Summary:" -ForegroundColor Cyan
+        Write-Host "  Signed: $signedCount files" -ForegroundColor Green
+        Write-Host "  Skipped: $skippedCount files (WinDivert)" -ForegroundColor Yellow
+    } else {
+        Write-Host "`nSigning skipped (-NoSign flag)" -ForegroundColor Yellow
+    }
 
     Write-Host "`nAll files ready in: $OutputDir\" -ForegroundColor Cyan
     Write-Host "Contents:" -ForegroundColor Yellow
@@ -243,8 +250,13 @@ if ($success) {
                 Move-Item "installer\$installerName" -Destination $OutputDir -Force
                 Write-Host "  Moved: $installerName -> $OutputDir\" -ForegroundColor Gray
 
-                Write-Host "`nSigning installer..." -ForegroundColor Green
-                if (Sign-Binary -FilePath "$OutputDir\$installerName") {
+                if (-not $NoSign) {
+                    Write-Host "`nSigning installer..." -ForegroundColor Green
+                    if (Sign-Binary -FilePath "$OutputDir\$installerName") {
+                        $installerSize = [math]::Round((Get-Item "$OutputDir\$installerName").Length/1MB, 2)
+                        Write-Host "  Installer ready: $OutputDir\$installerName ($installerSize MB)" -ForegroundColor Cyan
+                    }
+                } else {
                     $installerSize = [math]::Round((Get-Item "$OutputDir\$installerName").Length/1MB, 2)
                     Write-Host "  Installer ready: $OutputDir\$installerName ($installerSize MB)" -ForegroundColor Cyan
                 }
