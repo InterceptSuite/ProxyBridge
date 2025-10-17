@@ -214,6 +214,9 @@ class Program
         Console.WriteLine(" |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/");
         Console.WriteLine(" |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|");
         Console.WriteLine("                      |___/                      |___/  V1.1");
+        Console.WriteLine();
+        Console.WriteLine("  Universal proxy client for Windows applications");
+        Console.WriteLine();
         Console.WriteLine("\tAuthor: Sourav Kalal/InterceptSuite");
         Console.WriteLine("\tGitHub: https://github.com/InterceptSuite/ProxyBridge");
         Console.WriteLine();

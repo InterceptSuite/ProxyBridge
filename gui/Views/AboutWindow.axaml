@@ -40,7 +40,7 @@
                        HorizontalAlignment="Center"
                        Foreground="#FFB0B0B0"/>
 
-            <TextBlock Text="Modern Windows Network Proxy"
+            <TextBlock Text="Universal proxy client for Windows applications"
                        FontSize="14"
                        HorizontalAlignment="Center"
                        Foreground="#FFB0B0B0"
