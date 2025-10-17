@@ -11,7 +11,7 @@ namespace ProxyBridge.GUI.ViewModels;
 
 public class MainWindowViewModel : ViewModelBase
 {
-    private string _title = "ProxyBridge v1.1";
+    private string _title = "ProxyBridge";
     private int _selectedTabIndex;
     private string _connectionsLog = "";
     private string _activityLog = "ProxyBridge initialized successfully\n";
