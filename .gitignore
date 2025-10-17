@@ -7,3 +7,5 @@ build/**
 *.pyc
 gui/bin/**
 gui/obj/**
+cli/bin/**
+cli/obj/**
