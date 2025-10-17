@@ -13,8 +13,6 @@
 #pragma comment(lib, "ws2_32.lib")
 
 #define MAXBUF 0xFFFF
-#define DEFAULT_SOCKS5_IP "127.0.0.1"
-#define DEFAULT_SOCKS5_PORT 4444
 #define LOCAL_PROXY_PORT 34010
 #define MAX_PROCESS_NAME 256
 
@@ -59,10 +57,10 @@ static HANDLE windivert_handle = INVALID_HANDLE_VALUE;
 static HANDLE packet_thread = NULL;
 static HANDLE proxy_thread = NULL;
 static BOOL running = FALSE;
-static DWORD g_current_process_id = 0;  // PID of the process that loaded this DLL
+static DWORD g_current_process_id = 0;
 
-static char g_proxy_ip[64] = DEFAULT_SOCKS5_IP;
-static UINT16 g_proxy_port = DEFAULT_SOCKS5_PORT;
+static char g_proxy_ip[64] = "";
+static UINT16 g_proxy_port = 0;
 static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
 static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
 static LogCallback g_log_callback = NULL;
@@ -365,14 +363,25 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port)
             _stricmp(process_name, target_with_exe) == 0 ||
             _stricmp(process_name, target_without_exe) == 0)
         {
-            return rule->action;  // Specific match found - return immediately
+            RuleAction action = rule->action;
+            if (action == RULE_ACTION_PROXY && (g_proxy_ip[0] == '\0' || g_proxy_port == 0))
+            {
+                return RULE_ACTION_DIRECT;
+            }
+            return action;
         }
         rule = rule->next;
     }
 
     // Second pass: No specific match found, use wildcard if it exists
     if (wildcard_found)
+    {
+        if (wildcard_action == RULE_ACTION_PROXY && (g_proxy_ip[0] == '\0' || g_proxy_port == 0))
+        {
+            return RULE_ACTION_DIRECT;
+        }
         return wildcard_action;
+    }
 
     // No match at all - default to DIRECT
     return RULE_ACTION_DIRECT;
