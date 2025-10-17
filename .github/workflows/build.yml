@@ -1,0 +1,77 @@
+name: Build ProxyBridge
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+
+    - name: Setup MSYS2 (for GCC)
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-toolchain
+
+    - name: Add MSYS2 to PATH
+      run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      shell: pwsh
+
+    - name: Install NSIS
+      run: |
+        choco install nsis -y
+      shell: pwsh
+
+    - name: Download WinDivert
+      run: |
+        $url = "https://github.com/basil00/Divert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip"
+        Invoke-WebRequest -Uri $url -OutFile "WinDivert.zip"
+        Expand-Archive -Path "WinDivert.zip" -DestinationPath "C:\"
+      shell: pwsh
+
+    - name: Verify WinDivert installation
+      run: |
+        if (Test-Path "C:\WinDivert-2.2.2-A") {
+          Write-Host "WinDivert installed successfully"
+          Get-ChildItem "C:\WinDivert-2.2.2-A" -Recurse | Select-Object FullName
+        } else {
+          Write-Error "WinDivert installation failed"
+          exit 1
+        }
+      shell: pwsh
+
+    - name: Build project
+      run: .\compile.ps1 -NoSign -Compiler gcc
+      shell: pwsh
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ProxyBridge-Build-${{ github.sha }}
+        path: output/
+        retention-days: 30
+
+    - name: List output files
+      run: |
+        Write-Host "`nBuild artifacts:"
+        Get-ChildItem output -Recurse | ForEach-Object {
+          $size = [math]::Round($_.Length/1MB, 2)
+          Write-Host "  $($_.Name) - $size MB"
+        }
+      shell: pwsh
