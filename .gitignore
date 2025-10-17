@@ -2,3 +2,10 @@
 *.dll
 *.sys
 *.zip
+*.py
+build/**
+*.pyc
+gui/bin/**
+gui/obj/**
+cli/bin/**
+cli/obj/**

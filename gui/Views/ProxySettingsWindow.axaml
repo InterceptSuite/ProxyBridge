@@ -1,0 +1,135 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:ProxyBridge.GUI.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="500" d:DesignHeight="450"
+        x:Class="ProxyBridge.GUI.Views.ProxySettingsWindow"
+        x:DataType="vm:ProxySettingsViewModel"
+        x:CompileBindings="True"
+        Title="Proxy Settings"
+        Icon="/Assets/logo.ico"
+        Width="500" Height="450"
+        CanResize="False"
+        Background="#FF2D2D30"
+        WindowStartupLocation="CenterOwner">
+
+    <Window.Styles>
+        <Style Selector="TextBlock.label">
+            <Setter Property="Foreground" Value="#FFE0E0E0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="Medium"/>
+        </Style>
+
+        <Style Selector="TextBlock.error">
+            <Setter Property="Foreground" Value="#FFF48771"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Margin" Value="0,4,0,0"/>
+        </Style>
+
+        <Style Selector="TextBox">
+            <Setter Property="Background" Value="#FF1E1E1E"/>
+            <Setter Property="Foreground" Value="#FFE0E0E0"/>
+            <Setter Property="BorderBrush" Value="#FF3F3F46"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="FontFamily" Value="Consolas,monospace"/>
+            <Setter Property="FontSize" Value="13"/>
+        </Style>
+
+        <Style Selector="TextBox:focus">
+            <Setter Property="BorderBrush" Value="#FF007ACC"/>
+        </Style>
+
+        <Style Selector="ComboBox">
+            <Setter Property="Background" Value="#FF1E1E1E"/>
+            <Setter Property="Foreground" Value="#FFE0E0E0"/>
+            <Setter Property="BorderBrush" Value="#FF3F3F46"/>
+            <Setter Property="Padding" Value="10,8"/>
+        </Style>
+
+        <Style Selector="Button">
+            <Setter Property="Background" Value="#FF0E639C"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+
+        <Style Selector="Button:pointerover">
+            <Setter Property="Background" Value="#FF1177BB"/>
+        </Style>
+
+        <Style Selector="Button.secondary">
+            <Setter Property="Background" Value="#FF3E3E42"/>
+        </Style>
+
+        <Style Selector="Button.secondary:pointerover">
+            <Setter Property="Background" Value="#FF4E4E52"/>
+        </Style>
+    </Window.Styles>
+
+    <DockPanel>
+        <!-- Header -->
+        <Border DockPanel.Dock="Top" Background="#FF1E1E1E" Padding="20,16">
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <TextBlock Text="🔧" FontSize="22" VerticalAlignment="Center"/>
+                <TextBlock Text="Proxy Settings"
+                           FontSize="18"
+                           FontWeight="SemiBold"
+                           Foreground="#FFE0E0E0"
+                           VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Settings Form -->
+        <StackPanel Margin="24,20" Spacing="20">
+            <StackPanel Spacing="6">
+                <TextBlock Text="Proxy Type" Classes="label"/>
+                <ComboBox SelectedIndex="0"
+                          HorizontalAlignment="Stretch"
+                          x:Name="ProxyTypeComboBox">
+                    <ComboBoxItem Content="SOCKS5" Tag="SOCKS5"/>
+                    <ComboBoxItem Content="HTTP" Tag="HTTP"/>
+                </ComboBox>
+            </StackPanel>
+
+            <StackPanel Spacing="6">
+                <TextBlock Text="Proxy IP Address *" Classes="label"/>
+                <TextBox Text="{Binding ProxyIp}"
+                         Watermark="e.g., 127.0.0.1"/>
+                <TextBlock Text="{Binding IpError}"
+                           Classes="error"
+                           IsVisible="{Binding IpError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+            </StackPanel>
+
+            <StackPanel Spacing="6">
+                <TextBlock Text="Proxy Port *" Classes="label"/>
+                <TextBox Text="{Binding ProxyPort}"
+                         Watermark="e.g., 1080"/>
+                <TextBlock Text="{Binding PortError}"
+                           Classes="error"
+                           IsVisible="{Binding PortError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+            </StackPanel>
+
+            <TextBlock Text="* Required fields"
+                       Foreground="#FF999999"
+                       FontSize="12"
+                       Margin="0,8,0,0"/>
+
+            <StackPanel Orientation="Horizontal"
+                        HorizontalAlignment="Right"
+                        Spacing="12"
+                        Margin="0,16,0,0">
+                <Button Content="Cancel"
+                        Classes="secondary"
+                        Command="{Binding CancelCommand}"
+                        Width="100"/>
+                <Button Content="Save Changes"
+                        Command="{Binding SaveCommand}"
+                        Width="130"/>
+            </StackPanel>
+        </StackPanel>
+    </DockPanel>
+</Window>

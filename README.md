@@ -1,64 +1,211 @@
 # ProxyBridge
 
-![ProxyBridge Logo](img/logo.png)
+<p align="center">
+  <img src="img/logo.png" alt="ProxyBridge Logo" width="200"/>
+</p>
 
-## Overview
 
-ProxyBridge is a transparent proxy traffic redirector for Windows that intercepts and redirects TCP traffic from specific applications through SOCKS5 or HTTP proxies. It works at the kernel level using WinDivert, making it compatible with proxy-unaware applications without requiring any configuration changes.
-
+ProxyBridge is a lightweight, open-source alternative to Proxifier that provides transparent proxy routing for Windows applications. It redirects TCP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. Working at the kernel level using WinDivert, ProxyBridge is compatible with proxy-unaware applications without requiring any configuration changes.
 
 ## Features
 
-- Process-based traffic redirection (target specific applications)
-- Works with proxy-unaware applications
-- Supports SOCKS5 and HTTP proxies
-- Kernel-level packet interception using WinDivert
-- No application configuration required
-- Compatible with any TCP protocol (HTTP, HTTPS, databases, RDP, SSH, etc.)
-- Process exclusion to prevent proxy loops
+- **Dual interface** - Feature-rich GUI and powerful CLI for all use cases
+- **Process-based traffic control** - Route, block, or allow traffic for specific applications
+- **Universal compatibility** - Works with proxy-unaware applications
+- **Multiple proxy protocols** - Supports SOCKS5 and HTTP proxies
+- **Kernel-level interception** - Uses WinDivert for reliable packet capture
+- **No configuration needed** - Applications work without any modifications
+- **Protocol agnostic** - Compatible with any TCP protocol (HTTP, HTTPS, databases, RDP, SSH, etc.)
+- **Traffic blocking** - Block specific applications from accessing the internet
+- **Flexible rules** - Direct connection, proxy routing, or complete blocking per process
+- **Process exclusion** - Prevent proxy loops by excluding proxy applications
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Usage](#usage)
+  - [GUI Application](#gui-application)
+    - [Proxy Settings](#proxy-settings)
+    - [Process Rules](#process-rules)
+    - [Activity Monitoring](#activity-monitoring)
+  - [Command Line Interface (CLI)](#command-line-interface-cli)
+    - [Basic Usage](#basic-usage)
+    - [Command Line Options](#command-line-options)
+    - [Rule Examples](#rule-examples)
+- [Use Cases](#use-cases)
+- [Current Limitations](#current-limitations)
+- [How It Works](#how-it-works)
+- [Build from Source](#build-from-source)
+- [License](#license)
+- [Author](#author)
+- [Credits](#credits)
 
 ## Installation
 
-1. Download the latest `ProxyBridge-vX.X.zip` from the [Releases](https://github.com/InterceptSuite/ProxyBridge/releases) page
-2. Extract the ZIP file to your preferred location
-3. Run `ProxyBridge.exe` with Administrator privileges (required for WinDivert driver)
+1. Download the latest `ProxyBridge-Installer-vX.X.X.exe` from the [Releases](https://github.com/InterceptSuite/ProxyBridge/releases) page
+2. Run the installer with Administrator privileges
+3. The installer will:
+   - Install ProxyBridge to `C:\Program Files\ProxyBridge`
+   - Add the CLI to your system PATH for easy command-line access
+   - Create Start Menu shortcuts for the GUI application
+   - Include all required dependencies (WinDivert driver)
 
-**Note:** The release ZIP includes all required files (ProxyBridge.exe, WinDivert.dll, WinDivert64.sys). No additional downloads needed.
 
-**Important:** Administrator privileges are required to load the WinDivert kernel driver.
+
 
 ## Usage
 
-### Basic Usage
+### GUI Application
+
+Launch `ProxyBridge.exe` (GUI) with Administrator privileges for an intuitive graphical interface to:
+
+#### Proxy Settings
+
+<p align="center">
+  <img src="img/proxy-setting.png" alt="Proxy Settings" width="600"/>
+</p>
+
+1. Click **Proxy** tab in the main window
+2. Click **Proxy Settings** from the menu
+3. Select **Proxy Type** (SOCKS5 or HTTP)
+4. Enter **Proxy IP Address** (e.g., 127.0.0.1)
+5. Enter **Proxy Port** (e.g., 1080 for SOCKS5, 8080 for HTTP)
+6. Click **Save Changes**
+
+#### Process Rules
+
+<p align="center">
+  <img src="img/proxy-rule.png" alt="Add Process Rule" width="600"/>
+</p>
+
+<p align="center">
+  <img src="img/proxy-rule2.png" alt="Process Rules List" width="600"/>
+</p>
+
+1. Click **Proxy** tab in the main window
+2. Click **Proxy Rules** from the menu
+3. Add process rules with actions:
+   - **PROXY** - Route through configured proxy
+   - **DIRECT** - Allow direct internet access
+   - **BLOCK** - Block all internet access
+4. Enter process name
+      - Use `*` as wildcard to set default action for all processes
+      - or Appname like chrome or chrome.exe
+5. Click **Save** to apply rules
+
+#### Activity Monitoring
+
+<p align="center">
+  <img src="img/connections.png" alt="Active Connections" width="600"/>
+</p>
+
+- View real-time connection activity in the **Connections** tab
+- Monitor which processes are active and their routing status
+- Search and filter connections using the search box
+
+**Important:** The GUI automatically saves your configuration and restores it on next launch.
+
+**Note:** Adding a rule with action **PROXY** while no proxy is configured will result in traffic being routed through a direct connection instead. Make sure to configure proxy settings before using PROXY rules.
+
+### Command Line Interface (CLI)
+
+The CLI provides powerful automation and scripting capabilities with rule-based traffic control:
+
+#### Basic Usage
 ```powershell
-# Redirect Chrome through default SOCKS5 proxy (127.0.0.1:4444)
-.\ProxyBridge.exe chrome.exe
+# Help menu
+ProxyBridge_CLI -h
 
-# Redirect Chrome through InterceptSuite
-.\ProxyBridge.exe chrome.exe --exclude InterceptSuite.exe
+# Use custom HTTP proxy
+ProxyBridge_CLI --proxy http://192.168.1.100:8080
 
-# Redirect Discord through InterceptSuite SOCKS5 proxy
-.\ProxyBridge.exe discord.exe --proxy socks5://127.0.0.1:4444
+# Route Chrome through socks5 proxy
+ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "chrome.exe=proxy"
 
-# Redirect Chrome through Burp Suite HTTP proxy
-.\ProxyBridge.exe chrome.exe --proxy http://127.0.0.1:8080
+# Block specific application from internet access
+ProxyBridge_CLI --rule "chrome.exe=block"
 
-# Exclude Burp Suite from redirection (prevent proxy loops)
-.\ProxyBridge.exe chrome.exe --proxy http://127.0.0.1:8080 --exclude BurpSuiteCommunity.exe
+# Route specific apps through proxy, block everything else
+ProxyBridge_CLI --rule "chrome.exe=proxy;firefox.exe=proxy;*=block"
 
-.\ProxyBridge.exe chrome.exe --proxy http://127.0.0.1:8080 --exclude BurpSuitePro.exe
+# Route all through proxy except proxy app itself
+ProxyBridge_CLI --rule "*=proxy;BurpSuiteCommunity.exe=direct"
 
-# Use custom relay port
-.\ProxyBridge.exe chrome.exe --relay-port 40000
 ```
 
-### Command Line Options
+#### Command Line Options
 ```
---proxy <url>         Proxy URL (default: socks5://127.0.0.1:4444)
-                      Supported: socks5://host:port, http://host:port
---relay-port <port>   Local relay port (default: 37123)
---exclude <process>   Exclude process from redirection
+ProxyBridge_CLI -h
+
+  ____                        ____       _     _
+ |  _ \ _ __ _____  ___   _  | __ ) _ __(_) __| | __ _  ___
+ | |_) | '__/ _ \ \/ / | | | |  _ \| '__| |/ _` |/ _` |/ _ \
+ |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/
+ |_|   |_|  \___/_/\_\\__, | |____/|_|  |_|\__,_|\__, |\___|
+                      |___/                      |___/  V1.1
+
+  Universal proxy client for Windows applications
+
+        Author: Sourav Kalal/InterceptSuite
+        GitHub: https://github.com/InterceptSuite/ProxyBridge
+
+A lightweight proxy bridge for process-based traffic routing
+
+USAGE:
+    ProxyBridge_CLI [OPTIONS]
+
+OPTIONS:
+    --proxy <url>       Proxy server URL
+                        Format: socks5://ip:port or http://ip:port
+                        Default: socks5://127.0.0.1:4444
+
+    --rule <rules>      Traffic routing rules (semicolon-separated)
+                        Format: process=action;process=action
+                        Actions: PROXY, DIRECT, BLOCK
+                        Example: --rule "chrome.exe=proxy;firefox.exe=direct;*=block"
+
+    --help, -h          Show this help message
+
+EXAMPLES:
+    Start with default SOCKS5 proxy:
+        ProxyBridge_CLI
+
+    Use custom HTTP proxy:
+        ProxyBridge_CLI --proxy http://192.168.1.100:8080
+
+    Route specific processes:
+        ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "chrome.exe=proxy;*=direct"
+
+    Block all traffic except specific apps:
+        ProxyBridge_CLI --rule "chrome.exe=proxy;firefox.exe=proxy;*=block"
+
+NOTES:
+    - Press Ctrl+C to stop ProxyBridge
+    - Use * as process name to match all traffic
+    - Process names are case-insensitive
+
 ```
+
+#### Rule Examples
+```powershell
+# Single process rule
+--rule "chrome.exe=proxy"
+
+# Multiple processes with different actions
+--rule "chrome.exe=proxy;firefox.exe=direct;malware.exe=block"
+
+# Default action for all unmatched processes
+--rule "chrome.exe=proxy;*=direct"
+
+# Whitelist approach (block everything except specific apps)
+--rule "chrome.exe=proxy;firefox.exe=proxy;*=block"
+```
+
+**Notes:**
+- After installation, the CLI is available from any terminal (no `.\` prefix needed)
+- Process names are case-insensitive
+- Use `*` as the process name to set a default action for all traffic
+- Press `Ctrl+C` to stop ProxyBridge
 
 ## Use Cases
 
@@ -74,7 +221,7 @@ ProxyBridge is a transparent proxy traffic redirector for Windows that intercept
 
 - IPv4 only (IPv6 not supported)
 - TCP only (UDP not supported)
-- Single process targeting at a time
+- IP and Port based Routing
 
 
 ## How It Works
@@ -184,10 +331,6 @@ MIT License - See LICENSE file for details
 ## Author
 
 Sourav Kalal / InterceptSuite
-
-## Project
-
-https://github.com/InterceptSuite/ProxyBridge
 
 ## Credits
 
