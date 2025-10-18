@@ -18,7 +18,9 @@
 
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
-    char process_name[MAX_PROCESS_NAME];
+    char process_name[MAX_PROCESS_NAME]; // size should be updated
+    char *target_hosts;   // Dynamic: IP filter "*", "192.168.*.*", "10.0.0.1;172.16.0.0"  Regex need to be tested - Done
+    char *target_ports;   // Dynamic: Port filter "*", "80", "80;443", "8000-9000"  - Done
     RuleAction action;
     BOOL enabled;
     struct PROCESS_RULE *next;
@@ -79,6 +81,10 @@ static void log_message(const char *msg, ...)
 
 static UINT32 parse_ipv4(const char *ip);
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
+static BOOL match_ip_pattern(const char *pattern, UINT32 ip);
+static BOOL match_port_pattern(const char *pattern, UINT16 port);
+static BOOL match_ip_list(const char *ip_list, UINT32 ip);
+static BOOL match_port_list(const char *port_list, UINT16 port);
 static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
 static DWORD WINAPI local_proxy_server(LPVOID arg);
 static DWORD WINAPI connection_handler(LPVOID arg);
@@ -86,7 +92,7 @@ static DWORD WINAPI transfer_handler(LPVOID arg);
 static DWORD WINAPI packet_processor(LPVOID arg);
 static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port);
 static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
-static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port);
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port);
 static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port);
 static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port);
 static BOOL is_connection_tracked(UINT16 src_port);
@@ -151,7 +157,8 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             }
             else
             {
-                RuleAction action = check_process_rule(ip_header->SrcAddr, ntohs(tcp_header->SrcPort));
+                RuleAction action = check_process_rule(ip_header->SrcAddr, ntohs(tcp_header->SrcPort),
+                                                                       ip_header->DstAddr, ntohs(tcp_header->DstPort));
 
                 if (action == RULE_ACTION_DIRECT)
                 {
@@ -305,8 +312,137 @@ static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
     return FALSE;
 }
 
+// Match IP pattern against IP address
+// Supports: "*" (all), "192.168.1.1" (exact), "192.168.*.*" (wildcard)
+static BOOL match_ip_pattern(const char *pattern, UINT32 ip)
+{
+    if (pattern == NULL || strcmp(pattern, "*") == 0)
+        return TRUE;
 
-static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port)
+    // Extract 4 octets from IP (little-endian)
+    unsigned char ip_octets[4];
+    ip_octets[0] = (ip >> 0) & 0xFF;
+    ip_octets[1] = (ip >> 8) & 0xFF;
+    ip_octets[2] = (ip >> 16) & 0xFF;
+    ip_octets[3] = (ip >> 24) & 0xFF;
+
+    // Parse pattern manually
+    char pattern_copy[256];
+    strncpy(pattern_copy, pattern, sizeof(pattern_copy) - 1);
+    pattern_copy[sizeof(pattern_copy) - 1] = '\0';
+
+    char pattern_octets[4][16];
+    int octet_count = 0;
+    int char_idx = 0;
+
+    for (int i = 0; i <= (int)strlen(pattern_copy) && octet_count < 4; i++)
+    {
+        if (pattern_copy[i] == '.' || pattern_copy[i] == '\0')
+        {
+            pattern_octets[octet_count][char_idx] = '\0';
+            octet_count++;
+            char_idx = 0;
+            if (pattern_copy[i] == '\0')
+                break;
+        }
+        else
+        {
+            if (char_idx < 15)
+                pattern_octets[octet_count][char_idx++] = pattern_copy[i];
+        }
+    }
+
+    if (octet_count != 4)
+        return FALSE;
+
+    for (int i = 0; i < 4; i++)
+    {
+        if (strcmp(pattern_octets[i], "*") == 0)
+            continue;
+        int pattern_val = atoi(pattern_octets[i]);
+        if (pattern_val != ip_octets[i])
+            return FALSE;
+    }
+    return TRUE;
+}
+
+// Match port pattern: "*", "80", "8000-9000"
+static BOOL match_port_pattern(const char *pattern, UINT16 port)
+{
+    if (pattern == NULL || strcmp(pattern, "*") == 0)
+        return TRUE;
+
+    char *dash = strchr(pattern, '-');
+    if (dash != NULL)
+    {
+        int start_port = atoi(pattern);
+        int end_port = atoi(dash + 1);
+        return (port >= start_port && port <= end_port);
+    }
+
+    return (port == atoi(pattern));
+}
+
+// Match IP list: "192.168.*.*;10.0.0.1"
+static BOOL match_ip_list(const char *ip_list, UINT32 ip)
+{
+    if (ip_list == NULL || ip_list[0] == '\0' || strcmp(ip_list, "*") == 0)
+        return TRUE;
+
+    size_t len = strlen(ip_list) + 1;
+    char *list_copy = (char *)malloc(len);
+    if (list_copy == NULL)
+        return FALSE;
+
+    strncpy(list_copy, ip_list, len);
+    BOOL matched = FALSE;
+    char *token = strtok(list_copy, ";");
+    while (token != NULL)
+    {
+        while (*token == ' ' || *token == '\t')
+            token++;
+        if (match_ip_pattern(token, ip))
+        {
+            matched = TRUE;
+            break;
+        }
+        token = strtok(NULL, ";");
+    }
+    free(list_copy);
+    return matched;
+}
+
+// Match port list: "80;443;8000-9000"
+static BOOL match_port_list(const char *port_list, UINT16 port)
+{
+    if (port_list == NULL || port_list[0] == '\0' || strcmp(port_list, "*") == 0)
+        return TRUE;
+
+    size_t len = strlen(port_list) + 1;
+    char *list_copy = (char *)malloc(len);
+    if (list_copy == NULL)
+        return FALSE;
+
+    strncpy(list_copy, port_list, len);
+    BOOL matched = FALSE;
+    char *token = strtok(list_copy, ",;");
+    while (token != NULL)
+    {
+        while (*token == ' ' || *token == '\t')
+            token++;
+        if (match_port_pattern(token, port))
+        {
+            matched = TRUE;
+            break;
+        }
+        token = strtok(NULL, ",;");
+    }
+    free(list_copy);
+    return matched;
+}
+
+
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port)
 {
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
@@ -363,6 +499,20 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port)
             _stricmp(process_name, target_with_exe) == 0 ||
             _stricmp(process_name, target_without_exe) == 0)
         {
+            // Process name matched! Now check IP and port filters
+            if (!match_ip_list(rule->target_hosts, dest_ip))
+            {
+                rule = rule->next;
+                continue;  // IP doesn't match, try next rule
+            }
+
+            if (!match_port_list(rule->target_ports, dest_port))
+            {
+                rule = rule->next;
+                continue;  // Port doesn't match, try next rule
+            }
+
+            // Process name, IP, and port ALL matched!
             RuleAction action = rule->action;
             if (action == RULE_ACTION_PROXY && (g_proxy_ip[0] == '\0' || g_proxy_port == 0))
             {
@@ -820,7 +970,7 @@ static void remove_connection(UINT16 src_port)
     ReleaseMutex(lock);
 }
 
-PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, RuleAction action)
+PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, RuleAction action)
 {
     if (process_name == NULL || process_name[0] == '\0')
         return 0;
@@ -832,6 +982,58 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, RuleAction 
     rule->rule_id = g_next_rule_id++;
     strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
     rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
+
+    if (target_hosts != NULL && target_hosts[0] != '\0')
+    {
+        size_t len = strlen(target_hosts) + 1;
+        rule->target_hosts = (char *)malloc(len);
+        if (rule->target_hosts == NULL)
+        {
+            free(rule);
+            return 0;
+        }
+        strncpy(rule->target_hosts, target_hosts, len);
+        rule->target_hosts[len - 1] = '\0';
+    }
+    else
+    {
+        // Default to "*" ll IPs
+        rule->target_hosts = (char *)malloc(2);
+        if (rule->target_hosts == NULL)
+        {
+            free(rule);
+            return 0;
+        }
+        strcpy(rule->target_hosts, "*");
+    }
+
+    // Dynamically allocate memory for target_ports no size limit!
+    if (target_ports != NULL && target_ports[0] != '\0')
+    {
+        size_t len = strlen(target_ports) + 1;
+        rule->target_ports = (char *)malloc(len);
+        if (rule->target_ports == NULL)
+        {
+            free(rule->target_hosts);
+            free(rule);
+            return 0;
+        }
+        strncpy(rule->target_ports, target_ports, len);
+        rule->target_ports[len - 1] = '\0';
+    }
+    else
+    {
+        // Default to "*" - all ports
+        rule->target_ports = (char *)malloc(2);
+        if (rule->target_ports == NULL)
+        {
+            free(rule->target_hosts);
+            free(rule);
+            return 0;
+        }
+        strcpy(rule->target_ports, "*");
+    }
+
     rule->action = action;
     rule->enabled = TRUE;
     rule->next = rules_list;
@@ -1039,6 +1241,12 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
             {
                 PROCESS_RULE *to_free = rules_list;
                 rules_list = rules_list->next;
+
+                if (to_free->target_hosts != NULL)
+                    free(to_free->target_hosts);
+                if (to_free->target_ports != NULL)
+                    free(to_free->target_ports);
+
                 free(to_free);
             }
             break;
