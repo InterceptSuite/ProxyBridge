@@ -46,9 +46,21 @@ Section "MainSection" SEC01
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\ProxyBridge.exe"
   CreateShortCut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\ProxyBridge.exe"
 
+  ; Add to PATH safely - check if already exists first
   ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
-  StrCpy $0 "$0;$INSTDIR"
-  WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "$0"
+
+  ; Check if our path is already in PATH
+  Push "$0"
+  Push "$INSTDIR"
+  Call StrContains
+  Pop $1
+
+  ; Only add if not already present
+  StrCmp $1 "" 0 +3
+    ; Path not found, append it
+    StrCpy $0 "$0;$INSTDIR"
+    WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "$0"
+
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
 SectionEnd
 
@@ -89,3 +101,37 @@ Section Uninstall
   DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}"
   SetAutoClose true
 SectionEnd
+
+; Helper function to check if string contains substring
+Function StrContains
+  Exch $R1 ; Needle (what to search for)
+  Exch
+  Exch $R2 ; Haystack (where to search)
+  Push $R3
+  Push $R4
+  Push $R5
+
+  StrLen $R3 $R1
+  StrCpy $R4 0
+
+  loop:
+    StrCpy $R5 $R2 $R3 $R4
+    StrCmp $R5 $R1 found
+    StrCmp $R5 "" notfound
+    IntOp $R4 $R4 + 1
+    Goto loop
+
+  found:
+    StrCpy $R1 $R1
+    Goto done
+
+  notfound:
+    StrCpy $R1 ""
+
+  done:
+    Pop $R5
+    Pop $R4
+    Pop $R3
+    Pop $R2
+    Exch $R1
+FunctionEnd
