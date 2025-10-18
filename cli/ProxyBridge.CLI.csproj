@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>ProxyBridge_CLI</AssemblyName>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>false</InvariantGlobalization>
     <SelfContained>true</SelfContained>

@@ -144,7 +144,7 @@
                                FontSize="14"
                                FontWeight="SemiBold"
                                Foreground="#FFE0E0E0"/>
-                    <Button Content="🧪 Test Proxy Connection"
+                    <Button Content="Test Proxy Connection"
                             Command="{Binding OpenTestCommand}"
                             Classes="secondary"
                             HorizontalAlignment="Left"/>
