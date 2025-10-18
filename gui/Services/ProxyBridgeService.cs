@@ -80,11 +80,6 @@ public class ProxyBridgeService : IDisposable
         return ProxyBridgeNative.ProxyBridge_DisableRule(ruleId);
     }
 
-    public bool ClearRules()
-    {
-        return ProxyBridgeNative.ProxyBridge_ClearRules();
-    }
-
     public void Dispose()
     {
         Stop();

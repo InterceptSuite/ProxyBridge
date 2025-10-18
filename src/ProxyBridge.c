@@ -840,22 +840,6 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, RuleAction 
     return rule->rule_id;
 }
 
-PROXYBRIDGE_API BOOL ProxyBridge_ClearRules(void)
-{
-    if (running)
-        return FALSE;
-
-    while (rules_list != NULL)
-    {
-        PROCESS_RULE *to_free = rules_list;
-        rules_list = rules_list->next;
-        free(to_free);
-    }
-
-    g_next_rule_id = 1;
-    return TRUE;
-}
-
 PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id)
 {
     if (rule_id == 0)

@@ -50,10 +50,6 @@ public static class ProxyBridgeNative
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool ProxyBridge_ClearRules();
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_EnableRule(uint ruleId);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
