@@ -217,7 +217,8 @@ public class MainWindowViewModel : ViewModelBase
                 onClose: () =>
                 {
                     window.Close();
-                }
+                },
+                proxyService: _proxyService
             );
 
             window.DataContext = viewModel;

@@ -91,4 +91,11 @@ public static class ProxyBridgeNative
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_Stop();
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int ProxyBridge_TestConnection(
+        [MarshalAs(UnmanagedType.LPStr)] string targetHost,
+        ushort targetPort,
+        [MarshalAs(UnmanagedType.LPStr)] System.Text.StringBuilder resultBuffer,
+        UIntPtr bufferSize);
 }

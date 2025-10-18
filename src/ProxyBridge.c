@@ -1471,6 +1471,198 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
     return TRUE;
 }
 
+
+PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 target_port, char* result_buffer, size_t buffer_size)
+{
+    WSADATA wsa;
+    SOCKET test_sock = INVALID_SOCKET;
+    struct sockaddr_in proxy_addr;
+    struct hostent* host_info;
+    UINT32 target_ip;
+    int ret = -1;
+    char temp_buffer[512];
+
+    if (g_proxy_ip[0] == '\0' || g_proxy_port == 0)
+    {
+        snprintf(result_buffer, buffer_size, "ERROR: No proxy configured");
+        return -1;
+    }
+
+    if (target_host == NULL || target_host[0] == '\0')
+    {
+        snprintf(result_buffer, buffer_size, "ERROR: Invalid target host");
+        return -1;
+    }
+
+    // Initialize Winsock
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+    {
+        snprintf(result_buffer, buffer_size, "ERROR: WSAStartup failed (%d)", WSAGetLastError());
+        return -1;
+    }
+
+    snprintf(temp_buffer, sizeof(temp_buffer), "Testing connection to %s:%d via %s proxy %s:%d...\n",
+        target_host, target_port,
+        g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
+        g_proxy_ip, g_proxy_port);
+    strncpy(result_buffer, temp_buffer, buffer_size - 1);
+
+
+    host_info = gethostbyname(target_host);
+    if (host_info == NULL)
+    {
+        snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to resolve hostname %s (%d)\n", target_host, WSAGetLastError());
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        WSACleanup();
+        return -1;
+    }
+    target_ip = *(UINT32*)host_info->h_addr_list[0];
+
+    snprintf(temp_buffer, sizeof(temp_buffer), "Resolved %s to %d.%d.%d.%d\n",
+        target_host,
+        (target_ip >> 0) & 0xFF, (target_ip >> 8) & 0xFF,
+        (target_ip >> 16) & 0xFF, (target_ip >> 24) & 0xFF);
+    strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+
+    // Create socket
+    test_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (test_sock == INVALID_SOCKET)
+    {
+        snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Socket creation failed (%d)\n", WSAGetLastError());
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        WSACleanup();
+        return -1;
+    }
+
+    DWORD timeout = 10000;
+    setsockopt(test_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(test_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+
+    memset(&proxy_addr, 0, sizeof(proxy_addr));
+    proxy_addr.sin_family = AF_INET;
+    proxy_addr.sin_addr.s_addr = parse_ipv4(g_proxy_ip);
+    proxy_addr.sin_port = htons(g_proxy_port);
+
+    snprintf(temp_buffer, sizeof(temp_buffer), "Connecting to proxy %s:%d...\n", g_proxy_ip, g_proxy_port);
+    strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+
+    if (connect(test_sock, (struct sockaddr*)&proxy_addr, sizeof(proxy_addr)) == SOCKET_ERROR)
+    {
+        snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to connect to proxy (%d)\n", WSAGetLastError());
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        closesocket(test_sock);
+        WSACleanup();
+        return -1;
+    }
+
+    strncat(result_buffer, "Connected to proxy server\n", buffer_size - strlen(result_buffer) - 1);
+
+    if (g_proxy_type == PROXY_TYPE_SOCKS5)
+    {
+        if (socks5_connect(test_sock, target_ip, target_port) != 0)
+        {
+            snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: SOCKS5 handshake failed\n");
+            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            closesocket(test_sock);
+            WSACleanup();
+            return -1;
+        }
+        strncat(result_buffer, "SOCKS5 handshake successful\n", buffer_size - strlen(result_buffer) - 1);
+    }
+    else
+    {
+        if (http_connect(test_sock, target_ip, target_port) != 0)
+        {
+            snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: HTTP CONNECT failed\n");
+            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            closesocket(test_sock);
+            WSACleanup();
+            return -1;
+        }
+        strncat(result_buffer, "HTTP CONNECT successful\n", buffer_size - strlen(result_buffer) - 1);
+    }
+
+
+    char http_request[512];
+    snprintf(http_request, sizeof(http_request),
+        "GET / HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Connection: close\r\n"
+        "User-Agent: ProxyBridge/1.0\r\n"
+        "\r\n", target_host);
+
+    if (send(test_sock, http_request, strlen(http_request), 0) == SOCKET_ERROR)
+    {
+        snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to send test request (%d)\n", WSAGetLastError());
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        closesocket(test_sock);
+        WSACleanup();
+        return -1;
+    }
+
+    strncat(result_buffer, "Sent HTTP GET request\n", buffer_size - strlen(result_buffer) - 1);
+    char response[1024];
+    int bytes_received = recv(test_sock, response, sizeof(response) - 1, 0);
+    if (bytes_received > 0)
+    {
+        response[bytes_received] = '\0';
+
+        if (strstr(response, "HTTP/") != NULL)
+        {
+            char* status_line = strstr(response, "HTTP/");
+            int status_code = 0;
+            if (status_line != NULL)
+            {
+                sscanf(status_line, "HTTP/%*s %d", &status_code);
+            }
+
+            snprintf(temp_buffer, sizeof(temp_buffer), "SUCCESS: Received HTTP %d response (%d bytes)\n", status_code, bytes_received);
+            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            ret = 0; // Success
+        }
+        else
+        {
+            snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Received data but not valid HTTP response\n");
+            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            ret = -1; // Failure - not a valid HTTP response
+        }
+    }
+    else if (bytes_received == 0)
+    {
+        snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Connection closed by remote host (no data received)\n");
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        ret = -1; // Failure
+    }
+    else
+    {
+        int error_code = WSAGetLastError();
+        if (error_code == WSAETIMEDOUT)
+        {
+            snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Connection timeout - no response received\n");
+        }
+        else
+        {
+            snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to receive response (%d)\n", error_code);
+        }
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        ret = -1; // Failure
+    }
+
+    closesocket(test_sock);
+    WSACleanup();
+
+    if (ret == 0)
+    {
+        strncat(result_buffer, "\n✓ Proxy connection test PASSED\n", buffer_size - strlen(result_buffer) - 1);
+    }
+    else
+    {
+        strncat(result_buffer, "\n✗ Proxy connection test FAILED\n", buffer_size - strlen(result_buffer) - 1);
+    }
+
+    return ret;
+}
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 {
     switch (fdwReason)

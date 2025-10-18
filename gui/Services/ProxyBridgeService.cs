@@ -88,6 +88,18 @@ public class ProxyBridgeService : IDisposable
         return ProxyBridgeNative.ProxyBridge_DisableRule(ruleId);
     }
 
+    public string TestConnection(string targetHost, ushort targetPort)
+    {
+        var buffer = new System.Text.StringBuilder(4096);
+        int result = ProxyBridgeNative.ProxyBridge_TestConnection(
+            targetHost,
+            targetPort,
+            buffer,
+            (UIntPtr)buffer.Capacity);
+
+        return buffer.ToString();
+    }
+
     public void Dispose()
     {
         Stop();
