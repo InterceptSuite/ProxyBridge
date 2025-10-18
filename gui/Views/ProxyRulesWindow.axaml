@@ -105,7 +105,8 @@
                 </StackPanel>
                 <Button Grid.Column="1"
                         Content="➕ Add Rule"
-                        Command="{Binding AddRuleCommand}"/>
+                        Command="{Binding AddRuleCommand}"
+                        IsVisible="{Binding !IsAddRuleViewOpen}"/>
             </Grid>
         </Border>
 
