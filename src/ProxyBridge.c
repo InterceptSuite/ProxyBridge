@@ -18,9 +18,10 @@
 
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
-    char process_name[MAX_PROCESS_NAME]; // size should be updated
-    char *target_hosts;   // Dynamic: IP filter "*", "192.168.*.*", "10.0.0.1;172.16.0.0"  Regex need to be tested - Done
-    char *target_ports;   // Dynamic: Port filter "*", "80", "80;443", "8000-9000"  - Done
+    char process_name[MAX_PROCESS_NAME];
+    char *target_hosts;   // Dynamic: IP filter "*", "192.168.*.*", "10.0.0.1;172.16.0.0"
+    char *target_ports;   // Dynamic: Port filter "*", "80", "80;443", "8000-9000"
+    RuleProtocol protocol;  // TCP, UDP, or BOTH (for future)
     RuleAction action;
     BOOL enabled;
     struct PROCESS_RULE *next;
@@ -512,6 +513,7 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
                 continue;  // Port doesn't match, try next rule
             }
 
+            // WIP - protocol based check
             // Process name, IP, and port ALL matched!
             RuleAction action = rule->action;
             if (action == RULE_ACTION_PROXY && (g_proxy_ip[0] == '\0' || g_proxy_port == 0))
@@ -970,7 +972,7 @@ static void remove_connection(UINT16 src_port)
     ReleaseMutex(lock);
 }
 
-PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, RuleAction action)
+PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, RuleProtocol protocol, RuleAction action)
 {
     if (process_name == NULL || process_name[0] == '\0')
         return 0;
@@ -982,6 +984,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
     rule->rule_id = g_next_rule_id++;
     strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
     rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
+    rule->protocol = protocol;
 
     if (target_hosts != NULL && target_hosts[0] != '\0')
     {

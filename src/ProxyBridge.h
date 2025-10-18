@@ -27,7 +27,13 @@ typedef enum {
     RULE_ACTION_BLOCK = 2
 } RuleAction;
 
-PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, RuleAction action);
+typedef enum {
+    RULE_PROTOCOL_TCP = 0,
+    RULE_PROTOCOL_UDP = 1,
+    RULE_PROTOCOL_BOTH = 2  // Future: Match both TCP and UDP
+} RuleProtocol;
+
+PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, RuleProtocol protocol, RuleAction action);
 PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id);
 PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id);
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port);
