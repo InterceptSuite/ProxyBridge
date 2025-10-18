@@ -35,6 +35,13 @@ public static class ProxyBridgeNative
         BLOCK = 2
     }
 
+    public enum RuleProtocol
+    {
+        TCP = 0,
+        UDP = 1,
+        BOTH = 2
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void LogCallback([MarshalAs(UnmanagedType.LPStr)] string message);
 
@@ -49,6 +56,9 @@ public static class ProxyBridgeNative
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern uint ProxyBridge_AddRule(
         [MarshalAs(UnmanagedType.LPStr)] string processName,
+        [MarshalAs(UnmanagedType.LPStr)] string targetHosts,
+        [MarshalAs(UnmanagedType.LPStr)] string targetPorts,
+        RuleProtocol protocol,
         RuleAction action);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]

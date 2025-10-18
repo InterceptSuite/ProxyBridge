@@ -122,26 +122,38 @@
                     BorderBrush="#FF3F3F46"
                     BorderThickness="0,1,0,1"
                     Padding="20,12">
-                <Grid ColumnDefinitions="100,80,*,200">
+                <Grid ColumnDefinitions="80,60,200,150,120,*">
                     <TextBlock Grid.Column="0"
                                Text="Enabled"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"
-                               Margin="0,0,20,0"/>
+                               Margin="0,0,10,0"/>
                     <TextBlock Grid.Column="1"
                                Text="SR"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"
-                               Margin="0,0,20,0"/>
+                               Margin="0,0,10,0"/>
                     <TextBlock Grid.Column="2"
-                               Text="Process Name"
+                               Text="Process"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"
-                               Margin="0,0,20,0"/>
+                               Margin="0,0,10,0"/>
                     <TextBlock Grid.Column="3"
+                               Text="Target Hosts"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"
+                               Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="4"
+                               Text="Target Ports"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"
+                               Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="5"
                                Text="Action"
                                FontSize="13"
                                FontWeight="SemiBold"
@@ -151,7 +163,7 @@
 
             <!-- Table Body -->
             <ScrollViewer Grid.Row="1"
-                          HorizontalScrollBarVisibility="Disabled"
+                          HorizontalScrollBarVisibility="Auto"
                           VerticalScrollBarVisibility="Auto">
                 <ItemsControl ItemsSource="{Binding ProxyRules}" x:Name="RulesItemsControl">
                     <ItemsControl.ItemTemplate>
@@ -160,17 +172,17 @@
                                     BorderBrush="#FF3F3F46"
                                     BorderThickness="0,0,0,1"
                                     Padding="20,16">
-                                <Grid ColumnDefinitions="100,80,*,200">
+                                <Grid ColumnDefinitions="80,60,200,150,120,*">
                                     <CheckBox Grid.Column="0"
                                               IsChecked="{Binding IsEnabled}"
                                               VerticalAlignment="Center"
-                                              Margin="0,0,20,0"/>
+                                              Margin="0,0,10,0"/>
                                     <TextBlock Grid.Column="1"
                                                Text="{Binding Index}"
                                                FontSize="14"
                                                Foreground="#FF999999"
                                                VerticalAlignment="Center"
-                                               Margin="0,0,20,0"/>
+                                               Margin="0,0,10,0"/>
                                     <TextBlock Grid.Column="2"
                                                Text="{Binding ProcessName}"
                                                FontSize="14"
@@ -178,8 +190,22 @@
                                                Foreground="#FFE0E0E0"
                                                VerticalAlignment="Center"
                                                TextTrimming="CharacterEllipsis"
-                                               Margin="0,0,20,0"/>
+                                               Margin="0,0,10,0"/>
                                     <TextBlock Grid.Column="3"
+                                               Text="{Binding TargetHosts}"
+                                               FontSize="13"
+                                               Foreground="#FF999999"
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,0,10,0"/>
+                                    <TextBlock Grid.Column="4"
+                                               Text="{Binding TargetPorts}"
+                                               FontSize="13"
+                                               Foreground="#FF999999"
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,0,10,0"/>
+                                    <TextBlock Grid.Column="5"
                                                Text="{Binding Action}"
                                                FontSize="14"
                                                FontWeight="SemiBold"
@@ -194,49 +220,92 @@
         </Grid>
 
         <!-- Add Rule Form View -->
-        <StackPanel Margin="24,20"
-                    Spacing="20"
-                    IsVisible="{Binding IsAddRuleViewOpen}">
-            <StackPanel Spacing="6">
-                <TextBlock Text="Process Name" Classes="label"/>
-                <TextBox Text="{Binding NewProcessName}"
-                         Watermark="e.g., chrome.exe, firefox.exe"/>
+        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      IsVisible="{Binding IsAddRuleViewOpen}">
+            <StackPanel Margin="24,20"
+                        Spacing="20">
+                <!-- Applications Section -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Applications" Classes="label"/>
+                    <TextBox Text="{Binding NewProcessName}"
+                             Watermark="Any"/>
+                    <TextBlock Text="Example: iexplore.exe; &quot;C:\some app.exe&quot;; fire*.exe; *.bin"
+                               FontSize="11"
+                               Foreground="#FF999999"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0"/>
+                </StackPanel>
+
+                <!-- Target Hosts Section -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Target hosts" Classes="label"/>
+                    <TextBox Text="{Binding NewTargetHosts}"
+                             Watermark="Any"/>
+                    <TextBlock Text="Example: 127.0.0.1; *.example.com; 192.168.1.*; 10.1.0.0-10.5.255.255"
+                               FontSize="11"
+                               Foreground="#FF999999"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0"/>
+                </StackPanel>
+
+                <!-- Target Ports Section -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Target ports" Classes="label"/>
+                    <TextBox Text="{Binding NewTargetPorts}"
+                             Watermark="Any"/>
+                    <TextBlock Text="Example: 80; 8000-9000; 3128"
+                               FontSize="11"
+                               Foreground="#FF999999"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0"/>
+                </StackPanel>
+
+                <!-- Protocol Section -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Protocol" Classes="label"/>
+                    <ComboBox SelectedIndex="0"
+                              HorizontalAlignment="Stretch"
+                              IsEnabled="False"
+                              x:Name="ProtocolComboBox">
+                        <ComboBoxItem Content="TCP (UDP not yet supported)" Tag="TCP"/>
+                    </ComboBox>
+                </StackPanel>
+
+                <!-- Action Section -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Action" Classes="label"/>
+                    <ComboBox SelectedIndex="0"
+                              HorizontalAlignment="Stretch"
+                              x:Name="ActionComboBox"
+                              SelectionChanged="ActionComboBox_SelectionChanged">
+                        <ComboBoxItem Content="PROXY" Tag="PROXY"/>
+                        <ComboBoxItem Content="DIRECT" Tag="DIRECT"/>
+                        <ComboBoxItem Content="BLOCK" Tag="BLOCK"/>
+                    </ComboBox>
+                </StackPanel>
+
+                <!-- Validation Error -->
                 <TextBlock Text="{Binding ProcessNameError}"
                            IsVisible="{Binding ProcessNameError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                            Foreground="#FFFF6B6B"
                            FontSize="12"
                            Margin="0,4,0,0"/>
-                <TextBlock Text="Enter the application name you want to control (e.g., chrome, firefox.exe, notepad). You can use * to apply the rule to all system traffic."
-                           FontSize="11"
-                           Foreground="#FF999999"
-                           TextWrapping="Wrap"
-                           Margin="0,4,0,0"/>
-            </StackPanel>
 
-            <StackPanel Spacing="6">
-                <TextBlock Text="Action" Classes="label"/>
-                <ComboBox SelectedIndex="0"
-                          HorizontalAlignment="Stretch"
-                          x:Name="ActionComboBox"
-                          SelectionChanged="ActionComboBox_SelectionChanged">
-                    <ComboBoxItem Content="PROXY" Tag="PROXY"/>
-                    <ComboBoxItem Content="DIRECT" Tag="DIRECT"/>
-                    <ComboBoxItem Content="BLOCK" Tag="BLOCK"/>
-                </ComboBox>
+                <!-- Action Buttons -->
+                <StackPanel Orientation="Horizontal"
+                            HorizontalAlignment="Right"
+                            Spacing="12"
+                            Margin="0,16,0,0">
+                    <Button Content="Cancel"
+                            Classes="secondary"
+                            Command="{Binding CancelAddRuleCommand}"
+                            Width="100"/>
+                    <Button Content="Save Rule"
+                            Command="{Binding SaveNewRuleCommand}"
+                            Width="130"/>
+                </StackPanel>
             </StackPanel>
-
-            <StackPanel Orientation="Horizontal"
-                        HorizontalAlignment="Right"
-                        Spacing="12"
-                        Margin="0,16,0,0">
-                <Button Content="Cancel"
-                        Classes="secondary"
-                        Command="{Binding CancelAddRuleCommand}"
-                        Width="100"/>
-                <Button Content="Save Rule"
-                        Command="{Binding SaveNewRuleCommand}"
-                        Width="130"/>
-            </StackPanel>
-        </StackPanel>
+        </ScrollViewer>
     </DockPanel>
 </Window>

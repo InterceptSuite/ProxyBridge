@@ -80,12 +80,25 @@ static void log_message(const char *msg, ...)
     g_log_callback(buffer);
 }
 
+// Extract filename from full path  C:\path\chrome.exe  >> chrome.exe
+static const char* extract_filename(const char* path)
+{
+    if (!path) return "";
+    const char* last_backslash = strrchr(path, '\\');
+    const char* last_slash = strrchr(path, '/');
+    const char* last_separator = (last_backslash > last_slash) ? last_backslash : last_slash;
+
+    return last_separator ? (last_separator + 1) : path;
+}
+
 static UINT32 parse_ipv4(const char *ip);
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
 static BOOL match_ip_pattern(const char *pattern, UINT32 ip);
 static BOOL match_port_pattern(const char *pattern, UINT16 port);
 static BOOL match_ip_list(const char *ip_list, UINT32 ip);
 static BOOL match_port_list(const char *port_list, UINT16 port);
+static BOOL match_process_pattern(const char *pattern, const char *process_name);
+static BOOL match_process_list(const char *process_list, const char *process_name);
 static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
 static DWORD WINAPI local_proxy_server(LPVOID arg);
 static DWORD WINAPI connection_handler(LPVOID arg);
@@ -196,7 +209,8 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                             g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
                             g_proxy_ip, g_proxy_port);
 
-                        g_connection_callback(process_name, pid, dest_ip_str, orig_dest_port, proxy_info);
+                        const char* display_name = extract_filename(process_name);
+                        g_connection_callback(display_name, pid, dest_ip_str, orig_dest_port, proxy_info);
                     }
                 }
 
@@ -298,15 +312,12 @@ static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
 
     if (QueryFullProcessImageNameA(hProcess, 0, full_path, &path_len))
     {
-        char *filename = strrchr(full_path, '\\');
-        if (filename != NULL)
-        {
-            filename++;
-            strncpy(name, filename, name_size - 1);
-            name[name_size - 1] = '\0';
-            CloseHandle(hProcess);
-            return TRUE;
-        }
+
+
+        strncpy(name, full_path, name_size - 1);
+        name[name_size - 1] = '\0';
+        CloseHandle(hProcess);
+        return TRUE;
     }
 
     CloseHandle(hProcess);
@@ -442,13 +453,132 @@ static BOOL match_port_list(const char *port_list, UINT16 port)
     return matched;
 }
 
+// Match process name with wildcard support
+// Supports: "*" (all),
+// "chrome.exe" (exact), "fire*.exe" (wildcard), "*.bin" (extension wildcard)
+// added support for full paths - C:\Program Files\Google\Chrome\Application\chrome.exe
+// Nedd to Test all combination at sanme time
+static BOOL match_process_pattern(const char *pattern, const char *process_full_path)
+{
+    if (pattern == NULL || strcmp(pattern, "*") == 0)
+        return TRUE;
+
+    // Extract just the filename from the full path for comparison
+    // Windows path sucks
+    const char *filename = strrchr(process_full_path, '\\');
+    if (filename != NULL)
+        filename++; // Skip the backslash
+    else
+        filename = process_full_path; // No path separator, use as-is
+
+    size_t pattern_len = strlen(pattern);
+    size_t name_len = strlen(filename);
+    size_t full_path_len = strlen(process_full_path);
+
+    // Check if pattern contains path separators (backslash or forward slash)
+    BOOL is_full_path_pattern = (strchr(pattern, '\\') != NULL || strchr(pattern, '/') != NULL);
+
+    // check if pattern has path seperator match for full path
+    const char *match_target = is_full_path_pattern ? process_full_path : filename; // match against filename only
+    size_t target_len = is_full_path_pattern ? full_path_len : name_len;
+
+    // check for * at the end: "fire*" or "C:\Program Files\*"
+    if (pattern_len > 0 && pattern[pattern_len - 1] == '*')
+    {
+        // Match prefix: "fire*" matches "firefox.exe"
+        return _strnicmp(pattern, match_target, pattern_len - 1) == 0;
+    }
+
+    // Check for wildcard at the beginning: "*.exe"
+    if (pattern_len > 1 && pattern[0] == '*')
+    {
+        // Match suffix: "*.exe" matches "chrome.exe"
+        const char *pattern_suffix = pattern + 1;
+        size_t suffix_len = pattern_len - 1;
+        if (target_len >= suffix_len)
+        {
+            return _stricmp(match_target + target_len - suffix_len, pattern_suffix) == 0;
+        }
+        return FALSE;
+    }
+
+    // check for *  in the middle: "fire*.exe" or C:\Program Files\*\chrome.exe
+    const char *star = strchr(pattern, '*');
+    if (star != NULL)
+    {
+        size_t prefix_len = star - pattern;
+        const char *suffix = star + 1;
+        size_t suffix_len = strlen(suffix);
+
+        // Check prefix matches
+        if (_strnicmp(pattern, match_target, prefix_len) != 0)
+            return FALSE;
+
+        if (target_len < prefix_len + suffix_len)
+            return FALSE;
+
+        return _stricmp(match_target + target_len - suffix_len, suffix) == 0;
+    }
+
+    // No * , use case insensitive
+    return _stricmp(pattern, match_target) == 0;
+}
+
+// Match process list: "chrome.exe;firefox.exe;*.bin"
+static BOOL match_process_list(const char *process_list, const char *process_name)
+{
+    if (process_list == NULL || process_list[0] == '\0' || strcmp(process_list, "*") == 0)
+        return TRUE;
+
+    size_t len = strlen(process_list) + 1;
+    char *list_copy = (char *)malloc(len);
+    if (list_copy == NULL)
+        return FALSE;
+
+    strncpy(list_copy, process_list, len);
+    BOOL matched = FALSE;
+
+    // Support both semicolon and comma as separators - Need to figure complex rules in CLI parsing
+    char *token = strtok(list_copy, ",;");
+    while (token != NULL)
+    {
+        // Skip leading whitespace
+        while (*token == ' ' || *token == '\t')
+            token++;
+
+        // Remove trailing whitespace   // this shit cause error in CLI parsing
+        char *end = token + strlen(token) - 1;
+        while (end > token && (*end == ' ' || *end == '\t'))
+        {
+            *end = '\0';
+            end--;
+        }
+
+        // Remove quotes if present: "C:\some app.exe"  - Need to carefully handle this in CLI app
+        if (*token == '"' && strlen(token) > 1)
+        {
+            token++;
+            char *quote = strchr(token, '"');
+            if (quote != NULL)
+                *quote = '\0';
+        }
+
+        if (match_process_pattern(token, process_name))
+        {
+            matched = TRUE;
+            break;
+        }
+        token = strtok(NULL, ",;");
+    }
+    free(list_copy);
+    return matched;
+}
+
 
 static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port)
 {
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
-    char target_with_exe[MAX_PROCESS_NAME];
-    char target_without_exe[MAX_PROCESS_NAME];
     RuleAction wildcard_action = RULE_ACTION_DIRECT;
     BOOL wildcard_found = FALSE;
 
@@ -483,22 +613,9 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
             continue;  // Skip to next rule
         }
 
-        // Process specific process name matching
-        strncpy(target_without_exe, rule->process_name, MAX_PROCESS_NAME - 1);
-        target_without_exe[MAX_PROCESS_NAME - 1] = '\0';
-
-        char *dot = strrchr(target_without_exe, '.');
-        if (dot && _stricmp(dot, ".exe") == 0)
-            *dot = '\0';
-
-        if (strrchr(rule->process_name, '.') == NULL)
-            snprintf(target_with_exe, MAX_PROCESS_NAME, "%s.exe", rule->process_name);
-        else
-            strncpy(target_with_exe, rule->process_name, MAX_PROCESS_NAME - 1);
-
-        if (_stricmp(process_name, rule->process_name) == 0 ||
-            _stricmp(process_name, target_with_exe) == 0 ||
-            _stricmp(process_name, target_without_exe) == 0)
+        // Use new wildcard process matching
+        // Supports: "chrome.exe", "fire*.exe", "*.bin", "chrome.exe;firefox.exe;*.bin"
+        if (match_process_list(rule->process_name, process_name))
         {
             // Process name matched! Now check IP and port filters
             if (!match_ip_list(rule->target_hosts, dest_ip))

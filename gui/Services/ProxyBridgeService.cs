@@ -58,7 +58,7 @@ public class ProxyBridgeService : IDisposable
         return ProxyBridgeNative.ProxyBridge_SetProxyConfig(proxyType, ip, port);
     }
 
-    public uint AddRule(string processName, string action)
+    public uint AddRule(string processName, string targetHosts, string targetPorts, string protocol, string action)
     {
         var ruleAction = action.ToUpper() switch
         {
@@ -67,7 +67,15 @@ public class ProxyBridgeService : IDisposable
             _ => ProxyBridgeNative.RuleAction.PROXY
         };
 
-        return ProxyBridgeNative.ProxyBridge_AddRule(processName, ruleAction);
+        var ruleProtocol = protocol.ToUpper() switch
+        {
+            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
+            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
+            "TCP+UDP" => ProxyBridgeNative.RuleProtocol.BOTH,
+            _ => ProxyBridgeNative.RuleProtocol.TCP
+        };
+
+        return ProxyBridgeNative.ProxyBridge_AddRule(processName, targetHosts, targetPorts, ruleProtocol, ruleAction);
     }
 
     public bool EnableRule(uint ruleId)

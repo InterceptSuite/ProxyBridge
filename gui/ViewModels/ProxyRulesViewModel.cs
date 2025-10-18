@@ -8,7 +8,10 @@ namespace ProxyBridge.GUI.ViewModels;
 public class ProxyRulesViewModel : ViewModelBase
 {
     private bool _isAddRuleViewOpen;
-    private string _newProcessName = "";
+    private string _newProcessName = "*";
+    private string _newTargetHosts = "*";
+    private string _newTargetPorts = "*";
+    private string _newProtocol = "TCP";
     private string _newProxyAction = "PROXY";
     private string _processNameError = "";
     private Action<ProxyRule>? _onAddRule;
@@ -31,6 +34,24 @@ public class ProxyRulesViewModel : ViewModelBase
             SetProperty(ref _newProcessName, value);
             ProcessNameError = "";
         }
+    }
+
+    public string NewTargetHosts
+    {
+        get => _newTargetHosts;
+        set => SetProperty(ref _newTargetHosts, value);
+    }
+
+    public string NewTargetPorts
+    {
+        get => _newTargetPorts;
+        set => SetProperty(ref _newTargetPorts, value);
+    }
+
+    public string NewProtocol
+    {
+        get => _newProtocol;
+        set => SetProperty(ref _newProtocol, value);
     }
 
     public string NewProxyAction
@@ -69,23 +90,34 @@ public class ProxyRulesViewModel : ViewModelBase
 
         SaveNewRuleCommand = new RelayCommand(() =>
         {
+            // Use "*" if empty
             if (string.IsNullOrWhiteSpace(NewProcessName))
             {
-                ProcessNameError = "Process name is required";
-                return;
+                NewProcessName = "*";
+            }
+
+            if (string.IsNullOrWhiteSpace(NewTargetHosts))
+            {
+                NewTargetHosts = "*";
+            }
+
+            if (string.IsNullOrWhiteSpace(NewTargetPorts))
+            {
+                NewTargetPorts = "*";
             }
 
             // This could be an issue if app name contain char
-            if (!System.Text.RegularExpressions.Regex.IsMatch(NewProcessName, @"^[a-zA-Z0-9\s._\-*]+$"))
+            if (!System.Text.RegularExpressions.Regex.IsMatch(NewProcessName, @"^[a-zA-Z0-9\s._\-*;""\\:]+$"))
             {
-                ProcessNameError = "Invalid characters in process name. Only letters, numbers, spaces, dots, dashes, underscores and * are allowed";
+                ProcessNameError = "Invalid characters in process name. Only letters, numbers, spaces, dots, dashes, underscores, semicolons, quotes, and * are allowed";
                 return;
             }
 
             if (NewProcessName != "*" && !NewProcessName.Equals("*", StringComparison.OrdinalIgnoreCase))
             {
                 if (!NewProcessName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
-                    !NewProcessName.Contains(".exe ", StringComparison.OrdinalIgnoreCase))
+                    !NewProcessName.Contains(".exe ", StringComparison.OrdinalIgnoreCase) &&
+                    !NewProcessName.Contains(";", StringComparison.OrdinalIgnoreCase))
                 {
                     NewProcessName += ".exe";
                 }
@@ -94,6 +126,9 @@ public class ProxyRulesViewModel : ViewModelBase
             var newRule = new ProxyRule
             {
                 ProcessName = NewProcessName,
+                TargetHosts = NewTargetHosts,
+                TargetPorts = NewTargetPorts,
+                Protocol = NewProtocol,
                 Action = NewProxyAction,
                 IsEnabled = true
             };
@@ -101,14 +136,23 @@ public class ProxyRulesViewModel : ViewModelBase
             newRule.PropertyChanged += Rule_PropertyChanged;
 
             _onAddRule?.Invoke(newRule);
-            NewProcessName = "";
+
+            // Reset to defaults
+            NewProcessName = "*";
+            NewTargetHosts = "*";
+            NewTargetPorts = "*";
+            NewProtocol = "TCP";
             NewProxyAction = "PROXY";
             ProcessNameError = "";
             IsAddRuleViewOpen = false;
         });        CancelAddRuleCommand = new RelayCommand(() =>
         {
-            NewProcessName = "";
+            NewProcessName = "*";
+            NewTargetHosts = "*";
+            NewTargetPorts = "*";
+            NewProtocol = "TCP";
             NewProxyAction = "PROXY";
+            ProcessNameError = "";
             IsAddRuleViewOpen = false;
         });
 

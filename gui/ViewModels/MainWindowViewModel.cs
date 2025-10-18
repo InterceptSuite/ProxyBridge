@@ -219,13 +219,18 @@ public class MainWindowViewModel : ViewModelBase
                 {
                     if (_proxyService != null)
                     {
-                        uint ruleId = _proxyService.AddRule(rule.ProcessName, rule.Action);
+                        uint ruleId = _proxyService.AddRule(
+                            rule.ProcessName,
+                            rule.TargetHosts,
+                            rule.TargetPorts,
+                            rule.Protocol,
+                            rule.Action);
                         if (ruleId > 0)
                         {
                             rule.RuleId = ruleId;
                             rule.Index = ProxyRules.Count + 1;
                             ProxyRules.Add(rule);
-                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Added rule: {rule.ProcessName} -> {rule.Action} (ID: {ruleId})\n";
+                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Added rule: {rule.ProcessName} ({rule.TargetHosts}:{rule.TargetPorts} {rule.Protocol}) -> {rule.Action} (ID: {ruleId})\n";
                         }
                         else
                         {
@@ -295,13 +300,16 @@ public class MainWindowViewModel : ViewModelBase
             var rule = new ProxyRule
             {
                 ProcessName = NewProcessName,
+                TargetHosts = "*",
+                TargetPorts = "*",
+                Protocol = "TCP",
                 Action = NewProxyAction,
                 IsEnabled = true
             };
 
             if (_proxyService != null)
             {
-                var ruleId = _proxyService.AddRule(NewProcessName, NewProxyAction);
+                var ruleId = _proxyService.AddRule(NewProcessName, "*", "*", "TCP", NewProxyAction);
                 if (ruleId > 0)
                 {
                     rule.RuleId = ruleId;
@@ -367,7 +375,10 @@ public class MainWindowViewModel : ViewModelBase
 
 public class ProxyRule : ViewModelBase
 {
-    private string _processName = "";
+    private string _processName = "*";
+    private string _targetHosts = "*";
+    private string _targetPorts = "*";
+    private string _protocol = "TCP";
     private string _action = "PROXY";
     private bool _isEnabled = true;
     private int _index;
@@ -389,6 +400,24 @@ public class ProxyRule : ViewModelBase
     {
         get => _processName;
         set => SetProperty(ref _processName, value);
+    }
+
+    public string TargetHosts
+    {
+        get => _targetHosts;
+        set => SetProperty(ref _targetHosts, value);
+    }
+
+    public string TargetPorts
+    {
+        get => _targetPorts;
+        set => SetProperty(ref _targetPorts, value);
+    }
+
+    public string Protocol
+    {
+        get => _protocol;
+        set => SetProperty(ref _protocol, value);
     }
 
     public string Action
