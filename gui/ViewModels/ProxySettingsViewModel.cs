@@ -67,10 +67,14 @@ public class ProxySettingsViewModel : ViewModelBase
         return domainRegex.IsMatch(input);
     }
 
-    public ProxySettingsViewModel(Action<string, string, string> onSave, Action onClose)
+    public ProxySettingsViewModel(string initialType, string initialIp, string initialPort, Action<string, string, string> onSave, Action onClose)
     {
         _onSave = onSave;
         _onClose = onClose;
+
+        ProxyType = initialType;
+        ProxyIp = initialIp;
+        ProxyPort = initialPort;
 
         SaveCommand = new RelayCommand(() =>
         {

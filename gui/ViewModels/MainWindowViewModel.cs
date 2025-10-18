@@ -27,6 +27,10 @@ public class MainWindowViewModel : ViewModelBase
     private Window? _mainWindow;
     private ProxyBridgeService? _proxyService;
 
+    private string _currentProxyType = "SOCKS5";
+    private string _currentProxyIp = "";
+    private string _currentProxyPort = "";
+
     public void SetMainWindow(Window window)
     {
         _mainWindow = window;
@@ -180,12 +184,19 @@ public class MainWindowViewModel : ViewModelBase
             var window = new ProxySettingsWindow();
 
             var viewModel = new ProxySettingsViewModel(
+                initialType: _currentProxyType,
+                initialIp: _currentProxyIp,
+                initialPort: _currentProxyPort,
                 onSave: (type, ip, port) =>
                 {
                     if (_proxyService != null && ushort.TryParse(port, out ushort portNum))
                     {
                         if (_proxyService.SetProxyConfig(type, ip, portNum))
                         {
+
+                            _currentProxyType = type;
+                            _currentProxyIp = ip;
+                            _currentProxyPort = port;
                             ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Saved proxy settings: {type} {ip}:{port}\n";
                         }
                         else

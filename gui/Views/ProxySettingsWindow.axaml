@@ -87,8 +87,7 @@
         <StackPanel Margin="24,20" Spacing="20">
             <StackPanel Spacing="6">
                 <TextBlock Text="Proxy Type" Classes="label"/>
-                <ComboBox SelectedIndex="0"
-                          HorizontalAlignment="Stretch"
+                <ComboBox HorizontalAlignment="Stretch"
                           x:Name="ProxyTypeComboBox">
                     <ComboBoxItem Content="SOCKS5" Tag="SOCKS5"/>
                     <ComboBoxItem Content="HTTP" Tag="HTTP"/>
