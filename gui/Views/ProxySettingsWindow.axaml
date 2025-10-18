@@ -3,13 +3,13 @@
         xmlns:vm="using:ProxyBridge.GUI.ViewModels"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="500" d:DesignHeight="450"
+        mc:Ignorable="d" d:DesignWidth="500" d:DesignHeight="550"
         x:Class="ProxyBridge.GUI.Views.ProxySettingsWindow"
         x:DataType="vm:ProxySettingsViewModel"
         x:CompileBindings="True"
         Title="Proxy Settings"
         Icon="/Assets/logo.ico"
-        Width="500" Height="450"
+        Width="500" Height="550"
         CanResize="False"
         Background="#FF2D2D30"
         WindowStartupLocation="CenterOwner">
@@ -110,6 +110,19 @@
                 <TextBlock Text="{Binding PortError}"
                            Classes="error"
                            IsVisible="{Binding PortError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+            </StackPanel>
+
+            <StackPanel Spacing="6">
+                <TextBlock Text="Username (Optional)" Classes="label"/>
+                <TextBox Text="{Binding ProxyUsername}"
+                         Watermark="Leave empty if no auth required"/>
+            </StackPanel>
+
+            <StackPanel Spacing="6">
+                <TextBlock Text="Password (Optional)" Classes="label"/>
+                <TextBox Text="{Binding ProxyPassword}"
+                         Watermark="Leave empty if no auth required"
+                         PasswordChar="●"/>
             </StackPanel>
 
             <TextBlock Text="* Required fields"

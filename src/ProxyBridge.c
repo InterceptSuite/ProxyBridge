@@ -66,6 +66,8 @@ static char g_proxy_ip[64] = "";
 static UINT16 g_proxy_port = 0;
 static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
 static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
+static char g_proxy_username[256] = "";
+static char g_proxy_password[256] = "";
 static LogCallback g_log_callback = NULL;
 static ConnectionCallback g_connection_callback = NULL;
 
@@ -661,24 +663,85 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 {
     unsigned char buf[512];
     int len;
+    BOOL use_auth = (g_proxy_username[0] != '\0');
 
-    log_message("SOCKS5: Connecting to %d.%d.%d.%d:%d",
+    log_message("SOCKS5: Connecting to %d.%d.%d.%d:%d%s",
         (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
+        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
+        use_auth ? " (with auth)" : "");
+
 
     buf[0] = SOCKS5_VERSION;
-    buf[1] = 0x01;
-    buf[2] = SOCKS5_AUTH_NONE;
-    if (send(s, (char*)buf, 3, 0) != 3)
+    if (use_auth)
     {
-        log_message("SOCKS5: Failed to send auth methods");
-        return -1;
+        buf[1] = 0x02;  // Number of methods
+        buf[2] = SOCKS5_AUTH_NONE;
+        buf[3] = 0x02;  // Username/password auth
+        if (send(s, (char*)buf, 4, 0) != 4)
+        {
+            log_message("SOCKS5: Failed to send auth methods");
+            return -1;
+        }
+    }
+    else
+    {
+        buf[1] = 0x01;  // Number of methods
+        buf[2] = SOCKS5_AUTH_NONE;
+        if (send(s, (char*)buf, 3, 0) != 3)
+        {
+            log_message("SOCKS5: Failed to send auth methods");
+            return -1;
+        }
     }
 
     len = recv(s, (char*)buf, 2, 0);
-    if (len != 2 || buf[0] != SOCKS5_VERSION || buf[1] != SOCKS5_AUTH_NONE)
+    if (len != 2 || buf[0] != SOCKS5_VERSION)
     {
-        log_message("SOCKS5: Auth method rejected");
+        log_message("SOCKS5: Invalid auth response");
+        return -1;
+    }
+
+    // Handle authentication
+    if (buf[1] == 0x02)  // Username/password required
+    {
+        if (!use_auth)
+        {
+            log_message("SOCKS5: Server requires authentication but no credentials provided");
+            return -1;
+        }
+
+        // Send username/password (RFC 1929)
+        size_t user_len = strlen(g_proxy_username);
+        size_t pass_len = strlen(g_proxy_password);
+        if (user_len > 255 || pass_len > 255)
+        {
+            log_message("SOCKS5: Username or password too long");
+            return -1;
+        }
+
+        buf[0] = 0x01;  // Version of username/password auth
+        buf[1] = (unsigned char)user_len;
+        memcpy(&buf[2], g_proxy_username, user_len);
+        buf[2 + user_len] = (unsigned char)pass_len;
+        memcpy(&buf[3 + user_len], g_proxy_password, pass_len);
+
+        if (send(s, (char*)buf, 3 + user_len + pass_len, 0) != (int)(3 + user_len + pass_len))
+        {
+            log_message("SOCKS5: Failed to send credentials");
+            return -1;
+        }
+
+        len = recv(s, (char*)buf, 2, 0);
+        if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
+        {
+            log_message("SOCKS5: Authentication failed");
+            return -1;
+        }
+        log_message("SOCKS5: Authentication successful");
+    }
+    else if (buf[1] != SOCKS5_AUTH_NONE)
+    {
+        log_message("SOCKS5: Unsupported auth method: 0x%02X", buf[1]);
         return -1;
     }
 
@@ -711,27 +774,73 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 }
 
 
+
+static void base64_encode(const char* input, char* output, size_t output_size)
+{
+    static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t input_len = strlen(input);
+    size_t output_len = 0;
+
+    for (size_t i = 0; i < input_len && output_len < output_size - 4; i += 3)
+    {
+        unsigned char b1 = input[i];
+        unsigned char b2 = (i + 1 < input_len) ? input[i + 1] : 0;
+        unsigned char b3 = (i + 2 < input_len) ? input[i + 2] : 0;
+
+        output[output_len++] = base64_chars[b1 >> 2];
+        output[output_len++] = base64_chars[((b1 & 0x03) << 4) | (b2 >> 4)];
+        output[output_len++] = (i + 1 < input_len) ? base64_chars[((b2 & 0x0F) << 2) | (b3 >> 6)] : '=';
+        output[output_len++] = (i + 2 < input_len) ? base64_chars[b3 & 0x3F] : '=';
+    }
+    output[output_len] = '\0';
+}
+
 static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 {
-    char request[512];
+    char request[1024];
     char response[4096];
     int len;
     char *status_line;
     int status_code;
+    BOOL use_auth = (g_proxy_username[0] != '\0');
 
-    log_message("HTTP: Connecting to %d.%d.%d.%d:%d",
-        (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
-
-    len = snprintf(request, sizeof(request),
-        "CONNECT %d.%d.%d.%d:%d HTTP/1.1\r\n"
-        "Host: %d.%d.%d.%d:%d\r\n"
-        "Proxy-Connection: keep-alive\r\n"
-        "\r\n",
+    log_message("HTTP: Connecting to %d.%d.%d.%d:%d%s",
         (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
         (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
-        (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
+        use_auth ? " (with auth)" : "");
+
+    if (use_auth)
+    {
+        // Create "username:password" string and encode as Base64
+        char credentials[512];
+        char encoded[1024];
+        snprintf(credentials, sizeof(credentials), "%s:%s", g_proxy_username, g_proxy_password);
+        base64_encode(credentials, encoded, sizeof(encoded));
+
+        len = snprintf(request, sizeof(request),
+            "CONNECT %d.%d.%d.%d:%d HTTP/1.1\r\n"
+            "Host: %d.%d.%d.%d:%d\r\n"
+            "Proxy-Authorization: Basic %s\r\n"
+            "Proxy-Connection: keep-alive\r\n"
+            "\r\n",
+            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
+            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
+            encoded);
+    }
+    else
+    {
+        len = snprintf(request, sizeof(request),
+            "CONNECT %d.%d.%d.%d:%d HTTP/1.1\r\n"
+            "Host: %d.%d.%d.%d:%d\r\n"
+            "Proxy-Connection: keep-alive\r\n"
+            "\r\n",
+            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
+            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
+    }
 
     if (send(s, request, len, 0) != len)
     {
@@ -1198,7 +1307,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id)
     return FALSE;
 }
 
-PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port)
+PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password)
 {
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
         return FALSE;
@@ -1210,6 +1319,27 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* prox
     g_proxy_ip[sizeof(g_proxy_ip) - 1] = '\0';
     g_proxy_port = proxy_port;
     g_proxy_type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
+
+    // Store credentials if there
+    if (username != NULL && username[0] != '\0')
+    {
+        strncpy(g_proxy_username, username, sizeof(g_proxy_username) - 1);
+        g_proxy_username[sizeof(g_proxy_username) - 1] = '\0';
+    }
+    else
+    {
+        g_proxy_username[0] = '\0';
+    }
+
+    if (password != NULL && password[0] != '\0')
+    {
+        strncpy(g_proxy_password, password, sizeof(g_proxy_password) - 1);
+        g_proxy_password[sizeof(g_proxy_password) - 1] = '\0';
+    }
+    else
+    {
+        g_proxy_password[0] = '\0';
+    }
 
     return TRUE;
 }

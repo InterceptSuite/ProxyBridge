@@ -30,6 +30,8 @@ public class MainWindowViewModel : ViewModelBase
     private string _currentProxyType = "SOCKS5";
     private string _currentProxyIp = "";
     private string _currentProxyPort = "";
+    private string _currentProxyUsername = "";
+    private string _currentProxyPassword = "";
 
     public void SetMainWindow(Window window)
     {
@@ -187,17 +189,23 @@ public class MainWindowViewModel : ViewModelBase
                 initialType: _currentProxyType,
                 initialIp: _currentProxyIp,
                 initialPort: _currentProxyPort,
-                onSave: (type, ip, port) =>
+                initialUsername: _currentProxyUsername,
+                initialPassword: _currentProxyPassword,
+                onSave: (type, ip, port, username, password) =>
                 {
                     if (_proxyService != null && ushort.TryParse(port, out ushort portNum))
                     {
-                        if (_proxyService.SetProxyConfig(type, ip, portNum))
+                        if (_proxyService.SetProxyConfig(type, ip, portNum, username, password))
                         {
 
                             _currentProxyType = type;
                             _currentProxyIp = ip;
                             _currentProxyPort = port;
-                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Saved proxy settings: {type} {ip}:{port}\n";
+                            _currentProxyUsername = username;
+                            _currentProxyPassword = password;
+
+                            string authInfo = string.IsNullOrEmpty(username) ? "" : " (with auth)";
+                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Saved proxy settings: {type} {ip}:{port}{authInfo}\n";
                         }
                         else
                         {

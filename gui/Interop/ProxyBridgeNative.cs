@@ -74,7 +74,9 @@ public static class ProxyBridgeNative
     public static extern bool ProxyBridge_SetProxyConfig(
         ProxyType type,
         [MarshalAs(UnmanagedType.LPStr)] string proxyIp,
-        ushort proxyPort);
+        ushort proxyPort,
+        [MarshalAs(UnmanagedType.LPStr)] string username,
+        [MarshalAs(UnmanagedType.LPStr)] string password);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern void ProxyBridge_SetLogCallback(LogCallback callback);

@@ -10,9 +10,11 @@ public class ProxySettingsViewModel : ViewModelBase
     private string _proxyIp = "";
     private string _proxyPort = "";
     private string _proxyType = "SOCKS5";
+    private string _proxyUsername = "";
+    private string _proxyPassword = "";
     private string _ipError = "";
     private string _portError = "";
-    private Action<string, string, string>? _onSave;
+    private Action<string, string, string, string, string>? _onSave;
     private Action? _onClose;
 
     public string ProxyIp
@@ -41,6 +43,18 @@ public class ProxySettingsViewModel : ViewModelBase
         set => SetProperty(ref _proxyType, value);
     }
 
+    public string ProxyUsername
+    {
+        get => _proxyUsername;
+        set => SetProperty(ref _proxyUsername, value);
+    }
+
+    public string ProxyPassword
+    {
+        get => _proxyPassword;
+        set => SetProperty(ref _proxyPassword, value);
+    }
+
     public string IpError
     {
         get => _ipError;
@@ -67,7 +81,7 @@ public class ProxySettingsViewModel : ViewModelBase
         return domainRegex.IsMatch(input);
     }
 
-    public ProxySettingsViewModel(string initialType, string initialIp, string initialPort, Action<string, string, string> onSave, Action onClose)
+    public ProxySettingsViewModel(string initialType, string initialIp, string initialPort, string initialUsername, string initialPassword, Action<string, string, string, string, string> onSave, Action onClose)
     {
         _onSave = onSave;
         _onClose = onClose;
@@ -75,6 +89,8 @@ public class ProxySettingsViewModel : ViewModelBase
         ProxyType = initialType;
         ProxyIp = initialIp;
         ProxyPort = initialPort;
+        ProxyUsername = initialUsername;
+        ProxyPassword = initialPassword;
 
         SaveCommand = new RelayCommand(() =>
         {
@@ -104,7 +120,7 @@ public class ProxySettingsViewModel : ViewModelBase
 
             if (isValid)
             {
-                _onSave?.Invoke(ProxyType, ProxyIp, ProxyPort);
+                _onSave?.Invoke(ProxyType, ProxyIp, ProxyPort, ProxyUsername ?? "", ProxyPassword ?? "");
             }
         });
 

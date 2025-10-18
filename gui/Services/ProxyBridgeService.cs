@@ -49,13 +49,13 @@ public class ProxyBridgeService : IDisposable
         return !_isRunning;
     }
 
-    public bool SetProxyConfig(string type, string ip, ushort port)
+    public bool SetProxyConfig(string type, string ip, ushort port, string username, string password)
     {
         var proxyType = type.ToUpper() == "HTTP"
             ? ProxyBridgeNative.ProxyType.HTTP
             : ProxyBridgeNative.ProxyType.SOCKS5;
 
-        return ProxyBridgeNative.ProxyBridge_SetProxyConfig(proxyType, ip, port);
+        return ProxyBridgeNative.ProxyBridge_SetProxyConfig(proxyType, ip, port, username, password);
     }
 
     public uint AddRule(string processName, string targetHosts, string targetPorts, string protocol, string action)
