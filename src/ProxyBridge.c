@@ -14,6 +14,7 @@
 
 #define MAXBUF 0xFFFF
 #define LOCAL_PROXY_PORT 34010
+#define LOCAL_UDP_RELAY_PORT 34011
 #define MAX_PROCESS_NAME 256
 
 typedef struct PROCESS_RULE {
@@ -29,6 +30,7 @@ typedef struct PROCESS_RULE {
 
 #define SOCKS5_VERSION 0x05
 #define SOCKS5_CMD_CONNECT 0x01
+#define SOCKS5_CMD_UDP_ASSOCIATE 0x03
 #define SOCKS5_ATYP_IPV4 0x01
 #define SOCKS5_AUTH_NONE 0x00
 
@@ -69,6 +71,11 @@ static HANDLE lock = NULL;
 static HANDLE windivert_handle = INVALID_HANDLE_VALUE;
 static HANDLE packet_thread = NULL;
 static HANDLE proxy_thread = NULL;
+static HANDLE udp_relay_thread = NULL;
+static SOCKET udp_relay_socket = INVALID_SOCKET;
+static SOCKET socks5_udp_socket = INVALID_SOCKET;  // TCP control connection
+static SOCKET socks5_udp_send_socket = INVALID_SOCKET;  // UDP socket for sending to SOCKS5
+static struct sockaddr_in socks5_udp_relay_addr;
 static BOOL running = FALSE;
 static DWORD g_current_process_id = 0;
 
@@ -105,6 +112,8 @@ static const char* extract_filename(const char* path)
 
 static UINT32 parse_ipv4(const char *ip);
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
+static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr);
+static DWORD WINAPI udp_relay_server(LPVOID arg);
 static BOOL match_ip_pattern(const char *pattern, UINT32 ip);
 static BOOL match_port_pattern(const char *pattern, UINT16 port);
 static BOOL match_ip_list(const char *ip_list, UINT32 ip);
@@ -119,7 +128,7 @@ static DWORD WINAPI packet_processor(LPVOID arg);
 static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port);
 static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port);
 static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
-static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port);
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp);
 static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port);
 static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port);
 static BOOL is_connection_tracked(UINT16 src_port);
@@ -154,45 +163,124 @@ static DWORD WINAPI packet_processor(LPVOID arg)
         if (ip_header == NULL)
             continue;
 
-        // Handle UDP packets - just log them, no proxying
         if (udp_header != NULL && tcp_header == NULL)
         {
-            if (addr.Outbound && g_connection_callback != NULL)
+            if (addr.Outbound)
             {
-                UINT16 src_port = ntohs(udp_header->SrcPort);
-                UINT32 src_ip = ip_header->SrcAddr;
-                UINT32 dest_ip = ip_header->DstAddr;
-                UINT16 dest_port = ntohs(udp_header->DstPort);
-
-                char process_name[MAX_PROCESS_NAME];
-                DWORD pid = get_process_id_from_udp_connection(src_ip, src_port);
-
-                // Fallback: Try TCP table if UDP table didn't find the process
-                if (pid == 0)
+                if (udp_header->SrcPort == htons(LOCAL_UDP_RELAY_PORT))
                 {
-                    pid = get_process_id_from_connection(src_ip, src_port);
+                    UINT16 dst_port = ntohs(udp_header->DstPort);
+                    UINT32 orig_dest_ip;
+                    UINT16 orig_dest_port;
+
+                    if (get_connection(dst_port, &orig_dest_ip, &orig_dest_port))
+                        udp_header->SrcPort = htons(orig_dest_port);
+
+                    UINT32 temp_addr = ip_header->DstAddr;
+                    ip_header->DstAddr = ip_header->SrcAddr;
+                    ip_header->SrcAddr = temp_addr;
+                    addr.Outbound = FALSE;
                 }
-
-                if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
+                else if (is_connection_tracked(ntohs(udp_header->SrcPort)))
                 {
-                    // Check if we already logged this UDP connection
-                    if (!is_connection_already_logged(pid, dest_ip, dest_port, RULE_ACTION_DIRECT))
+                    UINT16 src_port = ntohs(udp_header->SrcPort);
+                    UINT32 temp_addr = ip_header->DstAddr;
+                    udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
+                    ip_header->DstAddr = ip_header->SrcAddr;
+                    ip_header->SrcAddr = temp_addr;
+                    addr.Outbound = FALSE;
+                }
+                else
+                {
+                    UINT16 src_port = ntohs(udp_header->SrcPort);
+                    UINT32 src_ip = ip_header->SrcAddr;
+                    UINT32 dest_ip = ip_header->DstAddr;
+                    UINT16 dest_port = ntohs(udp_header->DstPort);
+
+                    RuleAction action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE);
+
+                    if (g_connection_callback != NULL)
                     {
-                        char dest_ip_str[32];
-                        snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
-                            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-                            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF);
+                        char process_name[MAX_PROCESS_NAME];
+                        DWORD pid = get_process_id_from_udp_connection(src_ip, src_port);
+                        if (pid == 0)
+                            pid = get_process_id_from_connection(src_ip, src_port);
 
-                        const char* display_name = extract_filename(process_name);
-                        g_connection_callback(display_name, pid, dest_ip_str, dest_port, "Direct (UDP)");
+                        if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
+                        {
+                            if (!is_connection_already_logged(pid, dest_ip, dest_port, action))
+                            {
+                                char dest_ip_str[32];
+                                snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
+                                    (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+                                    (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF);
 
-                        // Mark this UDP connection as logged
-                        add_logged_connection(pid, dest_ip, dest_port, RULE_ACTION_DIRECT);
+                                char proxy_info[128];
+                                if (action == RULE_ACTION_PROXY)
+                                {
+                                    snprintf(proxy_info, sizeof(proxy_info), "Proxy SOCKS5://%s:%d (UDP)",
+                                        g_proxy_ip, g_proxy_port);
+                                }
+                                else if (action == RULE_ACTION_DIRECT)
+                                {
+                                    snprintf(proxy_info, sizeof(proxy_info), "Direct (UDP)");
+                                }
+                                else if (action == RULE_ACTION_BLOCK)
+                                {
+                                    snprintf(proxy_info, sizeof(proxy_info), "Blocked (UDP)");
+                                }
+
+                                const char* display_name = extract_filename(process_name);
+                                g_connection_callback(display_name, pid, dest_ip_str, dest_port, proxy_info);
+                                add_logged_connection(pid, dest_ip, dest_port, action);
+                            }
+                        }
+                    }
+
+                    if (action == RULE_ACTION_BLOCK)
+                    {
+                        continue;
+                    }
+
+                    if (action == RULE_ACTION_PROXY)
+                    {
+                        add_connection(src_port, src_ip, dest_ip, dest_port);
+
+                        log_message("[UDP REDIRECT] Original: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d",
+                            (src_ip >> 0) & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, src_port,
+                            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF, (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
+
+                        UINT32 temp_addr = ip_header->DstAddr;
+                        udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
+                        ip_header->DstAddr = ip_header->SrcAddr;
+                        ip_header->SrcAddr = temp_addr;
+                        addr.Outbound = FALSE;
+
+                        log_message("[UDP REDIRECT] Redirected: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d (Outbound=%d)",
+                            (ip_header->SrcAddr >> 0) & 0xFF, (ip_header->SrcAddr >> 8) & 0xFF,
+                            (ip_header->SrcAddr >> 16) & 0xFF, (ip_header->SrcAddr >> 24) & 0xFF, ntohs(udp_header->SrcPort),
+                            (ip_header->DstAddr >> 0) & 0xFF, (ip_header->DstAddr >> 8) & 0xFF,
+                            (ip_header->DstAddr >> 16) & 0xFF, (ip_header->DstAddr >> 24) & 0xFF, ntohs(udp_header->DstPort),
+                            addr.Outbound);
                     }
                 }
             }
+            else
+            {
+                if (udp_header->DstPort != htons(LOCAL_UDP_RELAY_PORT))
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
 
-            // Pass UDP packet through unchanged
+                log_message("[UDP INBOUND] Received packet for relay: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d",
+                    (ip_header->SrcAddr >> 0) & 0xFF, (ip_header->SrcAddr >> 8) & 0xFF,
+                    (ip_header->SrcAddr >> 16) & 0xFF, (ip_header->SrcAddr >> 24) & 0xFF, ntohs(udp_header->SrcPort),
+                    (ip_header->DstAddr >> 0) & 0xFF, (ip_header->DstAddr >> 8) & 0xFF,
+                    (ip_header->DstAddr >> 16) & 0xFF, (ip_header->DstAddr >> 24) & 0xFF, ntohs(udp_header->DstPort));
+            }
+
+            WinDivertHelperCalcChecksums(packet, packet_len, &addr, 0);
             WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
             continue;
         }        // TCP packets only from here
@@ -238,7 +326,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT32 orig_dest_ip = ip_header->DstAddr;
                 UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
 
-                RuleAction action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port);
+                RuleAction action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE);
 
                 // Log ALL connections (DIRECT, BLOCK, PROXY) - only ONCE per unique connection
                 if (g_connection_callback != NULL)
@@ -715,14 +803,16 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
 }
 
 
-static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port)
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp)
 {
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
     RuleAction wildcard_action = RULE_ACTION_DIRECT;
     BOOL wildcard_found = FALSE;
 
-    pid = get_process_id_from_connection(src_ip, src_port);
+    pid = is_udp ? get_process_id_from_udp_connection(src_ip, src_port) : get_process_id_from_connection(src_ip, src_port);
+    if (pid == 0 && is_udp)
+        pid = get_process_id_from_connection(src_ip, src_port);
     if (pid == 0)
         return RULE_ACTION_DIRECT;
 
@@ -744,13 +834,23 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
             continue;
         }
 
-        // If this is a wildcard rule, save it for later but don't process it yet
+        // If this is a wildcard rule, check protocol and save it for later
         if (strcmp(rule->process_name, "*") == 0 || strcmp(rule->process_name, "ANY") == 0)
         {
+            if (rule->protocol == RULE_PROTOCOL_TCP && is_udp)
+            {
+                rule = rule->next;
+                continue;
+            }
+            if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp)
+            {
+                rule = rule->next;
+                continue;
+            }
             wildcard_action = rule->action;
             wildcard_found = TRUE;
             rule = rule->next;
-            continue;  // Skip to next rule
+            continue;
         }
 
         // Use new wildcard process matching
@@ -767,12 +867,25 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
             if (!match_port_list(rule->target_ports, dest_port))
             {
                 rule = rule->next;
-                continue;  // Port doesn't match, try next rule
+                continue;
             }
 
-            // WIP - protocol based check
-            // Process name, IP, and port ALL matched!
+            if (rule->protocol == RULE_PROTOCOL_TCP && is_udp)
+            {
+                rule = rule->next;
+                continue;
+            }
+            if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp)
+            {
+                rule = rule->next;
+                continue;
+            }
+
             RuleAction action = rule->action;
+            if (action == RULE_ACTION_PROXY && is_udp && g_proxy_type == PROXY_TYPE_HTTP)
+            {
+                return RULE_ACTION_DIRECT;
+            }
             if (action == RULE_ACTION_PROXY && (g_proxy_ip[0] == '\0' || g_proxy_port == 0))
             {
                 return RULE_ACTION_DIRECT;
@@ -1013,6 +1126,326 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
     }
 
     log_message("HTTP: Connection established");
+    return 0;
+}
+
+static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr)
+{
+    unsigned char buf[512];
+    int len;
+    BOOL use_auth = (g_proxy_username[0] != '\0');
+
+    buf[0] = SOCKS5_VERSION;
+    if (use_auth)
+    {
+        buf[1] = 0x02;
+        buf[2] = SOCKS5_AUTH_NONE;
+        buf[3] = 0x02;
+        if (send(s, (char*)buf, 4, 0) != 4)
+            return -1;
+    }
+    else
+    {
+        buf[1] = 0x01;
+        buf[2] = SOCKS5_AUTH_NONE;
+        if (send(s, (char*)buf, 3, 0) != 3)
+            return -1;
+    }
+
+    len = recv(s, (char*)buf, 2, 0);
+    if (len != 2 || buf[0] != SOCKS5_VERSION)
+        return -1;
+
+    if (buf[1] == 0x02)
+    {
+        if (!use_auth)
+            return -1;
+
+        size_t user_len = strlen(g_proxy_username);
+        size_t pass_len = strlen(g_proxy_password);
+        if (user_len > 255 || pass_len > 255)
+            return -1;
+
+        buf[0] = 0x01;
+        buf[1] = (unsigned char)user_len;
+        memcpy(&buf[2], g_proxy_username, user_len);
+        buf[2 + user_len] = (unsigned char)pass_len;
+        memcpy(&buf[3 + user_len], g_proxy_password, pass_len);
+
+        if (send(s, (char*)buf, 3 + user_len + pass_len, 0) != (int)(3 + user_len + pass_len))
+            return -1;
+
+        len = recv(s, (char*)buf, 2, 0);
+        if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
+            return -1;
+    }
+    else if (buf[1] != SOCKS5_AUTH_NONE)
+    {
+        return -1;
+    }
+
+    buf[0] = SOCKS5_VERSION;
+    buf[1] = SOCKS5_CMD_UDP_ASSOCIATE;
+    buf[2] = 0x00;
+    buf[3] = SOCKS5_ATYP_IPV4;
+    buf[4] = 0;
+    buf[5] = 0;
+    buf[6] = 0;
+    buf[7] = 0;
+    buf[8] = 0;
+    buf[9] = 0;
+
+    if (send(s, (char*)buf, 10, 0) != 10)
+        return -1;
+
+    len = recv(s, (char*)buf, 10, 0);
+    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+        return -1;
+
+    relay_addr->sin_family = AF_INET;
+    relay_addr->sin_addr.s_addr = *(UINT32*)&buf[4];
+    relay_addr->sin_port = *(UINT16*)&buf[8];
+
+    log_message("SOCKS5 UDP relay: %d.%d.%d.%d:%d",
+        buf[4], buf[5], buf[6], buf[7], ntohs(relay_addr->sin_port));
+    return 0;
+}
+
+static DWORD WINAPI udp_relay_server(LPVOID arg)
+{
+    WSADATA wsa_data;
+    struct sockaddr_in local_addr, socks_addr, from_addr;
+    SOCKET tcp_sock;
+    unsigned char recv_buf[MAXBUF];
+    unsigned char send_buf[MAXBUF];
+    int recv_len, from_len;
+
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0)
+        return 1;
+
+    udp_relay_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udp_relay_socket == INVALID_SOCKET)
+    {
+        WSACleanup();
+        return 1;
+    }
+
+    int on = 1;
+    setsockopt(udp_relay_socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
+
+    memset(&local_addr, 0, sizeof(local_addr));
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_addr.s_addr = INADDR_ANY;
+    local_addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);
+
+    if (bind(udp_relay_socket, (struct sockaddr *)&local_addr, sizeof(local_addr)) == SOCKET_ERROR)
+    {
+        closesocket(udp_relay_socket);
+        udp_relay_socket = INVALID_SOCKET;
+        WSACleanup();
+        return 1;
+    }
+
+    tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_sock == INVALID_SOCKET)
+    {
+        closesocket(udp_relay_socket);
+        udp_relay_socket = INVALID_SOCKET;
+        WSACleanup();
+        return 1;
+    }
+
+    UINT32 socks5_ip = parse_ipv4(g_proxy_ip);
+    memset(&socks_addr, 0, sizeof(socks_addr));
+    socks_addr.sin_family = AF_INET;
+    socks_addr.sin_addr.s_addr = socks5_ip;
+    socks_addr.sin_port = htons(g_proxy_port);
+
+    if (connect(tcp_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
+    {
+        closesocket(tcp_sock);
+        closesocket(udp_relay_socket);
+        udp_relay_socket = INVALID_SOCKET;
+        WSACleanup();
+        return 1;
+    }
+
+    if (socks5_udp_associate(tcp_sock, &socks5_udp_relay_addr) != 0)
+    {
+        closesocket(tcp_sock);
+        closesocket(udp_relay_socket);
+        udp_relay_socket = INVALID_SOCKET;
+        WSACleanup();
+        return 1;
+    }
+
+    socks5_udp_socket = tcp_sock;
+
+    // Create a separate UDP socket for sending to SOCKS5 proxy
+    socks5_udp_send_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (socks5_udp_send_socket == INVALID_SOCKET)
+    {
+        closesocket(tcp_sock);
+        closesocket(udp_relay_socket);
+        udp_relay_socket = INVALID_SOCKET;
+        socks5_udp_socket = INVALID_SOCKET;
+        WSACleanup();
+        return 1;
+    }
+
+    log_message("UDP relay listening on port %d", LOCAL_UDP_RELAY_PORT);
+
+    while (running)
+    {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(udp_relay_socket, &read_fds);
+        FD_SET(socks5_udp_send_socket, &read_fds);
+        struct timeval timeout = {1, 0};
+
+        int max_fd = (udp_relay_socket > socks5_udp_send_socket) ? udp_relay_socket : socks5_udp_send_socket;
+        if (select(max_fd + 1, &read_fds, NULL, NULL, &timeout) <= 0)
+            continue;
+
+        // Check if packet is from local application
+        if (FD_ISSET(udp_relay_socket, &read_fds))
+        {
+            from_len = sizeof(from_addr);
+            recv_len = recvfrom(udp_relay_socket, (char*)recv_buf, sizeof(recv_buf), 0,
+                               (struct sockaddr *)&from_addr, &from_len);
+
+            if (recv_len > 0)
+            {
+                UINT32 from_ip = from_addr.sin_addr.s_addr;
+                UINT16 from_port = ntohs(from_addr.sin_port);
+
+                log_message("[UDP RELAY] Received %d bytes from local app %d.%d.%d.%d:%d",
+                    recv_len,
+                    (from_ip >> 0) & 0xFF, (from_ip >> 8) & 0xFF,
+                    (from_ip >> 16) & 0xFF, (from_ip >> 24) & 0xFF, from_port);
+
+                // Packet from local application - encapsulate and forward to SOCKS5 proxy
+                UINT32 dest_ip;
+                UINT16 dest_port;
+                if (get_connection(from_port, &dest_ip, &dest_port))
+                {
+                    log_message("[UDP RELAY] Found connection for port %d -> %d.%d.%d.%d:%d, sending to SOCKS5",
+                        from_port,
+                        (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+                        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
+
+                    send_buf[0] = 0;
+                    send_buf[1] = 0;
+                    send_buf[2] = 0;
+                    send_buf[3] = SOCKS5_ATYP_IPV4;
+                    send_buf[4] = (dest_ip >> 0) & 0xFF;
+                    send_buf[5] = (dest_ip >> 8) & 0xFF;
+                    send_buf[6] = (dest_ip >> 16) & 0xFF;
+                    send_buf[7] = (dest_ip >> 24) & 0xFF;
+                    send_buf[8] = (dest_port >> 8) & 0xFF;
+                    send_buf[9] = (dest_port >> 0) & 0xFF;
+                    memcpy(&send_buf[10], recv_buf, recv_len);
+
+                    int sent = sendto(socks5_udp_send_socket, (char*)send_buf, 10 + recv_len, 0,
+                          (struct sockaddr *)&socks5_udp_relay_addr, sizeof(socks5_udp_relay_addr));
+
+                    log_message("[UDP RELAY] Sent %d bytes to SOCKS5 proxy %d.%d.%d.%d:%d",
+                        sent,
+                        (socks5_udp_relay_addr.sin_addr.s_addr >> 0) & 0xFF,
+                        (socks5_udp_relay_addr.sin_addr.s_addr >> 8) & 0xFF,
+                        (socks5_udp_relay_addr.sin_addr.s_addr >> 16) & 0xFF,
+                        (socks5_udp_relay_addr.sin_addr.s_addr >> 24) & 0xFF,
+                        ntohs(socks5_udp_relay_addr.sin_port));
+                }
+                else
+                {
+                    log_message("[UDP RELAY] No connection found for port %d", from_port);
+                }
+            }
+        }
+
+        // Check if packet is from SOCKS5 proxy
+        if (FD_ISSET(socks5_udp_send_socket, &read_fds))
+        {
+            from_len = sizeof(from_addr);
+            recv_len = recvfrom(socks5_udp_send_socket, (char*)recv_buf, sizeof(recv_buf), 0,
+                               (struct sockaddr *)&from_addr, &from_len);
+
+            if (recv_len > 0)
+            {
+                UINT32 from_ip = from_addr.sin_addr.s_addr;
+                UINT16 from_port = ntohs(from_addr.sin_port);
+
+                log_message("[UDP RELAY] Received %d bytes from SOCKS5 proxy %d.%d.%d.%d:%d",
+                    recv_len,
+                    (from_ip >> 0) & 0xFF, (from_ip >> 8) & 0xFF,
+                    (from_ip >> 16) & 0xFF, (from_ip >> 24) & 0xFF, from_port);
+
+                // Packet from SOCKS5 proxy - decapsulate and forward to original sender
+                if (recv_len < 10)
+                    continue;
+
+                // SOCKS5 UDP packet format: RSV(2) + FRAG(1) + ATYP(1) + DST.ADDR(4) + DST.PORT(2) + DATA
+                if (recv_buf[2] != 0x00)  // FRAG must be 0
+                    continue;
+
+                if (recv_buf[3] != SOCKS5_ATYP_IPV4)  // Only IPv4 supported
+                    continue;
+
+                // Extract source IP and port from SOCKS5 header
+                UINT32 src_ip = (recv_buf[4] << 0) | (recv_buf[5] << 8) |
+                               (recv_buf[6] << 16) | (recv_buf[7] << 24);
+                UINT16 src_port = (recv_buf[8] << 8) | recv_buf[9];
+
+                log_message("[UDP RELAY] Decapsulated packet from %d.%d.%d.%d:%d",
+                    (src_ip >> 0) & 0xFF, (src_ip >> 8) & 0xFF,
+                    (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, src_port);
+
+                // Find which local port this packet should go to
+                WaitForSingleObject(lock, INFINITE);
+                CONNECTION_INFO *conn = connection_list;
+                struct sockaddr_in target_addr;
+                BOOL found = FALSE;
+                while (conn != NULL)
+                {
+                    if (conn->orig_dest_ip == src_ip && conn->orig_dest_port == src_port)
+                    {
+                        memset(&target_addr, 0, sizeof(target_addr));
+                        target_addr.sin_family = AF_INET;
+                        target_addr.sin_addr.s_addr = conn->src_ip;
+                        target_addr.sin_port = htons(conn->src_port);
+                        found = TRUE;
+                        log_message("[UDP RELAY] Found original connection: will send back to %d.%d.%d.%d:%d",
+                            (conn->src_ip >> 0) & 0xFF, (conn->src_ip >> 8) & 0xFF,
+                            (conn->src_ip >> 16) & 0xFF, (conn->src_ip >> 24) & 0xFF, conn->src_port);
+                        break;
+                    }
+                    conn = conn->next;
+                }
+                ReleaseMutex(lock);
+
+                if (found)
+                {
+                    // Send decapsulated data back to original sender
+                    int sent = sendto(udp_relay_socket, (char*)&recv_buf[10], recv_len - 10, 0,
+                          (struct sockaddr *)&target_addr, sizeof(target_addr));
+                    log_message("[UDP RELAY] Sent %d bytes back to original application", sent);
+                }
+                else
+                {
+                    log_message("[UDP RELAY] No matching connection found for response");
+                }
+            }
+        }
+    }
+
+    closesocket(socks5_udp_socket);
+    closesocket(socks5_udp_send_socket);
+    closesocket(udp_relay_socket);
+    udp_relay_socket = INVALID_SOCKET;
+    socks5_udp_socket = INVALID_SOCKET;
+    socks5_udp_send_socket = INVALID_SOCKET;
+    WSACleanup();
     return 0;
 }
 
@@ -1574,11 +2007,24 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         return FALSE;
     }
 
+    if (g_proxy_type == PROXY_TYPE_SOCKS5)
+    {
+        udp_relay_thread = CreateThread(NULL, 1, udp_relay_server, NULL, 0, NULL);
+        if (udp_relay_thread == NULL)
+        {
+            running = FALSE;
+            WaitForSingleObject(proxy_thread, INFINITE);
+            CloseHandle(proxy_thread);
+            proxy_thread = NULL;
+            return FALSE;
+        }
+    }
+
     Sleep(500);
 
     snprintf(filter, sizeof(filter),
-        "(tcp and (outbound or (tcp.DstPort == %d or tcp.SrcPort == %d))) or (udp and outbound)",
-        g_local_relay_port, g_local_relay_port);
+        "(tcp and (outbound or (tcp.DstPort == %d or tcp.SrcPort == %d))) or (udp and (outbound or (udp.DstPort == %d or udp.SrcPort == %d)))",
+        g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT);
 
     windivert_handle = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, priority, 0);
     if (windivert_handle == INVALID_HANDLE_VALUE)
@@ -1651,6 +2097,13 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
         WaitForSingleObject(proxy_thread, 5000);
         CloseHandle(proxy_thread);
         proxy_thread = NULL;
+    }
+
+    if (udp_relay_thread != NULL)
+    {
+        WaitForSingleObject(udp_relay_thread, 5000);
+        CloseHandle(udp_relay_thread);
+        udp_relay_thread = NULL;
     }
 
     WaitForSingleObject(lock, INFINITE);
