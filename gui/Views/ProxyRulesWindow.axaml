@@ -229,8 +229,17 @@
                 <!-- Applications Section -->
                 <StackPanel Spacing="6">
                     <TextBlock Text="Applications" Classes="label"/>
-                    <TextBox Text="{Binding NewProcessName}"
-                             Watermark="Any"/>
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBox Grid.Column="0"
+                                 Text="{Binding NewProcessName}"
+                                 Watermark="Any"
+                                 Margin="0,0,8,0"/>
+                        <Button Grid.Column="1"
+                                Content="Browse..."
+                                Command="{Binding BrowseProcessCommand}"
+                                Padding="12,8"
+                                MinWidth="100"/>
+                    </Grid>
                     <TextBlock Text="Example: iexplore.exe; &quot;C:\some app.exe&quot;; fire*.exe; *.bin"
                                FontSize="11"
                                Foreground="#FF999999"

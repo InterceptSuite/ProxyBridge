@@ -1,6 +1,7 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Windows.Input;
+using Avalonia.Controls;
 using ProxyBridge.GUI.Services;
 
 namespace ProxyBridge.GUI.ViewModels;
@@ -17,6 +18,7 @@ public class ProxyRulesViewModel : ViewModelBase
     private Action<ProxyRule>? _onAddRule;
     private Action? _onClose;
     private ProxyBridgeService? _proxyService;
+    private Window? _window;
 
     public ObservableCollection<ProxyRule> ProxyRules { get; }
 
@@ -70,6 +72,12 @@ public class ProxyRulesViewModel : ViewModelBase
     public ICommand SaveNewRuleCommand { get; }
     public ICommand CancelAddRuleCommand { get; }
     public ICommand CloseCommand { get; }
+    public ICommand BrowseProcessCommand { get; }
+
+    public void SetWindow(Window window)
+    {
+        _window = window;
+    }
 
     public ProxyRulesViewModel(ObservableCollection<ProxyRule> proxyRules, Action<ProxyRule> onAddRule, Action onClose, ProxyBridgeService? proxyService = null)
     {
@@ -159,6 +167,49 @@ public class ProxyRulesViewModel : ViewModelBase
         CloseCommand = new RelayCommand(() =>
         {
             _onClose?.Invoke();
+        });
+
+        BrowseProcessCommand = new RelayCommand(async () =>
+        {
+            if (_window == null)
+                return;
+
+            var dialog = new Avalonia.Platform.Storage.FilePickerOpenOptions
+            {
+                Title = "Select Process Executable",
+                AllowMultiple = false,
+                FileTypeFilter = new[]
+                {
+                    new Avalonia.Platform.Storage.FilePickerFileType("Executable Files")
+                    {
+                        Patterns = new[] { "*.exe" }
+                    },
+                    new Avalonia.Platform.Storage.FilePickerFileType("All Files")
+                    {
+                        Patterns = new[] { "*.*" }
+                    }
+                }
+            };
+
+            var result = await _window.StorageProvider.OpenFilePickerAsync(dialog);
+
+            if (result != null && result.Count > 0)
+            {
+                string filename = System.IO.Path.GetFileName(result[0].Path.LocalPath);
+                if (string.IsNullOrWhiteSpace(NewProcessName) || NewProcessName == "*")
+                {
+                    NewProcessName = filename;
+                }
+                else
+                {
+                    if (!NewProcessName.EndsWith(";"))
+                        NewProcessName += "; ";
+                    else
+                        NewProcessName += " ";
+
+                    NewProcessName += filename;
+                }
+            }
         });
     }
 

@@ -302,6 +302,7 @@ public class MainWindowViewModel : ViewModelBase
             );
 
             window.DataContext = viewModel;
+            viewModel.SetWindow(window);
 
             if (_mainWindow != null)
             {
