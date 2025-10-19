@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Windows.Input;
 using System.Linq;
+using System.Text;
 using Avalonia.Threading;
 using Avalonia.Controls;
 using ProxyBridge.GUI.Views;
@@ -33,6 +35,11 @@ public class MainWindowViewModel : ViewModelBase
     private string _currentProxyUsername = "";
     private string _currentProxyPassword = "";
 
+    // Batch connection logs - UI need to maintain connnection logs, may crash if too many connection
+    private readonly List<string> _pendingConnectionLogs = new List<string>();
+    private readonly object _connectionLogLock = new object();
+    private DispatcherTimer? _connectionLogTimer;
+
     public void SetMainWindow(Window window)
     {
         _mainWindow = window;
@@ -48,13 +55,42 @@ public class MainWindowViewModel : ViewModelBase
                 });
             };
 
+            // Add to queue instead of updating UI immediately
             _proxyService.ConnectionReceived += (processName, pid, destIp, destPort, proxyInfo) =>
             {
-                Dispatcher.UIThread.Post(() =>
+                string logEntry = $"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}\n";
+                lock (_connectionLogLock)
                 {
-                    ConnectionsLog += $"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}\n";
-                });
+                    _pendingConnectionLogs.Add(logEntry);
+                }
             };
+
+            // Timer to flush batched logs to UI every 500ms
+            _connectionLogTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(500)
+            };
+            _connectionLogTimer.Tick += (s, e) =>
+            {
+                List<string> logsToAdd;
+                lock (_connectionLogLock)
+                {
+                    if (_pendingConnectionLogs.Count == 0)
+                        return;
+
+                    logsToAdd = new List<string>(_pendingConnectionLogs);
+                    _pendingConnectionLogs.Clear();
+                }
+
+                // Batch update UI
+                var sb = new StringBuilder();
+                foreach (var log in logsToAdd)
+                {
+                    sb.Append(log);
+                }
+                ConnectionsLog += sb.ToString();
+            };
+            _connectionLogTimer.Start();
 
             // Start the proxy bridge
             if (_proxyService.Start())

@@ -52,7 +52,17 @@ typedef struct {
     SOCKET to_socket;
 } TRANSFER_CONFIG;
 
+// Track logged connections to avoid dupli
+typedef struct LOGGED_CONNECTION {
+    DWORD pid;
+    UINT32 dest_ip;
+    UINT16 dest_port;
+    RuleAction action;
+    struct LOGGED_CONNECTION *next;
+} LOGGED_CONNECTION;
+
 static CONNECTION_INFO *connection_list = NULL;
+static LOGGED_CONNECTION *logged_connections = NULL;
 static PROCESS_RULE *rules_list = NULL;
 static UINT32 g_next_rule_id = 1;
 static HANDLE lock = NULL;
@@ -113,6 +123,9 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
 static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port);
 static BOOL is_connection_tracked(UINT16 src_port);
 static void remove_connection(UINT16 src_port);
+static BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
+static void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
+static void clear_logged_connections(void);
 
 
 static DWORD WINAPI packet_processor(LPVOID arg)
@@ -173,8 +186,52 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             }
             else
             {
-                RuleAction action = check_process_rule(ip_header->SrcAddr, ntohs(tcp_header->SrcPort),
-                                                                       ip_header->DstAddr, ntohs(tcp_header->DstPort));
+                UINT16 src_port = ntohs(tcp_header->SrcPort);
+                UINT32 src_ip = ip_header->SrcAddr;
+                UINT32 orig_dest_ip = ip_header->DstAddr;
+                UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
+
+                RuleAction action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port);
+
+                // Log ALL connections (DIRECT, BLOCK, PROXY) - only ONCE per unique connection
+                if (g_connection_callback != NULL)
+                {
+                    char process_name[MAX_PROCESS_NAME];
+                    DWORD pid = get_process_id_from_connection(src_ip, src_port);
+                    if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
+                    {
+                        // Check if we already logged this connection
+                        if (!is_connection_already_logged(pid, orig_dest_ip, orig_dest_port, action))
+                        {
+                            char dest_ip_str[32];
+                            snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
+                                (orig_dest_ip >> 0) & 0xFF, (orig_dest_ip >> 8) & 0xFF,
+                                (orig_dest_ip >> 16) & 0xFF, (orig_dest_ip >> 24) & 0xFF);
+
+                            char proxy_info[128];
+                            if (action == RULE_ACTION_PROXY)
+                            {
+                                snprintf(proxy_info, sizeof(proxy_info), "Proxy %s://%s:%d",
+                                    g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
+                                    g_proxy_ip, g_proxy_port);
+                            }
+                            else if (action == RULE_ACTION_DIRECT)
+                            {
+                                snprintf(proxy_info, sizeof(proxy_info), "Direct");
+                            }
+                            else if (action == RULE_ACTION_BLOCK)
+                            {
+                                snprintf(proxy_info, sizeof(proxy_info), "Blocked");
+                            }
+
+                            const char* display_name = extract_filename(process_name);
+                            g_connection_callback(display_name, pid, dest_ip_str, orig_dest_port, proxy_info);
+
+                            // Mark this connection as logged
+                            add_logged_connection(pid, orig_dest_ip, orig_dest_port, action);
+                        }
+                    }
+                }
 
                 if (action == RULE_ACTION_DIRECT)
                 {
@@ -188,33 +245,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 }
                 else if (action == RULE_ACTION_PROXY)
             {
-                UINT16 src_port = ntohs(tcp_header->SrcPort);
-                UINT32 src_ip = ip_header->SrcAddr;
-                UINT32 orig_dest_ip = ip_header->DstAddr;
-                UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
-
                 add_connection(src_port, src_ip, orig_dest_ip, orig_dest_port);
-
-                if (g_connection_callback != NULL)
-                {
-                    char process_name[MAX_PROCESS_NAME];
-                    DWORD pid = get_process_id_from_connection(src_ip, src_port);
-                    if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
-                    {
-                        char dest_ip_str[32];
-                        snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
-                            (orig_dest_ip >> 0) & 0xFF, (orig_dest_ip >> 8) & 0xFF,
-                            (orig_dest_ip >> 16) & 0xFF, (orig_dest_ip >> 24) & 0xFF);
-
-                        char proxy_info[128];
-                        snprintf(proxy_info, sizeof(proxy_info), "Redirect Proxy %s://%s:%d",
-                            g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
-                            g_proxy_ip, g_proxy_port);
-
-                        const char* display_name = extract_filename(process_name);
-                        g_connection_callback(display_name, pid, dest_ip_str, orig_dest_port, proxy_info);
-                    }
-                }
 
                 UINT32 temp_addr = ip_header->DstAddr;
                 tcp_header->DstPort = htons(g_local_relay_port);
@@ -1354,6 +1385,64 @@ PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callba
     g_connection_callback = callback;
 }
 
+// Check if connection already logged (deduplication)
+static BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action)
+{
+    BOOL found = FALSE;
+    WaitForSingleObject(lock, INFINITE);
+
+    LOGGED_CONNECTION *logged = logged_connections;
+    while (logged != NULL)
+    {
+        if (logged->pid == pid &&
+            logged->dest_ip == dest_ip &&
+            logged->dest_port == dest_port &&
+            logged->action == action)
+        {
+            found = TRUE;
+            break;
+        }
+        logged = logged->next;
+    }
+
+    ReleaseMutex(lock);
+    return found;
+}
+
+// Add connection to logged list
+static void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action)
+{
+    WaitForSingleObject(lock, INFINITE);
+
+    LOGGED_CONNECTION *logged = (LOGGED_CONNECTION *)malloc(sizeof(LOGGED_CONNECTION));
+    if (logged != NULL)
+    {
+        logged->pid = pid;
+        logged->dest_ip = dest_ip;
+        logged->dest_port = dest_port;
+        logged->action = action;
+        logged->next = logged_connections;
+        logged_connections = logged;
+    }
+
+    ReleaseMutex(lock);
+}
+
+// Clear all logged connections
+static void clear_logged_connections(void)
+{
+    WaitForSingleObject(lock, INFINITE);
+
+    while (logged_connections != NULL)
+    {
+        LOGGED_CONNECTION *to_free = logged_connections;
+        logged_connections = logged_connections->next;
+        free(to_free);
+    }
+
+    ReleaseMutex(lock);
+}
+
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 {
     char filter[512];
@@ -1465,6 +1554,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
         free(to_free);
     }
     ReleaseMutex(lock);
+
+    // Clear logged connections list
+    clear_logged_connections();
 
     log_message("ProxyBridge stopped");
 
