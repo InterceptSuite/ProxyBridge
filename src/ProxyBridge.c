@@ -117,6 +117,7 @@ static DWORD WINAPI connection_handler(LPVOID arg);
 static DWORD WINAPI transfer_handler(LPVOID arg);
 static DWORD WINAPI packet_processor(LPVOID arg);
 static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port);
+static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port);
 static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
 static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port);
 static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port);
@@ -135,6 +136,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
     WINDIVERT_ADDRESS addr;
     PWINDIVERT_IPHDR ip_header;
     PWINDIVERT_TCPHDR tcp_header;
+    PWINDIVERT_UDPHDR udp_header;
 
     while (running)
     {
@@ -147,9 +149,54 @@ static DWORD WINAPI packet_processor(LPVOID arg)
         }
 
         WinDivertHelperParsePacket(packet, packet_len, &ip_header, NULL, NULL,
-            NULL, NULL, &tcp_header, NULL, NULL, NULL, NULL, NULL);
+            NULL, NULL, &tcp_header, &udp_header, NULL, NULL, NULL, NULL);
 
-        if (ip_header == NULL || tcp_header == NULL)
+        if (ip_header == NULL)
+            continue;
+
+        // Handle UDP packets - just log them, no proxying
+        if (udp_header != NULL && tcp_header == NULL)
+        {
+            if (addr.Outbound && g_connection_callback != NULL)
+            {
+                UINT16 src_port = ntohs(udp_header->SrcPort);
+                UINT32 src_ip = ip_header->SrcAddr;
+                UINT32 dest_ip = ip_header->DstAddr;
+                UINT16 dest_port = ntohs(udp_header->DstPort);
+
+                char process_name[MAX_PROCESS_NAME];
+                DWORD pid = get_process_id_from_udp_connection(src_ip, src_port);
+
+                // Fallback: Try TCP table if UDP table didn't find the process
+                if (pid == 0)
+                {
+                    pid = get_process_id_from_connection(src_ip, src_port);
+                }
+
+                if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
+                {
+                    // Check if we already logged this UDP connection
+                    if (!is_connection_already_logged(pid, dest_ip, dest_port, RULE_ACTION_DIRECT))
+                    {
+                        char dest_ip_str[32];
+                        snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
+                            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+                            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF);
+
+                        const char* display_name = extract_filename(process_name);
+                        g_connection_callback(display_name, pid, dest_ip_str, dest_port, "Direct (UDP)");
+
+                        // Mark this UDP connection as logged
+                        add_logged_connection(pid, dest_ip, dest_port, RULE_ACTION_DIRECT);
+                    }
+                }
+            }
+
+            // Pass UDP packet through unchanged
+            WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+            continue;
+        }        // TCP packets only from here
+        if (tcp_header == NULL)
             continue;
 
         if (addr.Outbound)
@@ -322,6 +369,66 @@ static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
     }
 
     free(tcp_table);
+    return pid;
+}
+
+// Get process ID for UDP connection
+static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port)
+{
+    MIB_UDPTABLE_OWNER_PID *udp_table = NULL;
+    DWORD size = 0;
+    DWORD pid = 0;
+
+    if (GetExtendedUdpTable(NULL, &size, FALSE, AF_INET,
+                            UDP_TABLE_OWNER_PID, 0) != ERROR_INSUFFICIENT_BUFFER)
+    {
+        return 0;
+    }
+
+    udp_table = (MIB_UDPTABLE_OWNER_PID *)malloc(size);
+    if (udp_table == NULL)
+    {
+        return 0;
+    }
+
+    if (GetExtendedUdpTable(udp_table, &size, FALSE, AF_INET,
+                            UDP_TABLE_OWNER_PID, 0) != NO_ERROR)
+    {
+        free(udp_table);
+        return 0;
+    }
+
+    // First pass: Try exact match (IP + port)
+    for (DWORD i = 0; i < udp_table->dwNumEntries; i++)
+    {
+        MIB_UDPROW_OWNER_PID *row = &udp_table->table[i];
+
+        if (row->dwLocalAddr == src_ip &&
+            ntohs((UINT16)row->dwLocalPort) == src_port)
+        {
+            pid = row->dwOwningPid;
+            break;
+        }
+    }
+
+    // Second pass: If not found, try matching port on 0.0.0.0 (INADDR_ANY)
+    // Many UDP applications bind to 0.0.0.0:port instead of specific IP
+    if (pid == 0)
+    {
+        for (DWORD i = 0; i < udp_table->dwNumEntries; i++)
+        {
+            MIB_UDPROW_OWNER_PID *row = &udp_table->table[i];
+
+            if (row->dwLocalAddr == 0 &&  // 0.0.0.0 (INADDR_ANY)
+                ntohs((UINT16)row->dwLocalPort) == src_port)
+            {
+                pid = row->dwOwningPid;
+                break;
+            }
+        }
+    }
+
+    free(udp_table);
     return pid;
 }
 
@@ -1470,7 +1577,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     Sleep(500);
 
     snprintf(filter, sizeof(filter),
-        "tcp and (outbound or (tcp.DstPort == %d or tcp.SrcPort == %d))",
+        "(tcp and (outbound or (tcp.DstPort == %d or tcp.SrcPort == %d))) or (udp and outbound)",
         g_local_relay_port, g_local_relay_port);
 
     windivert_handle = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, priority, 0);
