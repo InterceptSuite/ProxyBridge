@@ -213,7 +213,7 @@ class Program
         Console.WriteLine(" | |_) | '__/ _ \\ \\/ / | | | |  _ \\| '__| |/ _` |/ _` |/ _ \\");
         Console.WriteLine(" |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/");
         Console.WriteLine(" |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|");
-        Console.WriteLine("                      |___/                      |___/  V1.2");
+        Console.WriteLine("                      |___/                      |___/  V2.0");
         Console.WriteLine();
         Console.WriteLine("  Universal proxy client for Windows applications");
         Console.WriteLine();
