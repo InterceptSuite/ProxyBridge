@@ -253,9 +253,6 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     {
                         add_connection(src_port, src_ip, dest_ip, dest_port);
 
-                        log_message("[UDP REDIRECT] Original: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d",
-                            (src_ip >> 0) & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, src_port,
-                            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF, (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
 
                         UINT32 temp_addr = ip_header->DstAddr;
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
@@ -263,12 +260,6 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                         ip_header->SrcAddr = temp_addr;
                         addr.Outbound = FALSE;
 
-                        log_message("[UDP REDIRECT] Redirected: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d (Outbound=%d)",
-                            (ip_header->SrcAddr >> 0) & 0xFF, (ip_header->SrcAddr >> 8) & 0xFF,
-                            (ip_header->SrcAddr >> 16) & 0xFF, (ip_header->SrcAddr >> 24) & 0xFF, ntohs(udp_header->SrcPort),
-                            (ip_header->DstAddr >> 0) & 0xFF, (ip_header->DstAddr >> 8) & 0xFF,
-                            (ip_header->DstAddr >> 16) & 0xFF, (ip_header->DstAddr >> 24) & 0xFF, ntohs(udp_header->DstPort),
-                            addr.Outbound);
                     }
                 }
             }
@@ -280,11 +271,6 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     continue;
                 }
 
-                log_message("[UDP INBOUND] Received packet for relay: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d",
-                    (ip_header->SrcAddr >> 0) & 0xFF, (ip_header->SrcAddr >> 8) & 0xFF,
-                    (ip_header->SrcAddr >> 16) & 0xFF, (ip_header->SrcAddr >> 24) & 0xFF, ntohs(udp_header->SrcPort),
-                    (ip_header->DstAddr >> 0) & 0xFF, (ip_header->DstAddr >> 8) & 0xFF,
-                    (ip_header->DstAddr >> 16) & 0xFF, (ip_header->DstAddr >> 24) & 0xFF, ntohs(udp_header->DstPort));
             }
 
             WinDivertHelperCalcChecksums(packet, packet_len, &addr, 0);
@@ -937,12 +923,6 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
     int len;
     BOOL use_auth = (g_proxy_username[0] != '\0');
 
-    log_message("SOCKS5: Connecting to %d.%d.%d.%d:%d%s",
-        (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
-        use_auth ? " (with auth)" : "");
-
-
     buf[0] = SOCKS5_VERSION;
     if (use_auth)
     {
@@ -1075,11 +1055,6 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
     char *status_line;
     int status_code;
     BOOL use_auth = (g_proxy_username[0] != '\0');
-
-    log_message("HTTP: Connecting to %d.%d.%d.%d:%d%s",
-        (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
-        use_auth ? " (with auth)" : "");
 
     if (use_auth)
     {
@@ -1227,8 +1202,6 @@ static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr)
     relay_addr->sin_addr.s_addr = *(UINT32*)&buf[4];
     relay_addr->sin_port = *(UINT16*)&buf[8];
 
-    log_message("SOCKS5 UDP relay: %d.%d.%d.%d:%d",
-        buf[4], buf[5], buf[6], buf[7], ntohs(relay_addr->sin_port));
     return 0;
 }
 
@@ -1372,20 +1345,12 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                 UINT32 from_ip = from_addr.sin_addr.s_addr;
                 UINT16 from_port = ntohs(from_addr.sin_port);
 
-                log_message("[UDP RELAY] Received %d bytes from local app %d.%d.%d.%d:%d",
-                    recv_len,
-                    (from_ip >> 0) & 0xFF, (from_ip >> 8) & 0xFF,
-                    (from_ip >> 16) & 0xFF, (from_ip >> 24) & 0xFF, from_port);
 
                 // Packet from local application - encapsulate and forward to SOCKS5 proxy
                 UINT32 dest_ip;
                 UINT16 dest_port;
                 if (get_connection(from_port, &dest_ip, &dest_port))
                 {
-                    log_message("[UDP RELAY] Found connection for port %d -> %d.%d.%d.%d:%d, sending to SOCKS5",
-                        from_port,
-                        (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-                        (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
 
                     // Ensure UDP ASSOCIATE is established (retry if needed)
                     if (!udp_associate_connected)
@@ -1573,7 +1538,6 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
         UINT16 client_port = ntohs(client_addr.sin_port);
         if (!get_connection(client_port, &conn_config->orig_dest_ip, &conn_config->orig_dest_port))
         {
-            log_message("Connection from port %d not found in tracking table", client_port);
             closesocket(client_sock);
             free(conn_config);
             continue;
