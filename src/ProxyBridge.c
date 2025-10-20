@@ -76,6 +76,8 @@ static SOCKET udp_relay_socket = INVALID_SOCKET;
 static SOCKET socks5_udp_socket = INVALID_SOCKET;  // TCP control connection
 static SOCKET socks5_udp_send_socket = INVALID_SOCKET;  // UDP socket for sending to SOCKS5
 static struct sockaddr_in socks5_udp_relay_addr;
+static BOOL udp_associate_connected = FALSE;  // Track if UDP ASSOCIATE is established
+static DWORD last_udp_connect_attempt = 0;  // Timestamp of last connection attempt
 static BOOL running = FALSE;
 static DWORD g_current_process_id = 0;
 
@@ -1224,6 +1226,74 @@ static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr)
     return 0;
 }
 
+// connect UDP ASSOCIATE with SOCKS5 proxy
+// Need to monitor the System memory and CPU usage
+static BOOL establish_udp_associate(void)
+{
+    // Prevent retry spam - only try every 5 seconds
+    DWORD now = GetTickCount();
+    if (now - last_udp_connect_attempt < 5000)
+        return FALSE;
+
+    last_udp_connect_attempt = now;
+
+    // Close existing connections if any
+    if (socks5_udp_socket != INVALID_SOCKET)
+    {
+        closesocket(socks5_udp_socket);
+        socks5_udp_socket = INVALID_SOCKET;
+    }
+    if (socks5_udp_send_socket != INVALID_SOCKET)
+    {
+        closesocket(socks5_udp_send_socket);
+        socks5_udp_send_socket = INVALID_SOCKET;
+    }
+
+    // Create TCP control connection
+    SOCKET tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_sock == INVALID_SOCKET)
+        return FALSE;
+
+    // 3 seconds, without delay can take extra system resource CPU/Memory
+    DWORD timeout = 3000;
+    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+
+    UINT32 socks5_ip = parse_ipv4(g_proxy_ip);
+    struct sockaddr_in socks_addr;
+    memset(&socks_addr, 0, sizeof(socks_addr));
+    socks_addr.sin_family = AF_INET;
+    socks_addr.sin_addr.s_addr = socks5_ip;
+    socks_addr.sin_port = htons(g_proxy_port);
+
+    if (connect(tcp_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
+    {
+        closesocket(tcp_sock);
+        return FALSE;
+    }
+
+    if (socks5_udp_associate(tcp_sock, &socks5_udp_relay_addr) != 0)
+    {
+        closesocket(tcp_sock);
+        return FALSE;
+    }
+
+    socks5_udp_socket = tcp_sock;
+
+    // ccreate UDP socket for sending to SOCKS5 proxy
+    socks5_udp_send_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (socks5_udp_send_socket == INVALID_SOCKET)
+    {
+        closesocket(socks5_udp_socket);
+        socks5_udp_socket = INVALID_SOCKET;
+        return FALSE;
+    }
+
+    udp_associate_connected = TRUE;
+    log_message("UDP ASSOCIATE established with SOCKS5 proxy");
+    return TRUE;
+}
+
 static DWORD WINAPI udp_relay_server(LPVOID arg)
 {
     WSADATA wsa_data;
@@ -1259,61 +1329,25 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
         return 1;
     }
 
-    tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (tcp_sock == INVALID_SOCKET)
-    {
-        closesocket(udp_relay_socket);
-        udp_relay_socket = INVALID_SOCKET;
-        WSACleanup();
-        return 1;
-    }
-
-    UINT32 socks5_ip = parse_ipv4(g_proxy_ip);
-    memset(&socks_addr, 0, sizeof(socks_addr));
-    socks_addr.sin_family = AF_INET;
-    socks_addr.sin_addr.s_addr = socks5_ip;
-    socks_addr.sin_port = htons(g_proxy_port);
-
-    if (connect(tcp_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
-    {
-        closesocket(tcp_sock);
-        closesocket(udp_relay_socket);
-        udp_relay_socket = INVALID_SOCKET;
-        WSACleanup();
-        return 1;
-    }
-
-    if (socks5_udp_associate(tcp_sock, &socks5_udp_relay_addr) != 0)
-    {
-        closesocket(tcp_sock);
-        closesocket(udp_relay_socket);
-        udp_relay_socket = INVALID_SOCKET;
-        WSACleanup();
-        return 1;
-    }
-
-    socks5_udp_socket = tcp_sock;
-
-    // Create a separate UDP socket for sending to SOCKS5 proxy
-    socks5_udp_send_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (socks5_udp_send_socket == INVALID_SOCKET)
-    {
-        closesocket(tcp_sock);
-        closesocket(udp_relay_socket);
-        udp_relay_socket = INVALID_SOCKET;
-        socks5_udp_socket = INVALID_SOCKET;
-        WSACleanup();
-        return 1;
-    }
+    // Try initial UDP ASSOCIATE (non-fatal if it fails)
+    udp_associate_connected = establish_udp_associate();
 
     log_message("UDP relay listening on port %d", LOCAL_UDP_RELAY_PORT);
+    if (!udp_associate_connected)
+    {
+        log_message("UDP ASSOCIATE not available yet - will retry when needed");
+    }
 
     while (running)
     {
         fd_set read_fds;
         FD_ZERO(&read_fds);
         FD_SET(udp_relay_socket, &read_fds);
-        FD_SET(socks5_udp_send_socket, &read_fds);
+
+        // Only monitor SOCKS5 socket if connection is established
+        if (udp_associate_connected && socks5_udp_send_socket != INVALID_SOCKET)
+            FD_SET(socks5_udp_send_socket, &read_fds);
+
         struct timeval timeout = {1, 0};
 
         int max_fd = (udp_relay_socket > socks5_udp_send_socket) ? udp_relay_socket : socks5_udp_send_socket;
@@ -1347,6 +1381,17 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                         (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
                         (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
 
+                    // Ensure UDP ASSOCIATE is established (retry if needed)
+                    if (!udp_associate_connected)
+                    {
+                        udp_associate_connected = establish_udp_associate();
+                        if (!udp_associate_connected)
+                        {
+                            log_message("[UDP RELAY] Cannot send - UDP ASSOCIATE not established");
+                            continue;
+                        }
+                    }
+
                     send_buf[0] = 0;
                     send_buf[1] = 0;
                     send_buf[2] = 0;
@@ -1365,6 +1410,8 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                     if (sent == SOCKET_ERROR) {
                         int err = WSAGetLastError();
                         log_message("[UDP RELAY ERROR] Failed to send to SOCKS5 proxy: %d", err);
+                        // Connection might be broken, mark for retry
+                        udp_associate_connected = FALSE;
                     }
                 }
                 else
@@ -1374,8 +1421,8 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
             }
         }
 
-        // Check if packet is from SOCKS5 proxy
-        if (FD_ISSET(socks5_udp_send_socket, &read_fds))
+        // Check if packet is from SOCKS5 proxy (only if connected)
+        if (udp_associate_connected && socks5_udp_send_socket != INVALID_SOCKET && FD_ISSET(socks5_udp_send_socket, &read_fds))
         {
             from_len = sizeof(from_addr);
             recv_len = recvfrom(socks5_udp_send_socket, (char*)recv_buf, sizeof(recv_buf), 0,
