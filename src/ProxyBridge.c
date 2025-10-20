@@ -73,11 +73,11 @@ static HANDLE packet_thread = NULL;
 static HANDLE proxy_thread = NULL;
 static HANDLE udp_relay_thread = NULL;
 static SOCKET udp_relay_socket = INVALID_SOCKET;
-static SOCKET socks5_udp_socket = INVALID_SOCKET;  // TCP control connection
-static SOCKET socks5_udp_send_socket = INVALID_SOCKET;  // UDP socket for sending to SOCKS5
+static SOCKET socks5_udp_socket = INVALID_SOCKET;
+static SOCKET socks5_udp_send_socket = INVALID_SOCKET;
 static struct sockaddr_in socks5_udp_relay_addr;
-static BOOL udp_associate_connected = FALSE;  // Track if UDP ASSOCIATE is established
-static DWORD last_udp_connect_attempt = 0;  // Timestamp of last connection attempt
+static BOOL udp_associate_connected = FALSE;
+static DWORD last_udp_connect_attempt = 0;
 static BOOL running = FALSE;
 static DWORD g_current_process_id = 0;
 
@@ -87,6 +87,7 @@ static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
 static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
 static char g_proxy_username[256] = "";
 static char g_proxy_password[256] = "";
+static BOOL g_dns_via_proxy = TRUE;
 static LogCallback g_log_callback = NULL;
 static ConnectionCallback g_connection_callback = NULL;
 
@@ -199,8 +200,11 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     UINT32 dest_ip = ip_header->DstAddr;
                     UINT16 dest_port = ntohs(udp_header->DstPort);
 
-                    // Always allow DNS (port 53) to go DIRECT for UDP
-                    RuleAction action = (dest_port == 53) ? RULE_ACTION_DIRECT : check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE);
+                    RuleAction action;
+                    if (dest_port == 53 && !g_dns_via_proxy)
+                        action = RULE_ACTION_DIRECT;
+                    else
+                        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE);
 
                     if (g_connection_callback != NULL)
                     {
@@ -329,7 +333,11 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT32 orig_dest_ip = ip_header->DstAddr;
                 UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
 
-                RuleAction action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE);
+                RuleAction action;
+                if (orig_dest_port == 53 && !g_dns_via_proxy)
+                    action = RULE_ACTION_DIRECT;
+                else
+                    action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE);
 
                 // Log ALL connections (DIRECT, BLOCK, PROXY) - only ONCE per unique connection
                 if (g_connection_callback != NULL)
@@ -338,7 +346,6 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     DWORD pid = get_process_id_from_connection(src_ip, src_port);
                     if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
                     {
-                        // Check if we already logged this connection
                         if (!is_connection_already_logged(pid, orig_dest_ip, orig_dest_port, action))
                         {
                             char dest_ip_str[32];
@@ -365,7 +372,6 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                             const char* display_name = extract_filename(process_name);
                             g_connection_callback(display_name, pid, dest_ip_str, orig_dest_port, proxy_info);
 
-                            // Mark this connection as logged
                             add_logged_connection(pid, orig_dest_ip, orig_dest_port, action);
                         }
                     }
@@ -1956,6 +1962,12 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* prox
     return TRUE;
 }
 
+PROXYBRIDGE_API void ProxyBridge_SetDnsViaProxy(BOOL enable)
+{
+    g_dns_via_proxy = enable;
+    log_message("DNS routing: %s", enable ? "via proxy" : "direct");
+}
+
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback)
 {
     g_log_callback = callback;
@@ -1990,7 +2002,6 @@ static BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_
     return found;
 }
 
-// Add connection to logged list
 static void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action)
 {
     WaitForSingleObject(lock, INFINITE);
@@ -2009,7 +2020,6 @@ static void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, R
     ReleaseMutex(lock);
 }
 
-// Clear all logged connections
 static void clear_logged_connections(void)
 {
     WaitForSingleObject(lock, INFINITE);
