@@ -88,6 +88,11 @@ public class ProxyBridgeService : IDisposable
         return ProxyBridgeNative.ProxyBridge_DisableRule(ruleId);
     }
 
+    public void SetDnsViaProxy(bool enable)
+    {
+        ProxyBridgeNative.ProxyBridge_SetDnsViaProxy(enable);
+    }
+
     public string TestConnection(string targetHost, ushort targetPort)
     {
         var buffer = new System.Text.StringBuilder(4096);

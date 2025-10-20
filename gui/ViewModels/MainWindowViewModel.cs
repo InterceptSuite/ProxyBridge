@@ -92,6 +92,8 @@ public class MainWindowViewModel : ViewModelBase
             };
             _connectionLogTimer.Start();
 
+            _proxyService.SetDnsViaProxy(true);
+
             // Start the proxy bridge
             if (_proxyService.Start())
             {
@@ -204,10 +206,25 @@ public class MainWindowViewModel : ViewModelBase
 
     public ObservableCollection<ProxyRule> ProxyRules { get; } = new();
 
+    private bool _dnsViaProxy = true;  // Default TRUE
+    public bool DnsViaProxy
+    {
+        get => _dnsViaProxy;
+        set
+        {
+            if (SetProperty(ref _dnsViaProxy, value))
+            {
+                _proxyService?.SetDnsViaProxy(value);
+                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] DNS via Proxy: {(value ? "Enabled" : "Disabled")}\n";
+            }
+        }
+    }
+
     // Commands
     public ICommand ShowProxySettingsCommand { get; }
     public ICommand ShowProxyRulesCommand { get; }
     public ICommand ShowAboutCommand { get; }
+    public ICommand ToggleDnsViaProxyCommand { get; }
     public ICommand CloseDialogCommand { get; }
     public ICommand ClearConnectionsLogCommand { get; }
     public ICommand ClearActivityLogCommand { get; }
@@ -326,6 +343,11 @@ public class MainWindowViewModel : ViewModelBase
             {
                 await window.ShowDialog(_mainWindow);
             }
+        });
+
+        ToggleDnsViaProxyCommand = new RelayCommand(() =>
+        {
+            DnsViaProxy = !DnsViaProxy;
         });
 
         CloseDialogCommand = new RelayCommand(CloseDialogs);

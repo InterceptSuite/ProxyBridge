@@ -30,14 +30,14 @@ typedef enum {
 typedef enum {
     RULE_PROTOCOL_TCP = 0,
     RULE_PROTOCOL_UDP = 1,
-    RULE_PROTOCOL_BOTH = 2  // Future: Match both TCP and UDP
+    RULE_PROTOCOL_BOTH = 2
 } RuleProtocol;
 
 PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, RuleProtocol protocol, RuleAction action);
 PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id);
 PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id);
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password);
-PROXYBRIDGE_API void ProxyBridge_SetDnsViaProxy(BOOL enable);  // DNS routing: TRUE = via proxy (UDP via SOCKS5, TCP via HTTP/SOCKS5), FALSE = direct
+PROXYBRIDGE_API void ProxyBridge_SetDnsViaProxy(BOOL enable);
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback);
 PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void);

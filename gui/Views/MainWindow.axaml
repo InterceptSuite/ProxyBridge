@@ -203,6 +203,15 @@
                 <MenuItem Header="Proxy">
                     <MenuItem Header="Proxy Settings" Command="{Binding ShowProxySettingsCommand}"/>
                     <MenuItem Header="Proxy Rules" Command="{Binding ShowProxyRulesCommand}"/>
+                    <Separator/>
+                    <MenuItem Header="DNS via Proxy"
+                              Command="{Binding ToggleDnsViaProxyCommand}">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding DnsViaProxy}"
+                                      IsHitTestVisible="False"
+                                      Margin="0"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
                 </MenuItem>
                 <MenuItem Header="About" Command="{Binding ShowAboutCommand}"/>
             </Menu>

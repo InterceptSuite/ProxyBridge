@@ -12,7 +12,7 @@ public class ProxyRulesViewModel : ViewModelBase
     private string _newProcessName = "*";
     private string _newTargetHosts = "*";
     private string _newTargetPorts = "*";
-    private string _newProtocol = "TCP";
+    private string _newProtocol = "TCP"; // TCP, UDP, or BOTH
     private string _newProxyAction = "PROXY";
     private string _processNameError = "";
     private Action<ProxyRule>? _onAddRule;

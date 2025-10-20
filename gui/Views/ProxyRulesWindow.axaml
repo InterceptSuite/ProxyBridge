@@ -276,9 +276,10 @@
                     <TextBlock Text="Protocol" Classes="label"/>
                     <ComboBox SelectedIndex="0"
                               HorizontalAlignment="Stretch"
-                              IsEnabled="False"
                               x:Name="ProtocolComboBox">
-                        <ComboBoxItem Content="TCP (UDP not yet supported)" Tag="TCP"/>
+                        <ComboBoxItem Content="TCP" Tag="TCP"/>
+                        <ComboBoxItem Content="UDP" Tag="UDP"/>
+                        <ComboBoxItem Content="Both (TCP + UDP)" Tag="BOTH"/>
                     </ComboBox>
                 </StackPanel>
 

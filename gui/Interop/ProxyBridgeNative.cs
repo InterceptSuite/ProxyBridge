@@ -85,6 +85,9 @@ public static class ProxyBridgeNative
     public static extern void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern void ProxyBridge_SetDnsViaProxy([MarshalAs(UnmanagedType.Bool)] bool enable);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_Start();
 
