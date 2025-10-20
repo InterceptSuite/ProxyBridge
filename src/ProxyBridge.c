@@ -128,6 +128,7 @@ static DWORD WINAPI packet_processor(LPVOID arg);
 static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port);
 static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port);
 static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
+static RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp);
 static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp);
 static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port);
 static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port);
@@ -174,12 +175,11 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     UINT16 orig_dest_port;
 
                     if (get_connection(dst_port, &orig_dest_ip, &orig_dest_port))
+                    {
+                        // Restore both source IP and port to original destination
+                        ip_header->SrcAddr = orig_dest_ip;
                         udp_header->SrcPort = htons(orig_dest_port);
-
-                    UINT32 temp_addr = ip_header->DstAddr;
-                    ip_header->DstAddr = ip_header->SrcAddr;
-                    ip_header->SrcAddr = temp_addr;
-                    addr.Outbound = FALSE;
+                    }                    addr.Outbound = FALSE;
                 }
                 else if (is_connection_tracked(ntohs(udp_header->SrcPort)))
                 {
@@ -197,7 +197,8 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     UINT32 dest_ip = ip_header->DstAddr;
                     UINT16 dest_port = ntohs(udp_header->DstPort);
 
-                    RuleAction action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE);
+                    // Always allow DNS (port 53) to go DIRECT for UDP
+                    RuleAction action = (dest_port == 53) ? RULE_ACTION_DIRECT : check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE);
 
                     if (g_connection_callback != NULL)
                     {
@@ -803,29 +804,13 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
 }
 
 
-static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp)
+// Unified rule matching function for both TCP and UDP
+// Matches rules by process name, IP, port, and protocol
+static RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp)
 {
-    DWORD pid;
-    char process_name[MAX_PROCESS_NAME];
-    RuleAction wildcard_action = RULE_ACTION_DIRECT;
-    BOOL wildcard_found = FALSE;
-
-    pid = is_udp ? get_process_id_from_udp_connection(src_ip, src_port) : get_process_id_from_connection(src_ip, src_port);
-    if (pid == 0 && is_udp)
-        pid = get_process_id_from_connection(src_ip, src_port);
-    if (pid == 0)
-        return RULE_ACTION_DIRECT;
-
-    // Auto-exclude: Always bypass the process that loaded this DLL (prevents loops)
-    //// DOO NOT Remove THIS - If * rule is used, not checking our own process will cause loop
-    if (pid == g_current_process_id)
-        return RULE_ACTION_DIRECT;
-
-    if (!get_process_name_from_pid(pid, process_name, sizeof(process_name)))
-        return RULE_ACTION_DIRECT;
-
-    // First pass: Check specific process rules and save wildcard
     PROCESS_RULE *rule = rules_list;
+    PROCESS_RULE *wildcard_rule = NULL;  // Save fully wildcard rule for last
+
     while (rule != NULL)
     {
         if (!rule->enabled)
@@ -834,79 +819,107 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
             continue;
         }
 
-        // If this is a wildcard rule, check protocol and save it for later
-        if (strcmp(rule->process_name, "*") == 0 || strcmp(rule->process_name, "ANY") == 0)
+        // Check protocol compatibility
+        if (rule->protocol == RULE_PROTOCOL_TCP && is_udp)
         {
-            if (rule->protocol == RULE_PROTOCOL_TCP && is_udp)
-            {
-                rule = rule->next;
-                continue;
-            }
-            if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp)
-            {
-                rule = rule->next;
-                continue;
-            }
-            wildcard_action = rule->action;
-            wildcard_found = TRUE;
+            rule = rule->next;
+            continue;
+        }
+        if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp)
+        {
             rule = rule->next;
             continue;
         }
 
-        // Use new wildcard process matching
-        // Supports: "chrome.exe", "fire*.exe", "*.bin", "chrome.exe;firefox.exe;*.bin"
+        // Check if this is a wildcard process rule
+        BOOL is_wildcard_process = (strcmp(rule->process_name, "*") == 0 || strcmp(rule->process_name, "ANY") == 0);
+
+        if (is_wildcard_process)
+        {
+            // Check if wildcard has specific filters
+            BOOL has_ip_filter = (strcmp(rule->target_hosts, "*") != 0);
+            BOOL has_port_filter = (strcmp(rule->target_ports, "*") != 0);
+
+            if (has_ip_filter || has_port_filter)
+            {
+                // Filtered wildcard - check if it matches
+                if (match_ip_list(rule->target_hosts, dest_ip) &&
+                    match_port_list(rule->target_ports, dest_port))
+                {
+                    // Matched! Return this rule's action
+                    return rule->action;
+                }
+                // Didn't match, continue
+                rule = rule->next;
+                continue;
+            }
+
+            // Fully wildcard rule (no filters) - save for later
+            if (wildcard_rule == NULL)
+            {
+                wildcard_rule = rule;
+            }
+            rule = rule->next;
+            continue;
+        }
+
+        // Check if process name matches
         if (match_process_list(rule->process_name, process_name))
         {
-            // Process name matched! Now check IP and port filters
-            if (!match_ip_list(rule->target_hosts, dest_ip))
+            // Process matched! Check IP and port filters
+            if (match_ip_list(rule->target_hosts, dest_ip) &&
+                match_port_list(rule->target_ports, dest_port))
             {
-                rule = rule->next;
-                continue;  // IP doesn't match, try next rule
+                // All filters matched! Return this rule's action
+                return rule->action;
             }
-
-            if (!match_port_list(rule->target_ports, dest_port))
-            {
-                rule = rule->next;
-                continue;
-            }
-
-            if (rule->protocol == RULE_PROTOCOL_TCP && is_udp)
-            {
-                rule = rule->next;
-                continue;
-            }
-            if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp)
-            {
-                rule = rule->next;
-                continue;
-            }
-
-            RuleAction action = rule->action;
-            if (action == RULE_ACTION_PROXY && is_udp && g_proxy_type == PROXY_TYPE_HTTP)
-            {
-                return RULE_ACTION_DIRECT;
-            }
-            if (action == RULE_ACTION_PROXY && (g_proxy_ip[0] == '\0' || g_proxy_port == 0))
-            {
-                return RULE_ACTION_DIRECT;
-            }
-            return action;
         }
+
         rule = rule->next;
     }
 
-    // Second pass: No specific match found, use wildcard if it exists
-    if (wildcard_found)
+    // No specific rule matched, use wildcard if available
+    if (wildcard_rule != NULL)
     {
-        if (wildcard_action == RULE_ACTION_PROXY && (g_proxy_ip[0] == '\0' || g_proxy_port == 0))
-        {
-            return RULE_ACTION_DIRECT;
-        }
-        return wildcard_action;
+        return wildcard_rule->action;
     }
 
-    // No match at all - default to DIRECT
+    // No rule matched at all
     return RULE_ACTION_DIRECT;
+}
+
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp)
+{
+    DWORD pid;
+    char process_name[MAX_PROCESS_NAME];
+
+    pid = is_udp ? get_process_id_from_udp_connection(src_ip, src_port) : get_process_id_from_connection(src_ip, src_port);
+    if (pid == 0 && is_udp)
+        pid = get_process_id_from_connection(src_ip, src_port);
+    if (pid == 0)
+        return RULE_ACTION_DIRECT;
+
+    // Auto-exclude: Always bypass the process that loaded this DLL (prevents loops)
+    if (pid == g_current_process_id)
+        return RULE_ACTION_DIRECT;
+
+    if (!get_process_name_from_pid(pid, process_name, sizeof(process_name)))
+        return RULE_ACTION_DIRECT;
+
+    // Use unified rule matching function
+    RuleAction action = match_rule(process_name, dest_ip, dest_port, is_udp);
+
+    // Additional checks for proxy configuration
+    if (action == RULE_ACTION_PROXY && is_udp && g_proxy_type == PROXY_TYPE_HTTP)
+    {
+        return RULE_ACTION_DIRECT;  // HTTP proxy doesn't support UDP
+    }
+    if (action == RULE_ACTION_PROXY && (g_proxy_ip[0] == '\0' || g_proxy_port == 0))
+    {
+        return RULE_ACTION_DIRECT;  // No proxy configured
+    }
+
+    return action;
 }
 
 
@@ -1349,13 +1362,10 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                     int sent = sendto(socks5_udp_send_socket, (char*)send_buf, 10 + recv_len, 0,
                           (struct sockaddr *)&socks5_udp_relay_addr, sizeof(socks5_udp_relay_addr));
 
-                    log_message("[UDP RELAY] Sent %d bytes to SOCKS5 proxy %d.%d.%d.%d:%d",
-                        sent,
-                        (socks5_udp_relay_addr.sin_addr.s_addr >> 0) & 0xFF,
-                        (socks5_udp_relay_addr.sin_addr.s_addr >> 8) & 0xFF,
-                        (socks5_udp_relay_addr.sin_addr.s_addr >> 16) & 0xFF,
-                        (socks5_udp_relay_addr.sin_addr.s_addr >> 24) & 0xFF,
-                        ntohs(socks5_udp_relay_addr.sin_port));
+                    if (sent == SOCKET_ERROR) {
+                        int err = WSAGetLastError();
+                        log_message("[UDP RELAY ERROR] Failed to send to SOCKS5 proxy: %d", err);
+                    }
                 }
                 else
                 {
@@ -1373,14 +1383,6 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
             if (recv_len > 0)
             {
-                UINT32 from_ip = from_addr.sin_addr.s_addr;
-                UINT16 from_port = ntohs(from_addr.sin_port);
-
-                log_message("[UDP RELAY] Received %d bytes from SOCKS5 proxy %d.%d.%d.%d:%d",
-                    recv_len,
-                    (from_ip >> 0) & 0xFF, (from_ip >> 8) & 0xFF,
-                    (from_ip >> 16) & 0xFF, (from_ip >> 24) & 0xFF, from_port);
-
                 // Packet from SOCKS5 proxy - decapsulate and forward to original sender
                 if (recv_len < 10)
                     continue;
@@ -1397,10 +1399,6 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                                (recv_buf[6] << 16) | (recv_buf[7] << 24);
                 UINT16 src_port = (recv_buf[8] << 8) | recv_buf[9];
 
-                log_message("[UDP RELAY] Decapsulated packet from %d.%d.%d.%d:%d",
-                    (src_ip >> 0) & 0xFF, (src_ip >> 8) & 0xFF,
-                    (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, src_port);
-
                 // Find which local port this packet should go to
                 WaitForSingleObject(lock, INFINITE);
                 CONNECTION_INFO *conn = connection_list;
@@ -1415,9 +1413,6 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                         target_addr.sin_addr.s_addr = conn->src_ip;
                         target_addr.sin_port = htons(conn->src_port);
                         found = TRUE;
-                        log_message("[UDP RELAY] Found original connection: will send back to %d.%d.%d.%d:%d",
-                            (conn->src_ip >> 0) & 0xFF, (conn->src_ip >> 8) & 0xFF,
-                            (conn->src_ip >> 16) & 0xFF, (conn->src_ip >> 24) & 0xFF, conn->src_port);
                         break;
                     }
                     conn = conn->next;
@@ -1426,14 +1421,13 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
                 if (found)
                 {
-                    // Send decapsulated data back to original sender
-                    int sent = sendto(udp_relay_socket, (char*)&recv_buf[10], recv_len - 10, 0,
+                    memset(&target_addr, 0, sizeof(target_addr));
+                    target_addr.sin_family = AF_INET;
+                    target_addr.sin_addr.s_addr = conn->src_ip;
+                    target_addr.sin_port = htons(conn->src_port);
+
+                    sendto(udp_relay_socket, (char*)&recv_buf[10], recv_len - 10, 0,
                           (struct sockaddr *)&target_addr, sizeof(target_addr));
-                    log_message("[UDP RELAY] Sent %d bytes back to original application", sent);
-                }
-                else
-                {
-                    log_message("[UDP RELAY] No matching connection found for response");
                 }
             }
         }
