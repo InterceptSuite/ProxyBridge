@@ -5,7 +5,7 @@
 </p>
 
 
-ProxyBridge is a lightweight, open-source alternative to Proxifier that provides transparent proxy routing for Windows applications. It redirects TCP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. Working at the kernel level using WinDivert, ProxyBridge is compatible with proxy-unaware applications without requiring any configuration changes.
+ProxyBridge is a lightweight, open-source alternative to Proxifier that provides transparent proxy routing for Windows applications. It redirects TCP and UDP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. Working at the kernel level using WinDivert, ProxyBridge is compatible with proxy-unaware applications without requiring any configuration changes.
 
 ## Features
 
@@ -15,9 +15,10 @@ ProxyBridge is a lightweight, open-source alternative to Proxifier that provides
 - **Multiple proxy protocols** - Supports SOCKS5 and HTTP proxies
 - **Kernel-level interception** - Uses WinDivert for reliable packet capture
 - **No configuration needed** - Applications work without any modifications
-- **Protocol agnostic** - Compatible with any TCP protocol (HTTP, HTTPS, databases, RDP, SSH, etc.)
-- **Traffic blocking** - Block specific applications from accessing the internet
+- **Protocol agnostic** - Compatible with TCP and UDP protocols (HTTP/HTTPS, HTTP/3, databases, RDP, SSH, games, DTLS, DNS, etc.)
+- **Traffic blocking** - Block specific applications from accessing the internet or any network (LAN, localhost, etc.)
 - **Flexible rules** - Direct connection, proxy routing, or complete blocking per process
+- **Advanced rule configuration** - Target specific processes, IPs, ports, protocols (TCP/UDP), and hostnames with wildcard support
 - **Process exclusion** - Prevent proxy loops by excluding proxy applications
 
 ## Table of Contents
@@ -135,54 +136,53 @@ ProxyBridge_CLI --rule "*=proxy;BurpSuiteCommunity.exe=direct"
 
 #### Command Line Options
 ```
-ProxyBridge_CLI -h
+ProxyBridge_CLI.exe -h
 
   ____                        ____       _     _
  |  _ \ _ __ _____  ___   _  | __ ) _ __(_) __| | __ _  ___
  | |_) | '__/ _ \ \/ / | | | |  _ \| '__| |/ _` |/ _` |/ _ \
  |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/
  |_|   |_|  \___/_/\_\\__, | |____/|_|  |_|\__,_|\__, |\___|
-                      |___/                      |___/  V1.1
+                      |___/                      |___/  V2.0
 
   Universal proxy client for Windows applications
 
         Author: Sourav Kalal/InterceptSuite
         GitHub: https://github.com/InterceptSuite/ProxyBridge
 
-A lightweight proxy bridge for process-based traffic routing
+Description:
+  ProxyBridge - Universal proxy client for Windows applications
 
-USAGE:
-    ProxyBridge_CLI [OPTIONS]
+Usage:
+  ProxyBridge_CLI [command] [options]
 
-OPTIONS:
-    --proxy <url>       Proxy server URL
-                        Format: socks5://ip:port or http://ip:port
-                        Default: socks5://127.0.0.1:4444
+Options:
+  --proxy <proxy>      Proxy server URL with optional authentication
+                       Format: type://ip:port or type://ip:port:username:password
+                       Examples: socks5://127.0.0.1:1080
+                                 http://proxy.com:8080:myuser:mypass [default: socks5://127.0.0.1:4444]
+  --rule <rule>        Traffic routing rule (multiple values supported, can repeat)
+                       Format: process:hosts:ports:protocol:action
+                         process  - Process name(s): chrome.exe, chr*.exe, *.exe, or *
+                         hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple comma-separated
+                         ports    - Port(s): *, 443, 80,443, 80-100, or multiple comma-separated
+                         protocol - TCP, UDP, or BOTH
+                         action   - PROXY, DIRECT, or BLOCK
+                       Examples:
+                         chrome.exe:*:*:TCP:PROXY
+                         *:*:53:UDP:PROXY
+                         firefox.exe:*:80,443:TCP:DIRECT
+  --dns-via-proxy      Route DNS queries through proxy (default: true) [default: True]
+  --verbose <verbose>  Logging verbosity level
+                         0 - No logs (default)
+                         1 - Show log messages only
+                         2 - Show connection events only
+                         3 - Show both logs and connections [default: 0]
+  --version            Show version information
+  -?, -h, --help       Show help and usage information
 
-    --rule <rules>      Traffic routing rules (semicolon-separated)
-                        Format: process=action;process=action
-                        Actions: PROXY, DIRECT, BLOCK
-                        Example: --rule "chrome.exe=proxy;firefox.exe=direct;*=block"
-
-    --help, -h          Show this help message
-
-EXAMPLES:
-    Start with default SOCKS5 proxy:
-        ProxyBridge_CLI
-
-    Use custom HTTP proxy:
-        ProxyBridge_CLI --proxy http://192.168.1.100:8080
-
-    Route specific processes:
-        ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "chrome.exe=proxy;*=direct"
-
-    Block all traffic except specific apps:
-        ProxyBridge_CLI --rule "chrome.exe=proxy;firefox.exe=proxy;*=block"
-
-NOTES:
-    - Press Ctrl+C to stop ProxyBridge
-    - Use * as process name to match all traffic
-    - Process names are case-insensitive
+Commands:
+  --update  Check for updates and download latest version from GitHub
 
 ```
 
@@ -220,79 +220,95 @@ NOTES:
 ## Current Limitations
 
 - IPv4 only (IPv6 not supported)
-- TCP only (UDP not supported)
-- IP and Port based Routing
 
 
 ## How It Works
 
+ProxyBridge use Windivert to inspect all TCP/UDP packets and use rules from user to perform action on them
+
+Case 1: Packet does not match any rules
+
 ```
-                                    Your Application
-                                 (Chrome, Discord, etc.)
-                                    Proxy-Unaware
-                                          |
-                                          | (1) Raw TCP Packets
-                                          v
-[user mode]                               |
-...........................................+...........................................
-[kernel mode]                             |
-                                          v
-                              +------------------------+
-                              |   WinDivert.sys        |
-         (1) All packets ---->|   (Kernel Driver)      |
-         intercepted          |   - Intercepts ALL TCP |
-                              +------------------------+
-                                          |
-                                          | (2) Sends ALL packets to ProxyBridge
-                                          v
-...........................................+...........................................
-[kernel mode]                             |
-[user mode]                               v
-                              +------------------------+
-                              | ProxyBridge.exe        |
-                              | Packet Handler         |
-                              | - Checks process name  |
-                              | - Matches target?      |
-                              +------------------------+
-                                    |            |
-                     (matching)     |            | (non-matching)
-                     redirect       |            | re-inject unchanged
-                                    |            |
-                                    |            +-------------------> Internet
-                                    |                                (direct connection)
-                                    | (3) re-inject with modified
-                                    |     destination: localhost:37123
-                                    v
-                              +------------------------+
-                              | ProxyBridge            |
-                              | TCP Relay Server       |
-                              | (localhost:37123)      |
-                              | - Tracks origin        |
-                              | - Converts TCP to      |
-                              |   SOCKS5/HTTP protocol |
-                              +------------------------+
-                                    |
-                                    | SOCKS5/HTTP CONNECT
-                                    v
-                              +------------------------+
-                              | Proxy Server           |
-                              | (Burp/InterceptSuite)  |
-                              | 127.0.0.1:8080/4444    |
-                              +------------------------+
-                                    |
-                                    | Proxied Traffic
-                                    v
-                                 Internet
+                                      -----------------------
+                                      |                     | (4a1) Packet doesn't meet rule
+                                      |    ProxyBridge      |-----------------------------
+                                      |                     |                            |
+                                      -----------------------                            |
+                                         ↑                                               |
+                      (3) packet intercepted by ProxyBridge                              |
+                                          |                                              |
+ [user mode]      (1) TCP/UDP packet     |                                               |
+ ...........................|............|..................................             |
+ [kernel mode]              |            |                                               |
+                            | 			     |                                               |
+ (2) Packet inspected via   |			       |                                               |
+      Windivert             ↓            |                                               |
+              +---------------+          |                                               |
+              | (2b)          |          |                                               |
+              | WinDivert.sys | ----------                                               |
+              |               |   <-------------------------------------------------------
+              +---------------+                (4a2) Packet reinject into Windivert
+                                                      for Direct connection
+
+
 ```
 
+
+Case 2: Packet match with proxy rule
+
+```
+                                                                                               --------------------------------------------------      (6) perfrom proxy connection, update dest ip and port
+                                                                                              | ProxyBridge TCP/UDP(34010/34011) relay server   |         with original details with network mananger stored details
+                                                                                              |                                                 |  ----->>>>------------------------------------
+                                                                                               --------------------------------------------------                                             |
+                                                                                                                                                                                              |
+                                                                                                          ↑                                                                                   |
+                                                                                                          |                                                                                   |
+                                      -----------------------                                             | (5b)                                                                              |
+                                      |                     | (4a) Packet meet rule to Proxy              |      redirect packet to relay                                                     ↓
+                                      |    ProxyBridge      |------------------------------------         |                                                                                  (7) Proxy app
+                                      |                     |                                   ↓ (4b)    |                                                                                  like BurpSuite/InterceptSuite
+                                      -----------------------                            --------------------------------------------
+                                         ↑                                               | ProxyBridge network mananger             |
+                      (3) packet intercepted by ProxyBridge                              | (4c) Store packet original dest ip/port  |
+                                          |                                              |------------------------------------------
+ [user mode]      (1) TCP/UDP packet     |                                                                 ↓
+ ...........................|............|.................................................................|......................................................................................................................
+ [kernel mode]              |            |                                                                 |
+                            | 			 |                                                        |
+ (2) Packet inspected via   |			 |                                                        |(5a) reinjected updated packet with changed dest IP and Port
+      Windivert             ↓            |                                               |                 |
+              +---------------+          |                                               |                 |
+              | (2b)          |          |                                               |                 |
+              | WinDivert.sys | ----------                                               |                 |
+              |               |   <--------------------------------------<<<----------------------<<<------
+              +---------------+                (4a2) Packet reinject into Windivert
+                                                      for Direct connection
+
+
+```
+
+**Traffic Flow:**
+1. **Applications Generate Traffic** - User-mode applications (Chrome, Discord, Games, Services) create TCP/UDP packets
+2. **Kernel Interception** - WinDivert.sys driver intercepts ALL outbound packets at kernel level
+3. **User-Mode Delivery** - WinDivert.dll receives intercepted packets and delivers them to ProxyBridge
+4. **Rule Evaluation** - ProxyBridge inspects each packet and applies configured rules:
+   - **BLOCK** → Packet is dropped (no network access)
+   - **DIRECT** → Packet is re-injected unchanged (direct connection)
+   - **NO MATCH** → Packet is re-injected unchanged (direct connection)
+   - **PROXY** → Packet destination is modified to TCP/UDP relay servers (37123/37124)
+5. **Proxy Processing** - For PROXY-matched packets:
+   - Relay servers store original destination IP and port
+   - Convert raw TCP/UDP to SOCKS5/HTTP proxy protocol
+   - Perform proxy authentication and forward to proxy server
+6. **Proxy Forwarding** - Proxy server (Burp Suite/InterceptSuite) forwards traffic to original destination
+7. **Response Handling** - Return traffic flows back through relay servers, which restore original source IP/port before re-injection
+
 **Key Points:**
-- WinDivert.sys sits between application and network, intercepts ALL TCP packets
-- ALL packets are sent to ProxyBridge in user space for inspection
-- ProxyBridge checks process name and decides: redirect or forward unchanged
-- Matching packets are re-injected with destination changed to localhost:37123
-- Non-matching packets are re-injected unchanged and go directly to Internet
-- TCP Relay Server converts raw TCP to SOCKS5/HTTP proxy protocol
-- This allows proxy-unaware apps to work with proxy servers
+- All packet manipulation happens transparently - applications remain completely unaware
+- WinDivert operates at kernel level for reliable interception before packets reach the network
+- ProxyBridge rule engine provides granular control over which traffic gets proxied
+- TCP/UDP relay servers handle protocol conversion between raw sockets and proxy protocols
 
 
 ## Build from Source
