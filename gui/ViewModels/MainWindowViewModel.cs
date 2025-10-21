@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Windows.Input;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using Avalonia.Threading;
 using Avalonia.Controls;
 using ProxyBridge.GUI.Views;
@@ -108,6 +109,8 @@ public class MainWindowViewModel : ViewModelBase
         {
             ActivityLog += $"[{DateTime.Now:HH:mm:ss}] ERROR: {ex.Message}\n";
         }
+
+        _ = CheckForUpdatesOnStartupAsync();
     }
 
     public string Title
@@ -456,6 +459,33 @@ public class MainWindowViewModel : ViewModelBase
     {
         IsProxyRulesDialogOpen = false;
         IsProxySettingsDialogOpen = false;
+    }
+
+    private async Task CheckForUpdatesOnStartupAsync()
+    {
+        try
+        {
+            var settingsService = new SettingsService();
+            var settings = settingsService.LoadSettings();
+            if (!settings.CheckForUpdatesOnStartup)
+                return;
+
+            var updateService = new UpdateService();
+            var versionInfo = await updateService.CheckForUpdatesAsync();
+
+            if (versionInfo.IsUpdateAvailable && _mainWindow != null)
+            {
+                var notificationWindow = new UpdateNotificationWindow();
+                var viewModel = new UpdateNotificationViewModel(() => notificationWindow.Close(), versionInfo);
+                notificationWindow.DataContext = viewModel;
+
+                _ = notificationWindow.ShowDialog(_mainWindow);
+            }
+        }
+        catch
+        {
+            // silently fail
+        }
     }
 
     public void Cleanup()
