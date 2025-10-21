@@ -151,16 +151,26 @@ ProxyBridge_CLI -h
 ProxyBridge_CLI --proxy http://192.168.1.100:8080
 
 # Route Chrome through socks5 proxy
-ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "chrome.exe=proxy"
+ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "chrome.exe:*:*:TCP:PROXY"
+
+# Route multiple processes in single rule (semicolon-separated)
+ProxyBridge_CLI --proxy http://127.0.0.1:8080 --rule "chrome.exe;steam*.exe:*:*:TCP:PROXY"
+
+# Multiple rules with verbose connection logging
+ProxyBridge_CLI --proxy http://127.0.0.1:8080 --rule "chrome.exe;steam*.exe:*:*:TCP:PROXY" --rule "firefox.exe:*:*:TCP:PROXY" --verbose 2
 
 # Block specific application from internet access
-ProxyBridge_CLI --rule "chrome.exe=block"
+ProxyBridge_CLI --rule "malware.exe:*:*:BOTH:BLOCK"
 
 # Route specific apps through proxy, block everything else
-ProxyBridge_CLI --rule "chrome.exe=proxy;firefox.exe=proxy;*=block"
+ProxyBridge_CLI --rule "chrome.exe:*:*:TCP:PROXY" --rule "firefox.exe:*:*:TCP:PROXY" --rule "*:*:*:BOTH:BLOCK"
 
 # Route all through proxy except proxy app itself
-ProxyBridge_CLI --rule "*=proxy;BurpSuiteCommunity.exe=direct"
+ProxyBridge_CLI --rule "*:*:*:TCP:PROXY" --rule "BurpSuiteCommunity.exe:*:*:TCP:DIRECT"
+
+# Target specific IPs and ports
+ProxyBridge_CLI --rule "chrome.exe:192.168.*.*;10.10.*.*:80;443;8080:TCP:PROXY"
+
 
 ```
 
@@ -216,19 +226,29 @@ Commands:
 
 ```
 
-#### Rule Examples
+#### Rule Format
+
+**Format:** `process:hosts:ports:protocol:action`
+
+- **process** - Process name(s): `chrome.exe`, `chrome.exe;firefox.exe`, `steam*.exe`, or `*`
+- **hosts** - Target IP/hostname(s): `*`, `192.168.1.1`, `192.168.*.*`, `10.10.1.1-10.10.255.255`, or `192.168.1.1;10.10.10.10`
+- **ports** - Target port(s): `*`, `443`, `80;443;8080`, `80-8000`, or `80;443;8000-9000`
+- **protocol** - `TCP`, `UDP`, or `BOTH`
+- **action** - `PROXY`, `DIRECT`, or `BLOCK`
+
+**Examples:**
 ```powershell
-# Single process rule
---rule "chrome.exe=proxy"
+# Single process to proxy
+--rule "chrome.exe:*:*:TCP:PROXY"
 
-# Multiple processes with different actions
---rule "chrome.exe=proxy;firefox.exe=direct;malware.exe=block"
+# Multiple processes in one rule
+--rule "chrome.exe;firefox.exe;steam*.exe:*:*:TCP:PROXY"
 
-# Default action for all unmatched processes
---rule "chrome.exe=proxy;*=direct"
+# Target specific IPs and ports
+--rule "chrome.exe:192.168.*;10.10.*.*:80;443;8080:TCP:PROXY"
 
-# Whitelist approach (block everything except specific apps)
---rule "chrome.exe=proxy;firefox.exe=proxy;*=block"
+# Allow direct connection (bypass proxy)
+--rule "BurpSuiteCommunity.exe:*:*:TCP:DIRECT"
 ```
 
 **Notes:**

@@ -25,15 +25,16 @@ class Program
             name: "--rule",
             description: "Traffic routing rule (multiple values supported, can repeat)\n" +
                         "Format: process:hosts:ports:protocol:action\n" +
-                        "  process  - Process name(s): chrome.exe, chr*.exe, *.exe, or *\n" +
-                        "  hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple comma-separated\n" +
-                        "  ports    - Port(s): *, 443, 80,443, 80-100, or multiple comma-separated\n" +
+                        "  process  - Process name(s): chrome.exe, chr*.exe, *.exe, or * (use ; for multiple: chrome.exe;firefox.exe)\n" +
+                        "  hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple separated by ; or ,\n" +
+                        "  ports    - Port(s): *, 443, 80;8080, 80-100, or multiple separated by ; or ,\n" +
                         "  protocol - TCP, UDP, or BOTH\n" +
                         "  action   - PROXY, DIRECT, or BLOCK\n" +
                         "Examples:\n" +
                         "  chrome.exe:*:*:TCP:PROXY\n" +
+                        "  chrome.exe;firefox.exe:*:*:TCP:PROXY\n" +
                         "  *:*:53:UDP:PROXY\n" +
-                        "  firefox.exe:*:80,443:TCP:DIRECT")
+                        "  firefox.exe:*:80;443:TCP:DIRECT")
         {
             AllowMultipleArgumentsPerToken = false,
             Arity = ArgumentArity.ZeroOrMore
@@ -245,17 +246,24 @@ class Program
 
         foreach (var rule in rules)
         {
+            // Split by colon, but limit to 5 parts to allow colons in other fields if needed
             var parts = rule.Split(':', 5);
             if (parts.Length != 5)
             {
                 throw new ArgumentException($"Invalid rule format: {rule}\nExpected format: process:hosts:ports:protocol:action");
             }
 
+            // Don't trim semicolons - they are valid separators for multiple values
             var processName = parts[0].Trim();
             var targetHosts = parts[1].Trim();
             var targetPorts = parts[2].Trim();
             var protocolStr = parts[3].Trim().ToUpper();
             var actionStr = parts[4].Trim().ToUpper();
+
+            // Handle empty fields - use "*" as default
+            if (string.IsNullOrWhiteSpace(processName)) processName = "*";
+            if (string.IsNullOrWhiteSpace(targetHosts)) targetHosts = "*";
+            if (string.IsNullOrWhiteSpace(targetPorts)) targetPorts = "*";
 
             var protocol = protocolStr switch
             {
