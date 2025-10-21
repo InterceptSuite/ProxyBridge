@@ -93,14 +93,35 @@ Launch `ProxyBridge.exe` (GUI) with Administrator privileges for an intuitive gr
 
 1. Click **Proxy** tab in the main window
 2. Click **Proxy Rules** from the menu
-3. Add process rules with actions:
+3. Configure rule parameters:
+
+   **Applications:**
+   - Use `*` as wildcard for all processes
+   - Enter single process: `chrome.exe`
+   - Enter multiple processes (semicolon-separated): `firefox.exe; chrome.exe`
+   - Use **Browse** button to select process executable from directory
+
+   **Target Hosts (Optional):**
+   - Specific IP: `127.0.0.1`
+   - Wildcard IP range: `127.0.*.*` or `192.168.*.*`
+   - Multiple IPs: `127.0.0.1; 192.168.1.1`
+   - IP range: `10.10.1.1-10.10.255.255`
+   - Leave empty or use `*` for all hosts
+
+   **Target Ports (Optional):**
+   - Specific ports: `80; 8080`
+   - Port range: `80-8000`
+   - Leave empty or use `*` for all ports
+
+   **Protocol:**
+   - Select **TCP**, **UDP**, or **Both (TCP + UDP)**
+
+   **Action:**
    - **PROXY** - Route through configured proxy
    - **DIRECT** - Allow direct internet access
    - **BLOCK** - Block all internet access
-4. Enter process name
-      - Use `*` as wildcard to set default action for all processes
-      - or Appname like chrome or chrome.exe
-5. Click **Save** to apply rules
+
+4. Click **Save Rule** to apply the configuration
 
 #### Activity Monitoring
 
@@ -109,10 +130,11 @@ Launch `ProxyBridge.exe` (GUI) with Administrator privileges for an intuitive gr
 </p>
 
 - View real-time connection activity in the **Connections** tab
-- Monitor which processes are active and their routing status
+- Monitor all system connections including both TCP and UDP protocols
+- See connections from all processes, whether they match rules or not
+- Track which processes are active and their routing status (PROXY, DIRECT, or BLOCK)
 - Search and filter connections using the search box
 
-**Important:** The GUI automatically saves your configuration and restores it on next launch.
 
 **Note:** Adding a rule with action **PROXY** while no proxy is configured will result in traffic being routed through a direct connection instead. Make sure to configure proxy settings before using PROXY rules.
 
