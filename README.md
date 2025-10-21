@@ -228,65 +228,17 @@ ProxyBridge use Windivert to inspect all TCP/UDP packets and use rules from user
 
 Case 1: Packet does not match any rules
 
-```
-                                      -----------------------
-                                      |                     | (4a1) Packet doesn't meet rule
-                                      |    ProxyBridge      |-----------------------------
-                                      |                     |                            |
-                                      -----------------------                            |
-                                         ↑                                               |
-                      (3) packet intercepted by ProxyBridge                              |
-                                          |                                              |
- [user mode]      (1) TCP/UDP packet     |                                               |
- ...........................|............|..................................             |
- [kernel mode]              |            |                                               |
-                            | 			     |                                               |
- (2) Packet inspected via   |			       |                                               |
-      Windivert             ↓            |                                               |
-              +---------------+          |                                               |
-              | (2b)          |          |                                               |
-              | WinDivert.sys | ----------                                               |
-              |               |   <-------------------------------------------------------
-              +---------------+                (4a2) Packet reinject into Windivert
-                                                      for Direct connection
-
-
-```
+<p align="center">
+  <img src="img/flow1.png" alt="flow" width="600"/>
+</p>
 
 
 Case 2: Packet match with proxy rule
 
-```
-                                                                                               --------------------------------------------------      (6) perfrom proxy connection, update dest ip and port
-                                                                                              | ProxyBridge TCP/UDP(34010/34011) relay server   |         with original details with network mananger stored details
-                                                                                              |                                                 |  ----->>>>------------------------------------
-                                                                                               --------------------------------------------------                                             |
-                                                                                                                                                                                              |
-                                                                                                          ↑                                                                                   |
-                                                                                                          |                                                                                   |
-                                      -----------------------                                             | (5b)                                                                              |
-                                      |                     | (4a) Packet meet rule to Proxy              |      redirect packet to relay                                                     ↓
-                                      |    ProxyBridge      |------------------------------------         |                                                                                  (7) Proxy app
-                                      |                     |                                   ↓ (4b)    |                                                                                  like BurpSuite/InterceptSuite
-                                      -----------------------                            --------------------------------------------
-                                         ↑                                               | ProxyBridge network mananger             |
-                      (3) packet intercepted by ProxyBridge                              | (4c) Store packet original dest ip/port  |
-                                          |                                              |------------------------------------------
- [user mode]      (1) TCP/UDP packet     |                                                                 ↓
- ...........................|............|.................................................................|......................................................................................................................
- [kernel mode]              |            |                                                                 |
-                            | 			 |                                                        |
- (2) Packet inspected via   |			 |                                                        |(5a) reinjected updated packet with changed dest IP and Port
-      Windivert             ↓            |                                               |                 |
-              +---------------+          |                                               |                 |
-              | (2b)          |          |                                               |                 |
-              | WinDivert.sys | ----------                                               |                 |
-              |               |   <--------------------------------------<<<----------------------<<<------
-              +---------------+                (4a2) Packet reinject into Windivert
-                                                      for Direct connection
 
-
-```
+<p align="center">
+  <img src="img/flow.png" alt="flow" width="600"/>
+</p>
 
 **Traffic Flow:**
 1. **Applications Generate Traffic** - User-mode applications (Chrome, Discord, Games, Services) create TCP/UDP packets
@@ -296,7 +248,7 @@ Case 2: Packet match with proxy rule
    - **BLOCK** → Packet is dropped (no network access)
    - **DIRECT** → Packet is re-injected unchanged (direct connection)
    - **NO MATCH** → Packet is re-injected unchanged (direct connection)
-   - **PROXY** → Packet destination is modified to TCP/UDP relay servers (37123/37124)
+   - **PROXY** → Packet destination is modified to TCP/UDP relay servers (34010/34011)
 5. **Proxy Processing** - For PROXY-matched packets:
    - Relay servers store original destination IP and port
    - Convert raw TCP/UDP to SOCKS5/HTTP proxy protocol
