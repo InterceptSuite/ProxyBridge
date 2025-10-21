@@ -53,6 +53,8 @@ class Program
                         "  3 - Show both logs and connections",
             getDefaultValue: () => 0);
 
+        var updateCommand = new Command("--update", "Check for updates and download latest version from GitHub");
+
         var rootCommand = new RootCommand("ProxyBridge - Universal proxy client for Windows applications")
         {
             proxyOption,
@@ -60,6 +62,13 @@ class Program
             dnsViaProxyOption,
             verboseOption
         };
+
+        rootCommand.AddCommand(updateCommand);
+
+        updateCommand.SetHandler(async () =>
+        {
+            await CheckAndUpdate();
+        });
 
         rootCommand.SetHandler(async (proxyUrl, rules, dnsViaProxy, verbose) =>
         {
@@ -300,5 +309,131 @@ class Program
         Console.WriteLine("\tAuthor: Sourav Kalal/InterceptSuite");
         Console.WriteLine("\tGitHub: https://github.com/InterceptSuite/ProxyBridge");
         Console.WriteLine();
+    }
+
+    private static async Task CheckAndUpdate()
+    {
+        ShowBanner();
+        Console.WriteLine("Checking for updates...\n");
+
+        // Get version from assembly
+        var currentVersion = System.Reflection.Assembly.GetExecutingAssembly()
+            .GetName().Version?.ToString(3) ?? "0.0.0";
+
+        const string repoOwner = "InterceptSuite";
+        const string repoName = "ProxyBridge";
+
+        try
+        {
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "ProxyBridge-CLI");
+
+            var apiUrl = $"https://api.github.com/repos/{repoOwner}/{repoName}/releases/latest";
+            var response = await httpClient.GetStringAsync(apiUrl);
+
+            using var jsonDoc = System.Text.Json.JsonDocument.Parse(response);
+            var root = jsonDoc.RootElement;
+
+            var latestVersionStr = root.GetProperty("tag_name").GetString()?.TrimStart('v') ?? "";
+            var releaseName = root.GetProperty("name").GetString() ?? "Unknown";
+
+            Console.WriteLine($"Current version: {currentVersion}");
+            Console.WriteLine($"Latest version:  {latestVersionStr}");
+            Console.WriteLine();
+
+
+            if (!Version.TryParse(currentVersion, out var currentVer))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("ERROR: Invalid current version format.");
+                Console.ResetColor();
+                return;
+            }
+
+            if (!Version.TryParse(latestVersionStr, out var latestVer))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("ERROR: Invalid latest version format from GitHub.");
+                Console.ResetColor();
+                return;
+            }
+
+            if (latestVer <= currentVer)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("✓ You are using the latest version!");
+                Console.ResetColor();
+                return;
+            }
+
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"⚠ New version available: {releaseName}");
+            Console.ResetColor();
+            Console.WriteLine();
+
+
+            var assets = root.GetProperty("assets").EnumerateArray();
+            string? setupUrl = null;
+            string? setupName = null;
+
+            foreach (var asset in assets)
+            {
+                var name = asset.GetProperty("name").GetString() ?? "";
+                if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
+                    (name.Contains("setup", StringComparison.OrdinalIgnoreCase) ||
+                     name.Contains("installer", StringComparison.OrdinalIgnoreCase)))
+                {
+                    setupUrl = asset.GetProperty("browser_download_url").GetString();
+                    setupName = name;
+                    break;
+                }
+            }
+
+            if (string.IsNullOrEmpty(setupUrl))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("ERROR: Setup installer not found in latest release.");
+                Console.ResetColor();
+                Console.WriteLine($"Visit: https://github.com/{repoOwner}/{repoName}/releases/latest");
+                return;
+            }
+
+            Console.WriteLine($"Downloading: {setupName}");
+            Console.WriteLine($"From: {setupUrl}");
+            Console.WriteLine();
+
+            var tempPath = Path.Combine(Path.GetTempPath(), setupName!);
+            var setupBytes = await httpClient.GetByteArrayAsync(setupUrl);
+            await File.WriteAllBytesAsync(tempPath, setupBytes);
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"✓ Downloaded to: {tempPath}");
+            Console.ResetColor();
+            Console.WriteLine();
+
+
+            Console.WriteLine("Launching installer...");
+            var processInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = tempPath,
+                UseShellExecute = true,
+                Verb = "runas"
+            };
+
+            System.Diagnostics.Process.Start(processInfo);
+
+            Console.WriteLine();
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("✓ Installer launched successfully!");
+            Console.ResetColor();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"ERROR: {ex.Message}");
+            Console.ResetColor();
+            Console.WriteLine();
+            Console.WriteLine($"Visit: https://github.com/{repoOwner}/{repoName}/releases/latest");
+        }
     }
 }
