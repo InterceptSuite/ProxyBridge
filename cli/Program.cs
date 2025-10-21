@@ -1,4 +1,4 @@
-﻿using System.Text.RegularExpressions;
+﻿using System.CommandLine;
 using System.Security.Principal;
 using System.Runtime.Versioning;
 
@@ -9,14 +9,75 @@ class Program
     private static ProxyBridgeNative.LogCallback? _logCallback;
     private static ProxyBridgeNative.ConnectionCallback? _connectionCallback;
     private static bool _isRunning = false;
+    private static int _verboseLevel = 0;
 
-    static int Main(string[] args)
+    static async Task<int> Main(string[] args)
     {
-        if (args.Length == 0 || args.Contains("--help") || args.Contains("-h"))
+        var proxyOption = new Option<string>(
+            name: "--proxy",
+            description: "Proxy server URL with optional authentication\n" +
+                        "Format: type://ip:port or type://ip:port:username:password\n" +
+                        "Examples: socks5://127.0.0.1:1080\n" +
+                        "          http://proxy.com:8080:myuser:mypass",
+            getDefaultValue: () => "socks5://127.0.0.1:4444");
+
+        var ruleOption = new Option<string[]>(
+            name: "--rule",
+            description: "Traffic routing rule (multiple values supported, can repeat)\n" +
+                        "Format: process:hosts:ports:protocol:action\n" +
+                        "  process  - Process name(s): chrome.exe, chr*.exe, *.exe, or *\n" +
+                        "  hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple comma-separated\n" +
+                        "  ports    - Port(s): *, 443, 80,443, 80-100, or multiple comma-separated\n" +
+                        "  protocol - TCP, UDP, or BOTH\n" +
+                        "  action   - PROXY, DIRECT, or BLOCK\n" +
+                        "Examples:\n" +
+                        "  chrome.exe:*:*:TCP:PROXY\n" +
+                        "  *:*:53:UDP:PROXY\n" +
+                        "  firefox.exe:*:80,443:TCP:DIRECT")
         {
-            ShowHelp();
-            return 0;
+            AllowMultipleArgumentsPerToken = false,
+            Arity = ArgumentArity.ZeroOrMore
+        };
+
+        var dnsViaProxyOption = new Option<bool>(
+            name: "--dns-via-proxy",
+            description: "Route DNS queries through proxy (default: true)",
+            getDefaultValue: () => true);
+
+        var verboseOption = new Option<int>(
+            name: "--verbose",
+            description: "Logging verbosity level\n" +
+                        "  0 - No logs (default)\n" +
+                        "  1 - Show log messages only\n" +
+                        "  2 - Show connection events only\n" +
+                        "  3 - Show both logs and connections",
+            getDefaultValue: () => 0);
+
+        var rootCommand = new RootCommand("ProxyBridge - Universal proxy client for Windows applications")
+        {
+            proxyOption,
+            ruleOption,
+            dnsViaProxyOption,
+            verboseOption
+        };
+
+        rootCommand.SetHandler(async (proxyUrl, rules, dnsViaProxy, verbose) =>
+        {
+            await RunProxyBridge(proxyUrl, rules, dnsViaProxy, verbose);
+        }, proxyOption, ruleOption, dnsViaProxyOption, verboseOption);
+
+        if (args.Contains("--help") || args.Contains("-h") || args.Contains("-?"))
+        {
+            ShowBanner();
         }
+
+        return await rootCommand.InvokeAsync(args);
+    }
+
+    private static async Task<int> RunProxyBridge(string proxyUrl, string[] rules, bool dnsViaProxy, int verboseLevel)
+    {
+        _verboseLevel = verboseLevel;
+        ShowBanner();
 
         if (!IsRunningAsAdministrator())
         {
@@ -29,10 +90,8 @@ class Program
 
         try
         {
-            ShowBanner();
-
-            var proxyConfig = ParseProxyConfig(args);
-            var rules = ParseRules(args);
+            var proxyInfo = ParseProxyConfig(proxyUrl);
+            var parsedRules = ParseRules(rules);
 
             _logCallback = OnLog;
             _connectionCallback = OnConnection;
@@ -40,23 +99,41 @@ class Program
             ProxyBridgeNative.ProxyBridge_SetLogCallback(_logCallback);
             ProxyBridgeNative.ProxyBridge_SetConnectionCallback(_connectionCallback);
 
-            Console.WriteLine($"Proxy: {proxyConfig.Type}://{proxyConfig.Ip}:{proxyConfig.Port}");
+            Console.WriteLine($"Proxy: {proxyInfo.Type}://{proxyInfo.Ip}:{proxyInfo.Port}");
+            if (!string.IsNullOrEmpty(proxyInfo.Username))
+            {
+                Console.WriteLine($"Proxy Auth: {proxyInfo.Username}:***");
+            }
+            Console.WriteLine($"DNS via Proxy: {(dnsViaProxy ? "Enabled" : "Disabled")}");
 
-            if (!ProxyBridgeNative.ProxyBridge_SetProxyConfig(proxyConfig.Type, proxyConfig.Ip, proxyConfig.Port))
+            if (!ProxyBridgeNative.ProxyBridge_SetProxyConfig(
+                proxyInfo.Type,
+                proxyInfo.Ip,
+                proxyInfo.Port,
+                proxyInfo.Username ?? "",
+                proxyInfo.Password ?? ""))
             {
                 Console.WriteLine("ERROR: Failed to set proxy configuration");
                 return 1;
             }
 
-            if (rules.Count > 0)
+            ProxyBridgeNative.ProxyBridge_SetDnsViaProxy(dnsViaProxy);
+
+            if (parsedRules.Count > 0)
             {
-                Console.WriteLine($"Rules: {rules.Count}");
-                foreach (var rule in rules)
+                Console.WriteLine($"Rules: {parsedRules.Count}");
+                foreach (var rule in parsedRules)
                 {
-                    var ruleId = ProxyBridgeNative.ProxyBridge_AddRule(rule.ProcessName, rule.Action);
+                    var ruleId = ProxyBridgeNative.ProxyBridge_AddRule(
+                        rule.ProcessName,
+                        rule.TargetHosts,
+                        rule.TargetPorts,
+                        rule.Protocol,
+                        rule.Action);
+
                     if (ruleId > 0)
                     {
-                        Console.WriteLine($"  [{ruleId}] {rule.ProcessName} -> {rule.Action}");
+                        Console.WriteLine($"  [{ruleId}] {rule.ProcessName}:{rule.TargetHosts}:{rule.TargetPorts}:{rule.Protocol} -> {rule.Action}");
                     }
                     else
                     {
@@ -88,7 +165,7 @@ class Program
 
             while (_isRunning)
             {
-                Thread.Sleep(100);
+                await Task.Delay(100);
             }
 
             return 0;
@@ -102,67 +179,82 @@ class Program
 
     private static void OnLog(string message)
     {
-        Console.WriteLine($"[LOG] {message}");
+        // Verbose 1 = logs only, Verbose 3 = both
+        if (_verboseLevel == 1 || _verboseLevel == 3)
+        {
+            Console.WriteLine($"[LOG] {message}");
+        }
     }
 
     private static void OnConnection(string processName, uint pid, string destIp, ushort destPort, string proxyInfo)
     {
-        Console.WriteLine($"[CONN] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}");
+        // Verbose 2 = connections only, Verbose 3 = both
+        if (_verboseLevel == 2 || _verboseLevel == 3)
+        {
+            Console.WriteLine($"[CONN] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}");
+        }
     }
 
-    private static (ProxyBridgeNative.ProxyType Type, string Ip, ushort Port) ParseProxyConfig(string[] args)
+    private static (ProxyBridgeNative.ProxyType Type, string Ip, ushort Port, string? Username, string? Password) ParseProxyConfig(string proxyUrl)
     {
-        var proxyArg = GetArgValue(args, "--proxy");
+        string? username = null;
+        string? password = null;
 
-        if (string.IsNullOrEmpty(proxyArg))
+        if (proxyUrl.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
         {
-            return (ProxyBridgeNative.ProxyType.SOCKS5, "127.0.0.1", 4444);
-        }
-
-        var socks5Match = Regex.Match(proxyArg, @"^socks5://([^:]+):(\d+)$", RegexOptions.IgnoreCase);
-        if (socks5Match.Success)
-        {
-            return (
-                ProxyBridgeNative.ProxyType.SOCKS5,
-                socks5Match.Groups[1].Value,
-                ushort.Parse(socks5Match.Groups[2].Value)
-            );
-        }
-
-        var httpMatch = Regex.Match(proxyArg, @"^http://([^:]+):(\d+)$", RegexOptions.IgnoreCase);
-        if (httpMatch.Success)
-        {
-            return (
-                ProxyBridgeNative.ProxyType.HTTP,
-                httpMatch.Groups[1].Value,
-                ushort.Parse(httpMatch.Groups[2].Value)
-            );
-        }
-
-        throw new ArgumentException($"Invalid proxy format: {proxyArg}. Use socks5://ip:port or http://ip:port");
-    }
-
-    private static List<(string ProcessName, ProxyBridgeNative.RuleAction Action)> ParseRules(string[] args)
-    {
-        var rules = new List<(string, ProxyBridgeNative.RuleAction)>();
-        var ruleArg = GetArgValue(args, "--rule");
-
-        if (string.IsNullOrEmpty(ruleArg))
-        {
-            return rules;
-        }
-
-        var rulePairs = ruleArg.Split(';', StringSplitOptions.RemoveEmptyEntries);
-        foreach (var pair in rulePairs)
-        {
-            var parts = pair.Split('=', 2);
-            if (parts.Length != 2)
+            var parts = proxyUrl.Substring(9).Split(':');
+            if (parts.Length >= 2 && ushort.TryParse(parts[1], out ushort port))
             {
-                throw new ArgumentException($"Invalid rule format: {pair}. Use process=action");
+                if (parts.Length >= 4)
+                {
+                    username = parts[2];
+                    password = parts[3];
+                }
+                return (ProxyBridgeNative.ProxyType.SOCKS5, parts[0], port, username, password);
+            }
+        }
+        else if (proxyUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        {
+            var parts = proxyUrl.Substring(7).Split(':');
+            if (parts.Length >= 2 && ushort.TryParse(parts[1], out ushort port))
+            {
+                if (parts.Length >= 4)
+                {
+                    username = parts[2];
+                    password = parts[3];
+                }
+                return (ProxyBridgeNative.ProxyType.HTTP, parts[0], port, username, password);
+            }
+        }
+
+        throw new ArgumentException($"Invalid proxy format: {proxyUrl}\nUse type://ip:port or type://ip:port:username:password");
+    }
+
+    private static List<(string ProcessName, string TargetHosts, string TargetPorts, ProxyBridgeNative.RuleProtocol Protocol, ProxyBridgeNative.RuleAction Action)> ParseRules(string[] rules)
+    {
+        var parsedRules = new List<(string, string, string, ProxyBridgeNative.RuleProtocol, ProxyBridgeNative.RuleAction)>();
+
+        foreach (var rule in rules)
+        {
+            var parts = rule.Split(':', 5);
+            if (parts.Length != 5)
+            {
+                throw new ArgumentException($"Invalid rule format: {rule}\nExpected format: process:hosts:ports:protocol:action");
             }
 
             var processName = parts[0].Trim();
-            var actionStr = parts[1].Trim().ToUpper();
+            var targetHosts = parts[1].Trim();
+            var targetPorts = parts[2].Trim();
+            var protocolStr = parts[3].Trim().ToUpper();
+            var actionStr = parts[4].Trim().ToUpper();
+
+            var protocol = protocolStr switch
+            {
+                "TCP" => ProxyBridgeNative.RuleProtocol.TCP,
+                "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
+                "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
+                _ => throw new ArgumentException($"Invalid protocol: {protocolStr}. Use TCP, UDP, or BOTH")
+            };
 
             var action = actionStr switch
             {
@@ -172,22 +264,10 @@ class Program
                 _ => throw new ArgumentException($"Invalid action: {actionStr}. Use PROXY, DIRECT, or BLOCK")
             };
 
-            rules.Add((processName, action));
+            parsedRules.Add((processName, targetHosts, targetPorts, protocol, action));
         }
 
-        return rules;
-    }
-
-    private static string? GetArgValue(string[] args, string argName)
-    {
-        for (int i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i].Equals(argName, StringComparison.OrdinalIgnoreCase))
-            {
-                return args[i + 1];
-            }
-        }
-        return null;
+        return parsedRules;
     }
 
     [SupportedOSPlatform("windows")]
@@ -220,45 +300,5 @@ class Program
         Console.WriteLine("\tAuthor: Sourav Kalal/InterceptSuite");
         Console.WriteLine("\tGitHub: https://github.com/InterceptSuite/ProxyBridge");
         Console.WriteLine();
-    }
-
-    private static void ShowHelp()
-    {
-        ShowBanner();
-        Console.WriteLine(@"A lightweight proxy bridge for process-based traffic routing
-
-USAGE:
-    ProxyBridge_CLI [OPTIONS]
-
-OPTIONS:
-    --proxy <url>       Proxy server URL
-                        Format: socks5://ip:port or http://ip:port
-                        Default: socks5://127.0.0.1:4444
-
-    --rule <rules>      Traffic routing rules (semicolon-separated)
-                        Format: process=action;process=action
-                        Actions: PROXY, DIRECT, BLOCK
-                        Example: --rule ""chrome.exe=proxy;firefox.exe=direct;*=block""
-
-    --help, -h          Show this help message
-
-EXAMPLES:
-    Start with default SOCKS5 proxy:
-        ProxyBridge_CLI
-
-    Use custom HTTP proxy:
-        ProxyBridge_CLI --proxy http://192.168.1.100:8080
-
-    Route specific processes:
-        ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule ""chrome.exe=proxy;*=direct""
-
-    Block all traffic except specific apps:
-        ProxyBridge_CLI --rule ""chrome.exe=proxy;firefox.exe=proxy;*=block""
-
-NOTES:
-    - Press Ctrl+C to stop ProxyBridge
-    - Use * as process name to match all traffic
-    - Process names are case-insensitive
-");
     }
 }

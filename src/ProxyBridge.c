@@ -23,7 +23,7 @@ typedef struct PROCESS_RULE {
     char process_name[MAX_PROCESS_NAME];
     char *target_hosts;   // Dynamic: IP filter "*", "192.168.*.*", "10.0.0.1;172.16.0.0"
     char *target_ports;   // Dynamic: Port filter "*", "80", "80;443", "8000-9000"
-    RuleProtocol protocol;  // TCP, UDP, or BOTH (for future)
+    RuleProtocol protocol;  // TCP, UDP, or BOTH
     RuleAction action;
     BOOL enabled;
     struct PROCESS_RULE *next;
