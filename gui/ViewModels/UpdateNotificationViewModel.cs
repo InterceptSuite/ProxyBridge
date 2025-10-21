@@ -14,7 +14,7 @@ public class UpdateNotificationViewModel : ViewModelBase
     private readonly SettingsService _settingsService;
     private readonly Action _onClose;
     private readonly VersionInfo _versionInfo;
-    
+
     private string _currentVersion = "";
     private string _latestVersion = "";
     private string _downloadStatus = "";
@@ -33,10 +33,10 @@ public class UpdateNotificationViewModel : ViewModelBase
         _settingsService = new SettingsService();
         _onClose = onClose;
         _versionInfo = versionInfo;
-        
+
         CurrentVersion = versionInfo.CurrentVersionString;
         LatestVersion = versionInfo.LatestVersionString;
-        
+
         UpdateNowCommand = new RelayCommand(async () => await DownloadAndInstallAsync());
         DontAskAgainCommand = new RelayCommand(DontAskAgain);
         LaterCommand = new RelayCommand(_onClose);
