@@ -224,6 +224,7 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand ShowProxySettingsCommand { get; }
     public ICommand ShowProxyRulesCommand { get; }
     public ICommand ShowAboutCommand { get; }
+    public ICommand CheckForUpdatesCommand { get; }
     public ICommand ToggleDnsViaProxyCommand { get; }
     public ICommand CloseDialogCommand { get; }
     public ICommand ClearConnectionsLogCommand { get; }
@@ -342,6 +343,18 @@ public class MainWindowViewModel : ViewModelBase
             if (_mainWindow != null)
             {
                 await window.ShowDialog(_mainWindow);
+            }
+        });
+
+        CheckForUpdatesCommand = new RelayCommand(async () =>
+        {
+            var updateWindow = new UpdateCheckWindow();
+            var viewModel = new UpdateCheckViewModel(() => updateWindow.Close());
+            updateWindow.DataContext = viewModel;
+
+            if (_mainWindow != null)
+            {
+                await updateWindow.ShowDialog(_mainWindow);
             }
         });
 

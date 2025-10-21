@@ -213,7 +213,10 @@
                         </MenuItem.Icon>
                     </MenuItem>
                 </MenuItem>
-                <MenuItem Header="About" Command="{Binding ShowAboutCommand}"/>
+                <MenuItem Header="About">
+                    <MenuItem Header="About ProxyBridge" Command="{Binding ShowAboutCommand}"/>
+                    <MenuItem Header="Check for Updates" Command="{Binding CheckForUpdatesCommand}"/>
+                </MenuItem>
             </Menu>
 
             <!-- Tab Control -->

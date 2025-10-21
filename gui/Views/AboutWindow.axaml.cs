@@ -1,7 +1,6 @@
 using Avalonia.Controls;
 using System.Diagnostics;
 using Avalonia.Input;
-using Avalonia.Interactivity;
 
 namespace ProxyBridge.GUI.Views;
 
