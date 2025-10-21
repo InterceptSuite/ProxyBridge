@@ -71,7 +71,15 @@ Launch `ProxyBridge.exe` (GUI) with Administrator privileges for an intuitive gr
 3. Select **Proxy Type** (SOCKS5 or HTTP)
 4. Enter **Proxy IP Address** (e.g., 127.0.0.1)
 5. Enter **Proxy Port** (e.g., 1080 for SOCKS5, 8080 for HTTP)
-6. Click **Save Changes**
+6. (Optional) Enter **Proxy Username** and **Proxy Password** for authenticated proxies
+7. Click **Save Changes**
+
+**Test Proxy Connection:**
+1. Click **Test Proxy Connection** button
+2. Enter **Destination IP/Host** (default: google.com)
+3. Enter **Destination Port** (default: 80)
+4. Click **Start Test** to verify proxy connectivity
+5. View test results in the output area
 
 #### Process Rules
 
