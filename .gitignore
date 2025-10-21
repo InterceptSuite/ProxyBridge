@@ -10,3 +10,4 @@ gui/obj/**
 cli/bin/**
 cli/obj/**
 .vscode/**
+output/ProxyBridge_CLI.pdb
