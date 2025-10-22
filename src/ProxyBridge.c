@@ -808,6 +808,11 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
 
 static BOOL is_broadcast_or_multicast(UINT32 ip)
 {
+    // Localhost: 127.0.0.0/8 (127.x.x.x)
+    BYTE first_octet = (ip >> 0) & 0xFF;
+    if (first_octet == 127)
+        return TRUE;
+
     // Broadcast: 255.255.255.255
     if (ip == 0xFFFFFFFF)
         return TRUE;
@@ -817,7 +822,6 @@ static BOOL is_broadcast_or_multicast(UINT32 ip)
         return TRUE;
 
     // Multicast: 224.0.0.0 - 239.255.255.255 (first octet 224-239)
-    BYTE first_octet = (ip >> 0) & 0xFF;
     if (first_octet >= 224 && first_octet <= 239)
         return TRUE;
 
