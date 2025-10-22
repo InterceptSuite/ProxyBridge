@@ -1,0 +1,114 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:ProxyBridge.GUI.ViewModels"
+        x:Class="ProxyBridge.GUI.Views.UpdateCheckWindow"
+        x:DataType="vm:UpdateCheckViewModel"
+        x:CompileBindings="True"
+        Title="Check for Updates"
+        Icon="/Assets/logo.ico"
+        Width="500" Height="300"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Background="#FF1E1E1E">
+
+    <Design.DataContext>
+        <vm:UpdateCheckViewModel/>
+    </Design.DataContext>
+
+    <Grid RowDefinitions="Auto,*,Auto">
+        <!-- Header -->
+        <Border Grid.Row="0" Background="#FF252526" BorderBrush="#FF007ACC" BorderThickness="0,0,0,1" Padding="16,12">
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <TextBlock Text="Update Check"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Content -->
+        <StackPanel Grid.Row="1" Margin="32,24" Spacing="16" VerticalAlignment="Center">
+            <!-- Current Version -->
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Text="Current Version:"
+                           FontWeight="Medium"
+                           Foreground="#FFB0B0B0"
+                           Width="120"/>
+                <TextBlock Text="{Binding CurrentVersion}"
+                           Foreground="#FF007ACC"/>
+            </StackPanel>
+
+            <!-- Latest Version -->
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Text="Latest Version:"
+                           FontWeight="Medium"
+                           Foreground="#FFB0B0B0"
+                           Width="120"/>
+                <TextBlock Text="{Binding LatestVersion}"
+                           Foreground="{Binding LatestVersionColor}"/>
+            </StackPanel>
+
+            <!-- Status Message -->
+            <TextBlock Text="{Binding StatusMessage}"
+                       FontWeight="Medium"
+                       Foreground="{Binding StatusColor}"
+                       HorizontalAlignment="Center"
+                       TextWrapping="Wrap"
+                       Margin="0,8,0,0"/>
+
+            <!-- Loading indicator -->
+            <TextBlock Text="Checking for updates..."
+                       Foreground="#FFB0B0B0"
+                       HorizontalAlignment="Center"
+                       IsVisible="{Binding IsChecking}"/>
+
+            <!-- Download Progress -->
+            <StackPanel Spacing="8" IsVisible="{Binding IsDownloading}">
+                <TextBlock Text="{Binding DownloadStatus}"
+                           Foreground="#FF007ACC"
+                           HorizontalAlignment="Center"/>
+                <ProgressBar Value="{Binding DownloadProgress}"
+                             Minimum="0"
+                             Maximum="100"
+                             Height="6"
+                             Background="#FF3C3C3C"
+                             Foreground="#FF007ACC"/>
+            </StackPanel>
+
+            <!-- Error message -->
+            <TextBlock Text="{Binding ErrorMessage}"
+                       Foreground="#FFFF6B6B"
+                       HorizontalAlignment="Center"
+                       TextWrapping="Wrap"
+                       IsVisible="{Binding HasError}"/>
+        </StackPanel>
+
+        <!-- Buttons -->
+        <Border Grid.Row="2" Background="#FF252526" BorderBrush="#FF007ACC" BorderThickness="0,1,0,0" Padding="16,12">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+                <!-- Download Now Button (only visible when update is available) -->
+                <Button Content="Download Now"
+                        Command="{Binding DownloadNowCommand}"
+                        IsVisible="{Binding IsUpdateAvailable}"
+                        IsEnabled="{Binding !IsDownloading}"
+                        Background="#FF4CAF50"
+                        Foreground="White"
+                        Padding="16,6"
+                        CornerRadius="3"/>
+                <Button Content="Check Again"
+                        Command="{Binding CheckUpdatesCommand}"
+                        IsEnabled="{Binding !IsChecking}"
+                        Background="#FF007ACC"
+                        Foreground="White"
+                        Padding="16,6"
+                        CornerRadius="3"/>
+                <Button Content="Close"
+                        Command="{Binding CloseCommand}"
+                        Background="#FF3C3C3C"
+                        Foreground="White"
+                        Padding="16,6"
+                        CornerRadius="3"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

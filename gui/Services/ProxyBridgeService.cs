@@ -49,16 +49,16 @@ public class ProxyBridgeService : IDisposable
         return !_isRunning;
     }
 
-    public bool SetProxyConfig(string type, string ip, ushort port)
+    public bool SetProxyConfig(string type, string ip, ushort port, string username, string password)
     {
         var proxyType = type.ToUpper() == "HTTP"
             ? ProxyBridgeNative.ProxyType.HTTP
             : ProxyBridgeNative.ProxyType.SOCKS5;
 
-        return ProxyBridgeNative.ProxyBridge_SetProxyConfig(proxyType, ip, port);
+        return ProxyBridgeNative.ProxyBridge_SetProxyConfig(proxyType, ip, port, username, password);
     }
 
-    public uint AddRule(string processName, string action)
+    public uint AddRule(string processName, string targetHosts, string targetPorts, string protocol, string action)
     {
         var ruleAction = action.ToUpper() switch
         {
@@ -67,7 +67,15 @@ public class ProxyBridgeService : IDisposable
             _ => ProxyBridgeNative.RuleAction.PROXY
         };
 
-        return ProxyBridgeNative.ProxyBridge_AddRule(processName, ruleAction);
+        var ruleProtocol = protocol.ToUpper() switch
+        {
+            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
+            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
+            "TCP+UDP" => ProxyBridgeNative.RuleProtocol.BOTH,
+            _ => ProxyBridgeNative.RuleProtocol.TCP
+        };
+
+        return ProxyBridgeNative.ProxyBridge_AddRule(processName, targetHosts, targetPorts, ruleProtocol, ruleAction);
     }
 
     public bool EnableRule(uint ruleId)
@@ -80,9 +88,46 @@ public class ProxyBridgeService : IDisposable
         return ProxyBridgeNative.ProxyBridge_DisableRule(ruleId);
     }
 
-    public bool ClearRules()
+    public bool DeleteRule(uint ruleId)
     {
-        return ProxyBridgeNative.ProxyBridge_ClearRules();
+        return ProxyBridgeNative.ProxyBridge_DeleteRule(ruleId);
+    }
+
+    public bool EditRule(uint ruleId, string processName, string targetHosts, string targetPorts, string protocol, string action)
+    {
+        var ruleAction = action.ToUpper() switch
+        {
+            "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
+            "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
+            _ => ProxyBridgeNative.RuleAction.PROXY
+        };
+
+        var ruleProtocol = protocol.ToUpper() switch
+        {
+            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
+            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
+            "TCP+UDP" => ProxyBridgeNative.RuleProtocol.BOTH,
+            _ => ProxyBridgeNative.RuleProtocol.TCP
+        };
+
+        return ProxyBridgeNative.ProxyBridge_EditRule(ruleId, processName, targetHosts, targetPorts, ruleProtocol, ruleAction);
+    }
+
+    public void SetDnsViaProxy(bool enable)
+    {
+        ProxyBridgeNative.ProxyBridge_SetDnsViaProxy(enable);
+    }
+
+    public string TestConnection(string targetHost, ushort targetPort)
+    {
+        var buffer = new System.Text.StringBuilder(4096);
+        int result = ProxyBridgeNative.ProxyBridge_TestConnection(
+            targetHost,
+            targetPort,
+            buffer,
+            (UIntPtr)buffer.Capacity);
+
+        return buffer.ToString();
     }
 
     public void Dispose()

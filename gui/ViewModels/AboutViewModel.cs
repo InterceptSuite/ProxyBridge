@@ -9,6 +9,10 @@ public class AboutViewModel
     public string Version { get; }
     public ICommand CloseCommand { get; }
 
+    public AboutViewModel() : this(() => { })
+    {
+    }
+
     public AboutViewModel(Action onClose)
     {
         var version = Assembly.GetExecutingAssembly().GetName().Version;

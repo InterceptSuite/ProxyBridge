@@ -35,6 +35,13 @@ public static class ProxyBridgeNative
         BLOCK = 2
     }
 
+    public enum RuleProtocol
+    {
+        TCP = 0,
+        UDP = 1,
+        BOTH = 2
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void LogCallback([MarshalAs(UnmanagedType.LPStr)] string message);
 
@@ -49,11 +56,10 @@ public static class ProxyBridgeNative
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern uint ProxyBridge_AddRule(
         [MarshalAs(UnmanagedType.LPStr)] string processName,
+        [MarshalAs(UnmanagedType.LPStr)] string targetHosts,
+        [MarshalAs(UnmanagedType.LPStr)] string targetPorts,
+        RuleProtocol protocol,
         RuleAction action);
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool ProxyBridge_ClearRules();
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -65,10 +71,26 @@ public static class ProxyBridgeNative
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ProxyBridge_DeleteRule(uint ruleId);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ProxyBridge_EditRule(
+        uint ruleId,
+        [MarshalAs(UnmanagedType.LPStr)] string processName,
+        [MarshalAs(UnmanagedType.LPStr)] string targetHosts,
+        [MarshalAs(UnmanagedType.LPStr)] string targetPorts,
+        RuleProtocol protocol,
+        RuleAction action);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_SetProxyConfig(
         ProxyType type,
         [MarshalAs(UnmanagedType.LPStr)] string proxyIp,
-        ushort proxyPort);
+        ushort proxyPort,
+        [MarshalAs(UnmanagedType.LPStr)] string username,
+        [MarshalAs(UnmanagedType.LPStr)] string password);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern void ProxyBridge_SetLogCallback(LogCallback callback);
@@ -77,10 +99,20 @@ public static class ProxyBridgeNative
     public static extern void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern void ProxyBridge_SetDnsViaProxy([MarshalAs(UnmanagedType.Bool)] bool enable);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_Start();
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_Stop();
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int ProxyBridge_TestConnection(
+        [MarshalAs(UnmanagedType.LPStr)] string targetHost,
+        ushort targetPort,
+        [MarshalAs(UnmanagedType.LPStr)] System.Text.StringBuilder resultBuffer,
+        UIntPtr bufferSize);
 }

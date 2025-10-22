@@ -81,7 +81,6 @@
                        Foreground="#FFB0B0B0"
                        Margin="0,8,0,0"/>
 
-
         </StackPanel>
     </Grid>
 </Window>

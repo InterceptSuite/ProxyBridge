@@ -1,0 +1,106 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:ProxyBridge.GUI.ViewModels"
+        x:Class="ProxyBridge.GUI.Views.UpdateNotificationWindow"
+        x:DataType="vm:UpdateNotificationViewModel"
+        x:CompileBindings="True"
+        Title="Update Available"
+        Icon="/Assets/logo.ico"
+        Width="450" Height="250"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Background="#FF1E1E1E">
+
+    <Design.DataContext>
+        <vm:UpdateNotificationViewModel/>
+    </Design.DataContext>
+
+    <Grid RowDefinitions="Auto,*,Auto">
+        <!-- Header -->
+        <Border Grid.Row="0" Background="#FF252526" BorderBrush="#FF007ACC" BorderThickness="0,0,0,1" Padding="16,12">
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <TextBlock Text="Update Available"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Content -->
+        <StackPanel Grid.Row="1" Margin="32,24" Spacing="16" VerticalAlignment="Center">
+            <!-- Version Info -->
+            <StackPanel Spacing="12">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Text="Current Version:"
+                               FontWeight="Medium"
+                               Foreground="#FFB0B0B0"
+                               Width="120"/>
+                    <TextBlock Text="{Binding CurrentVersion}"
+                               Foreground="#FF007ACC"/>
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Text="New Version:"
+                               FontWeight="Medium"
+                               Foreground="#FFB0B0B0"
+                               Width="120"/>
+                    <TextBlock Text="{Binding LatestVersion}"
+                               Foreground="#FF4CAF50"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Update Message -->
+            <TextBlock Text="A new version of ProxyBridge is available. Would you like to download and install it now?"
+                       TextWrapping="Wrap"
+                       HorizontalAlignment="Center"
+                       Foreground="#FFB0B0B0"
+                       Margin="0,8,0,8"/>
+
+            <!-- Download Progress -->
+            <StackPanel IsVisible="{Binding IsDownloading}" Spacing="8">
+                <TextBlock Text="{Binding DownloadStatus}"
+                           HorizontalAlignment="Center"
+                           Foreground="#FF007ACC"/>
+                <ProgressBar Value="{Binding DownloadProgress}"
+                             Maximum="100"
+                             Height="8"
+                             Background="#FF3C3C3C"
+                             Foreground="#FF007ACC"/>
+            </StackPanel>
+
+            <!-- Error Message -->
+            <TextBlock Text="{Binding ErrorMessage}"
+                       Foreground="#FFFF6B6B"
+                       HorizontalAlignment="Center"
+                       TextWrapping="Wrap"
+                       IsVisible="{Binding HasError}"/>
+        </StackPanel>
+
+        <!-- Buttons -->
+        <Border Grid.Row="2" Background="#FF252526" BorderBrush="#FF007ACC" BorderThickness="0,1,0,0" Padding="16,12">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+                <Button Content="Update Now"
+                        Command="{Binding UpdateNowCommand}"
+                        IsEnabled="{Binding !IsDownloading}"
+                        Background="#FF4CAF50"
+                        Foreground="White"
+                        Padding="16,6"
+                        CornerRadius="3"/>
+                <Button Content="Don't Ask Again"
+                        Command="{Binding DontAskAgainCommand}"
+                        IsEnabled="{Binding !IsDownloading}"
+                        Background="#FFFF6B6B"
+                        Foreground="White"
+                        Padding="16,6"
+                        CornerRadius="3"/>
+                <Button Content="Later"
+                        Command="{Binding LaterCommand}"
+                        IsEnabled="{Binding !IsDownloading}"
+                        Background="#FF3C3C3C"
+                        Foreground="White"
+                        Padding="16,6"
+                        CornerRadius="3"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

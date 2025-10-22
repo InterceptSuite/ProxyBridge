@@ -5,7 +5,7 @@
 </p>
 
 
-ProxyBridge is a lightweight, open-source alternative to Proxifier that provides transparent proxy routing for Windows applications. It redirects TCP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. Working at the kernel level using WinDivert, ProxyBridge is compatible with proxy-unaware applications without requiring any configuration changes.
+ProxyBridge is a lightweight, open-source alternative to Proxifier that provides transparent proxy routing for Windows applications. It redirects TCP and UDP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. Unlike Proxifier which only logs UDP connections without proxy support, ProxyBridge fully supports both TCP and UDP proxy routing. Working at the kernel level using WinDivert, ProxyBridge is compatible with proxy-unaware applications without requiring any configuration changes.
 
 ## Features
 
@@ -15,9 +15,10 @@ ProxyBridge is a lightweight, open-source alternative to Proxifier that provides
 - **Multiple proxy protocols** - Supports SOCKS5 and HTTP proxies
 - **Kernel-level interception** - Uses WinDivert for reliable packet capture
 - **No configuration needed** - Applications work without any modifications
-- **Protocol agnostic** - Compatible with any TCP protocol (HTTP, HTTPS, databases, RDP, SSH, etc.)
-- **Traffic blocking** - Block specific applications from accessing the internet
+- **Protocol agnostic** - Compatible with TCP and UDP protocols (HTTP/HTTPS, HTTP/3, databases, RDP, SSH, games, DTLS, DNS, etc.)
+- **Traffic blocking** - Block specific applications from accessing the internet or any network (LAN, localhost, etc.)
 - **Flexible rules** - Direct connection, proxy routing, or complete blocking per process
+- **Advanced rule configuration** - Target specific processes, IPs, ports, protocols (TCP/UDP), and hostnames with wildcard support
 - **Process exclusion** - Prevent proxy loops by excluding proxy applications
 
 ## Table of Contents
@@ -34,6 +35,7 @@ ProxyBridge is a lightweight, open-source alternative to Proxifier that provides
     - [Rule Examples](#rule-examples)
 - [Use Cases](#use-cases)
 - [Current Limitations](#current-limitations)
+- [Things to Note](#things-to-note)
 - [How It Works](#how-it-works)
 - [Build from Source](#build-from-source)
 - [License](#license)
@@ -70,7 +72,15 @@ Launch `ProxyBridge.exe` (GUI) with Administrator privileges for an intuitive gr
 3. Select **Proxy Type** (SOCKS5 or HTTP)
 4. Enter **Proxy IP Address** (e.g., 127.0.0.1)
 5. Enter **Proxy Port** (e.g., 1080 for SOCKS5, 8080 for HTTP)
-6. Click **Save Changes**
+6. (Optional) Enter **Proxy Username** and **Proxy Password** for authenticated proxies
+7. Click **Save Changes**
+
+**Test Proxy Connection:**
+1. Click **Test Proxy Connection** button
+2. Enter **Destination IP/Host** (default: google.com)
+3. Enter **Destination Port** (default: 80)
+4. Click **Start Test** to verify proxy connectivity
+5. View test results in the output area
 
 #### Process Rules
 
@@ -84,14 +94,35 @@ Launch `ProxyBridge.exe` (GUI) with Administrator privileges for an intuitive gr
 
 1. Click **Proxy** tab in the main window
 2. Click **Proxy Rules** from the menu
-3. Add process rules with actions:
+3. Configure rule parameters:
+
+   **Applications:**
+   - Use `*` as wildcard for all processes
+   - Enter single process: `chrome.exe`
+   - Enter multiple processes (semicolon-separated): `firefox.exe; chrome.exe`
+   - Use **Browse** button to select process executable from directory
+
+   **Target Hosts (Optional):**
+   - Specific IP: `127.0.0.1`
+   - Wildcard IP range: `127.0.*.*` or `192.168.*.*`
+   - Multiple IPs: `127.0.0.1; 192.168.1.1`
+   - IP range: `10.10.1.1-10.10.255.255`
+   - Leave empty or use `*` for all hosts
+
+   **Target Ports (Optional):**
+   - Specific ports: `80; 8080`
+   - Port range: `80-8000`
+   - Leave empty or use `*` for all ports
+
+   **Protocol:**
+   - Select **TCP**, **UDP**, or **Both (TCP + UDP)**
+
+   **Action:**
    - **PROXY** - Route through configured proxy
    - **DIRECT** - Allow direct internet access
    - **BLOCK** - Block all internet access
-4. Enter process name
-      - Use `*` as wildcard to set default action for all processes
-      - or Appname like chrome or chrome.exe
-5. Click **Save** to apply rules
+
+4. Click **Save Rule** to apply the configuration
 
 #### Activity Monitoring
 
@@ -100,10 +131,11 @@ Launch `ProxyBridge.exe` (GUI) with Administrator privileges for an intuitive gr
 </p>
 
 - View real-time connection activity in the **Connections** tab
-- Monitor which processes are active and their routing status
+- Monitor all system connections including both TCP and UDP protocols
+- See connections from all processes, whether they match rules or not
+- Track which processes are active and their routing status (PROXY, DIRECT, or BLOCK)
 - Search and filter connections using the search box
 
-**Important:** The GUI automatically saves your configuration and restores it on next launch.
 
 **Note:** Adding a rule with action **PROXY** while no proxy is configured will result in traffic being routed through a direct connection instead. Make sure to configure proxy settings before using PROXY rules.
 
@@ -120,85 +152,104 @@ ProxyBridge_CLI -h
 ProxyBridge_CLI --proxy http://192.168.1.100:8080
 
 # Route Chrome through socks5 proxy
-ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "chrome.exe=proxy"
+ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "chrome.exe:*:*:TCP:PROXY"
+
+# Route multiple processes in single rule (semicolon-separated)
+ProxyBridge_CLI --proxy http://127.0.0.1:8080 --rule "chrome.exe;steam*.exe:*:*:TCP:PROXY"
+
+# Multiple rules with verbose connection logging
+ProxyBridge_CLI --proxy http://127.0.0.1:8080 --rule "chrome.exe;steam*.exe:*:*:TCP:PROXY" --rule "firefox.exe:*:*:TCP:PROXY" --verbose 2
 
 # Block specific application from internet access
-ProxyBridge_CLI --rule "chrome.exe=block"
+ProxyBridge_CLI --rule "malware.exe:*:*:BOTH:BLOCK"
 
 # Route specific apps through proxy, block everything else
-ProxyBridge_CLI --rule "chrome.exe=proxy;firefox.exe=proxy;*=block"
+ProxyBridge_CLI --rule "chrome.exe:*:*:TCP:PROXY" --rule "firefox.exe:*:*:TCP:PROXY" --rule "*:*:*:BOTH:BLOCK"
 
 # Route all through proxy except proxy app itself
-ProxyBridge_CLI --rule "*=proxy;BurpSuiteCommunity.exe=direct"
+ProxyBridge_CLI --rule "*:*:*:TCP:PROXY" --rule "BurpSuiteCommunity.exe:*:*:TCP:DIRECT"
+
+# Target specific IPs and ports
+ProxyBridge_CLI --rule "chrome.exe:192.168.*.*;10.10.*.*:80;443;8080:TCP:PROXY"
+
 
 ```
 
 #### Command Line Options
 ```
-ProxyBridge_CLI -h
+ProxyBridge_CLI.exe -h
 
   ____                        ____       _     _
  |  _ \ _ __ _____  ___   _  | __ ) _ __(_) __| | __ _  ___
  | |_) | '__/ _ \ \/ / | | | |  _ \| '__| |/ _` |/ _` |/ _ \
  |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/
  |_|   |_|  \___/_/\_\\__, | |____/|_|  |_|\__,_|\__, |\___|
-                      |___/                      |___/  V1.1
+                      |___/                      |___/  V2.0
 
   Universal proxy client for Windows applications
 
         Author: Sourav Kalal/InterceptSuite
         GitHub: https://github.com/InterceptSuite/ProxyBridge
 
-A lightweight proxy bridge for process-based traffic routing
+Description:
+  ProxyBridge - Universal proxy client for Windows applications
 
-USAGE:
-    ProxyBridge_CLI [OPTIONS]
+Usage:
+  ProxyBridge_CLI [command] [options]
 
-OPTIONS:
-    --proxy <url>       Proxy server URL
-                        Format: socks5://ip:port or http://ip:port
-                        Default: socks5://127.0.0.1:4444
+Options:
+  --proxy <proxy>      Proxy server URL with optional authentication
+                       Format: type://ip:port or type://ip:port:username:password
+                       Examples: socks5://127.0.0.1:1080
+                                 http://proxy.com:8080:myuser:mypass [default: socks5://127.0.0.1:4444]
+  --rule <rule>        Traffic routing rule (multiple values supported, can repeat)
+                       Format: process:hosts:ports:protocol:action
+                         process  - Process name(s): chrome.exe, chr*.exe, *.exe, or *
+                         hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple comma-separated
+                         ports    - Port(s): *, 443, 80,443, 80-100, or multiple comma-separated
+                         protocol - TCP, UDP, or BOTH
+                         action   - PROXY, DIRECT, or BLOCK
+                       Examples:
+                         chrome.exe:*:*:TCP:PROXY
+                         *:*:53:UDP:PROXY
+                         firefox.exe:*:80,443:TCP:DIRECT
+  --dns-via-proxy      Route DNS queries through proxy (default: true) [default: True]
+  --verbose <verbose>  Logging verbosity level
+                         0 - No logs (default)
+                         1 - Show log messages only
+                         2 - Show connection events only
+                         3 - Show both logs and connections [default: 0]
+  --version            Show version information
+  -?, -h, --help       Show help and usage information
 
-    --rule <rules>      Traffic routing rules (semicolon-separated)
-                        Format: process=action;process=action
-                        Actions: PROXY, DIRECT, BLOCK
-                        Example: --rule "chrome.exe=proxy;firefox.exe=direct;*=block"
-
-    --help, -h          Show this help message
-
-EXAMPLES:
-    Start with default SOCKS5 proxy:
-        ProxyBridge_CLI
-
-    Use custom HTTP proxy:
-        ProxyBridge_CLI --proxy http://192.168.1.100:8080
-
-    Route specific processes:
-        ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "chrome.exe=proxy;*=direct"
-
-    Block all traffic except specific apps:
-        ProxyBridge_CLI --rule "chrome.exe=proxy;firefox.exe=proxy;*=block"
-
-NOTES:
-    - Press Ctrl+C to stop ProxyBridge
-    - Use * as process name to match all traffic
-    - Process names are case-insensitive
+Commands:
+  --update  Check for updates and download latest version from GitHub
 
 ```
 
-#### Rule Examples
+#### Rule Format
+
+**Format:** `process:hosts:ports:protocol:action`
+
+- **process** - Process name(s): `chrome.exe`, `chrome.exe;firefox.exe`, `steam*.exe`, or `*`
+- **hosts** - Target IP/hostname(s): `*`, `192.168.1.1`, `192.168.*.*`, `10.10.1.1-10.10.255.255`, or `192.168.1.1;10.10.10.10`
+- **ports** - Target port(s): `*`, `443`, `80;443;8080`, `80-8000`, or `80;443;8000-9000`
+- **protocol** - `TCP`, `UDP`, or `BOTH`
+- **action** - `PROXY`, `DIRECT`, or `BLOCK`
+
+**Examples:**
 ```powershell
-# Single process rule
---rule "chrome.exe=proxy"
+# Single process to proxy
+--rule "chrome.exe:*:*:TCP:PROXY"
 
-# Multiple processes with different actions
---rule "chrome.exe=proxy;firefox.exe=direct;malware.exe=block"
+# Multiple processes in one rule
+--rule "chrome.exe;firefox.exe;steam*.exe:*:*:TCP:PROXY"
 
-# Default action for all unmatched processes
---rule "chrome.exe=proxy;*=direct"
+# Target specific IPs and ports
+--rule "chrome.exe:192.168.*;10.10.*.*:80;443;8080:TCP:PROXY"
 
-# Whitelist approach (block everything except specific apps)
---rule "chrome.exe=proxy;firefox.exe=proxy;*=block"
+# Allow direct connection (bypass proxy)
+--rule "BurpSuiteCommunity.exe:*:*:TCP:DIRECT"
 ```
 
 **Notes:**
@@ -220,79 +271,63 @@ NOTES:
 ## Current Limitations
 
 - IPv4 only (IPv6 not supported)
-- TCP only (UDP not supported)
-- IP and Port based Routing
 
+## Things to Note
+
+- **DNS Traffic Handling**: DNS traffic on TCP and UDP port 53 is handled separately from proxy rules. Even if you configure rules for port 53, they will be ignored. Instead, DNS routing is controlled by the **DNS via Proxy** option in the Proxy menu (enabled by default). When enabled, all DNS queries are routed through the proxy; when disabled, DNS queries use direct connection.
+
+- **Automatic Direct Routing**: Certain IP addresses automatically use direct connection regardless of proxy rules. This includes:
+  - Localhost addresses (127.*.*.*)
+  - Broadcast and multicast addresses
+  - These IPs are used by various processes (curl, Firefox, NVIDIA drivers, Windows services) and system components. Note that Windows loopback traffic uses its own method that bypasses the network interface card (NIC), which currently doesn't support proxy routing due to technical limitations with WinDivert at the network layer.
+
+- **UDP Proxy Requirements**: UDP traffic only works when a SOCKS5 proxy is configured. If an HTTP proxy server is configured, ProxyBridge will ignore UDP proxy rules and route UDP traffic as direct connection instead. This limitation does not affect UDP rules with BLOCK or DIRECT actions.
+
+  **Important UDP Considerations**:
+  - Configuring a SOCKS5 proxy does not guarantee UDP will work. Most SOCKS5 proxies do not support UDP traffic, including SSH SOCKS5 proxies.
+  - The SOCKS5 proxy must support UDP ASSOCIATE command. If ProxyBridge fails to establish a UDP association with the SOCKS5 proxy, packets will fail to connect.
+  - Many UDP applications use HTTP/3 and DTLS protocols. Even if your SOCKS5 proxy supports UDP ASSOCIATE, ensure it can handle DTLS and HTTP/3 UDP traffic, as they require separate handling beyond raw UDP packets.
+  - **Testing UDP/HTTP3/DTLS Support**: If you need to test UDP, HTTP/3, and DTLS support with a SOCKS5 proxy, try [Nexus Proxy](https://github.com/InterceptSuite/nexus-proxy) - a proxy application created specifically to test ProxyBridge with advanced UDP protocols.
 
 ## How It Works
 
-```
-                                    Your Application
-                                 (Chrome, Discord, etc.)
-                                    Proxy-Unaware
-                                          |
-                                          | (1) Raw TCP Packets
-                                          v
-[user mode]                               |
-...........................................+...........................................
-[kernel mode]                             |
-                                          v
-                              +------------------------+
-                              |   WinDivert.sys        |
-         (1) All packets ---->|   (Kernel Driver)      |
-         intercepted          |   - Intercepts ALL TCP |
-                              +------------------------+
-                                          |
-                                          | (2) Sends ALL packets to ProxyBridge
-                                          v
-...........................................+...........................................
-[kernel mode]                             |
-[user mode]                               v
-                              +------------------------+
-                              | ProxyBridge.exe        |
-                              | Packet Handler         |
-                              | - Checks process name  |
-                              | - Matches target?      |
-                              +------------------------+
-                                    |            |
-                     (matching)     |            | (non-matching)
-                     redirect       |            | re-inject unchanged
-                                    |            |
-                                    |            +-------------------> Internet
-                                    |                                (direct connection)
-                                    | (3) re-inject with modified
-                                    |     destination: localhost:37123
-                                    v
-                              +------------------------+
-                              | ProxyBridge            |
-                              | TCP Relay Server       |
-                              | (localhost:37123)      |
-                              | - Tracks origin        |
-                              | - Converts TCP to      |
-                              |   SOCKS5/HTTP protocol |
-                              +------------------------+
-                                    |
-                                    | SOCKS5/HTTP CONNECT
-                                    v
-                              +------------------------+
-                              | Proxy Server           |
-                              | (Burp/InterceptSuite)  |
-                              | 127.0.0.1:8080/4444    |
-                              +------------------------+
-                                    |
-                                    | Proxied Traffic
-                                    v
-                                 Internet
-```
+ProxyBridge use Windivert to inspect all TCP/UDP packets and use rules from user to perform action on them
+
+Case 1: Packet does not match any rules
+
+<p align="center">
+  <img src="img/flow1.png" alt="flow" width="600"/>
+</p>
+
+
+Case 2: Packet match with proxy rule
+
+
+<p align="center">
+  <img src="img/flow.png" alt="flow" width="600"/>
+</p>
+
+**Traffic Flow:**
+1. **Applications Generate Traffic** - User-mode applications (Chrome, Discord, Games, Services) create TCP/UDP packets
+2. **Kernel Interception** - WinDivert.sys driver intercepts ALL outbound packets at kernel level
+3. **User-Mode Delivery** - WinDivert.dll receives intercepted packets and delivers them to ProxyBridge
+4. **Rule Evaluation** - ProxyBridge inspects each packet and applies configured rules:
+   - **BLOCK** → Packet is dropped (no network access)
+   - **DIRECT** → Packet is re-injected unchanged (direct connection)
+   - **NO MATCH** → Packet is re-injected unchanged (direct connection)
+   - **PROXY** → Packet destination is modified to TCP/UDP relay servers (34010/34011)
+5. **Proxy Processing** - For PROXY-matched packets:
+   - Relay servers store original destination IP and port
+   - Convert raw TCP/UDP to SOCKS5/HTTP proxy protocol
+   - Perform proxy authentication and forward to proxy server
+6. **Proxy Forwarding** - Proxy server (Burp Suite/InterceptSuite) forwards traffic to original destination
+7. **Response Handling** - Return traffic flows back through relay servers, which restore original source IP/port before re-injection
 
 **Key Points:**
-- WinDivert.sys sits between application and network, intercepts ALL TCP packets
-- ALL packets are sent to ProxyBridge in user space for inspection
-- ProxyBridge checks process name and decides: redirect or forward unchanged
-- Matching packets are re-injected with destination changed to localhost:37123
-- Non-matching packets are re-injected unchanged and go directly to Internet
-- TCP Relay Server converts raw TCP to SOCKS5/HTTP proxy protocol
-- This allows proxy-unaware apps to work with proxy servers
+- All packet manipulation happens transparently - applications remain completely unaware
+- WinDivert operates at kernel level for reliable interception before packets reach the network
+- ProxyBridge rule engine provides granular control over which traffic gets proxied
+- TCP/UDP relay servers handle protocol conversion between raw sockets and proxy protocols
 
 
 ## Build from Source

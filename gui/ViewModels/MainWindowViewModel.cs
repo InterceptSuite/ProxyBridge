@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Windows.Input;
 using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 using Avalonia.Threading;
 using Avalonia.Controls;
 using ProxyBridge.GUI.Views;
@@ -27,6 +30,17 @@ public class MainWindowViewModel : ViewModelBase
     private Window? _mainWindow;
     private ProxyBridgeService? _proxyService;
 
+    private string _currentProxyType = "SOCKS5";
+    private string _currentProxyIp = "";
+    private string _currentProxyPort = "";
+    private string _currentProxyUsername = "";
+    private string _currentProxyPassword = "";
+
+    // Batch connection logs - UI need to maintain connnection logs, may crash if too many connection
+    private readonly List<string> _pendingConnectionLogs = new List<string>();
+    private readonly object _connectionLogLock = new object();
+    private DispatcherTimer? _connectionLogTimer;
+
     public void SetMainWindow(Window window)
     {
         _mainWindow = window;
@@ -42,13 +56,44 @@ public class MainWindowViewModel : ViewModelBase
                 });
             };
 
+            // Add to queue instead of updating UI immediately
             _proxyService.ConnectionReceived += (processName, pid, destIp, destPort, proxyInfo) =>
             {
-                Dispatcher.UIThread.Post(() =>
+                string logEntry = $"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}\n";
+                lock (_connectionLogLock)
                 {
-                    ConnectionsLog += $"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}\n";
-                });
+                    _pendingConnectionLogs.Add(logEntry);
+                }
             };
+
+            // Timer to flush batched logs to UI every 500ms
+            _connectionLogTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(500)
+            };
+            _connectionLogTimer.Tick += (s, e) =>
+            {
+                List<string> logsToAdd;
+                lock (_connectionLogLock)
+                {
+                    if (_pendingConnectionLogs.Count == 0)
+                        return;
+
+                    logsToAdd = new List<string>(_pendingConnectionLogs);
+                    _pendingConnectionLogs.Clear();
+                }
+
+                // Batch update UI
+                var sb = new StringBuilder();
+                foreach (var log in logsToAdd)
+                {
+                    sb.Append(log);
+                }
+                ConnectionsLog += sb.ToString();
+            };
+            _connectionLogTimer.Start();
+
+            _proxyService.SetDnsViaProxy(true);
 
             // Start the proxy bridge
             if (_proxyService.Start())
@@ -64,6 +109,8 @@ public class MainWindowViewModel : ViewModelBase
         {
             ActivityLog += $"[{DateTime.Now:HH:mm:ss}] ERROR: {ex.Message}\n";
         }
+
+        _ = CheckForUpdatesOnStartupAsync();
     }
 
     public string Title
@@ -162,10 +209,26 @@ public class MainWindowViewModel : ViewModelBase
 
     public ObservableCollection<ProxyRule> ProxyRules { get; } = new();
 
+    private bool _dnsViaProxy = true;  // Default TRUE
+    public bool DnsViaProxy
+    {
+        get => _dnsViaProxy;
+        set
+        {
+            if (SetProperty(ref _dnsViaProxy, value))
+            {
+                _proxyService?.SetDnsViaProxy(value);
+                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] DNS via Proxy: {(value ? "Enabled" : "Disabled")}\n";
+            }
+        }
+    }
+
     // Commands
     public ICommand ShowProxySettingsCommand { get; }
     public ICommand ShowProxyRulesCommand { get; }
     public ICommand ShowAboutCommand { get; }
+    public ICommand CheckForUpdatesCommand { get; }
+    public ICommand ToggleDnsViaProxyCommand { get; }
     public ICommand CloseDialogCommand { get; }
     public ICommand ClearConnectionsLogCommand { get; }
     public ICommand ClearActivityLogCommand { get; }
@@ -180,13 +243,26 @@ public class MainWindowViewModel : ViewModelBase
             var window = new ProxySettingsWindow();
 
             var viewModel = new ProxySettingsViewModel(
-                onSave: (type, ip, port) =>
+                initialType: _currentProxyType,
+                initialIp: _currentProxyIp,
+                initialPort: _currentProxyPort,
+                initialUsername: _currentProxyUsername,
+                initialPassword: _currentProxyPassword,
+                onSave: (type, ip, port, username, password) =>
                 {
                     if (_proxyService != null && ushort.TryParse(port, out ushort portNum))
                     {
-                        if (_proxyService.SetProxyConfig(type, ip, portNum))
+                        if (_proxyService.SetProxyConfig(type, ip, portNum, username, password))
                         {
-                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Saved proxy settings: {type} {ip}:{port}\n";
+
+                            _currentProxyType = type;
+                            _currentProxyIp = ip;
+                            _currentProxyPort = port;
+                            _currentProxyUsername = username;
+                            _currentProxyPassword = password;
+
+                            string authInfo = string.IsNullOrEmpty(username) ? "" : " (with auth)";
+                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Saved proxy settings: {type} {ip}:{port}{authInfo}\n";
                         }
                         else
                         {
@@ -198,7 +274,8 @@ public class MainWindowViewModel : ViewModelBase
                 onClose: () =>
                 {
                     window.Close();
-                }
+                },
+                proxyService: _proxyService
             );
 
             window.DataContext = viewModel;
@@ -219,13 +296,18 @@ public class MainWindowViewModel : ViewModelBase
                 {
                     if (_proxyService != null)
                     {
-                        uint ruleId = _proxyService.AddRule(rule.ProcessName, rule.Action);
+                        uint ruleId = _proxyService.AddRule(
+                            rule.ProcessName,
+                            rule.TargetHosts,
+                            rule.TargetPorts,
+                            rule.Protocol,
+                            rule.Action);
                         if (ruleId > 0)
                         {
                             rule.RuleId = ruleId;
                             rule.Index = ProxyRules.Count + 1;
                             ProxyRules.Add(rule);
-                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Added rule: {rule.ProcessName} -> {rule.Action} (ID: {ruleId})\n";
+                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Added rule: {rule.ProcessName} ({rule.TargetHosts}:{rule.TargetPorts} {rule.Protocol}) -> {rule.Action} (ID: {ruleId})\n";
                         }
                         else
                         {
@@ -241,6 +323,7 @@ public class MainWindowViewModel : ViewModelBase
             );
 
             window.DataContext = viewModel;
+            viewModel.SetWindow(window);
 
             if (_mainWindow != null)
             {
@@ -264,6 +347,23 @@ public class MainWindowViewModel : ViewModelBase
             {
                 await window.ShowDialog(_mainWindow);
             }
+        });
+
+        CheckForUpdatesCommand = new RelayCommand(async () =>
+        {
+            var updateWindow = new UpdateCheckWindow();
+            var viewModel = new UpdateCheckViewModel(() => updateWindow.Close());
+            updateWindow.DataContext = viewModel;
+
+            if (_mainWindow != null)
+            {
+                await updateWindow.ShowDialog(_mainWindow);
+            }
+        });
+
+        ToggleDnsViaProxyCommand = new RelayCommand(() =>
+        {
+            DnsViaProxy = !DnsViaProxy;
         });
 
         CloseDialogCommand = new RelayCommand(CloseDialogs);
@@ -295,13 +395,16 @@ public class MainWindowViewModel : ViewModelBase
             var rule = new ProxyRule
             {
                 ProcessName = NewProcessName,
+                TargetHosts = "*",
+                TargetPorts = "*",
+                Protocol = "TCP",
                 Action = NewProxyAction,
                 IsEnabled = true
             };
 
             if (_proxyService != null)
             {
-                var ruleId = _proxyService.AddRule(NewProcessName, NewProxyAction);
+                var ruleId = _proxyService.AddRule(NewProcessName, "*", "*", "TCP", NewProxyAction);
                 if (ruleId > 0)
                 {
                     rule.RuleId = ruleId;
@@ -358,6 +461,33 @@ public class MainWindowViewModel : ViewModelBase
         IsProxySettingsDialogOpen = false;
     }
 
+    private async Task CheckForUpdatesOnStartupAsync()
+    {
+        try
+        {
+            var settingsService = new SettingsService();
+            var settings = settingsService.LoadSettings();
+            if (!settings.CheckForUpdatesOnStartup)
+                return;
+
+            var updateService = new UpdateService();
+            var versionInfo = await updateService.CheckForUpdatesAsync();
+
+            if (versionInfo.IsUpdateAvailable && _mainWindow != null)
+            {
+                var notificationWindow = new UpdateNotificationWindow();
+                var viewModel = new UpdateNotificationViewModel(() => notificationWindow.Close(), versionInfo);
+                notificationWindow.DataContext = viewModel;
+
+                _ = notificationWindow.ShowDialog(_mainWindow);
+            }
+        }
+        catch
+        {
+            // silently fail
+        }
+    }
+
     public void Cleanup()
     {
         _proxyService?.Dispose();
@@ -367,7 +497,10 @@ public class MainWindowViewModel : ViewModelBase
 
 public class ProxyRule : ViewModelBase
 {
-    private string _processName = "";
+    private string _processName = "*";
+    private string _targetHosts = "*";
+    private string _targetPorts = "*";
+    private string _protocol = "TCP";
     private string _action = "PROXY";
     private bool _isEnabled = true;
     private int _index;
@@ -389,6 +522,24 @@ public class ProxyRule : ViewModelBase
     {
         get => _processName;
         set => SetProperty(ref _processName, value);
+    }
+
+    public string TargetHosts
+    {
+        get => _targetHosts;
+        set => SetProperty(ref _targetHosts, value);
+    }
+
+    public string TargetPorts
+    {
+        get => _targetPorts;
+        set => SetProperty(ref _targetPorts, value);
+    }
+
+    public string Protocol
+    {
+        get => _protocol;
+        set => SetProperty(ref _protocol, value);
     }
 
     public string Action
