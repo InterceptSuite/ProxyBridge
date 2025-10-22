@@ -5,7 +5,7 @@
 </p>
 
 
-ProxyBridge is a lightweight, open-source alternative to Proxifier that provides transparent proxy routing for Windows applications. It redirects TCP and UDP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. Working at the kernel level using WinDivert, ProxyBridge is compatible with proxy-unaware applications without requiring any configuration changes.
+ProxyBridge is a lightweight, open-source alternative to Proxifier that provides transparent proxy routing for Windows applications. It redirects TCP and UDP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. Unlike Proxifier which only logs UDP connections without proxy support, ProxyBridge fully supports both TCP and UDP proxy routing. Working at the kernel level using WinDivert, ProxyBridge is compatible with proxy-unaware applications without requiring any configuration changes.
 
 ## Features
 
@@ -35,6 +35,7 @@ ProxyBridge is a lightweight, open-source alternative to Proxifier that provides
     - [Rule Examples](#rule-examples)
 - [Use Cases](#use-cases)
 - [Current Limitations](#current-limitations)
+- [Things to Note](#things-to-note)
 - [How It Works](#how-it-works)
 - [Build from Source](#build-from-source)
 - [License](#license)
@@ -271,6 +272,22 @@ Commands:
 
 - IPv4 only (IPv6 not supported)
 
+## Things to Note
+
+- **DNS Traffic Handling**: DNS traffic on TCP and UDP port 53 is handled separately from proxy rules. Even if you configure rules for port 53, they will be ignored. Instead, DNS routing is controlled by the **DNS via Proxy** option in the Proxy menu (enabled by default). When enabled, all DNS queries are routed through the proxy; when disabled, DNS queries use direct connection.
+
+- **Automatic Direct Routing**: Certain IP addresses automatically use direct connection regardless of proxy rules. This includes:
+  - Localhost addresses (127.*.*.*)
+  - Broadcast and multicast addresses
+  - These IPs are used by various processes (curl, Firefox, NVIDIA drivers, Windows services) and system components. Note that Windows loopback traffic uses its own method that bypasses the network interface card (NIC), which currently doesn't support proxy routing due to technical limitations with WinDivert at the network layer.
+
+- **UDP Proxy Requirements**: UDP traffic only works when a SOCKS5 proxy is configured. If an HTTP proxy server is configured, ProxyBridge will ignore UDP proxy rules and route UDP traffic as direct connection instead. This limitation does not affect UDP rules with BLOCK or DIRECT actions.
+
+  **Important UDP Considerations**:
+  - Configuring a SOCKS5 proxy does not guarantee UDP will work. Most SOCKS5 proxies do not support UDP traffic, including SSH SOCKS5 proxies.
+  - The SOCKS5 proxy must support UDP ASSOCIATE command. If ProxyBridge fails to establish a UDP association with the SOCKS5 proxy, packets will fail to connect.
+  - Many UDP applications use HTTP/3 and DTLS protocols. Even if your SOCKS5 proxy supports UDP ASSOCIATE, ensure it can handle DTLS and HTTP/3 UDP traffic, as they require separate handling beyond raw UDP packets.
+  - **Testing UDP/HTTP3/DTLS Support**: If you need to test UDP, HTTP/3, and DTLS support with a SOCKS5 proxy, try [Nexus Proxy](https://github.com/InterceptSuite/nexus-proxy) - a proxy application created specifically to test ProxyBridge with advanced UDP protocols.
 
 ## How It Works
 

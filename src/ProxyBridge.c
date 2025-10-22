@@ -1357,15 +1357,46 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
         FD_ZERO(&read_fds);
         FD_SET(udp_relay_socket, &read_fds);
 
-        // Only monitor SOCKS5 socket if connection is established
+        // monitor both TCP control connection and UDP send socket
+        if (udp_associate_connected && socks5_udp_socket != INVALID_SOCKET)
+            FD_SET(socks5_udp_socket, &read_fds);
+
         if (udp_associate_connected && socks5_udp_send_socket != INVALID_SOCKET)
             FD_SET(socks5_udp_send_socket, &read_fds);
 
         struct timeval timeout = {1, 0};
 
-        int max_fd = (udp_relay_socket > socks5_udp_send_socket) ? udp_relay_socket : socks5_udp_send_socket;
+        SOCKET max_fd = udp_relay_socket;
+        if (socks5_udp_socket > max_fd) max_fd = socks5_udp_socket;
+        if (socks5_udp_send_socket > max_fd) max_fd = socks5_udp_send_socket;
+
         if (select(max_fd + 1, &read_fds, NULL, NULL, &timeout) <= 0)
             continue;
+
+        // check SOCKS5 server disconnected
+        if (udp_associate_connected && socks5_udp_socket != INVALID_SOCKET && FD_ISSET(socks5_udp_socket, &read_fds))
+        {
+            char test_buf[1];
+            int result = recv(socks5_udp_socket, test_buf, sizeof(test_buf), MSG_PEEK);
+            if (result == 0 || (result == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK))
+            {
+                log_message("[UDP RELAY] TCP control connection closed - SOCKS5 proxy disconnected");
+
+                // close all connections
+                if (socks5_udp_socket != INVALID_SOCKET)
+                {
+                    closesocket(socks5_udp_socket);
+                    socks5_udp_socket = INVALID_SOCKET;
+                }
+                if (socks5_udp_send_socket != INVALID_SOCKET)
+                {
+                    closesocket(socks5_udp_send_socket);
+                    socks5_udp_send_socket = INVALID_SOCKET;
+                }
+                udp_associate_connected = FALSE;
+                continue;
+            }
+        }
 
         // Check if packet is from local application
         if (FD_ISSET(udp_relay_socket, &read_fds))
@@ -1414,8 +1445,19 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
                     if (sent == SOCKET_ERROR) {
                         int err = WSAGetLastError();
-                        log_message("[UDP RELAY ERROR] Failed to send to SOCKS5 proxy: %d", err);
-                        // Connection might be broken, mark for retry
+                        log_message("[UDP RELAY ERROR] Failed to send to SOCKS5 proxy: %d - closing connection", err);
+
+                        // connection is broken close all sockets and retry
+                        if (socks5_udp_socket != INVALID_SOCKET)
+                        {
+                            closesocket(socks5_udp_socket);
+                            socks5_udp_socket = INVALID_SOCKET;
+                        }
+                        if (socks5_udp_send_socket != INVALID_SOCKET)
+                        {
+                            closesocket(socks5_udp_send_socket);
+                            socks5_udp_send_socket = INVALID_SOCKET;
+                        }
                         udp_associate_connected = FALSE;
                     }
                 }
@@ -1432,6 +1474,24 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
             from_len = sizeof(from_addr);
             recv_len = recvfrom(socks5_udp_send_socket, (char*)recv_buf, sizeof(recv_buf), 0,
                                (struct sockaddr *)&from_addr, &from_len);
+
+            if (recv_len == SOCKET_ERROR)
+            {
+                int err = WSAGetLastError();
+                log_message("[UDP RELAY ERROR] Failed to receive from SOCKS5 proxy: %d - closing connection", err);
+                if (socks5_udp_socket != INVALID_SOCKET)
+                {
+                    closesocket(socks5_udp_socket);
+                    socks5_udp_socket = INVALID_SOCKET;
+                }
+                if (socks5_udp_send_socket != INVALID_SOCKET)
+                {
+                    closesocket(socks5_udp_send_socket);
+                    socks5_udp_send_socket = INVALID_SOCKET;
+                }
+                udp_associate_connected = FALSE;
+                continue;
+            }
 
             if (recv_len > 0)
             {
