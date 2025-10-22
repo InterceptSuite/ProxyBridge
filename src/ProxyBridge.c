@@ -141,6 +141,7 @@ static void remove_connection(UINT16 src_port);
 static BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 static void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 static void clear_logged_connections(void);
+static BOOL is_broadcast_or_multicast(UINT32 ip);
 
 
 static DWORD WINAPI packet_processor(LPVOID arg)
@@ -202,7 +203,9 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     UINT16 dest_port = ntohs(udp_header->DstPort);
 
                     RuleAction action;
-                    if (dest_port == 53 && !g_dns_via_proxy)
+                    if (is_broadcast_or_multicast(dest_ip))
+                        action = RULE_ACTION_DIRECT;
+                    else if (dest_port == 53 && !g_dns_via_proxy)
                         action = RULE_ACTION_DIRECT;
                     else
                         action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE);
@@ -254,11 +257,13 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     {
                         add_connection(src_port, src_ip, dest_ip, dest_port);
 
-
-                        UINT32 temp_addr = ip_header->DstAddr;
+                        // dest to rely udp
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
-                        ip_header->DstAddr = ip_header->SrcAddr;
-                        ip_header->SrcAddr = temp_addr;
+
+                        // Set destination to localhost (127.0.0.1)
+                        ip_header->DstAddr = htonl(INADDR_LOOPBACK);
+
+                        // Keep source IP unchanged
                         addr.Outbound = FALSE;
 
                     }
@@ -321,7 +326,9 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
 
                 RuleAction action;
-                if (orig_dest_port == 53 && !g_dns_via_proxy)
+                if (is_broadcast_or_multicast(orig_dest_ip))
+                    action = RULE_ACTION_DIRECT;
+                else if (orig_dest_port == 53 && !g_dns_via_proxy)
                     action = RULE_ACTION_DIRECT;
                 else
                     action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE);
@@ -799,6 +806,24 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
 }
 
 
+static BOOL is_broadcast_or_multicast(UINT32 ip)
+{
+    // Broadcast: 255.255.255.255
+    if (ip == 0xFFFFFFFF)
+        return TRUE;
+
+    // x.x.x.255
+    if ((ip & 0xFF000000) == 0xFF000000)
+        return TRUE;
+
+    // Multicast: 224.0.0.0 - 239.255.255.255 (first octet 224-239)
+    BYTE first_octet = (ip >> 0) & 0xFF;
+    if (first_octet >= 224 && first_octet <= 239)
+        return TRUE;
+
+    return FALSE;
+}
+
 // Unified rule matching function for both TCP and UDP
 // Matches rules by process name, IP, port, and protocol
 static RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp)
@@ -815,15 +840,19 @@ static RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 de
         }
 
         // Check protocol compatibility
-        if (rule->protocol == RULE_PROTOCOL_TCP && is_udp)
+        // RULE_PROTOCOL_BOTH (0x03) matches both TCP and UDP
+        if (rule->protocol != RULE_PROTOCOL_BOTH)
         {
-            rule = rule->next;
-            continue;
-        }
-        if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp)
-        {
-            rule = rule->next;
-            continue;
+            if (rule->protocol == RULE_PROTOCOL_TCP && is_udp)
+            {
+                rule = rule->next;
+                continue;
+            }
+            if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp)
+            {
+                rule = rule->next;
+                continue;
+            }
         }
 
         // Check if this is a wildcard process rule
