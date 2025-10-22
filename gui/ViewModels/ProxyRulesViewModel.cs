@@ -93,6 +93,12 @@ public class ProxyRulesViewModel : ViewModelBase
 
         AddRuleCommand = new RelayCommand(() =>
         {
+            NewProcessName = "*";
+            NewTargetHosts = "*";
+            NewTargetPorts = "*";
+            NewProtocol = "TCP";
+            NewProxyAction = "PROXY";
+            ProcessNameError = "";
             IsAddRuleViewOpen = true;
         });
 
@@ -145,6 +151,8 @@ public class ProxyRulesViewModel : ViewModelBase
 
             _onAddRule?.Invoke(newRule);
 
+            IsAddRuleViewOpen = false;
+
             // Reset to defaults
             NewProcessName = "*";
             NewTargetHosts = "*";
@@ -152,7 +160,6 @@ public class ProxyRulesViewModel : ViewModelBase
             NewProtocol = "TCP";
             NewProxyAction = "PROXY";
             ProcessNameError = "";
-            IsAddRuleViewOpen = false;
         });        CancelAddRuleCommand = new RelayCommand(() =>
         {
             NewProcessName = "*";
