@@ -1923,6 +1923,70 @@ PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id)
     return FALSE;
 }
 
+PROXYBRIDGE_API BOOL ProxyBridge_DeleteRule(UINT32 rule_id)
+{
+    if (rule_id == 0)
+        return FALSE;
+
+    PROCESS_RULE *rule = rules_list;
+    PROCESS_RULE *prev = NULL;
+
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+        {
+            if (prev == NULL)
+                rules_list = rule->next;
+            else
+                prev->next = rule->next;
+
+            if (rule->target_hosts != NULL)
+                free(rule->target_hosts);
+            if (rule->target_ports != NULL)
+                free(rule->target_ports);
+            free(rule);
+
+            log_message("Deleted rule ID: %u", rule_id);
+            return TRUE;
+        }
+        prev = rule;
+        rule = rule->next;
+    }
+    return FALSE;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_name, const char* target_hosts, const char* target_ports, RuleProtocol protocol, RuleAction action)
+{
+    if (rule_id == 0 || process_name == NULL || target_hosts == NULL || target_ports == NULL)
+        return FALSE;
+
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+        {
+            strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
+            rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
+
+            if (rule->target_hosts != NULL)
+                free(rule->target_hosts);
+            rule->target_hosts = _strdup(target_hosts);
+
+            if (rule->target_ports != NULL)
+                free(rule->target_ports);
+            rule->target_ports = _strdup(target_ports);
+
+            rule->protocol = protocol;
+            rule->action = action;
+
+            log_message("Updated rule ID: %u", rule_id);
+            return TRUE;
+        }
+        rule = rule->next;
+    }
+    return FALSE;
+}
+
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password)
 {
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)

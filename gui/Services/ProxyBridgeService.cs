@@ -88,6 +88,31 @@ public class ProxyBridgeService : IDisposable
         return ProxyBridgeNative.ProxyBridge_DisableRule(ruleId);
     }
 
+    public bool DeleteRule(uint ruleId)
+    {
+        return ProxyBridgeNative.ProxyBridge_DeleteRule(ruleId);
+    }
+
+    public bool EditRule(uint ruleId, string processName, string targetHosts, string targetPorts, string protocol, string action)
+    {
+        var ruleAction = action.ToUpper() switch
+        {
+            "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
+            "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
+            _ => ProxyBridgeNative.RuleAction.PROXY
+        };
+
+        var ruleProtocol = protocol.ToUpper() switch
+        {
+            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
+            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
+            "TCP+UDP" => ProxyBridgeNative.RuleProtocol.BOTH,
+            _ => ProxyBridgeNative.RuleProtocol.TCP
+        };
+
+        return ProxyBridgeNative.ProxyBridge_EditRule(ruleId, processName, targetHosts, targetPorts, ruleProtocol, ruleAction);
+    }
+
     public void SetDnsViaProxy(bool enable)
     {
         ProxyBridgeNative.ProxyBridge_SetDnsViaProxy(enable);

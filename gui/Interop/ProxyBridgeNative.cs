@@ -71,6 +71,20 @@ public static class ProxyBridgeNative
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ProxyBridge_DeleteRule(uint ruleId);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ProxyBridge_EditRule(
+        uint ruleId,
+        [MarshalAs(UnmanagedType.LPStr)] string processName,
+        [MarshalAs(UnmanagedType.LPStr)] string targetHosts,
+        [MarshalAs(UnmanagedType.LPStr)] string targetPorts,
+        RuleProtocol protocol,
+        RuleAction action);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_SetProxyConfig(
         ProxyType type,
         [MarshalAs(UnmanagedType.LPStr)] string proxyIp,
