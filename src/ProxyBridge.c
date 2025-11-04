@@ -535,6 +535,15 @@ static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
         return FALSE;
     }
 
+    // ERROR in getting process name for PID 4 reserved by system
+    // SMB is managed by system process
+    if (pid == 4)
+    {
+        strncpy(name, "System", name_size - 1);
+        name[name_size - 1] = '\0';
+        return TRUE;
+    }
+
     hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (hProcess == NULL)
     {
