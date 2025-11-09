@@ -129,7 +129,7 @@ Launch `ProxyBridge.exe` (GUI) with Administrator privileges for an intuitive gr
 #### Activity Monitoring
 
 <p align="center">
-  <img src="img/connections.png" alt="Active Connections" width="600"/>
+  <img src="img/ProxyBridge.png" alt="Active Connections" width="600"/>
 </p>
 
 - View real-time connection activity in the **Connections** tab
