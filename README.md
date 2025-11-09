@@ -7,6 +7,8 @@
 
 ProxyBridge is a lightweight, open-source alternative to Proxifier that provides transparent proxy routing for Windows applications. It redirects TCP and UDP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. Unlike Proxifier which only logs UDP connections without proxy support, ProxyBridge fully supports both TCP and UDP proxy routing. Working at the kernel level using WinDivert, ProxyBridge is compatible with proxy-unaware applications without requiring any configuration changes.
 
+> 🚀 **Need advanced traffic analysis?** Check out [**InterceptSuite**](https://github.com/InterceptSuite/InterceptSuite) - our comprehensive MITM proxy for analyzing TLS, TCP, UDP, DTLS traffic. Perfect for security testing, network debugging, and system administration!
+
 ## Features
 
 - **Dual interface** - Feature-rich GUI and powerful CLI for all use cases
@@ -184,7 +186,7 @@ ProxyBridge_CLI.exe -h
  | |_) | '__/ _ \ \/ / | | | |  _ \| '__| |/ _` |/ _` |/ _ \
  |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/
  |_|   |_|  \___/_/\_\\__, | |____/|_|  |_|\__,_|\__, |\___|
-                      |___/                      |___/  V2.0
+                      |___/                      |___/  V2.0.1
 
   Universal proxy client for Windows applications
 

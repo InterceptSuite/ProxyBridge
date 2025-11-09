@@ -16,7 +16,7 @@
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 256
-#define VERSION "2.0"
+#define VERSION "2.0.1"
 
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
@@ -533,6 +533,15 @@ static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
     if (pid == 0)
     {
         return FALSE;
+    }
+
+    // ERROR in getting process name for PID 4 reserved by system
+    // SMB is managed by system process
+    if (pid == 4)
+    {
+        strncpy(name, "System", name_size - 1);
+        name[name_size - 1] = '\0';
+        return TRUE;
     }
 
     hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
