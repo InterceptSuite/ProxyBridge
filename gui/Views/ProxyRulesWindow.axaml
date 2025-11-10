@@ -311,8 +311,7 @@
                 <!-- Protocol Section -->
                 <StackPanel Spacing="6">
                     <TextBlock Text="Protocol" Classes="label"/>
-                    <ComboBox SelectedIndex="0"
-                              HorizontalAlignment="Stretch"
+                    <ComboBox HorizontalAlignment="Stretch"
                               x:Name="ProtocolComboBox">
                         <ComboBoxItem Content="TCP" Tag="TCP"/>
                         <ComboBoxItem Content="UDP" Tag="UDP"/>
@@ -323,8 +322,7 @@
                 <!-- Action Section -->
                 <StackPanel Spacing="6">
                     <TextBlock Text="Action" Classes="label"/>
-                    <ComboBox SelectedIndex="0"
-                              HorizontalAlignment="Stretch"
+                    <ComboBox HorizontalAlignment="Stretch"
                               x:Name="ActionComboBox"
                               SelectionChanged="ActionComboBox_SelectionChanged">
                         <ComboBoxItem Content="PROXY" Tag="PROXY"/>
