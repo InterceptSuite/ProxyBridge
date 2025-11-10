@@ -44,6 +44,7 @@ public class MainWindowViewModel : ViewModelBase
     public void SetMainWindow(Window window)
     {
         _mainWindow = window;
+        LoadConfiguration();
 
         try
         {
@@ -93,12 +94,50 @@ public class MainWindowViewModel : ViewModelBase
             };
             _connectionLogTimer.Start();
 
-            _proxyService.SetDnsViaProxy(true);
+            // Apply config DNS setting
+            _proxyService.SetDnsViaProxy(_dnsViaProxy);
+
+            // Apply comfig proxy settings
+            if (!string.IsNullOrEmpty(_currentProxyIp) &&
+                !string.IsNullOrEmpty(_currentProxyPort) &&
+                ushort.TryParse(_currentProxyPort, out ushort portNum))
+            {
+                _proxyService.SetProxyConfig(
+                    _currentProxyType,
+                    _currentProxyIp,
+                    portNum,
+                    _currentProxyUsername,
+                    _currentProxyPassword);
+
+                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Restored proxy settings: {_currentProxyType} {_currentProxyIp}:{_currentProxyPort}\n";
+            }
 
             // Start the proxy bridge
             if (_proxyService.Start())
             {
                 ActivityLog += $"[{DateTime.Now:HH:mm:ss}] ProxyBridge service started successfully\n";
+
+                // Apply config proxy rules, Need to see if this cause UI issues/slow/freeze
+                foreach (var rule in ProxyRules)
+                {
+                    uint ruleId = _proxyService.AddRule(
+                        rule.ProcessName,
+                        rule.TargetHosts,
+                        rule.TargetPorts,
+                        rule.Protocol,
+                        rule.Action);
+
+                    if (ruleId > 0)
+                    {
+                        rule.RuleId = ruleId;
+                        rule.Index = ProxyRules.IndexOf(rule) + 1;
+                    }
+                }
+
+                if (ProxyRules.Count > 0)
+                {
+                    ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Restored {ProxyRules.Count} proxy rule(s)\n";
+                }
             }
             else
             {
@@ -490,8 +529,99 @@ public class MainWindowViewModel : ViewModelBase
 
     public void Cleanup()
     {
+        try
+        {
+            var config = new AppConfig
+            {
+                ProxyType = _currentProxyType,
+                ProxyIp = _currentProxyIp,
+                ProxyPort = _currentProxyPort,
+                ProxyUsername = _currentProxyUsername,
+                ProxyPassword = _currentProxyPassword,
+                DnsViaProxy = _dnsViaProxy,
+                ProxyRules = ProxyRules.Select(r => new ProxyRuleConfig
+                {
+                    ProcessName = r.ProcessName,
+                    TargetHosts = r.TargetHosts,
+                    TargetPorts = r.TargetPorts,
+                    Protocol = r.Protocol,
+                    Action = r.Action,
+                    IsEnabled = r.IsEnabled
+                }).ToList()
+            };
+
+            ConfigManager.SaveConfig(config);
+        }
+        catch { }
+
         _proxyService?.Dispose();
         _proxyService = null;
+    }    private void LoadConfiguration()
+    {
+        try
+        {
+            var config = ConfigManager.LoadConfig();
+
+            _currentProxyType = config.ProxyType;
+            _currentProxyIp = config.ProxyIp;
+            _currentProxyPort = config.ProxyPort;
+            _currentProxyUsername = config.ProxyUsername;
+            _currentProxyPassword = config.ProxyPassword;
+
+            DnsViaProxy = config.DnsViaProxy;
+
+            foreach (var ruleConfig in config.ProxyRules)
+            {
+                var rule = new ProxyRule
+                {
+                    ProcessName = ruleConfig.ProcessName,
+                    TargetHosts = ruleConfig.TargetHosts,
+                    TargetPorts = ruleConfig.TargetPorts,
+                    Protocol = ruleConfig.Protocol,
+                    Action = ruleConfig.Action,
+                    IsEnabled = ruleConfig.IsEnabled
+                };
+                ProxyRules.Add(rule);
+            }
+        }
+        catch (Exception ex)
+        {
+            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Failed to load configuration: {ex.Message}\n";
+        }
+    }
+
+    private void SaveConfiguration()
+    {
+        try
+        {
+            var config = new AppConfig
+            {
+                ProxyType = _currentProxyType,
+                ProxyIp = _currentProxyIp,
+                ProxyPort = _currentProxyPort,
+                ProxyUsername = _currentProxyUsername,
+                ProxyPassword = _currentProxyPassword,
+                DnsViaProxy = _dnsViaProxy,
+                ProxyRules = ProxyRules.Select(r => new ProxyRuleConfig
+                {
+                    ProcessName = r.ProcessName,
+                    TargetHosts = r.TargetHosts,
+                    TargetPorts = r.TargetPorts,
+                    Protocol = r.Protocol,
+                    Action = r.Action,
+                    IsEnabled = r.IsEnabled
+                }).ToList()
+            };
+
+            if (ConfigManager.SaveConfig(config))
+            {
+                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Configuration saved successfully\n";
+            }
+        }
+        catch (Exception ex)
+        {
+            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Failed to save configuration: {ex.Message}\n";
+        }
     }
 }
 

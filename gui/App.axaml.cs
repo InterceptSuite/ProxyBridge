@@ -23,6 +23,15 @@ public class App : Application
             {
                 DataContext = new MainWindowViewModel()
             };
+
+            // save config during shutdown
+            desktop.ShutdownRequested += (s, e) =>
+            {
+                if (desktop.MainWindow?.DataContext is MainWindowViewModel vm)
+                {
+                    vm.Cleanup();
+                }
+            };
         }
 
         base.OnFrameworkInitializationCompleted();
