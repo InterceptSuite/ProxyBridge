@@ -1,8 +1,10 @@
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
+using Avalonia.Controls;
 using ProxyBridge.GUI.ViewModels;
 using ProxyBridge.GUI.Views;
+using System;
 
 namespace ProxyBridge.GUI;
 
@@ -24,5 +26,27 @@ public class App : Application
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+    // https://docs.avaloniaui.net/docs/reference/controls/tray-icon
+    public void TrayIcon_Show(object? sender, EventArgs e)
+    {
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            var mainWindow = desktop.MainWindow;
+            if (mainWindow != null)
+            {
+                mainWindow.Show();
+                mainWindow.WindowState = WindowState.Normal;
+                mainWindow.Activate();
+            }
+        }
+    }
+
+    public void TrayIcon_Exit(object? sender, EventArgs e)
+    {
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            desktop.Shutdown();
+        }
     }
 }
