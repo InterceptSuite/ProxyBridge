@@ -262,6 +262,25 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
+    private readonly Loc _loc = Loc.Instance;
+    public Loc Loc => _loc;
+
+    private string _currentLanguage = "en";
+    private string _englishCheckmark = "✓";
+    private string _chineseCheckmark = "";
+
+    public string EnglishCheckmark
+    {
+        get => _englishCheckmark;
+        set => SetProperty(ref _englishCheckmark, value);
+    }
+
+    public string ChineseCheckmark
+    {
+        get => _chineseCheckmark;
+        set => SetProperty(ref _chineseCheckmark, value);
+    }
+
     // Commands
     public ICommand ShowProxySettingsCommand { get; }
     public ICommand ShowProxyRulesCommand { get; }
@@ -466,6 +485,23 @@ public class MainWindowViewModel : ViewModelBase
         });
     }
 
+    public void ChangeLanguage(string languageCode)
+    {
+        if (string.IsNullOrEmpty(languageCode)) return;
+
+        _currentLanguage = languageCode;
+        EnglishCheckmark = languageCode == "en" ? "✓" : "";
+        ChineseCheckmark = languageCode == "zh" ? "✓" : "";
+
+        var config = ConfigManager.LoadConfig();
+        config.Language = languageCode;
+        ConfigManager.SaveConfig(config);
+
+        _loc.CurrentCulture = new System.Globalization.CultureInfo(languageCode);
+
+        ActivityLog += $"[{DateTime.Now:HH:mm:ss}] {_loc.LogLanguageChanged}: {languageCode}\n";
+    }
+
     private void FilterConnectionsLog()
     {
         if (string.IsNullOrWhiteSpace(_connectionsSearchText))
@@ -569,6 +605,11 @@ public class MainWindowViewModel : ViewModelBase
             _currentProxyPassword = config.ProxyPassword;
 
             DnsViaProxy = config.DnsViaProxy;
+
+            _currentLanguage = config.Language;
+            _loc.CurrentCulture = new System.Globalization.CultureInfo(config.Language);
+            EnglishCheckmark = config.Language == "en" ? "✓" : "";
+            ChineseCheckmark = config.Language == "zh" ? "✓" : "";
 
             foreach (var ruleConfig in config.ProxyRules)
             {

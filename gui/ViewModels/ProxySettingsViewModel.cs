@@ -2,11 +2,15 @@ using System;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Windows.Input;
+using ProxyBridge.GUI.Services;
 
 namespace ProxyBridge.GUI.ViewModels;
 
 public class ProxySettingsViewModel : ViewModelBase
 {
+    private readonly Loc _loc = Loc.Instance;
+    public Loc Loc => _loc;
+
     private string _proxyIp = "";
     private string _proxyPort = "";
     private string _proxyType = "SOCKS5";

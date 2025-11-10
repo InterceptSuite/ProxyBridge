@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:ProxyBridge.GUI.ViewModels"
+        xmlns:services="using:ProxyBridge.GUI.Services"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d" d:DesignWidth="1100" d:DesignHeight="650"
@@ -200,11 +201,11 @@
 
             <!-- Menu Bar -->
             <Menu DockPanel.Dock="Top" Background="#FF2D2D30">
-                <MenuItem Header="Proxy">
-                    <MenuItem Header="Proxy Settings" Command="{Binding ShowProxySettingsCommand}"/>
-                    <MenuItem Header="Proxy Rules" Command="{Binding ShowProxyRulesCommand}"/>
+                <MenuItem Header="{Binding Loc.MenuProxy}">
+                    <MenuItem Header="{Binding Loc.MenuProxySettings}" Command="{Binding ShowProxySettingsCommand}"/>
+                    <MenuItem Header="{Binding Loc.MenuProxyRules}" Command="{Binding ShowProxyRulesCommand}"/>
                     <Separator/>
-                    <MenuItem Header="DNS via Proxy"
+                    <MenuItem Header="{Binding Loc.MenuDnsViaProxy}"
                               Command="{Binding ToggleDnsViaProxyCommand}">
                         <MenuItem.Icon>
                             <CheckBox IsChecked="{Binding DnsViaProxy}"
@@ -213,15 +214,27 @@
                         </MenuItem.Icon>
                     </MenuItem>
                 </MenuItem>
-                <MenuItem Header="About">
-                    <MenuItem Header="About ProxyBridge" Command="{Binding ShowAboutCommand}"/>
-                    <MenuItem Header="Check for Updates" Command="{Binding CheckForUpdatesCommand}"/>
+                <MenuItem Header="{Binding Loc.MenuLanguage}">
+                    <MenuItem Header="English" Click="OnChangeLanguageEnglish">
+                        <MenuItem.Icon>
+                            <TextBlock Text="{Binding EnglishCheckmark}" FontSize="14"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                    <MenuItem Header="中文 (Chinese)" Click="OnChangeLanguageChinese">
+                        <MenuItem.Icon>
+                            <TextBlock Text="{Binding ChineseCheckmark}" FontSize="14"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                </MenuItem>
+                <MenuItem Header="{Binding Loc.MenuAbout}">
+                    <MenuItem Header="{Binding Loc.MenuAboutProxyBridge}" Command="{Binding ShowAboutCommand}"/>
+                    <MenuItem Header="{Binding Loc.MenuCheckUpdates}" Command="{Binding CheckForUpdatesCommand}"/>
                 </MenuItem>
             </Menu>
 
             <!-- Tab Control -->
             <TabControl SelectedIndex="{Binding SelectedTabIndex}" Background="#FF1E1E1E" Padding="0">
-                <TabItem Header="🔌 Connections">
+                <TabItem Header="{Binding Loc.TabConnections}">
                     <Border Background="#FF252526" Margin="8" CornerRadius="4" BorderBrush="#FF3F3F46" BorderThickness="1">
                         <DockPanel>
                             <!-- Search and Clear Bar -->
@@ -229,10 +242,10 @@
                                 <Grid ColumnDefinitions="*,Auto,Auto">
                                     <TextBox Grid.Column="0"
                                              Text="{Binding ConnectionsSearchText}"
-                                             Watermark="🔍 Search connections..."
+                                             Watermark="{Binding Loc.SearchConnectionsPlaceholder}"
                                              Margin="0,0,8,0"/>
                                     <Button Grid.Column="1"
-                                            Content="Clear"
+                                            Content="{Binding Loc.ButtonClear}"
                                             Classes="secondary"
                                             Command="{Binding ClearConnectionsLogCommand}"
                                             Padding="12,6"
@@ -254,7 +267,7 @@
                         </DockPanel>
                     </Border>
                 </TabItem>
-                <TabItem Header="📋 Activity Logs">
+                <TabItem Header="{Binding Loc.TabActivity}">
                     <Border Background="#FF252526" Margin="8" CornerRadius="4" BorderBrush="#FF3F3F46" BorderThickness="1">
                         <DockPanel>
                             <!-- Search and Clear Bar -->
@@ -262,10 +275,10 @@
                                 <Grid ColumnDefinitions="*,Auto,Auto">
                                     <TextBox Grid.Column="0"
                                              Text="{Binding ActivitySearchText}"
-                                             Watermark="🔍 Search activity logs..."
+                                             Watermark="{Binding Loc.SearchActivityPlaceholder}"
                                              Margin="0,0,8,0"/>
                                     <Button Grid.Column="1"
-                                            Content="Clear"
+                                            Content="{Binding Loc.ButtonClear}"
                                             Classes="secondary"
                                             Command="{Binding ClearActivityLogCommand}"
                                             Padding="12,6"

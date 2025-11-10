@@ -9,6 +9,9 @@ namespace ProxyBridge.GUI.ViewModels;
 
 public class ProxyRulesViewModel : ViewModelBase
 {
+    private readonly Loc _loc = Loc.Instance;
+    public Loc Loc => _loc;
+
     private bool _isAddRuleViewOpen;
     private bool _isEditMode;
     private uint _currentEditingRuleId;

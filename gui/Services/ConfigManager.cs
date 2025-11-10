@@ -15,6 +15,7 @@ public class AppConfig
     public string ProxyUsername { get; set; } = "";
     public string ProxyPassword { get; set; } = "";
     public bool DnsViaProxy { get; set; } = true;
+    public string Language { get; set; } = "en";
     public List<ProxyRuleConfig> ProxyRules { get; set; } = new();
 }
 

@@ -7,7 +7,7 @@
         x:Class="ProxyBridge.GUI.Views.ProxyRulesWindow"
         x:DataType="vm:ProxyRulesViewModel"
         x:CompileBindings="True"
-        Title="Process Rules"
+        Title="{Binding Loc.ProxyRulesTitle}"
         Icon="/Assets/logo.ico"
         Width="1000" Height="550"
         MinWidth="900" MinHeight="400"
@@ -97,14 +97,14 @@
             <Grid ColumnDefinitions="*,Auto">
                 <StackPanel Orientation="Horizontal" Spacing="10">
                     <TextBlock Text="⚙" FontSize="22" VerticalAlignment="Center"/>
-                    <TextBlock Text="Process Rules"
+                    <TextBlock Text="{Binding Loc.ProxyRulesTitle}"
                                FontSize="18"
                                FontWeight="SemiBold"
                                Foreground="#FFE0E0E0"
                                VerticalAlignment="Center"/>
                 </StackPanel>
                 <Button Grid.Column="1"
-                        Content="➕ Add Rule"
+                        Content="{Binding Loc.ButtonAdd}"
                         Command="{Binding AddRuleCommand}"
                         IsVisible="{Binding !IsAddRuleViewOpen}"/>
             </Grid>
@@ -125,49 +125,49 @@
                     Padding="20,12">
                 <Grid ColumnDefinitions="80,140,60,200,150,120,80,*">
                     <TextBlock Grid.Column="0"
-                               Text="Enabled"
+                               Text="{Binding Loc.EnabledLabel}"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"
                                Margin="0,0,10,0"/>
                     <TextBlock Grid.Column="1"
-                               Text="Actions"
+                               Text="{Binding Loc.ActionsLabel}"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"
                                Margin="0,0,10,0"/>
                     <TextBlock Grid.Column="2"
-                               Text="SR"
+                               Text="{Binding Loc.SRLabel}"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"
                                Margin="0,0,10,0"/>
                     <TextBlock Grid.Column="3"
-                               Text="Process"
+                               Text="{Binding Loc.ProcessLabel}"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"
                                Margin="0,0,10,0"/>
                     <TextBlock Grid.Column="4"
-                               Text="Target Hosts"
+                               Text="{Binding Loc.TargetHostsLabel}"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"
                                Margin="0,0,10,0"/>
                     <TextBlock Grid.Column="5"
-                               Text="Target Ports"
+                               Text="{Binding Loc.TargetPortsLabel}"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"
                                Margin="0,0,10,0"/>
                     <TextBlock Grid.Column="6"
-                               Text="Protocol"
+                               Text="{Binding Loc.ProtocolLabel}"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"
                                Margin="0,0,10,0"/>
                     <TextBlock Grid.Column="7"
-                               Text="Action"
+                               Text="{Binding Loc.ActionLabel}"
                                FontSize="13"
                                FontWeight="SemiBold"
                                Foreground="#FFB0B0B0"/>
@@ -195,13 +195,13 @@
                                                 Spacing="8"
                                                 VerticalAlignment="Center"
                                                 Margin="0,0,10,0">
-                                        <Button Content="✏ Edit"
+                                        <Button Content="{Binding $parent[ItemsControl].((vm:ProxyRulesViewModel)DataContext).Loc.ButtonEdit, StringFormat='✏ {0}'}"
                                                 Command="{Binding $parent[ItemsControl].((vm:ProxyRulesViewModel)DataContext).EditRuleCommand}"
                                                 CommandParameter="{Binding}"
                                                 Padding="8,4"
                                                 MinWidth="60"
                                                 FontSize="12"/>
-                                        <Button Content="🗑 Delete"
+                                        <Button Content="{Binding $parent[ItemsControl].((vm:ProxyRulesViewModel)DataContext).Loc.ButtonDelete, StringFormat='🗑 {0}'}"
                                                 Command="{Binding $parent[ItemsControl].((vm:ProxyRulesViewModel)DataContext).DeleteRuleCommand}"
                                                 CommandParameter="{Binding}"
                                                 Padding="8,4"
@@ -265,19 +265,19 @@
                         Spacing="20">
                 <!-- Applications Section -->
                 <StackPanel Spacing="6">
-                    <TextBlock Text="Applications" Classes="label"/>
+                    <TextBlock Text="{Binding Loc.ApplicationsLabel}" Classes="label"/>
                     <Grid ColumnDefinitions="*,Auto">
                         <TextBox Grid.Column="0"
                                  Text="{Binding NewProcessName}"
                                  Watermark="Any"
                                  Margin="0,0,8,0"/>
                         <Button Grid.Column="1"
-                                Content="Browse..."
+                                Content="{Binding Loc.BrowseButton}"
                                 Command="{Binding BrowseProcessCommand}"
                                 Padding="12,8"
                                 MinWidth="100"/>
                     </Grid>
-                    <TextBlock Text="Example: iexplore.exe; &quot;C:\some app.exe&quot;; fire*.exe; *.bin"
+                    <TextBlock Text="{Binding Loc.ExampleApplications}"
                                FontSize="11"
                                Foreground="#FF999999"
                                TextWrapping="Wrap"
@@ -286,10 +286,10 @@
 
                 <!-- Target Hosts Section -->
                 <StackPanel Spacing="6">
-                    <TextBlock Text="Target hosts" Classes="label"/>
+                    <TextBlock Text="{Binding Loc.TargetHostsLabel}" Classes="label"/>
                     <TextBox Text="{Binding NewTargetHosts}"
                              Watermark="Any"/>
-                    <TextBlock Text="Example: 127.0.0.1; *.example.com; 192.168.1.*; 10.1.0.0-10.5.255.255"
+                    <TextBlock Text="{Binding Loc.ExampleTargetHosts}"
                                FontSize="11"
                                Foreground="#FF999999"
                                TextWrapping="Wrap"
@@ -298,10 +298,10 @@
 
                 <!-- Target Ports Section -->
                 <StackPanel Spacing="6">
-                    <TextBlock Text="Target ports" Classes="label"/>
+                    <TextBlock Text="{Binding Loc.TargetPortsLabel}" Classes="label"/>
                     <TextBox Text="{Binding NewTargetPorts}"
                              Watermark="Any"/>
-                    <TextBlock Text="Example: 80; 8000-9000; 3128"
+                    <TextBlock Text="{Binding Loc.ExampleTargetPorts}"
                                FontSize="11"
                                Foreground="#FF999999"
                                TextWrapping="Wrap"
@@ -310,24 +310,24 @@
 
                 <!-- Protocol Section -->
                 <StackPanel Spacing="6">
-                    <TextBlock Text="Protocol" Classes="label"/>
+                    <TextBlock Text="{Binding Loc.ProtocolLabel}" Classes="label"/>
                     <ComboBox HorizontalAlignment="Stretch"
                               x:Name="ProtocolComboBox">
-                        <ComboBoxItem Content="TCP" Tag="TCP"/>
-                        <ComboBoxItem Content="UDP" Tag="UDP"/>
-                        <ComboBoxItem Content="Both (TCP + UDP)" Tag="BOTH"/>
+                        <ComboBoxItem Content="{Binding Loc.ProtocolTCP}" Tag="TCP"/>
+                        <ComboBoxItem Content="{Binding Loc.ProtocolUDP}" Tag="UDP"/>
+                        <ComboBoxItem Content="{Binding Loc.ProtocolBoth}" Tag="BOTH"/>
                     </ComboBox>
                 </StackPanel>
 
                 <!-- Action Section -->
                 <StackPanel Spacing="6">
-                    <TextBlock Text="Action" Classes="label"/>
+                    <TextBlock Text="{Binding Loc.ActionLabel}" Classes="label"/>
                     <ComboBox HorizontalAlignment="Stretch"
                               x:Name="ActionComboBox"
                               SelectionChanged="ActionComboBox_SelectionChanged">
-                        <ComboBoxItem Content="PROXY" Tag="PROXY"/>
-                        <ComboBoxItem Content="DIRECT" Tag="DIRECT"/>
-                        <ComboBoxItem Content="BLOCK" Tag="BLOCK"/>
+                        <ComboBoxItem Content="{Binding Loc.ActionProxy}" Tag="PROXY"/>
+                        <ComboBoxItem Content="{Binding Loc.ActionDirect}" Tag="DIRECT"/>
+                        <ComboBoxItem Content="{Binding Loc.ActionBlock}" Tag="BLOCK"/>
                     </ComboBox>
                 </StackPanel>
 
@@ -343,11 +343,11 @@
                             HorizontalAlignment="Right"
                             Spacing="12"
                             Margin="0,16,0,0">
-                    <Button Content="Cancel"
+                    <Button Content="{Binding Loc.ButtonCancel}"
                             Classes="secondary"
                             Command="{Binding CancelAddRuleCommand}"
                             Width="100"/>
-                    <Button Content="Save Rule"
+                    <Button Content="{Binding Loc.SaveRuleButton}"
                             Command="{Binding SaveNewRuleCommand}"
                             Width="130"/>
                 </StackPanel>
