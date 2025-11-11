@@ -26,6 +26,9 @@
   <data name="MenuDnsViaProxy" xml:space="preserve">
     <value>DNS通过代理</value>
   </data>
+  <data name="MenuSettings" xml:space="preserve">
+    <value>设置</value>
+  </data>
   <data name="MenuLanguage" xml:space="preserve">
     <value>语言</value>
   </data>
@@ -125,7 +128,7 @@
     <value>语言已更改为</value>
   </data>
   <data name="LogWithAuth" xml:space="preserve">
-    <value>带认证</value>
+    <value>需要认证</value>
   </data>
 
   <!-- Proxy Settings Window -->

@@ -92,6 +92,12 @@ namespace ProxyBridge.GUI.Resources {
             }
         }
 
+        internal static string MenuSettings {
+            get {
+                return ResourceManager.GetString("MenuSettings", resourceCulture);
+            }
+        }
+
         /// <summary>
         ///   Looks up a localized string similar to Language.
         /// </summary>
