@@ -57,20 +57,20 @@ jobs:
       shell: pwsh
 
     - name: Build project
-      run: .\compile.ps1 -NoSign -Compiler gcc
+      run: .\Windows\compile.ps1 -NoSign -Compiler gcc
       shell: pwsh
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: ProxyBridge-Build-${{ github.sha }}
-        path: output/
+        path: Windows/output/
         retention-days: 30
 
     - name: List output files
       run: |
         Write-Host "`nBuild artifacts:"
-        Get-ChildItem output -Recurse | ForEach-Object {
+        Get-ChildItem Windows/output -Recurse | ForEach-Object {
           $size = [math]::Round($_.Length/1MB, 2)
           Write-Host "  $($_.Name) - $size MB"
         }

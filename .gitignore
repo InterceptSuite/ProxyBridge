@@ -5,9 +5,9 @@
 *.py
 build/**
 *.pyc
-gui/bin/**
-gui/obj/**
-cli/bin/**
-cli/obj/**
+Windows/gui/bin/**
+Windows/gui/obj/**
+Windows/cli/bin/**
+Windows/cli/obj/**
 .vscode/**
-output/ProxyBridge_CLI.pdb
+Windows/output/ProxyBridge_CLI.pdb
