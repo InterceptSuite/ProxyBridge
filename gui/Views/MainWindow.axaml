@@ -215,6 +215,15 @@
                     </MenuItem>
                 </MenuItem>
                 <MenuItem Header="{Binding Loc.MenuSettings}">
+                    <MenuItem Header="{Binding Loc.MenuCloseToTray}"
+                              Command="{Binding ToggleCloseToTrayCommand}">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding CloseToTray}"
+                                      IsHitTestVisible="False"
+                                      Margin="0"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                    <Separator/>
                     <MenuItem Header="{Binding Loc.MenuLanguage}">
                         <MenuItem Header="English" Click="OnChangeLanguageEnglish">
                             <MenuItem.Icon>

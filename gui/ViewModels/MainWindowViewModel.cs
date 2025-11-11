@@ -262,6 +262,13 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
+    private bool _closeToTray = true;
+    public bool CloseToTray
+    {
+        get => _closeToTray;
+        set => SetProperty(ref _closeToTray, value);
+    }
+
     private readonly Loc _loc = Loc.Instance;
     public Loc Loc => _loc;
 
@@ -287,6 +294,7 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand ShowAboutCommand { get; }
     public ICommand CheckForUpdatesCommand { get; }
     public ICommand ToggleDnsViaProxyCommand { get; }
+    public ICommand ToggleCloseToTrayCommand { get; }
     public ICommand CloseDialogCommand { get; }
     public ICommand ClearConnectionsLogCommand { get; }
     public ICommand ClearActivityLogCommand { get; }
@@ -422,6 +430,12 @@ public class MainWindowViewModel : ViewModelBase
         ToggleDnsViaProxyCommand = new RelayCommand(() =>
         {
             DnsViaProxy = !DnsViaProxy;
+        });
+
+        ToggleCloseToTrayCommand = new RelayCommand(() =>
+        {
+            CloseToTray = !CloseToTray;
+            SaveConfiguration();
         });
 
         CloseDialogCommand = new RelayCommand(CloseDialogs);
@@ -575,6 +589,8 @@ public class MainWindowViewModel : ViewModelBase
                 ProxyUsername = _currentProxyUsername,
                 ProxyPassword = _currentProxyPassword,
                 DnsViaProxy = _dnsViaProxy,
+                Language = _currentLanguage,
+                CloseToTray = _closeToTray,
                 ProxyRules = ProxyRules.Select(r => new ProxyRuleConfig
                 {
                     ProcessName = r.ProcessName,
@@ -605,6 +621,7 @@ public class MainWindowViewModel : ViewModelBase
             _currentProxyPassword = config.ProxyPassword;
 
             DnsViaProxy = config.DnsViaProxy;
+            CloseToTray = config.CloseToTray;
 
             _currentLanguage = config.Language;
             _loc.CurrentCulture = new System.Globalization.CultureInfo(config.Language);
@@ -643,6 +660,8 @@ public class MainWindowViewModel : ViewModelBase
                 ProxyUsername = _currentProxyUsername,
                 ProxyPassword = _currentProxyPassword,
                 DnsViaProxy = _dnsViaProxy,
+                Language = _currentLanguage,
+                CloseToTray = _closeToTray,
                 ProxyRules = ProxyRules.Select(r => new ProxyRuleConfig
                 {
                     ProcessName = r.ProcessName,

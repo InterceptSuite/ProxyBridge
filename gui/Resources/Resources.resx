@@ -29,6 +29,9 @@
   <data name="MenuSettings" xml:space="preserve">
     <value>Settings</value>
   </data>
+  <data name="MenuCloseToTray" xml:space="preserve">
+    <value>Close to System Tray</value>
+  </data>
   <data name="MenuLanguage" xml:space="preserve">
     <value>Language</value>
   </data>

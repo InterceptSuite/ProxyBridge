@@ -20,13 +20,6 @@ public partial class MainWindow : Window
                 vm.SetMainWindow(this);
             }
         };
-
-        // ,inimize to tray
-        this.Closing += (s, e) =>
-        {
-            e.Cancel = true;
-            this.Hide();
-        };
     }
 
     private void OnChangeLanguageEnglish(object? sender, RoutedEventArgs e)
@@ -56,7 +49,28 @@ public partial class MainWindow : Window
             base.OnClosing(e);
             return;
         }
-        e.Cancel = true;
-        this.Hide();
+
+        // verify if user cclose app or minimize to tray
+        if (DataContext is MainWindowViewModel viewModel)
+        {
+            if (viewModel.CloseToTray)
+            {
+                // minimize to tray
+                e.Cancel = true;
+                this.Hide();
+            }
+            else
+            {
+                // exit the app if not tray
+                viewModel.Cleanup();
+                base.OnClosing(e);
+            }
+        }
+        else
+        {
+            // fallback to tray
+            e.Cancel = true;
+            this.Hide();
+        }
     }
 }

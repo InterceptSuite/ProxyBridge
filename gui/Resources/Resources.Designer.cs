@@ -98,6 +98,12 @@ namespace ProxyBridge.GUI.Resources {
             }
         }
 
+        internal static string MenuCloseToTray {
+            get {
+                return ResourceManager.GetString("MenuCloseToTray", resourceCulture);
+            }
+        }
+
         /// <summary>
         ///   Looks up a localized string similar to Language.
         /// </summary>

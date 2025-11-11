@@ -29,6 +29,9 @@
   <data name="MenuSettings" xml:space="preserve">
     <value>设置</value>
   </data>
+  <data name="MenuCloseToTray" xml:space="preserve">
+    <value>关闭到系统托盘</value>
+  </data>
   <data name="MenuLanguage" xml:space="preserve">
     <value>语言</value>
   </data>
