@@ -11,3 +11,5 @@ Windows/cli/bin/**
 Windows/cli/obj/**
 .vscode/**
 Windows/output/ProxyBridge_CLI.pdb
+Linux/**
+MacOS/**
