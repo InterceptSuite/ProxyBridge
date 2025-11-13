@@ -60,12 +60,10 @@ class AppProxyProvider: NETransparentProxyProvider {
     override func handleNewFlow(_ flow: NEAppProxyFlow) -> Bool {
         if let tcpFlow = flow as? NEAppProxyTCPFlow {
             logTCPConnection(tcpFlow)
-            handleTCP(tcpFlow)
         } else if let udpFlow = flow as? NEAppProxyUDPFlow {
             logUDPConnection(udpFlow)
-            handleUDP(udpFlow)
         }
-        return true
+        return false
     }
     
     private func logTCPConnection(_ flow: NEAppProxyTCPFlow) {
@@ -90,28 +88,6 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         if let metaData = flow.metaData as? NEFlowMetaData {
             logger.info("  App: \(metaData.sourceAppSigningIdentifier ?? "unknown")")
-        }
-    }
-    
-    private func handleTCP(_ flow: NEAppProxyTCPFlow) {
-        relayTCP(flow)
-    }
-    
-    private func relayTCP(_ flow: NEAppProxyTCPFlow) {
-        flow.readData { _, error in
-            guard error == nil else { return }
-            self.relayTCP(flow)
-        }
-    }
-    
-    private func handleUDP(_ flow: NEAppProxyUDPFlow) {
-        relayUDP(flow)
-    }
-    
-    private func relayUDP(_ flow: NEAppProxyUDPFlow) {
-        flow.readDatagrams { _, _, error in
-            guard error == nil else { return }
-            self.relayUDP(flow)
         }
     }
 }

@@ -12,6 +12,7 @@ import os.log
 
 @main
 struct ProxyBridgeApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     
     init() {
         os_log("App init - installing extension", type: .info)
@@ -21,6 +22,20 @@ struct ProxyBridgeApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+        }
+        .onChange(of: scenePhase) { oldPhase, newPhase in
+            if newPhase == .background {
+                os_log("App going to background, stopping proxy", type: .info)
+                stopProxy()
+            }
+        }
+    }
+    
+    func stopProxy() {
+        NETransparentProxyManager.loadAllFromPreferences { managers, error in
+            guard let manager = managers?.first else { return }
+            (manager.connection as? NETunnelProviderSession)?.stopTunnel()
+            os_log("Proxy tunnel stopped", type: .info)
         }
     }
     
