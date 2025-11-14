@@ -83,9 +83,8 @@ class AppProxyProvider: NETransparentProxyProvider {
     override func handleNewFlow(_ flow: NEAppProxyFlow) -> Bool {
         if let tcpFlow = flow as? NEAppProxyTCPFlow {
             logTCPConnection(tcpFlow)
-        } else if let udpFlow = flow as? NEAppProxyUDPFlow {
-            logUDPConnection(udpFlow)
         }
+        // Let all traffic pass through directly
         return false
     }
     
@@ -108,27 +107,6 @@ class AppProxyProvider: NETransparentProxyProvider {
         }
         
         sendLogToApp(protocol: "TCP", process: processName, destination: destination, port: port)
-    }
-    
-    private func logUDPConnection(_ flow: NEAppProxyUDPFlow) {
-        var destination = ""
-        var port = ""
-        
-        if let localEndpoint = flow.localEndpoint,
-           let localHost = localEndpoint as? NWHostEndpoint {
-            destination = localHost.hostname
-            port = localHost.port
-        } else {
-            destination = "unknown"
-            port = "unknown"
-        }
-        
-        var processName = "unknown"
-        if let metaData = flow.metaData as? NEFlowMetaData {
-            processName = metaData.sourceAppSigningIdentifier
-        }
-        
-        sendLogToApp(protocol: "UDP", process: processName, destination: destination, port: port)
     }
     
     private func sendLogToApp(protocol: String, process: String, destination: String, port: String) {

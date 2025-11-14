@@ -24,25 +24,30 @@ class ProxyBridgeApp: NSObject {
         
         print("ProxyBridge CLI - Starting")
         
+        signal(SIGINT, SIG_IGN)
+        signal(SIGTERM, SIG_IGN)
+        
         let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         sigintSource.setEventHandler {
             print("\nShutting down...")
+            fflush(stdout)
             app.shouldKeepRunning = false
             app.shutdown()
             CFRunLoopStop(app.runLoop)
+            exit(0)
         }
         sigintSource.resume()
-        signal(SIGINT, SIG_IGN)
         
         let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         sigtermSource.setEventHandler {
             print("\nTerminating...")
+            fflush(stdout)
             app.shouldKeepRunning = false
             app.shutdown()
             CFRunLoopStop(app.runLoop)
+            exit(0)
         }
         sigtermSource.resume()
-        signal(SIGTERM, SIG_IGN)
         
         app.installExtension()
         
