@@ -100,7 +100,6 @@ class ProxyBridgeApp: NSObject {
     }
     
     func setupTestProxyAndRule(session: NETunnelProviderSession) {
-        // Set hardcoded SOCKS5 proxy
         let proxyConfig: [String: Any] = [
             "action": "setProxyConfig",
             "proxyType": "socks5",
@@ -111,12 +110,23 @@ class ProxyBridgeApp: NSObject {
         guard let configData = try? JSONSerialization.data(withJSONObject: proxyConfig) else { return }
         
         try? session.sendProviderMessage(configData) { response in
-            print("✓ Proxy configured: socks5://192.168.1.4:4444")
+            if let responseData = response,
+               let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+               let status = json["status"] as? String {
+                if status == "ok" {
+                    print("✓ Proxy configured: socks5://192.168.1.4:4444")
+                    print("  Extension response: \(json)")
+                } else {
+                    print("✗ Proxy config failed: \(json["message"] as? String ?? "unknown error")")
+                    print("  Extension response: \(json)")
+                }
+            } else {
+                print("✓ Proxy configured: socks5://192.168.1.4:4444")
+                print("  Extension response: No data")
+            }
             
-            // After proxy is set, add test rule for curl
             let rule: [String: Any] = [
                 "action": "addRule",
-                "ruleId": 1,
                 "processNames": "com.apple.curl",
                 "targetHosts": "*",
                 "targetPorts": "*",
@@ -128,7 +138,21 @@ class ProxyBridgeApp: NSObject {
             guard let ruleData = try? JSONSerialization.data(withJSONObject: rule) else { return }
             
             try? session.sendProviderMessage(ruleData) { response in
-                print("✓ Test rule added: com.apple.curl -> * -> * -> PROXY")
+                if let responseData = response,
+                   let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                   let status = json["status"] as? String {
+                    if status == "ok" {
+                        let ruleId = json["ruleId"] as? UInt32 ?? 0
+                        print("✓ Test rule added with ID #\(ruleId): com.apple.curl -> * -> * -> PROXY")
+                        print("  Extension response: \(json)")
+                    } else {
+                        print("✗ Add rule failed: \(json["message"] as? String ?? "unknown error")")
+                        print("  Extension response: \(json)")
+                    }
+                } else {
+                    print("✓ Test rule added: com.apple.curl -> * -> * -> PROXY")
+                    print("  Extension response: No data")
+                }
                 print("")
             }
         }

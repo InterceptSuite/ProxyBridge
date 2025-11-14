@@ -22,7 +22,7 @@ enum RuleAction: String, Codable {
 }
 
 struct ProxyRule: Codable {
-    let ruleId: UInt32
+    var ruleId: UInt32
     let processNames: String
     let targetHosts: String
     let targetPorts: String
@@ -38,6 +38,27 @@ struct ProxyRule: Codable {
         case ruleProtocol
         case action = "ruleAction"
         case enabled
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.ruleId = try container.decodeIfPresent(UInt32.self, forKey: .ruleId) ?? 0
+        self.processNames = try container.decode(String.self, forKey: .processNames)
+        self.targetHosts = try container.decode(String.self, forKey: .targetHosts)
+        self.targetPorts = try container.decode(String.self, forKey: .targetPorts)
+        self.ruleProtocol = try container.decode(RuleProtocol.self, forKey: .ruleProtocol)
+        self.action = try container.decode(RuleAction.self, forKey: .action)
+        self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+    }
+    
+    init(ruleId: UInt32, processNames: String, targetHosts: String, targetPorts: String, ruleProtocol: RuleProtocol, action: RuleAction, enabled: Bool) {
+        self.ruleId = ruleId
+        self.processNames = processNames
+        self.targetHosts = targetHosts
+        self.targetPorts = targetPorts
+        self.ruleProtocol = ruleProtocol
+        self.action = action
+        self.enabled = enabled
     }
     
     func matchesProcess(_ processPath: String) -> Bool {
@@ -178,11 +199,10 @@ class AppProxyProvider: NETransparentProxyProvider {
     private var logQueue: [[String: String]] = []
     private let queueLock = NSLock()
     
-    // Rule storage
     private var rules: [ProxyRule] = []
     private let rulesLock = NSLock()
+    private var nextRuleId: UInt32 = 1
     
-    // Proxy configuration
     private var proxyType: String?
     private var proxyHost: String?
     private var proxyPort: Int?
@@ -255,14 +275,25 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         case "addRule":
             if let ruleData = try? JSONSerialization.data(withJSONObject: message),
-               let rule = try? JSONDecoder().decode(ProxyRule.self, from: ruleData) {
+               var rule = try? JSONDecoder().decode(ProxyRule.self, from: ruleData) {
                 rulesLock.lock()
-                // Remove existing rule with same ID
-                rules.removeAll { $0.ruleId == rule.ruleId }
+                rule.ruleId = nextRuleId
+                nextRuleId += 1
                 rules.append(rule)
                 rulesLock.unlock()
+                
                 logger.info("Added rule #\(rule.ruleId): \(rule.processNames) -> \(rule.action.rawValue)")
-                let response = ["status": "ok"]
+                
+                let response: [String: Any] = [
+                    "status": "ok",
+                    "ruleId": rule.ruleId,
+                    "processNames": rule.processNames,
+                    "targetHosts": rule.targetHosts,
+                    "targetPorts": rule.targetPorts,
+                    "protocol": rule.ruleProtocol.rawValue,
+                    "action": rule.action.rawValue,
+                    "enabled": rule.enabled
+                ]
                 completionHandler?(try? JSONSerialization.data(withJSONObject: response))
             } else {
                 let response = ["status": "error", "message": "Invalid rule format"]
