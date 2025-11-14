@@ -6,7 +6,6 @@
 //
 
 import NetworkExtension
-import os.log
 
 // MARK: - Rule Definitions
 enum RuleProtocol: String, Codable {
@@ -195,9 +194,8 @@ struct ProxyRule: Codable {
 
 class AppProxyProvider: NETransparentProxyProvider {
     
-    private let logger = Logger(subsystem: "com.interceptsuite.ProxyBridge.extension", category: "NetworkProxy")
     private var logQueue: [[String: String]] = []
-    private let queueLock = NSLock()
+    private let logQueueLock = NSLock()
     
     private var rules: [ProxyRule] = []
     private let rulesLock = NSLock()
@@ -209,6 +207,23 @@ class AppProxyProvider: NETransparentProxyProvider {
     private var proxyUsername: String?
     private var proxyPassword: String?
     private let proxyLock = NSLock()
+    
+    // MARK: - Logging Helper
+    private func log(_ message: String, level: String = "INFO") {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let logEntry: [String: String] = [
+            "timestamp": timestamp,
+            "level": level,
+            "message": message
+        ]
+        
+        logQueueLock.lock()
+        logQueue.append(logEntry)
+        if logQueue.count > 1000 {
+            logQueue.removeFirst()
+        }
+        logQueueLock.unlock()
+    }
 
     override func startProxy(options: [String : Any]?, completionHandler: @escaping (Error?) -> Void) {
         let settings = NETransparentProxyNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
@@ -242,13 +257,13 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         switch action {
         case "getLogs":
-            queueLock.lock()
+            logQueueLock.lock()
             if !logQueue.isEmpty {
-                let log = logQueue.removeFirst()
-                queueLock.unlock()
-                completionHandler?(try? JSONSerialization.data(withJSONObject: log))
+                let logEntry = logQueue.removeFirst()
+                logQueueLock.unlock()
+                completionHandler?(try? JSONSerialization.data(withJSONObject: logEntry))
             } else {
-                queueLock.unlock()
+                logQueueLock.unlock()
                 completionHandler?(nil)
             }
         case "setProxyConfig":
@@ -268,7 +283,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 if let username = message["proxyUsername"] as? String {
                     logMsg += " (auth: \(username):***)"
                 }
-                logger.info("\(logMsg)")
+                log(logMsg)
             }
             let response = ["status": "ok"]
             completionHandler?(try? JSONSerialization.data(withJSONObject: response))
@@ -282,7 +297,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 rules.append(rule)
                 rulesLock.unlock()
                 
-                logger.info("Added rule #\(rule.ruleId): \(rule.processNames) -> \(rule.action.rawValue)")
+                log("Added rule #\(rule.ruleId): \(rule.processNames) -> \(rule.action.rawValue)")
                 
                 let response: [String: Any] = [
                     "status": "ok",
@@ -307,7 +322,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 rules.removeAll { $0.ruleId == ruleId }
                 let removed = beforeCount - rules.count
                 rulesLock.unlock()
-                logger.info("Removed rule #\(ruleId)")
+                log("Removed rule #\(ruleId)")
                 let response: [String: Any] = ["status": "ok", "removed": removed]
                 completionHandler?(try? JSONSerialization.data(withJSONObject: response))
             } else {
@@ -337,13 +352,13 @@ class AppProxyProvider: NETransparentProxyProvider {
             let count = rules.count
             rules.removeAll()
             rulesLock.unlock()
-            logger.info("Cleared all rules (\(count) rules)")
+            log("Cleared all rules (\(count) rules)")
             let response: [String: Any] = ["status": "ok", "cleared": count]
             completionHandler?(try? JSONSerialization.data(withJSONObject: response))
         
         case "setRules":
             if let rules = message["rules"] as? [[String: String]] {
-                logger.info("Rules updated: \(rules.count) rules")
+                log("Rules updated: \(rules.count) rules")
             }
             let response = ["status": "ok"]
             completionHandler?(try? JSONSerialization.data(withJSONObject: response))
@@ -401,7 +416,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         if let rule = matchedRule {
             let action = rule.action.rawValue
-            logger.info("Rule #\(rule.ruleId) matched: \(processPath) -> \(destination):\(portStr) -> \(action)")
+            log("Rule #\(rule.ruleId) matched: \(processPath) -> \(destination):\(portStr) -> \(action)")
             
             sendLogToApp(protocol: "TCP", process: processPath, destination: destination, port: portStr, proxy: action)
             
@@ -428,7 +443,7 @@ class AppProxyProvider: NETransparentProxyProvider {
               let proxyPort = self.proxyPort,
               let proxyType = self.proxyType else {
             proxyLock.unlock()
-            logger.error("Proxy config missing")
+            log("Proxy config missing", level: "ERROR")
             flow.closeReadWithError(nil)
             flow.closeWriteWithError(nil)
             return
@@ -447,7 +462,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         } else if proxyType.lowercased() == "http" {
             handleHTTPProxy(clientFlow: flow, proxyConnection: proxyConnection, destination: destination, port: port, username: username, password: password)
         } else {
-            logger.error("Unsupported proxy type: \(proxyType)")
+            log("Unsupported proxy type: \(proxyType)", level: "ERROR")
             flow.closeReadWithError(nil)
             flow.closeWriteWithError(nil)
         }
@@ -464,7 +479,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         let greetingData = Data(greeting)
         proxyConnection.write(greetingData) { [weak self] error in
             if let error = error {
-                self?.logger.error("SOCKS5 greeting write failed: \(error.localizedDescription)")
+                self?.log("SOCKS5 greeting write failed: \(error.localizedDescription)", level: "ERROR")
                 clientFlow.closeReadWithError(error)
                 clientFlow.closeWriteWithError(error)
                 proxyConnection.cancel()
@@ -476,7 +491,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 guard let self = self else { return }
                 
                 if let error = error {
-                    self.logger.error("SOCKS5 greeting response failed: \(error.localizedDescription)")
+                    self.log("SOCKS5 greeting response failed: \(error.localizedDescription)", level: "ERROR")
                     clientFlow.closeReadWithError(error)
                     clientFlow.closeWriteWithError(error)
                     proxyConnection.cancel()
@@ -484,7 +499,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 }
                 
                 guard let data = data, data.count == 2 else {
-                    self.logger.error("SOCKS5 invalid greeting response")
+                    self.log("SOCKS5 invalid greeting response", level: "ERROR")
                     clientFlow.closeReadWithError(nil)
                     clientFlow.closeWriteWithError(nil)
                     proxyConnection.cancel()
@@ -495,7 +510,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 let method = data[1]
                 
                 if version != 0x05 {
-                    self.logger.error("SOCKS5 invalid version: \(version)")
+                    self.log("SOCKS5 invalid version: \(version)", level: "ERROR")
                     clientFlow.closeReadWithError(nil)
                     clientFlow.closeWriteWithError(nil)
                     proxyConnection.cancel()
@@ -509,7 +524,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                     // Username/password authentication required
                     self.sendSOCKS5Auth(clientFlow: clientFlow, proxyConnection: proxyConnection, destination: destination, port: port, username: username ?? "", password: password ?? "")
                 } else {
-                    self.logger.error("SOCKS5 no acceptable auth method: \(method)")
+                    self.log("SOCKS5 no acceptable auth method: \(method)", level: "ERROR")
                     clientFlow.closeReadWithError(nil)
                     clientFlow.closeWriteWithError(nil)
                     proxyConnection.cancel()
@@ -529,7 +544,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         proxyConnection.write(authData) { [weak self] error in
             if let error = error {
-                self?.logger.error("SOCKS5 auth write failed: \(error.localizedDescription)")
+                self?.log("SOCKS5 auth write failed: \(error.localizedDescription)", level: "ERROR")
                 clientFlow.closeReadWithError(error)
                 clientFlow.closeWriteWithError(error)
                 proxyConnection.cancel()
@@ -541,7 +556,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 guard let self = self else { return }
                 
                 if let error = error {
-                    self.logger.error("SOCKS5 auth response failed: \(error.localizedDescription)")
+                    self.log("SOCKS5 auth response failed: \(error.localizedDescription)", level: "ERROR")
                     clientFlow.closeReadWithError(error)
                     clientFlow.closeWriteWithError(error)
                     proxyConnection.cancel()
@@ -549,7 +564,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 }
                 
                 guard let data = data, data.count == 2, data[1] == 0x00 else {
-                    self.logger.error("SOCKS5 auth failed")
+                    self.log("SOCKS5 auth failed", level: "ERROR")
                     clientFlow.closeReadWithError(nil)
                     clientFlow.closeWriteWithError(nil)
                     proxyConnection.cancel()
@@ -584,7 +599,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         proxyConnection.write(request) { [weak self] error in
             if let error = error {
-                self?.logger.error("SOCKS5 connect write failed: \(error.localizedDescription)")
+                self?.log("SOCKS5 connect write failed: \(error.localizedDescription)", level: "ERROR")
                 clientFlow.closeReadWithError(error)
                 clientFlow.closeWriteWithError(error)
                 proxyConnection.cancel()
@@ -596,7 +611,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 guard let self = self else { return }
                 
                 if let error = error {
-                    self.logger.error("SOCKS5 connect response failed: \(error.localizedDescription)")
+                    self.log("SOCKS5 connect response failed: \(error.localizedDescription)", level: "ERROR")
                     clientFlow.closeReadWithError(error)
                     clientFlow.closeWriteWithError(error)
                     proxyConnection.cancel()
@@ -604,14 +619,14 @@ class AppProxyProvider: NETransparentProxyProvider {
                 }
                 
                 guard let data = data, data.count >= 10, data[0] == 0x05, data[1] == 0x00 else {
-                    self.logger.error("SOCKS5 connect failed")
+                    self.log("SOCKS5 connect failed", level: "ERROR")
                     clientFlow.closeReadWithError(nil)
                     clientFlow.closeWriteWithError(nil)
                     proxyConnection.cancel()
                     return
                 }
                 
-                self.logger.info("SOCKS5 connection established to \(destination):\(port)")
+                self.log("SOCKS5 connection established to \(destination):\(port)")
                 self.relayData(clientFlow: clientFlow, proxyConnection: proxyConnection)
             }
         }
@@ -632,7 +647,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         request += "\r\n"
         
         guard let requestData = request.data(using: .utf8) else {
-            logger.error("HTTP CONNECT request encoding failed")
+            log("HTTP CONNECT request encoding failed", level: "ERROR")
             clientFlow.closeReadWithError(nil)
             clientFlow.closeWriteWithError(nil)
             proxyConnection.cancel()
@@ -641,7 +656,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         proxyConnection.write(requestData) { [weak self] error in
             if let error = error {
-                self?.logger.error("HTTP CONNECT write failed: \(error.localizedDescription)")
+                self?.log("HTTP CONNECT write failed: \(error.localizedDescription)", level: "ERROR")
                 clientFlow.closeReadWithError(error)
                 clientFlow.closeWriteWithError(error)
                 proxyConnection.cancel()
@@ -653,7 +668,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 guard let self = self else { return }
                 
                 if let error = error {
-                    self.logger.error("HTTP CONNECT response failed: \(error.localizedDescription)")
+                    self.log("HTTP CONNECT response failed: \(error.localizedDescription)", level: "ERROR")
                     clientFlow.closeReadWithError(error)
                     clientFlow.closeWriteWithError(error)
                     proxyConnection.cancel()
@@ -662,7 +677,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 
                 guard let data = data,
                       let response = String(data: data, encoding: .utf8) else {
-                    self.logger.error("HTTP CONNECT invalid response")
+                    self.log("HTTP CONNECT invalid response", level: "ERROR")
                     clientFlow.closeReadWithError(nil)
                     clientFlow.closeWriteWithError(nil)
                     proxyConnection.cancel()
@@ -670,10 +685,10 @@ class AppProxyProvider: NETransparentProxyProvider {
                 }
                 
                 if response.contains("200") {
-                    self.logger.info("HTTP CONNECT established to \(destination):\(port)")
+                    self.log("HTTP CONNECT established to \(destination):\(port)")
                     self.relayData(clientFlow: clientFlow, proxyConnection: proxyConnection)
                 } else {
-                    self.logger.error("HTTP CONNECT failed: \(response)")
+                    self.log("HTTP CONNECT failed: \(response)", level: "ERROR")
                     clientFlow.closeReadWithError(nil)
                     clientFlow.closeWriteWithError(nil)
                     proxyConnection.cancel()
@@ -685,7 +700,7 @@ class AppProxyProvider: NETransparentProxyProvider {
     private func relayData(clientFlow: NEAppProxyTCPFlow, proxyConnection: NWTCPConnection) {
         clientFlow.open(withLocalEndpoint: nil) { [weak self] error in
             if let error = error {
-                self?.logger.error("Failed to open client flow: \(error.localizedDescription)")
+                self?.log("Failed to open client flow: \(error.localizedDescription)", level: "ERROR")
                 proxyConnection.cancel()
                 return
             }
@@ -698,20 +713,20 @@ class AppProxyProvider: NETransparentProxyProvider {
     private func relayClientToProxy(clientFlow: NEAppProxyTCPFlow, proxyConnection: NWTCPConnection) {
         clientFlow.readData { [weak self] data, error in
             if let error = error {
-                self?.logger.error("Client read error: \(error.localizedDescription)")
+                self?.log("Client read error: \(error.localizedDescription)", level: "ERROR")
                 proxyConnection.cancel()
                 return
             }
             
             guard let data = data, !data.isEmpty else {
-                self?.logger.info("Client closed connection")
+                self?.log("Client closed connection")
                 proxyConnection.cancel()
                 return
             }
             
             proxyConnection.write(data) { error in
                 if let error = error {
-                    self?.logger.error("Proxy write error: \(error.localizedDescription)")
+                    self?.log("Proxy write error: \(error.localizedDescription)", level: "ERROR")
                     clientFlow.closeReadWithError(error)
                     clientFlow.closeWriteWithError(error)
                 } else {
@@ -725,14 +740,14 @@ class AppProxyProvider: NETransparentProxyProvider {
     private func relayProxyToClient(clientFlow: NEAppProxyTCPFlow, proxyConnection: NWTCPConnection) {
         proxyConnection.readMinimumLength(1, maximumLength: 65536) { [weak self] data, error in
             if let error = error {
-                self?.logger.error("Proxy read error: \(error.localizedDescription)")
+                self?.log("Proxy read error: \(error.localizedDescription)", level: "ERROR")
                 clientFlow.closeReadWithError(error)
                 clientFlow.closeWriteWithError(error)
                 return
             }
             
             guard let data = data, !data.isEmpty else {
-                self?.logger.info("Proxy closed connection")
+                self?.log("Proxy closed connection")
                 clientFlow.closeReadWithError(nil)
                 clientFlow.closeWriteWithError(nil)
                 return
@@ -740,7 +755,7 @@ class AppProxyProvider: NETransparentProxyProvider {
             
             clientFlow.write(data) { error in
                 if let error = error {
-                    self?.logger.error("Client write error: \(error.localizedDescription)")
+                    self?.log("Client write error: \(error.localizedDescription)", level: "ERROR")
                     proxyConnection.cancel()
                 } else {
                     // Continue reading from proxy
@@ -792,12 +807,12 @@ class AppProxyProvider: NETransparentProxyProvider {
             "proxy": proxy
         ]
         
-        queueLock.lock()
+        logQueueLock.lock()
         logQueue.append(logData)
         if logQueue.count > 1000 {
             logQueue.removeFirst()
         }
-        queueLock.unlock()
+        logQueueLock.unlock()
     }
 }
 

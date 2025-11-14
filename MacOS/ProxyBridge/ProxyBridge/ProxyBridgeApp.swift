@@ -166,17 +166,26 @@ class ProxyBridgeApp: NSObject {
         
         try? session.sendProviderMessage(data) { response in
             guard let responseData = response,
-                  let log = try? JSONSerialization.jsonObject(with: responseData) as? [String: String],
-                  let type = log["type"], type == "connection",
-                  let proto = log["protocol"],
-                  let process = log["process"],
-                  let dest = log["destination"],
-                  let port = log["port"],
-                  let proxy = log["proxy"] else {
+                  let log = try? JSONSerialization.jsonObject(with: responseData) as? [String: String] else {
                 return
             }
             
-            print("[\(proto)] \(process) -> \(dest):\(port) -> \(proxy)")
+            // Check if it's a connection log (old format)
+            if let type = log["type"], type == "connection",
+               let proto = log["protocol"],
+               let process = log["process"],
+               let dest = log["destination"],
+               let port = log["port"],
+               let proxy = log["proxy"] {
+                print("[\(proto)] \(process) -> \(dest):\(port) -> \(proxy)")
+            }
+            // Check if it's a general log (new format)
+            else if let timestamp = log["timestamp"],
+                    let level = log["level"],
+                    let message = log["message"] {
+                let levelIcon = level == "ERROR" ? "✗" : "ℹ"
+                print("[\(timestamp)] \(levelIcon) \(message)")
+            }
         }
     }
     
