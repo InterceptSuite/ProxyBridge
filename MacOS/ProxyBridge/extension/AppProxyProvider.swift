@@ -11,10 +11,10 @@ import os.log
 class AppProxyProvider: NETransparentProxyProvider {
     
     private let logger = Logger(subsystem: "com.interceptsuite.ProxyBridge.extension", category: "NetworkProxy")
+    private var logQueue: [[String: String]] = []
+    private let queueLock = NSLock()
 
     override func startProxy(options: [String : Any]?, completionHandler: @escaping (Error?) -> Void) {
-        logger.info("Configuring transparent proxy")
-        
         let settings = NETransparentProxyNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         
         let allTrafficRule = NENetworkRule(
@@ -29,24 +29,47 @@ class AppProxyProvider: NETransparentProxyProvider {
         settings.includedNetworkRules = [allTrafficRule]
         
         self.setTunnelNetworkSettings(settings) { error in
-            if let error = error {
-                self.logger.error("Failed to set network settings: \(error.localizedDescription)")
-                completionHandler(error)
-            } else {
-                self.logger.info("Transparent proxy started")
-                completionHandler(nil)
-            }
+            completionHandler(error)
         }
     }
     
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
-        logger.info("Proxy stopped: \(reason.rawValue)")
         completionHandler()
     }
     
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
-        if let handler = completionHandler {
-            handler(messageData)
+        guard let message = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any],
+              let action = message["action"] as? String else {
+            completionHandler?(nil)
+            return
+        }
+        
+        switch action {
+        case "getLogs":
+            queueLock.lock()
+            if !logQueue.isEmpty {
+                let log = logQueue.removeFirst()
+                queueLock.unlock()
+                completionHandler?(try? JSONSerialization.data(withJSONObject: log))
+            } else {
+                queueLock.unlock()
+                completionHandler?(nil)
+            }
+        case "setProxyConfig":
+            if let host = message["host"] as? String,
+               let port = message["port"] as? Int {
+                logger.info("Proxy config updated: \(host):\(port)")
+            }
+            let response = ["status": "ok"]
+            completionHandler?(try? JSONSerialization.data(withJSONObject: response))
+        case "setRules":
+            if let rules = message["rules"] as? [[String: String]] {
+                logger.info("Rules updated: \(rules.count) rules")
+            }
+            let response = ["status": "ok"]
+            completionHandler?(try? JSONSerialization.data(withJSONObject: response))
+        default:
+            completionHandler?(nil)
         }
     }
     
@@ -68,26 +91,63 @@ class AppProxyProvider: NETransparentProxyProvider {
     
     private func logTCPConnection(_ flow: NEAppProxyTCPFlow) {
         let remoteEndpoint = flow.remoteEndpoint
+        var destination = ""
+        var port = ""
         
         if let remoteHost = remoteEndpoint as? NWHostEndpoint {
-            logger.info("TCP -> \(remoteHost.hostname):\(remoteHost.port)")
+            destination = remoteHost.hostname
+            port = remoteHost.port
         } else {
-            logger.info("TCP -> \(String(describing: remoteEndpoint))")
+            destination = String(describing: remoteEndpoint)
+            port = "unknown"
         }
         
+        var processName = "unknown"
         if let metaData = flow.metaData as? NEFlowMetaData {
-            logger.info("  App: \(metaData.sourceAppSigningIdentifier ?? "unknown")")
+            processName = metaData.sourceAppSigningIdentifier
         }
+        
+        sendLogToApp(protocol: "TCP", process: processName, destination: destination, port: port)
     }
     
     private func logUDPConnection(_ flow: NEAppProxyUDPFlow) {
+        var destination = ""
+        var port = ""
+        
         if let localEndpoint = flow.localEndpoint,
            let localHost = localEndpoint as? NWHostEndpoint {
-            logger.info("UDP: \(localHost.hostname):\(localHost.port)")
+            destination = localHost.hostname
+            port = localHost.port
+        } else {
+            destination = "unknown"
+            port = "unknown"
         }
         
+        var processName = "unknown"
         if let metaData = flow.metaData as? NEFlowMetaData {
-            logger.info("  App: \(metaData.sourceAppSigningIdentifier ?? "unknown")")
+            processName = metaData.sourceAppSigningIdentifier
         }
+        
+        sendLogToApp(protocol: "UDP", process: processName, destination: destination, port: port)
+    }
+    
+    private func sendLogToApp(protocol: String, process: String, destination: String, port: String) {
+        let logData: [String: String] = [
+            "type": "connection",
+            "protocol": `protocol`,
+            "process": process,
+            "destination": destination,
+            "port": port,
+            "proxy": "Direct"
+        ]
+        
+        queueLock.lock()
+        logQueue.append(logData)
+        if logQueue.count > 1000 {
+            logQueue.removeFirst()
+        }
+        queueLock.unlock()
     }
 }
+
+
