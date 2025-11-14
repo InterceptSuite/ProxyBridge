@@ -18,11 +18,23 @@ class ProxyBridgeApp: NSObject {
     private let runLoop = CFRunLoopGetCurrent()
     private var tunnelSession: NETunnelProviderSession?
     private var statusObserver: NSObjectProtocol?
+    private var proxyConfig: ProxyConfig?
+    
+    struct ProxyConfig {
+        let type: String  // "socks5" or "http"
+        let host: String
+        let port: Int
+        let username: String?
+        let password: String?
+    }
     
     static func main() {
         let app = ProxyBridgeApp.shared
         
         print("ProxyBridge CLI - Starting")
+        
+        // Parse command line arguments
+        app.parseArguments()
         
         signal(SIGINT, SIG_IGN)
         signal(SIGTERM, SIG_IGN)
@@ -82,6 +94,44 @@ class ProxyBridgeApp: NSObject {
         
         print("Listening for connections...")
         print("")
+        
+        // Setup hardcoded proxy for testing
+        setupTestProxyAndRule(session: session)
+    }
+    
+    func setupTestProxyAndRule(session: NETunnelProviderSession) {
+        // Set hardcoded SOCKS5 proxy
+        let proxyConfig: [String: Any] = [
+            "action": "setProxyConfig",
+            "proxyType": "socks5",
+            "proxyHost": "192.168.1.4",
+            "proxyPort": 4444
+        ]
+        
+        guard let configData = try? JSONSerialization.data(withJSONObject: proxyConfig) else { return }
+        
+        try? session.sendProviderMessage(configData) { response in
+            print("✓ Proxy configured: socks5://192.168.1.4:4444")
+            
+            // After proxy is set, add test rule for curl
+            let rule: [String: Any] = [
+                "action": "addRule",
+                "ruleId": 1,
+                "processNames": "com.apple.curl",
+                "targetHosts": "*",
+                "targetPorts": "*",
+                "ruleProtocol": "TCP",
+                "ruleAction": "PROXY",
+                "enabled": true
+            ]
+            
+            guard let ruleData = try? JSONSerialization.data(withJSONObject: rule) else { return }
+            
+            try? session.sendProviderMessage(ruleData) { response in
+                print("✓ Test rule added: com.apple.curl -> * -> * -> PROXY")
+                print("")
+            }
+        }
     }
     
     func checkForLogs() {
@@ -97,28 +147,104 @@ class ProxyBridgeApp: NSObject {
                   let proto = log["protocol"],
                   let process = log["process"],
                   let dest = log["destination"],
-                  let port = log["port"] else {
+                  let port = log["port"],
+                  let proxy = log["proxy"] else {
                 return
             }
             
-            print("[\(proto)] \(process) -> \(dest):\(port)")
+            print("[\(proto)] \(process) -> \(dest):\(port) -> \(proxy)")
         }
     }
     
     func sendConfig(host: String, port: Int) {
         guard let session = tunnelSession else { return }
         
-        let config = [
+        var config: [String: Any] = [
             "action": "setProxyConfig",
             "host": host,
             "port": port
-        ] as [String : Any]
+        ]
+        
+        // Add proxy config if available
+        if let proxy = proxyConfig {
+            config["proxyType"] = proxy.type
+            config["proxyHost"] = proxy.host
+            config["proxyPort"] = proxy.port
+            if let username = proxy.username {
+                config["proxyUsername"] = username
+            }
+            if let password = proxy.password {
+                config["proxyPassword"] = password
+            }
+        }
         
         guard let data = try? JSONSerialization.data(withJSONObject: config) else { return }
         
         try? session.sendProviderMessage(data) { response in
             print("Config sent to extension")
         }
+    }
+    
+    func parseArguments() {
+        let args = CommandLine.arguments
+        
+        // Look for --proxy argument
+        if let proxyIndex = args.firstIndex(of: "--proxy"),
+           proxyIndex + 1 < args.count {
+            let proxyUrl = args[proxyIndex + 1]
+            
+            if let config = parseProxyUrl(proxyUrl) {
+                proxyConfig = config
+                print("Proxy: \(config.type)://\(config.host):\(config.port)")
+                if let username = config.username {
+                    print("Proxy Auth: \(username):***")
+                }
+            } else {
+                print("WARNING: Invalid proxy format: \(proxyUrl)")
+                print("Use: type://ip:port or type://ip:port:username:password")
+                print("Examples: socks5://127.0.0.1:1080")
+                print("          http://proxy.com:8080:myuser:mypass")
+            }
+        }
+    }
+    
+    func parseProxyUrl(_ proxyUrl: String) -> ProxyConfig? {
+        var username: String? = nil
+        var password: String? = nil
+        
+        if proxyUrl.starts(with: "socks5://") {
+            let parts = String(proxyUrl.dropFirst(9)).split(separator: ":")
+            if parts.count >= 2, let port = Int(parts[1]) {
+                if parts.count >= 4 {
+                    username = String(parts[2])
+                    password = String(parts[3])
+                }
+                return ProxyConfig(
+                    type: "socks5",
+                    host: String(parts[0]),
+                    port: port,
+                    username: username,
+                    password: password
+                )
+            }
+        } else if proxyUrl.starts(with: "http://") {
+            let parts = String(proxyUrl.dropFirst(7)).split(separator: ":")
+            if parts.count >= 2, let port = Int(parts[1]) {
+                if parts.count >= 4 {
+                    username = String(parts[2])
+                    password = String(parts[3])
+                }
+                return ProxyConfig(
+                    type: "http",
+                    host: String(parts[0]),
+                    port: port,
+                    username: username,
+                    password: password
+                )
+            }
+        }
+        
+        return nil
     }
     
     func stopProxy() {
