@@ -259,6 +259,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     
     deinit {
         logTimer?.invalidate()
+        stopProxy()
     }
 }
 

@@ -10,10 +10,18 @@ import SwiftUI
 @main
 struct ProxyBridgeGUIApp: App {
     @StateObject private var viewModel = ProxyBridgeViewModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    
+    init() {
+        // Set the viewModel reference for AppDelegate
+    }
     
     var body: some Scene {
         WindowGroup {
             ContentView(viewModel: viewModel)
+                .onAppear {
+                    AppDelegate.viewModel = viewModel
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
@@ -49,6 +57,12 @@ struct ProxyBridgeGUIApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    static var viewModel: ProxyBridgeViewModel?
+    
+    func applicationWillTerminate(_ notification: Notification) {
+        AppDelegate.viewModel?.stopProxy()
+    }
+    
     @objc func openProxySettings() {
         // Window opening handled by SwiftUI
     }
