@@ -15,9 +15,9 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     @Published var activityLogs: [ActivityLog] = []
     @Published var isProxyActive = false
     
-    private var tunnelSession: NETunnelProviderSession?
+    var tunnelSession: NETunnelProviderSession?
     private var logTimer: Timer?
-    private var proxyConfig: ProxyConfig?
+    private(set) var proxyConfig: ProxyConfig?
     
     struct ProxyConfig {
         let type: String
@@ -46,7 +46,43 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     
     override init() {
         super.init()
+        loadProxyConfig()
         installAndStartProxy()
+    }
+    
+    private func loadProxyConfig() {
+        if let type = UserDefaults.standard.string(forKey: "proxyType"),
+           let host = UserDefaults.standard.string(forKey: "proxyHost"),
+           let port = UserDefaults.standard.object(forKey: "proxyPort") as? Int {
+            let username = UserDefaults.standard.string(forKey: "proxyUsername")
+            let password = UserDefaults.standard.string(forKey: "proxyPassword")
+            
+            proxyConfig = ProxyConfig(
+                type: type,
+                host: host,
+                port: port,
+                username: username,
+                password: password
+            )
+        }
+    }
+    
+    private func saveProxyConfig(_ config: ProxyConfig) {
+        UserDefaults.standard.set(config.type, forKey: "proxyType")
+        UserDefaults.standard.set(config.host, forKey: "proxyHost")
+        UserDefaults.standard.set(config.port, forKey: "proxyPort")
+        
+        if let username = config.username {
+            UserDefaults.standard.set(username, forKey: "proxyUsername")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "proxyUsername")
+        }
+        
+        if let password = config.password {
+            UserDefaults.standard.set(password, forKey: "proxyPassword")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "proxyPassword")
+        }
     }
     
     private func installAndStartProxy() {
@@ -194,6 +230,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     
     func setProxyConfig(_ config: ProxyConfig) {
         proxyConfig = config
+        saveProxyConfig(config)
         
         guard let session = tunnelSession else {
             addLog("ERROR", "Extension not connected")

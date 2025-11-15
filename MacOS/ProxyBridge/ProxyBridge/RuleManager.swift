@@ -29,7 +29,7 @@ struct RuleManager {
             "targetHosts": targetHosts,
             "targetPorts": targetPorts,
             "ruleProtocol": `protocol`,
-            "action": action,
+            "ruleAction": action,
             "enabled": enabled
         ]
         

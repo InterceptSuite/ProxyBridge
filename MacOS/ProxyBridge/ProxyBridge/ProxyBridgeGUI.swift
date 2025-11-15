@@ -29,12 +29,12 @@ struct ProxyBridgeGUIApp: App {
             
             CommandMenu("Proxy") {
                 Button("Proxy Settings...") {
-                    NSApp.sendAction(#selector(AppDelegate.openProxySettings), to: nil, from: nil)
+                    openProxySettingsWindow()
                 }
                 .keyboardShortcut(",", modifiers: .command)
                 
                 Button("Proxy Rules...") {
-                    NSApp.sendAction(#selector(AppDelegate.openProxyRules), to: nil, from: nil)
+                    openProxyRulesWindow()
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }
@@ -42,7 +42,6 @@ struct ProxyBridgeGUIApp: App {
         
         Window("Proxy Settings", id: "proxy-settings") {
             ProxySettingsView(viewModel: viewModel)
-                .frame(width: 500, height: 400)
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
@@ -54,6 +53,14 @@ struct ProxyBridgeGUIApp: App {
         .windowResizability(.contentSize)
         .defaultPosition(.center)
     }
+    
+    private func openProxySettingsWindow() {
+        NSApp.sendAction(#selector(AppDelegate.openProxySettings), to: nil, from: nil)
+    }
+    
+    private func openProxyRulesWindow() {
+        NSApp.sendAction(#selector(AppDelegate.openProxyRules), to: nil, from: nil)
+    }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -64,10 +71,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func openProxySettings() {
-        // Window opening handled by SwiftUI
+        if let window = NSApplication.shared.windows.first(where: { $0.title == "Proxy Settings" }) {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            // Open new window
+            let controller = NSHostingController(rootView: ProxySettingsView(viewModel: AppDelegate.viewModel!))
+            let window = NSWindow(contentViewController: controller)
+            window.title = "Proxy Settings"
+            window.setContentSize(NSSize(width: 600, height: 500))
+            window.styleMask = [.titled, .closable]
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+        }
     }
     
     @objc func openProxyRules() {
-        // Window opening handled by SwiftUI
+        if let window = NSApplication.shared.windows.first(where: { $0.title == "Proxy Rules" }) {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            // Open new window
+            let controller = NSHostingController(rootView: ProxyRulesView(viewModel: AppDelegate.viewModel!))
+            let window = NSWindow(contentViewController: controller)
+            window.title = "Proxy Rules"
+            window.setContentSize(NSSize(width: 1000, height: 600))
+            window.styleMask = [.titled, .closable, .resizable]
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 }
