@@ -7,7 +7,6 @@
 
 import NetworkExtension
 
-// MARK: - Rule Definitions
 enum RuleProtocol: String, Codable {
     case tcp = "TCP"
     case udp = "UDP"
@@ -208,7 +207,6 @@ class AppProxyProvider: NETransparentProxyProvider {
     private var proxyPassword: String?
     private let proxyLock = NSLock()
     
-    // MARK: - Logging Helper
     private func log(_ message: String, level: String = "INFO") {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let logEntry: [String: String] = [
@@ -247,6 +245,9 @@ class AppProxyProvider: NETransparentProxyProvider {
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         completionHandler()
     }
+    
+    private var udpTCPConnections: [NEAppProxyUDPFlow: NWTCPConnection] = [:]
+    private let tcpConnectionsLock = NSLock()
     
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         guard let message = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any],
@@ -377,8 +378,10 @@ class AppProxyProvider: NETransparentProxyProvider {
     override func handleNewFlow(_ flow: NEAppProxyFlow) -> Bool {
         if let tcpFlow = flow as? NEAppProxyTCPFlow {
             return handleTCPFlow(tcpFlow)
+        } else if let udpFlow = flow as? NEAppProxyUDPFlow {
+            return handleUDPFlow(udpFlow)
         }
-        // Let all traffic pass through directly
+        // Let all other traffic pass through directly
         return false
     }
     
@@ -435,6 +438,366 @@ class AppProxyProvider: NETransparentProxyProvider {
             sendLogToApp(protocol: "TCP", process: processPath, destination: destination, port: portStr, proxy: "Direct")
             return false
         }
+    }
+    
+    private func handleUDPFlow(_ flow: NEAppProxyUDPFlow) -> Bool {
+        var processPath = "unknown"
+        if let metaData = flow.metaData as? NEFlowMetaData {
+            processPath = metaData.sourceAppSigningIdentifier
+        }
+        
+        // Check if proxy is configured and is SOCKS5
+        proxyLock.lock()
+        let hasSOCKS5Proxy = (proxyHost != nil && proxyPort != nil && proxyType?.lowercased() == "socks5")
+        let socksHost = self.proxyHost
+        let socksPort = self.proxyPort
+        proxyLock.unlock()
+        
+        if !hasSOCKS5Proxy {
+            return false  // Let OS handle - no SOCKS5 proxy configured
+        }
+        
+        // Check rules - match by process name only (UDP flows don't have destination info yet)
+        let matchedRule = findMatchingUDPRule(processPath: processPath)
+        
+        if let rule = matchedRule {
+            log("UDP Rule #\(rule.ruleId) matched: \(processPath) -> \(rule.action.rawValue)")
+            
+            switch rule.action {
+            case .direct:
+                return false  // Let OS handle
+            case .block:
+                return true  // Block by returning true without opening
+            case .proxy:
+                // Proxy via SOCKS5
+                flow.open(withLocalEndpoint: nil) { [weak self] error in
+                    guard let self = self else { return }
+                    
+                    if let error = error {
+                        self.log("Failed to open UDP flow: \(error.localizedDescription)", level: "ERROR")
+                        return
+                    }
+                    
+                    if let host = socksHost, let port = socksPort {
+                        self.proxyUDPFlowViaSOCKS5(flow, processPath: processPath, socksHost: host, socksPort: port)
+                    }
+                }
+                return true
+            }
+        } else {
+            return false  // No matching rule, let OS handle
+        }
+    }
+    
+    private func findMatchingUDPRule(processPath: String) -> ProxyRule? {
+        rulesLock.lock()
+        defer { rulesLock.unlock() }
+        
+        for rule in rules {
+            guard rule.enabled else { continue }
+            
+            // Rule must apply to UDP (protocol is UDP or BOTH)
+            if rule.ruleProtocol != .udp && rule.ruleProtocol != .both {
+                continue
+            }
+            
+            // Match process name
+            if !rule.matchesProcess(processPath) {
+                continue
+            }
+            
+            return rule
+        }
+        
+        return nil
+    }
+    
+    private func proxyUDPFlowViaSOCKS5(_ clientFlow: NEAppProxyUDPFlow, processPath: String, socksHost: String, socksPort: Int) {
+        let proxyEndpoint = NWHostEndpoint(hostname: socksHost, port: String(socksPort))
+        let tcpConnection = createTCPConnection(to: proxyEndpoint, enableTLS: false, tlsParameters: nil, delegate: nil)
+        
+        let greeting: [UInt8] = [0x05, 0x01, 0x00]
+        let greetingData = Data(greeting)
+        
+        tcpConnection.write(greetingData) { [weak self] error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                self.log("SOCKS5 UDP greeting failed: \(error.localizedDescription)", level: "ERROR")
+                return
+            }
+            
+            tcpConnection.readMinimumLength(2, maximumLength: 2) { [weak self] data, error in
+                guard let self = self else { return }
+                
+                if let error = error {
+                    self.log("SOCKS5 UDP greeting response failed: \(error.localizedDescription)", level: "ERROR")
+                    return
+                }
+                
+                guard let data = data, data.count == 2, data[1] == 0x00 else {
+                    self.log("SOCKS5 UDP greeting response failed", level: "ERROR")
+                    return
+                }
+                
+                self.sendSOCKS5UDPAssociate(clientFlow: clientFlow, tcpConnection: tcpConnection, processPath: processPath)
+            }
+        }
+    }
+    
+    private func sendSOCKS5UDPAssociate(clientFlow: NEAppProxyUDPFlow, tcpConnection: NWTCPConnection, processPath: String) {
+        var request = Data()
+        request.append(0x05)
+        request.append(0x03)
+        request.append(0x00)
+        request.append(0x01)
+        request.append(contentsOf: [0, 0, 0, 0])
+        request.append(contentsOf: [0, 0])
+        
+        tcpConnection.write(request) { [weak self] error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                self.log("SOCKS5 UDP ASSOCIATE failed: \(error.localizedDescription)", level: "ERROR")
+                return
+            }
+            
+            tcpConnection.readMinimumLength(10, maximumLength: 512) { [weak self] data, error in
+                guard let self = self else { return }
+                
+                if let error = error {
+                    self.log("SOCKS5 UDP ASSOCIATE response error: \(error.localizedDescription)", level: "ERROR")
+                    return
+                }
+                
+                guard let data = data, data.count >= 10, data[0] == 0x05, data[1] == 0x00 else {
+                    self.log("SOCKS5 UDP ASSOCIATE rejected", level: "ERROR")
+                    return
+                }
+                
+                let (relayHost, relayPort) = self.parseSOCKS5Address(from: data, offset: 3)
+                self.relayUDPThroughSOCKS5(clientFlow: clientFlow, relayHost: relayHost, relayPort: relayPort, tcpConnection: tcpConnection, processPath: processPath)
+            }
+        }
+    }
+    
+    private func parseSOCKS5Address(from data: Data, offset: Int) -> (String, UInt16) {
+        let atyp = data[offset]
+        
+        if atyp == 0x01 {
+            let ip = "\(data[offset+1]).\(data[offset+2]).\(data[offset+3]).\(data[offset+4])"
+            let port = (UInt16(data[offset+5]) << 8) | UInt16(data[offset+6])
+            return (ip, port)
+        } else if atyp == 0x04 {
+            var ipv6Parts: [String] = []
+            for i in 0..<8 {
+                let idx = offset + 1 + (i * 2)
+                let part = (UInt16(data[idx]) << 8) | UInt16(data[idx+1])
+                ipv6Parts.append(String(format: "%x", part))
+            }
+            let ip = ipv6Parts.joined(separator: ":")
+            let port = (UInt16(data[offset+17]) << 8) | UInt16(data[offset+18])
+            return (ip, port)
+        } else if atyp == 0x03 {
+            let len = Int(data[offset+1])
+            let domain = String(data: data[(offset+2)..<(offset+2+len)], encoding: .utf8) ?? "unknown"
+            let port = (UInt16(data[offset+2+len]) << 8) | UInt16(data[offset+2+len+1])
+            return (domain, port)
+        }
+        
+        return ("0.0.0.0", 0)
+    }
+    
+    private func relayUDPThroughSOCKS5(clientFlow: NEAppProxyUDPFlow, relayHost: String, relayPort: UInt16, tcpConnection: NWTCPConnection, processPath: String) {
+        let relayEndpoint = NWHostEndpoint(hostname: relayHost, port: String(relayPort))
+        let udpSession = self.createUDPSession(to: relayEndpoint, from: nil)
+        
+        tcpConnectionsLock.lock()
+        udpTCPConnections[clientFlow] = tcpConnection
+        tcpConnectionsLock.unlock()
+        
+        readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
+        readAndForwardRelayUDP(clientFlow: clientFlow, udpSession: udpSession)
+    }
+    
+    private func readAndForwardClientUDP(clientFlow: NEAppProxyUDPFlow, udpSession: NWUDPSession, processPath: String) {
+        var isFirstPacket = true
+        
+        clientFlow.readDatagrams { [weak self] datagrams, endpoints, error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                self.log("UDP read error: \(error.localizedDescription)", level: "ERROR")
+                return
+            }
+            
+            guard let datagrams = datagrams, let endpoints = endpoints, !datagrams.isEmpty else {
+                self.readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
+                return
+            }
+            
+            for i in 0..<datagrams.count {
+                let datagram = datagrams[i]
+                let endpoint = endpoints[i]
+                
+                var destHost = ""
+                var destPort: UInt16 = 0
+                var portStr = ""
+                
+                if let nwHost = endpoint as? NWHostEndpoint {
+                    destHost = nwHost.hostname
+                    destPort = UInt16(nwHost.port) ?? 0
+                    portStr = nwHost.port
+                }
+                
+                if isFirstPacket {
+                    isFirstPacket = false
+                    self.sendLogToApp(protocol: "UDP", process: processPath, destination: destHost, port: portStr, proxy: "SOCKS5")
+                }
+                
+                if let encapsulated = self.encapsulateSOCKS5UDP(datagram: datagram, destHost: destHost, destPort: destPort) {
+                    udpSession.writeDatagram(encapsulated, completionHandler: { error in
+                        if let error = error {
+                            self.log("UDP write error: \(error)", level: "ERROR")
+                        }
+                    })
+                }
+            }
+            
+            self.readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
+        }
+    }
+    
+    private func readAndForwardRelayUDP(clientFlow: NEAppProxyUDPFlow, udpSession: NWUDPSession) {
+        udpSession.setReadHandler({ [weak self] datagrams, error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                self.log("UDP relay error: \(error.localizedDescription)", level: "ERROR")
+                return
+            }
+            
+            if let datagrams = datagrams, !datagrams.isEmpty {
+                var unwrappedDatagrams: [Data] = []
+                var unwrappedEndpoints: [NWEndpoint] = []
+                
+                for datagram in datagrams {
+                    if let (unwrapped, destHost, destPort) = self.decapsulateSOCKS5UDPWithEndpoint(datagram: datagram) {
+                        unwrappedDatagrams.append(unwrapped)
+                        unwrappedEndpoints.append(NWHostEndpoint(hostname: destHost, port: String(destPort)))
+                    }
+                }
+                
+                if !unwrappedDatagrams.isEmpty {
+                    clientFlow.writeDatagrams(unwrappedDatagrams, sentBy: unwrappedEndpoints) { error in
+                        if let error = error {
+                            self.log("UDP response write error: \(error.localizedDescription)", level: "ERROR")
+                        }
+                    }
+                }
+            }
+        }, maxDatagrams: 32)
+    }
+    
+    private func encapsulateSOCKS5UDP(datagram: Data, destHost: String, destPort: UInt16) -> Data? {
+        // Check datagram size (max UDP payload is typically 65507, but we need to account for SOCKS5 header)
+        // Conservative limit: 1400 bytes to avoid fragmentation
+        if datagram.count > 1400 {
+            self.log("Datagram too large (\(datagram.count) bytes), skipping", level: "WARN")
+            return nil
+        }
+        
+        var header = Data()
+        header.append(contentsOf: [0, 0])
+        header.append(0x00)
+        
+        if let ipv4 = IPv4Address(destHost) {
+            header.append(0x01)
+            header.append(contentsOf: ipv4.rawValue)
+        } else if let ipv6 = IPv6Address(destHost) {
+            header.append(0x04)
+            header.append(contentsOf: ipv6.rawValue)
+        } else {
+            guard destHost.count <= 255 else {
+                self.log("Domain name too long: \(destHost.count) bytes", level: "ERROR")
+                return nil
+            }
+            header.append(0x03)
+            header.append(UInt8(destHost.count))
+            header.append(destHost.data(using: .utf8) ?? Data())
+        }
+        
+        header.append(UInt8(destPort >> 8))
+        header.append(UInt8(destPort & 0xFF))
+        
+        var result = header
+        result.append(datagram)
+        
+        if result.count > 1472 {
+            self.log("Encapsulated datagram too large (\(result.count) bytes), skipping", level: "WARN")
+            return nil
+        }
+        
+        return result
+    }
+    
+    private func decapsulateSOCKS5UDP(datagram: Data) -> Data? {
+        guard datagram.count > 10 else { return nil }
+        
+        let atyp = datagram[3]
+        var headerLen = 4
+        
+        if atyp == 0x01 {
+            headerLen += 6
+        } else if atyp == 0x04 {
+            headerLen += 18
+        } else if atyp == 0x03 {
+            let domainLen = Int(datagram[4])
+            headerLen += 1 + domainLen + 2
+        } else {
+            return nil
+        }
+        
+        guard datagram.count > headerLen else { return nil }
+        
+        return datagram[headerLen...]
+    }
+    
+    private func decapsulateSOCKS5UDPWithEndpoint(datagram: Data) -> (Data, String, UInt16)? {
+        guard datagram.count > 10 else { return nil }
+        
+        let atyp = datagram[3]
+        var headerLen = 4
+        var destHost = ""
+        var destPort: UInt16 = 0
+        
+        if atyp == 0x01 {
+            destHost = "\(datagram[4]).\(datagram[5]).\(datagram[6]).\(datagram[7])"
+            destPort = (UInt16(datagram[8]) << 8) | UInt16(datagram[9])
+            headerLen += 6
+        } else if atyp == 0x04 {
+            var ipv6Parts: [String] = []
+            for i in 0..<8 {
+                let idx = 4 + (i * 2)
+                let part = (UInt16(datagram[idx]) << 8) | UInt16(datagram[idx+1])
+                ipv6Parts.append(String(format: "%x", part))
+            }
+            destHost = ipv6Parts.joined(separator: ":")
+            destPort = (UInt16(datagram[20]) << 8) | UInt16(datagram[21])
+            headerLen += 18
+        } else if atyp == 0x03 {
+            let domainLen = Int(datagram[4])
+            destHost = String(data: datagram[5..<(5+domainLen)], encoding: .utf8) ?? "unknown"
+            destPort = (UInt16(datagram[5+domainLen]) << 8) | UInt16(datagram[5+domainLen+1])
+            headerLen += 1 + domainLen + 2
+        } else {
+            return nil
+        }
+        
+        guard datagram.count > headerLen else { return nil }
+        
+        let payload = datagram[headerLen...]
+        return (Data(payload), destHost, destPort)
     }
     
     private func proxyTCPFlow(_ flow: NEAppProxyTCPFlow, destination: String, port: UInt16) {
