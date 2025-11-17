@@ -138,6 +138,10 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
                 if let session = manager.connection as? NETunnelProviderSession {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         self.setupLogPolling(session: session)
+                        
+                        if let config = self.proxyConfig {
+                            self.sendProxyConfigToExtension(config, session: session)
+                        }
                     }
                 }
             } catch {
@@ -193,7 +197,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
                     self.handleConnectionLog(log)
                 } else {
                     self.handleActivityLog(log)
-                }
+                }                
             }
         }
     }
@@ -250,6 +254,10 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             return
         }
         
+        sendProxyConfigToExtension(config, session: session)
+    }
+    
+    private func sendProxyConfigToExtension(_ config: ProxyConfig, session: NETunnelProviderSession) {
         var message: [String: Any] = [
             "action": "setProxyConfig",
             "proxyType": config.type,
