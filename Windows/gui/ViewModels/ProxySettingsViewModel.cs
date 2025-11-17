@@ -11,7 +11,7 @@ public class ProxySettingsViewModel : ViewModelBase
     private readonly Loc _loc = Loc.Instance;
     public Loc Loc => _loc;
 
-    private string _proxyIp = "";
+    private string _proxyIp = "";  // Can be IP address or hostname
     private string _proxyPort = "";
     private string _proxyType = "SOCKS5";
     private string _proxyUsername = "";
@@ -142,12 +142,12 @@ public class ProxySettingsViewModel : ViewModelBase
 
             if (string.IsNullOrWhiteSpace(ProxyIp))
             {
-                IpError = "IP address or domain is required";
+                IpError = "IP address or hostname is required";
                 isValid = false;
             }
             else if (!IsValidIpOrDomain(ProxyIp))
             {
-                IpError = "Invalid IP address or domain name";
+                IpError = "Invalid IP address or hostname";
                 isValid = false;
             }
 
@@ -191,7 +191,7 @@ public class ProxySettingsViewModel : ViewModelBase
             // Validate inputs first
             if (string.IsNullOrWhiteSpace(ProxyIp))
             {
-                TestOutput = "ERROR: Please configure proxy IP address first";
+                TestOutput = "ERROR: Please configure proxy IP address or hostname first";
                 return;
             }
 

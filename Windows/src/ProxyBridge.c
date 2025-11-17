@@ -82,7 +82,7 @@ static DWORD last_udp_connect_attempt = 0;
 static BOOL running = FALSE;
 static DWORD g_current_process_id = 0;
 
-static char g_proxy_ip[64] = "";
+static char g_proxy_host[256] = "";  // Can be IP address or hostname
 static UINT16 g_proxy_port = 0;
 static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
 static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
@@ -115,6 +115,7 @@ static const char* extract_filename(const char* path)
 }
 
 static UINT32 parse_ipv4(const char *ip);
+static UINT32 resolve_hostname(const char *hostname);
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
 static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr);
 static DWORD WINAPI udp_relay_server(LPVOID arg);
@@ -236,7 +237,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                                 if (action == RULE_ACTION_PROXY)
                                 {
                                     snprintf(proxy_info, sizeof(proxy_info), "Proxy SOCKS5://%s:%d (UDP)",
-                                        g_proxy_ip, g_proxy_port);
+                                        g_proxy_host, g_proxy_port);
                                 }
                                 else if (action == RULE_ACTION_DIRECT)
                                 {
@@ -360,7 +361,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                             {
                                 snprintf(proxy_info, sizeof(proxy_info), "Proxy %s://%s:%d",
                                     g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
-                                    g_proxy_ip, g_proxy_port);
+                                    g_proxy_host, g_proxy_port);
                             }
                             else if (action == RULE_ACTION_DIRECT)
                             {
@@ -428,6 +429,48 @@ static UINT32 parse_ipv4(const char *ip)
     if (a > 255 || b > 255 || c > 255 || d > 255)
         return 0;
     return (a << 0) | (b << 8) | (c << 16) | (d << 24);
+}
+
+// Resolve hostname to IPv4 address (supports both IP addresses and domain names)
+static UINT32 resolve_hostname(const char *hostname)
+{
+    if (hostname == NULL || hostname[0] == '\0')
+        return 0;
+
+    // First try to parse as IP address
+    UINT32 ip = parse_ipv4(hostname);
+    if (ip != 0)
+        return ip;
+
+    // Not an IP address, try DNS resolution
+    struct addrinfo hints, *result = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;  // IPv4 only
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(hostname, NULL, &hints, &result) != 0)
+    {
+        log_message("Failed to resolve hostname: %s", hostname);
+        return 0;
+    }
+
+    if (result == NULL || result->ai_family != AF_INET)
+    {
+        if (result != NULL)
+            freeaddrinfo(result);
+        log_message("No IPv4 address found for hostname: %s", hostname);
+        return 0;
+    }
+
+    struct sockaddr_in *addr = (struct sockaddr_in *)result->ai_addr;
+    UINT32 resolved_ip = addr->sin_addr.s_addr;
+    freeaddrinfo(result);
+
+    log_message("Resolved %s to %d.%d.%d.%d", hostname,
+        (resolved_ip >> 0) & 0xFF, (resolved_ip >> 8) & 0xFF,
+        (resolved_ip >> 16) & 0xFF, (resolved_ip >> 24) & 0xFF);
+
+    return resolved_ip;
 }
 
 static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
@@ -964,7 +1007,7 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
     {
         return RULE_ACTION_DIRECT;  // HTTP proxy doesn't support UDP
     }
-    if (action == RULE_ACTION_PROXY && (g_proxy_ip[0] == '\0' || g_proxy_port == 0))
+    if (action == RULE_ACTION_PROXY && (g_proxy_host[0] == '\0' || g_proxy_port == 0))
     {
         return RULE_ACTION_DIRECT;  // No proxy configured
     }
@@ -1294,7 +1337,13 @@ static BOOL establish_udp_associate(void)
     setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
     setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
 
-    UINT32 socks5_ip = parse_ipv4(g_proxy_ip);
+    UINT32 socks5_ip = resolve_hostname(g_proxy_host);
+    if (socks5_ip == 0)
+    {
+        closesocket(tcp_sock);
+        return FALSE;
+    }
+
     struct sockaddr_in socks_addr;
     memset(&socks_addr, 0, sizeof(socks_addr));
     socks_addr.sin_family = AF_INET;
@@ -1690,7 +1739,13 @@ static DWORD WINAPI connection_handler(LPVOID arg)
     free(config);
 
     // Connect to SOCKS5 proxy
-    socks5_ip = parse_ipv4(g_proxy_ip);
+    socks5_ip = resolve_hostname(g_proxy_host);
+    if (socks5_ip == 0)
+    {
+        closesocket(client_sock);
+        return 1;
+    }
+
     socks_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (socks_sock == INVALID_SOCKET)
     {
@@ -2074,11 +2129,12 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* prox
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
         return FALSE;
 
-    if (parse_ipv4(proxy_ip) == 0)
+    // Validate that the hostname/IP can be resolved
+    if (resolve_hostname(proxy_ip) == 0)
         return FALSE;
 
-    strncpy(g_proxy_ip, proxy_ip, sizeof(g_proxy_ip) - 1);
-    g_proxy_ip[sizeof(g_proxy_ip) - 1] = '\0';
+    strncpy(g_proxy_host, proxy_ip, sizeof(g_proxy_host) - 1);
+    g_proxy_host[sizeof(g_proxy_host) - 1] = '\0';
     g_proxy_port = proxy_port;
     g_proxy_type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
 
@@ -2249,7 +2305,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 
     log_message("ProxyBridge started");
     log_message("Local relay: localhost:%d", g_local_relay_port);
-    log_message("%s proxy: %s:%d", g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5", g_proxy_ip, g_proxy_port);
+    log_message("%s proxy: %s:%d", g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5", g_proxy_host, g_proxy_port);
 
     int rule_count = 0;
     PROCESS_RULE *rule = rules_list;
@@ -2329,7 +2385,7 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
     int ret = -1;
     char temp_buffer[512];
 
-    if (g_proxy_ip[0] == '\0' || g_proxy_port == 0)
+    if (g_proxy_host[0] == '\0' || g_proxy_port == 0)
     {
         snprintf(result_buffer, buffer_size, "ERROR: No proxy configured");
         return -1;
@@ -2351,7 +2407,7 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
     snprintf(temp_buffer, sizeof(temp_buffer), "Testing connection to %s:%d via %s proxy %s:%d...\n",
         target_host, target_port,
         g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
-        g_proxy_ip, g_proxy_port);
+        g_proxy_host, g_proxy_port);
     strncpy(result_buffer, temp_buffer, buffer_size - 1);
 
 
@@ -2387,10 +2443,10 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
 
     memset(&proxy_addr, 0, sizeof(proxy_addr));
     proxy_addr.sin_family = AF_INET;
-    proxy_addr.sin_addr.s_addr = parse_ipv4(g_proxy_ip);
+    proxy_addr.sin_addr.s_addr = resolve_hostname(g_proxy_host);
     proxy_addr.sin_port = htons(g_proxy_port);
 
-    snprintf(temp_buffer, sizeof(temp_buffer), "Connecting to proxy %s:%d...\n", g_proxy_ip, g_proxy_port);
+    snprintf(temp_buffer, sizeof(temp_buffer), "Connecting to proxy %s:%d...\n", g_proxy_host, g_proxy_port);
     strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
 
     if (connect(test_sock, (struct sockaddr*)&proxy_addr, sizeof(proxy_addr)) == SOCKET_ERROR)

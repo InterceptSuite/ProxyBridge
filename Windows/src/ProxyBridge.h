@@ -38,7 +38,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id);
 PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id);
 PROXYBRIDGE_API BOOL ProxyBridge_DeleteRule(UINT32 rule_id);
 PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_name, const char* target_hosts, const char* target_ports, RuleProtocol protocol, RuleAction action);
-PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password);
+PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password);  // proxy_ip can be IP address or hostname
 PROXYBRIDGE_API void ProxyBridge_SetDnsViaProxy(BOOL enable);
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback);
 PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);

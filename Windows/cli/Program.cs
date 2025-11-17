@@ -109,7 +109,7 @@ class Program
             ProxyBridgeNative.ProxyBridge_SetLogCallback(_logCallback);
             ProxyBridgeNative.ProxyBridge_SetConnectionCallback(_connectionCallback);
 
-            Console.WriteLine($"Proxy: {proxyInfo.Type}://{proxyInfo.Ip}:{proxyInfo.Port}");
+            Console.WriteLine($"Proxy: {proxyInfo.Type}://{proxyInfo.Host}:{proxyInfo.Port}");
             if (!string.IsNullOrEmpty(proxyInfo.Username))
             {
                 Console.WriteLine($"Proxy Auth: {proxyInfo.Username}:***");
@@ -118,7 +118,7 @@ class Program
 
             if (!ProxyBridgeNative.ProxyBridge_SetProxyConfig(
                 proxyInfo.Type,
-                proxyInfo.Ip,
+                proxyInfo.Host,
                 proxyInfo.Port,
                 proxyInfo.Username ?? "",
                 proxyInfo.Password ?? ""))
@@ -205,7 +205,7 @@ class Program
         }
     }
 
-    private static (ProxyBridgeNative.ProxyType Type, string Ip, ushort Port, string? Username, string? Password) ParseProxyConfig(string proxyUrl)
+    private static (ProxyBridgeNative.ProxyType Type, string Host, ushort Port, string? Username, string? Password) ParseProxyConfig(string proxyUrl)
     {
         string? username = null;
         string? password = null;
@@ -237,7 +237,7 @@ class Program
             }
         }
 
-        throw new ArgumentException($"Invalid proxy format: {proxyUrl}\nUse type://ip:port or type://ip:port:username:password");
+        throw new ArgumentException($"Invalid proxy format: {proxyUrl}\nUse type://host:port or type://host:port:username:password");
     }
 
     private static List<(string ProcessName, string TargetHosts, string TargetPorts, ProxyBridgeNative.RuleProtocol Protocol, ProxyBridgeNative.RuleAction Action)> ParseRules(string[] rules)
