@@ -1,3 +1,5 @@
+## Windows
+
 *.exe
 *.dll
 *.sys
@@ -11,5 +13,72 @@ Windows/cli/bin/**
 Windows/cli/obj/**
 .vscode/**
 Windows/output/ProxyBridge_CLI.pdb
+
+## macOS / Xcode / Swift
+
+# Build environment
+MacOS/ProxyBridge/.env
+MacOS/ProxyBridge/output/
+MacOS/ProxyBridge/build/
+
+# Xcode
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# CocoaPods
+Pods/
+*.xcworkspace
+!default.xcworkspace
+
+# Carthage
+Carthage/Build/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Swift
+*.swp
+*~.nib
+*.swiftdoc
+*.swiftmodule
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+MacOS/ProxyBridge/build/
+MacOS/ProxyBridge/output/
+
 Linux/**
-MacOS/**
