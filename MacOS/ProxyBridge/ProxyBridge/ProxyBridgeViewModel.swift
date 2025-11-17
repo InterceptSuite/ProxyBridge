@@ -142,6 +142,12 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
                         if let config = self.proxyConfig {
                             self.sendProxyConfigToExtension(config, session: session)
                         }
+                        
+                        RuleManager.loadRulesFromUserDefaults(session: session) { success, count in
+                            if success && count > 0 {
+                                self.addLog("INFO", "Loaded \(count) rule(s) from local storage")
+                            }
+                        }
                     }
                 }
             } catch {

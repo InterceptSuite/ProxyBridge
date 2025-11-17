@@ -25,8 +25,7 @@ struct RuleManager {
                 "enabled": enabled
             ]
         ) { success, result in
-            if success, let result = result {
-                let ruleId = result["ruleId"] as? UInt32
+            if success, let result = result, let ruleId = result["ruleId"] as? UInt32 {
                 completion(true, "Rule added successfully", ruleId)
             } else {
                 completion(false, result?["message"] as? String ?? "Unknown error", nil)
@@ -182,5 +181,49 @@ struct RuleManager {
                          enabled ? "Yes" : "No"))
         }
         print("")
+    }
+    
+    static func saveRulesToUserDefaults(_ rules: [[String: Any]]) {
+        let rulesToSave = rules.map { rule -> [String: Any] in
+            var ruleData = rule
+            ruleData.removeValue(forKey: "ruleId")
+            return ruleData
+        }
+        UserDefaults.standard.set(rulesToSave, forKey: "proxyRules")
+    }
+    
+    static func loadRulesFromUserDefaults(
+        session: NETunnelProviderSession,
+        completion: @escaping (Bool, Int) -> Void
+    ) {
+        let rules = UserDefaults.standard.array(forKey: "proxyRules") as? [[String: Any]] ?? []
+        
+        guard !rules.isEmpty else {
+            completion(true, 0)
+            return
+        }
+        
+        var successCount = 0
+        let group = DispatchGroup()
+        
+        for rule in rules {
+            group.enter()
+            addRule(
+                session: session,
+                processNames: rule["processNames"] as? String ?? "",
+                targetHosts: rule["targetHosts"] as? String ?? "",
+                targetPorts: rule["targetPorts"] as? String ?? "",
+                protocol: rule["protocol"] as? String ?? "BOTH",
+                action: rule["action"] as? String ?? "DIRECT",
+                enabled: rule["enabled"] as? Bool ?? true
+            ) { success, _, _ in
+                if success { successCount += 1 }
+                group.leave()
+            }
+        }
+        
+        group.notify(queue: .main) {
+            completion(true, successCount)
+        }
     }
 }

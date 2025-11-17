@@ -164,6 +164,7 @@ struct ProxyRulesView: View {
                 isLoading = false
                 if success {
                     rules = rulesList.map(mapToProxyRule)
+                    RuleManager.saveRulesToUserDefaults(rulesList)
                 }
             }
         }
