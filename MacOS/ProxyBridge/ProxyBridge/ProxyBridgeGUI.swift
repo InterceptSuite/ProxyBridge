@@ -27,6 +27,12 @@ struct ProxyBridgeGUIApp: App {
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }
+            
+            CommandGroup(replacing: .help) {
+                Button("About ProxyBridge") {
+                    openAboutWindow()
+                }
+            }
         }
         
         Window("Proxy Settings", id: "proxy-settings") {
@@ -41,6 +47,12 @@ struct ProxyBridgeGUIApp: App {
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
+        
+        Window("About ProxyBridge", id: "about") {
+            AboutView()
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
     }
     
     private func openProxySettingsWindow() {
@@ -49,6 +61,10 @@ struct ProxyBridgeGUIApp: App {
     
     private func openProxyRulesWindow() {
         NSApp.sendAction(#selector(AppDelegate.openProxyRules), to: nil, from: nil)
+    }
+    
+    private func openAboutWindow() {
+        NSApp.sendAction(#selector(AppDelegate.openAbout), to: nil, from: nil)
     }
 }
 
@@ -66,8 +82,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func openProxyRules() {
-        openWindow(title: "Proxy Rules", size: NSSize(width: 1000, height: 600), resizable: true) {
+        openWindow(title: "Proxy Rules", size: NSSize(width: 700, height: 500), resizable: true) {
             ProxyRulesView(viewModel: AppDelegate.viewModel!)
+        }
+    }
+    
+    @objc func openAbout() {
+        openWindow(title: "About ProxyBridge", size: NSSize(width: 400, height: 350)) {
+            AboutView()
         }
     }
     
