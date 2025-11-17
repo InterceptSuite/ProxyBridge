@@ -126,6 +126,45 @@ Launch `ProxyBridge.exe` (GUI) with Administrator privileges for an intuitive gr
 
 4. Click **Save Rule** to apply the configuration
 
+#### Exporting and Importing Rules
+
+ProxyBridge allows you to export selected rules to a JSON file and import rules from previously exported files, making it easy to share configurations between systems or back up your rule sets.
+
+**Export Rules:**
+1. In the **Proxy Rules** window, select one or more rules using the checkboxes in the **Select** column
+2. Click the **Select All** button to select all rules (optional)
+3. Click the **Export** button (only enabled when at least one rule is selected)
+4. Choose a location and save the JSON file
+
+**Import Rules:**
+1. Click the **Import** button
+2. Select a previously exported JSON file
+3. Rules will be imported and added to your existing rules
+
+**JSON Format Example:**
+```json
+[
+  {
+    "processNames": "chrome.exe",
+    "targetHosts": "*",
+    "targetPorts": "*",
+    "protocol": "TCP",
+    "action": "PROXY",
+    "enabled": true
+  },
+  {
+    "processNames": "firefox.exe",
+    "targetHosts": "192.168.*.*",
+    "targetPorts": "80;443",
+    "protocol": "BOTH",
+    "action": "DIRECT",
+    "enabled": true
+  }
+]
+```
+
+**Note:** The JSON format is compatible across platforms, allowing you to export rules from macOS and import them on Windows, and vice versa.
+
 #### Activity Monitoring
 
 <p align="center">

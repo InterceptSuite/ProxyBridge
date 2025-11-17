@@ -693,6 +693,7 @@ public class ProxyRule : ViewModelBase
     private string _protocol = "TCP";
     private string _action = "PROXY";
     private bool _isEnabled = true;
+    private bool _isSelected = false;
     private int _index;
     private uint _ruleId;
 
@@ -742,6 +743,12 @@ public class ProxyRule : ViewModelBase
     {
         get => _isEnabled;
         set => SetProperty(ref _isEnabled, value);
+    }
+
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set => SetProperty(ref _isSelected, value);
     }
 }
 
