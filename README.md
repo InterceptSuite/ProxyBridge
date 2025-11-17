@@ -225,7 +225,7 @@ ProxyBridge_CLI.exe -h
  | |_) | '__/ _ \ \/ / | | | |  _ \| '__| |/ _` |/ _` |/ _ \
  |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/
  |_|   |_|  \___/_/\_\\__, | |____/|_|  |_|\__,_|\__, |\___|
-                      |___/                      |___/  V2.0.1
+                      |___/                      |___/  V3.0.0
 
   Universal proxy client for Windows applications
 
@@ -254,6 +254,17 @@ Options:
                          chrome.exe:*:*:TCP:PROXY
                          *:*:53:UDP:PROXY
                          firefox.exe:*:80,443:TCP:DIRECT
+  --rule-file <rule-file>  Path to JSON file containing proxy rules
+                           JSON format (same as GUI export):
+                           [{
+                             "processNames": "chrome.exe",
+                             "targetHosts": "*",
+                             "targetPorts": "*",
+                             "protocol": "TCP",
+                             "action": "PROXY",
+                             "enabled": true
+                           }]
+                           Example: --rule-file C:\\rules.json []
   --dns-via-proxy      Route DNS queries through proxy (default: true) [default: True]
   --verbose <verbose>  Logging verbosity level
                          0 - No logs (default)

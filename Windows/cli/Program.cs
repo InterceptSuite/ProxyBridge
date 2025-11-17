@@ -1,8 +1,26 @@
 ﻿using System.CommandLine;
 using System.Security.Principal;
 using System.Runtime.Versioning;
+using System.Text.Json.Serialization;
 
 namespace ProxyBridge.CLI;
+
+public class ProxyRuleImport
+{
+    public string ProcessNames { get; set; } = string.Empty;
+    public string TargetHosts { get; set; } = string.Empty;
+    public string TargetPorts { get; set; } = string.Empty;
+    public string Protocol { get; set; } = string.Empty;
+    public string Action { get; set; } = string.Empty;
+    public bool Enabled { get; set; } = true;
+}
+
+// JSON Source Generator for NativeAOT compatibility
+[JsonSerializable(typeof(List<ProxyRuleImport>))]
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+public partial class ProxyRuleJsonContext : JsonSerializerContext
+{
+}
 
 class Program
 {
@@ -40,6 +58,21 @@ class Program
             Arity = ArgumentArity.ZeroOrMore
         };
 
+        var ruleFileOption = new Option<string?>(
+            name: "--rule-file",
+            description: "Path to JSON file containing proxy rules\n" +
+                        "JSON format (same as GUI export):\n" +
+                        "[{\n" +
+                        "  \"processNames\": \"chrome.exe\",\n" +
+                        "  \"targetHosts\": \"*\",\n" +
+                        "  \"targetPorts\": \"*\",\n" +
+                        "  \"protocol\": \"TCP\",\n" +
+                        "  \"action\": \"PROXY\",\n" +
+                        "  \"enabled\": true\n" +
+                        "}]\n" +
+                        "Example: --rule-file C:\\\\rules.json",
+            getDefaultValue: () => null);
+
         var dnsViaProxyOption = new Option<bool>(
             name: "--dns-via-proxy",
             description: "Route DNS queries through proxy (default: true)",
@@ -60,6 +93,7 @@ class Program
         {
             proxyOption,
             ruleOption,
+            ruleFileOption,
             dnsViaProxyOption,
             verboseOption
         };
@@ -71,10 +105,10 @@ class Program
             await CheckAndUpdate();
         });
 
-        rootCommand.SetHandler(async (proxyUrl, rules, dnsViaProxy, verbose) =>
+        rootCommand.SetHandler(async (proxyUrl, rules, ruleFile, dnsViaProxy, verbose) =>
         {
-            await RunProxyBridge(proxyUrl, rules, dnsViaProxy, verbose);
-        }, proxyOption, ruleOption, dnsViaProxyOption, verboseOption);
+            await RunProxyBridge(proxyUrl, rules, ruleFile, dnsViaProxy, verbose);
+        }, proxyOption, ruleOption, ruleFileOption, dnsViaProxyOption, verboseOption);
 
         if (args.Contains("--help") || args.Contains("-h") || args.Contains("-?"))
         {
@@ -84,7 +118,7 @@ class Program
         return await rootCommand.InvokeAsync(args);
     }
 
-    private static async Task<int> RunProxyBridge(string proxyUrl, string[] rules, bool dnsViaProxy, int verboseLevel)
+    private static async Task<int> RunProxyBridge(string proxyUrl, string[] rules, string? ruleFile, bool dnsViaProxy, int verboseLevel)
     {
         _verboseLevel = verboseLevel;
         ShowBanner();
@@ -102,6 +136,12 @@ class Program
         {
             var proxyInfo = ParseProxyConfig(proxyUrl);
             var parsedRules = ParseRules(rules);
+
+            if (!string.IsNullOrEmpty(ruleFile))
+            {
+                var fileRules = await LoadRulesFromFile(ruleFile);
+                parsedRules.AddRange(fileRules);
+            }
 
             _logCallback = OnLog;
             _connectionCallback = OnConnection;
@@ -202,6 +242,65 @@ class Program
         if (_verboseLevel == 2 || _verboseLevel == 3)
         {
             Console.WriteLine($"[CONN] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}");
+        }
+    }
+
+    private static async Task<List<(string ProcessName, string TargetHosts, string TargetPorts, ProxyBridgeNative.RuleProtocol Protocol, ProxyBridgeNative.RuleAction Action)>> LoadRulesFromFile(string filePath)
+    {
+        var rules = new List<(string, string, string, ProxyBridgeNative.RuleProtocol, ProxyBridgeNative.RuleAction)>();
+
+        if (!File.Exists(filePath))
+        {
+            throw new FileNotFoundException($"Rule file not found: {filePath}");
+        }
+
+        try
+        {
+            var json = await File.ReadAllTextAsync(filePath);
+            var importedRules = System.Text.Json.JsonSerializer.Deserialize(json, ProxyRuleJsonContext.Default.ListProxyRuleImport);
+
+            if (importedRules == null || importedRules.Count == 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"WARNING: No rules found in file: {filePath}");
+                Console.ResetColor();
+                return rules;
+            }
+
+            Console.WriteLine($"Loaded {importedRules.Count} rule(s) from: {filePath}");
+
+            foreach (var rule in importedRules)
+            {
+                if (!rule.Enabled)
+                {
+                    Console.WriteLine($"  Skipping disabled rule: {rule.ProcessNames}");
+                    continue;
+                }
+
+                var protocol = rule.Protocol.ToUpper() switch
+                {
+                    "TCP" => ProxyBridgeNative.RuleProtocol.TCP,
+                    "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
+                    "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
+                    _ => throw new ArgumentException($"Invalid protocol in rule file: {rule.Protocol}")
+                };
+
+                var action = rule.Action.ToUpper() switch
+                {
+                    "PROXY" => ProxyBridgeNative.RuleAction.PROXY,
+                    "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
+                    "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
+                    _ => throw new ArgumentException($"Invalid action in rule file: {rule.Action}")
+                };
+
+                rules.Add((rule.ProcessNames, rule.TargetHosts, rule.TargetPorts, protocol, action));
+            }
+
+            return rules;
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            throw new ArgumentException($"Invalid JSON format in rule file: {ex.Message}");
         }
     }
 
