@@ -1,10 +1,3 @@
-//
-//  ProxyRulesView.swift
-//  ProxyBridge
-//
-//  Created by sourav kalal on 14/11/25.
-//
-
 import SwiftUI
 import NetworkExtension
 
@@ -16,8 +9,6 @@ struct ProxyRule: Identifiable {
     let ruleProtocol: String
     let action: String
     var enabled: Bool
-    
-    var ruleId: UInt32 { id }
 }
 
 struct ProxyRulesView: View {
@@ -168,44 +159,40 @@ struct ProxyRulesView: View {
         guard let session = viewModel.tunnelSession else { return }
         
         isLoading = true
-        RuleManager.listRules(session: session) { success, rulesList in
+        RuleManager.listRules(session: session) { [self] success, rulesList in
             DispatchQueue.main.async {
                 isLoading = false
                 if success {
-                    rules = rulesList.map { dict in
-                        ProxyRule(
-                            id: dict["ruleId"] as? UInt32 ?? 0,
-                            processNames: dict["processNames"] as? String ?? "",
-                            targetHosts: dict["targetHosts"] as? String ?? "",
-                            targetPorts: dict["targetPorts"] as? String ?? "",
-                            ruleProtocol: dict["protocol"] as? String ?? "BOTH",
-                            action: dict["action"] as? String ?? "DIRECT",
-                            enabled: dict["enabled"] as? Bool ?? true
-                        )
-                    }
+                    rules = rulesList.map(mapToProxyRule)
                 }
             }
         }
     }
     
+    private func mapToProxyRule(_ dict: [String: Any]) -> ProxyRule {
+        ProxyRule(
+            id: dict["ruleId"] as? UInt32 ?? 0,
+            processNames: dict["processNames"] as? String ?? "",
+            targetHosts: dict["targetHosts"] as? String ?? "",
+            targetPorts: dict["targetPorts"] as? String ?? "",
+            ruleProtocol: dict["protocol"] as? String ?? "BOTH",
+            action: dict["action"] as? String ?? "DIRECT",
+            enabled: dict["enabled"] as? Bool ?? true
+        )
+    }
+    
     private func deleteRule(_ rule: ProxyRule) {
         guard let session = viewModel.tunnelSession else { return }
         
-        RuleManager.removeRule(session: session, ruleId: rule.id) { success, message in
-            if success {
-                loadRules()
-            }
+        RuleManager.removeRule(session: session, ruleId: rule.id) { [self] success, _ in
+            if success { loadRules() }
         }
     }
     
     private func toggleRule(_ rule: ProxyRule, enabled: Bool) {
         guard let session = viewModel.tunnelSession else { return }
         
-        RuleManager.toggleRule(
-            session: session,
-            ruleId: rule.id,
-            enabled: enabled
-        ) { _, _ in
+        RuleManager.toggleRule(session: session, ruleId: rule.id, enabled: enabled) { [self] _, _ in
             loadRules()
         }
     }
@@ -224,6 +211,8 @@ struct RuleEditorView: View {
     @State private var selectedProtocol: String
     @State private var selectedAction: String
     
+    private var isEditMode: Bool { existingRule != nil }
+    
     init(viewModel: ProxyBridgeViewModel, existingRule: ProxyRule? = nil, onSave: @escaping () -> Void) {
         self.viewModel = viewModel
         self.existingRule = existingRule
@@ -238,41 +227,32 @@ struct RuleEditorView: View {
     
     var body: some View {
         VStack(spacing: 20) {
-            Text(existingRule == nil ? "Add Rule" : "Edit Rule")
+            Text(isEditMode ? "Edit Rule" : "Add Rule")
                 .font(.title2)
                 .fontWeight(.semibold)
             
             Form {
                 Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Applications")
-                            .fontWeight(.medium)
-                        TextField("*", text: $processNames)
-                            .textFieldStyle(.roundedBorder)
-                        Text("Example: iexplore.exe; \"C:\\some app.exe\"; fire*.exe; *.bin")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                    formField(
+                        label: "Applications",
+                        placeholder: "*",
+                        text: $processNames,
+                        hint: "Example: iexplore.exe; \"C:\\some app.exe\"; fire*.exe; *.bin"
+                    )
                     
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Target hosts")
-                            .fontWeight(.medium)
-                        TextField("*", text: $targetHosts)
-                            .textFieldStyle(.roundedBorder)
-                        Text("Example: 127.0.0.1; *.example.com; 192.168.1.*; 10.1.0.0-10.5.255.255")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                    formField(
+                        label: "Target hosts",
+                        placeholder: "*",
+                        text: $targetHosts,
+                        hint: "Example: 127.0.0.1; *.example.com; 192.168.1.*; 10.1.0.0-10.5.255.255"
+                    )
                     
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Target ports")
-                            .fontWeight(.medium)
-                        TextField("*", text: $targetPorts)
-                            .textFieldStyle(.roundedBorder)
-                        Text("Example: 80; 8000-9000; 3128")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                    formField(
+                        label: "Target ports",
+                        placeholder: "*",
+                        text: $targetPorts,
+                        hint: "Example: 80; 8000-9000; 3128"
+                    )
                     
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Protocol")
@@ -319,45 +299,62 @@ struct RuleEditorView: View {
         .frame(width: 600, height: 550)
     }
     
+    @ViewBuilder
+    private func formField(label: String, placeholder: String, text: Binding<String>, hint: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(label)
+                .fontWeight(.medium)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+            Text(hint)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+    
     private func saveRule() {
         guard let session = viewModel.tunnelSession else { return }
         
         if let existing = existingRule {
-            // Edit existing rule - use update
-            RuleManager.updateRule(
-                session: session,
-                ruleId: existing.id,
-                processNames: processNames,
-                targetHosts: targetHosts,
-                targetPorts: targetPorts,
-                protocol: selectedProtocol,
-                action: selectedAction,
-                enabled: true
-            ) { success, _ in
-                if success {
-                    DispatchQueue.main.async {
-                        onSave()
-                        dismiss()
-                    }
-                }
-            }
+            updateExistingRule(session: session, ruleId: existing.id)
         } else {
-            RuleManager.addRule(
-                session: session,
-                processNames: processNames,
-                targetHosts: targetHosts,
-                targetPorts: targetPorts,
-                protocol: selectedProtocol,
-                action: selectedAction,
-                enabled: true
-            ) { success, _, _ in
-                if success {
-                    DispatchQueue.main.async {
-                        onSave()
-                        dismiss()
-                    }
-                }
-            }
+            addNewRule(session: session)
+        }
+    }
+    
+    private func updateExistingRule(session: NETunnelProviderSession, ruleId: UInt32) {
+        RuleManager.updateRule(
+            session: session,
+            ruleId: ruleId,
+            processNames: processNames,
+            targetHosts: targetHosts,
+            targetPorts: targetPorts,
+            protocol: selectedProtocol,
+            action: selectedAction,
+            enabled: true
+        ) { [self] success, _ in
+            if success { dismissOnSuccess() }
+        }
+    }
+    
+    private func addNewRule(session: NETunnelProviderSession) {
+        RuleManager.addRule(
+            session: session,
+            processNames: processNames,
+            targetHosts: targetHosts,
+            targetPorts: targetPorts,
+            protocol: selectedProtocol,
+            action: selectedAction,
+            enabled: true
+        ) { [self] success, _, _ in
+            if success { dismissOnSuccess() }
+        }
+    }
+    
+    private func dismissOnSuccess() {
+        DispatchQueue.main.async {
+            onSave()
+            dismiss()
         }
     }
 }

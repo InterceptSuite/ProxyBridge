@@ -1,16 +1,8 @@
-//
-//  RuleManager.swift
-//  ProxyBridge
-//
-//  Rule management helper for CLI
-//
-
 import Foundation
 import NetworkExtension
 
 struct RuleManager {
     
-    // Send addRule command to extension
     static func addRule(
         session: NETunnelProviderSession,
         processNames: String,
@@ -21,36 +13,23 @@ struct RuleManager {
         enabled: Bool = true,
         completion: @escaping (Bool, String, UInt32?) -> Void
     ) {
-        let message: [String: Any] = [
-            "action": "addRule",
-            "processNames": processNames,
-            "targetHosts": targetHosts,
-            "targetPorts": targetPorts,
-            "ruleProtocol": `protocol`,
-            "ruleAction": action,
-            "enabled": enabled
-        ]
-        
-        guard let data = try? JSONSerialization.data(withJSONObject: message) else {
-            completion(false, "Failed to serialize rule", nil)
-            return
-        }
-        
-        try? session.sendProviderMessage(data) { response in
-            guard let responseData = response,
-                  let result = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                  let status = result["status"] as? String else {
-                completion(false, "No response from extension", nil)
-                return
-            }
-            
-            if status == "ok" {
+        sendMessage(
+            session: session,
+            action: "addRule",
+            params: [
+                "processNames": processNames,
+                "targetHosts": targetHosts,
+                "targetPorts": targetPorts,
+                "ruleProtocol": `protocol`,
+                "ruleAction": action,
+                "enabled": enabled
+            ]
+        ) { success, result in
+            if success, let result = result {
                 let ruleId = result["ruleId"] as? UInt32
                 completion(true, "Rule added successfully", ruleId)
-            } else if let message = result["message"] as? String {
-                completion(false, "Error: \(message)", nil)
             } else {
-                completion(false, "Unknown error", nil)
+                completion(false, result?["message"] as? String ?? "Unknown error", nil)
             }
         }
     }
@@ -66,150 +45,97 @@ struct RuleManager {
         enabled: Bool = true,
         completion: @escaping (Bool, String) -> Void
     ) {
-        let message: [String: Any] = [
-            "action": "updateRule",
-            "ruleId": ruleId,
-            "processNames": processNames,
-            "targetHosts": targetHosts,
-            "targetPorts": targetPorts,
-            "ruleProtocol": `protocol`,
-            "ruleAction": action,
-            "enabled": enabled
-        ]
-        
-        guard let data = try? JSONSerialization.data(withJSONObject: message) else {
-            completion(false, "Failed to serialize rule")
-            return
-        }
-        
-        try? session.sendProviderMessage(data) { response in
-            guard let responseData = response,
-                  let result = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                  let status = result["status"] as? String else {
-                completion(false, "No response from extension")
-                return
-            }
-            
-            if status == "ok" {
-                completion(true, "Rule #\(ruleId) updated successfully")
-            } else if let message = result["message"] as? String {
-                completion(false, "Error: \(message)")
-            } else {
-                completion(false, "Unknown error")
-            }
+        sendMessage(
+            session: session,
+            action: "updateRule",
+            params: [
+                "ruleId": ruleId,
+                "processNames": processNames,
+                "targetHosts": targetHosts,
+                "targetPorts": targetPorts,
+                "ruleProtocol": `protocol`,
+                "ruleAction": action,
+                "enabled": enabled
+            ]
+        ) { success, result in
+            let message = success
+                ? "Rule #\(ruleId) updated successfully"
+                : (result?["message"] as? String ?? "Unknown error")
+            completion(success, message)
         }
     }
     
-
     static func toggleRule(
         session: NETunnelProviderSession,
         ruleId: UInt32,
         enabled: Bool,
         completion: @escaping (Bool, String) -> Void
     ) {
-        let message: [String: Any] = [
-            "action": "toggleRule",
-            "ruleId": ruleId,
-            "enabled": enabled
-        ]
-        
-        guard let data = try? JSONSerialization.data(withJSONObject: message) else {
-            completion(false, "Failed to serialize message")
-            return
-        }
-        
-        try? session.sendProviderMessage(data) { response in
-            guard let responseData = response,
-                  let result = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                  let status = result["status"] as? String else {
-                completion(false, "No response from extension")
-                return
-            }
-            
-            if status == "ok" {
-                completion(true, "Rule #\(ruleId) \(enabled ? "enabled" : "disabled")")
-            } else if let message = result["message"] as? String {
-                completion(false, "Error: \(message)")
-            } else {
-                completion(false, "Unknown error")
-            }
+        sendMessage(
+            session: session,
+            action: "toggleRule",
+            params: ["ruleId": ruleId, "enabled": enabled]
+        ) { success, result in
+            let message = success
+                ? "Rule #\(ruleId) \(enabled ? "enabled" : "disabled")"
+                : (result?["message"] as? String ?? "Unknown error")
+            completion(success, message)
         }
     }
     
-    // Send removeRule command
     static func removeRule(
         session: NETunnelProviderSession,
         ruleId: UInt32,
         completion: @escaping (Bool, String) -> Void
     ) {
-        let message: [String: Any] = [
-            "action": "removeRule",
-            "ruleId": ruleId
-        ]
-        
-        guard let data = try? JSONSerialization.data(withJSONObject: message) else {
-            completion(false, "Failed to serialize message")
-            return
-        }
-        
-        try? session.sendProviderMessage(data) { response in
-            guard let responseData = response,
-                  let result = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                  let status = result["status"] as? String else {
-                completion(false, "No response from extension")
-                return
-            }
-            
-            if status == "ok" {
-                let removed = result["removed"] as? Int ?? 0
-                completion(true, "Removed \(removed) rule(s)")
-            } else if let message = result["message"] as? String {
-                completion(false, "Error: \(message)")
-            } else {
-                completion(false, "Unknown error")
-            }
+        sendMessage(
+            session: session,
+            action: "removeRule",
+            params: ["ruleId": ruleId]
+        ) { success, result in
+            let message = success
+                ? "Removed \(result?["removed"] as? Int ?? 0) rule(s)"
+                : (result?["message"] as? String ?? "Unknown error")
+            completion(success, message)
         }
     }
     
-    // List all rules
     static func listRules(
         session: NETunnelProviderSession,
         completion: @escaping (Bool, [[String: Any]]) -> Void
     ) {
-        let message: [String: Any] = [
-            "action": "listRules"
-        ]
-        
-        guard let data = try? JSONSerialization.data(withJSONObject: message) else {
-            completion(false, [])
-            return
-        }
-        
-        try? session.sendProviderMessage(data) { response in
-            guard let responseData = response,
-                  let result = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                  let status = result["status"] as? String,
-                  status == "ok",
-                  let rules = result["rules"] as? [[String: Any]] else {
+        sendMessage(session: session, action: "listRules", params: [:]) { success, result in
+            if success, let rules = result?["rules"] as? [[String: Any]] {
+                completion(true, rules)
+            } else {
                 completion(false, [])
-                return
             }
-            
-            completion(true, rules)
         }
     }
     
-    // Clear all rules
     static func clearRules(
         session: NETunnelProviderSession,
         completion: @escaping (Bool, String) -> Void
     ) {
-        let message: [String: Any] = [
-            "action": "clearRules"
-        ]
+        sendMessage(session: session, action: "clearRules", params: [:]) { success, result in
+            let message = success
+                ? "Cleared \(result?["cleared"] as? Int ?? 0) rule(s)"
+                : (result?["message"] as? String ?? "Unknown error")
+            completion(success, message)
+        }
+    }
+    
+    private static func sendMessage(
+        session: NETunnelProviderSession,
+        action: String,
+        params: [String: Any],
+        completion: @escaping (Bool, [String: Any]?) -> Void
+    ) {
+        var message = params
+        message["action"] = action
         
         guard let data = try? JSONSerialization.data(withJSONObject: message) else {
-            completion(false, "Failed to serialize message")
+            completion(false, nil)
             return
         }
         
@@ -217,18 +143,11 @@ struct RuleManager {
             guard let responseData = response,
                   let result = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
                   let status = result["status"] as? String else {
-                completion(false, "No response from extension")
+                completion(false, nil)
                 return
             }
             
-            if status == "ok" {
-                let cleared = result["cleared"] as? Int ?? 0
-                completion(true, "Cleared \(cleared) rule(s)")
-            } else if let message = result["message"] as? String {
-                completion(false, "Error: \(message)")
-            } else {
-                completion(false, "Unknown error")
-            }
+            completion(status == "ok", result)
         }
     }
     

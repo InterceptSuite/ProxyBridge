@@ -1,20 +1,9 @@
-//
-//  ProxyBridgeGUI.swift
-//  ProxyBridge - GUI App
-//
-//  Created by sourav kalal on 14/11/25.
-//
-
 import SwiftUI
 
 @main
 struct ProxyBridgeGUIApp: App {
     @StateObject private var viewModel = ProxyBridgeViewModel()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
-    init() {
-        // Set the viewModel reference for AppDelegate
-    }
     
     var body: some Scene {
         WindowGroup {
@@ -71,32 +60,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func openProxySettings() {
-        if let window = NSApplication.shared.windows.first(where: { $0.title == "Proxy Settings" }) {
-            window.makeKeyAndOrderFront(nil)
-        } else {
-            // Open new window
-            let controller = NSHostingController(rootView: ProxySettingsView(viewModel: AppDelegate.viewModel!))
-            let window = NSWindow(contentViewController: controller)
-            window.title = "Proxy Settings"
-            window.setContentSize(NSSize(width: 600, height: 500))
-            window.styleMask = [.titled, .closable]
-            window.center()
-            window.makeKeyAndOrderFront(nil)
+        openWindow(title: "Proxy Settings", size: NSSize(width: 600, height: 500)) {
+            ProxySettingsView(viewModel: AppDelegate.viewModel!)
         }
     }
     
     @objc func openProxyRules() {
-        if let window = NSApplication.shared.windows.first(where: { $0.title == "Proxy Rules" }) {
+        openWindow(title: "Proxy Rules", size: NSSize(width: 1000, height: 600), resizable: true) {
+            ProxyRulesView(viewModel: AppDelegate.viewModel!)
+        }
+    }
+    
+    private func openWindow<Content: View>(
+        title: String,
+        size: NSSize,
+        resizable: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
+        if let window = NSApplication.shared.windows.first(where: { $0.title == title }) {
             window.makeKeyAndOrderFront(nil)
         } else {
-            // Open new window
-            let controller = NSHostingController(rootView: ProxyRulesView(viewModel: AppDelegate.viewModel!))
+            let controller = NSHostingController(rootView: content())
             let window = NSWindow(contentViewController: controller)
-            window.title = "Proxy Rules"
-            window.setContentSize(NSSize(width: 1000, height: 600))
-            window.styleMask = [.titled, .closable, .resizable]
+            window.title = title
+            window.setContentSize(size)
+            window.styleMask = resizable ? [.titled, .closable, .resizable] : [.titled, .closable]
             window.center()
             window.makeKeyAndOrderFront(nil)
         }
     }
 }
+

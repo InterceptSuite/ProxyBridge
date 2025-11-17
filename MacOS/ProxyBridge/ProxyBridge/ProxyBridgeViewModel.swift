@@ -1,10 +1,3 @@
-//
-//  ProxyBridgeViewModel.swift
-//  ProxyBridge - GUI ViewModel
-//
-//  Created by sourav kalal on 14/11/25.
-//
-
 import Foundation
 import NetworkExtension
 import SystemExtensions
@@ -18,6 +11,10 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     var tunnelSession: NETunnelProviderSession?
     private var logTimer: Timer?
     private(set) var proxyConfig: ProxyConfig?
+    
+    private let maxLogEntries = 1000
+    private let logPollingInterval = 0.1
+    private let extensionIdentifier = "com.interceptsuite.ProxyBridge.extension"
     
     struct ProxyConfig {
         let type: String
@@ -86,9 +83,8 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     private func installAndStartProxy() {
-        print("Installing system extension")
         let request = OSSystemExtensionRequest.activationRequest(
-            forExtensionWithIdentifier: "com.interceptsuite.ProxyBridge.extension",
+            forExtensionWithIdentifier: extensionIdentifier,
             queue: .main
         )
         request.delegate = self
@@ -105,12 +101,11 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             }
             
             let manager = managers?.first ?? NETransparentProxyManager()
-            
             manager.localizedDescription = "ProxyBridge Transparent Proxy"
             manager.isEnabled = true
             
             let providerProtocol = NETunnelProviderProtocol()
-            providerProtocol.providerBundleIdentifier = "com.interceptsuite.ProxyBridge.extension"
+            providerProtocol.providerBundleIdentifier = self.extensionIdentifier
             providerProtocol.serverAddress = "ProxyBridge"
             manager.protocolConfiguration = providerProtocol
             
@@ -121,28 +116,32 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
                 }
                 
                 self.addLog("INFO", "Configuration saved")
+                self.reloadAndStartTunnel(manager: manager)
+            }
+        }
+    }
+    
+    private func reloadAndStartTunnel(manager: NETransparentProxyManager) {
+        manager.loadFromPreferences { [weak self] loadError in
+            guard let self = self else { return }
+            
+            if let loadError = loadError {
+                self.addLog("ERROR", "Failed to reload preferences: \(loadError.localizedDescription)")
+                return
+            }
+            
+            do {
+                try (manager.connection as? NETunnelProviderSession)?.startTunnel()
+                self.isProxyActive = true
+                self.addLog("INFO", "Proxy tunnel started")
                 
-                manager.loadFromPreferences { loadError in
-                    if let loadError = loadError {
-                        self.addLog("ERROR", "Failed to reload preferences: \(loadError.localizedDescription)")
-                        return
-                    }
-                    
-                    do {
-                        try (manager.connection as? NETunnelProviderSession)?.startTunnel()
-                        self.isProxyActive = true
-                        self.addLog("INFO", "Proxy tunnel started")
-                        
-                        if let session = manager.connection as? NETunnelProviderSession {
-                            // Wait a bit for extension to initialize
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                self.setupLogPolling(session: session)
-                            }
-                        }
-                    } catch {
-                        self.addLog("ERROR", "Failed to start tunnel: \(error.localizedDescription)")
+                if let session = manager.connection as? NETunnelProviderSession {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        self.setupLogPolling(session: session)
                     }
                 }
+            } catch {
+                self.addLog("ERROR", "Failed to start tunnel: \(error.localizedDescription)")
             }
         }
     }
@@ -165,8 +164,12 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         tunnelSession = session
         
         DispatchQueue.main.async { [weak self] in
-            self?.logTimer?.invalidate()
-            self?.logTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.logTimer?.invalidate()
+            self.logTimer = Timer.scheduledTimer(
+                withTimeInterval: self.logPollingInterval,
+                repeats: true
+            ) { [weak self] _ in
                 self?.pollLogs()
             }
         }
@@ -186,45 +189,55 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             }
             
             DispatchQueue.main.async {
-                // Connection log
-                if let type = log["type"], type == "connection",
-                   let proto = log["protocol"],
-                   let process = log["process"],
-                   let dest = log["destination"],
-                   let port = log["port"],
-                   let proxy = log["proxy"] {
-                    
-                    let connectionLog = ConnectionLog(
-                        timestamp: self.getCurrentTimestamp(),
-                        connectionProtocol: proto,
-                        process: process,
-                        destination: dest,
-                        port: port,
-                        proxy: proxy
-                    )
-                    self.connections.append(connectionLog)
-                    
-                    if self.connections.count > 1000 {
-                        self.connections.removeFirst()
-                    }
-                }
-                // Activity log
-                else if let timestamp = log["timestamp"],
-                        let level = log["level"],
-                        let message = log["message"] {
-                    
-                    let activityLog = ActivityLog(
-                        timestamp: timestamp,
-                        level: level,
-                        message: message
-                    )
-                    self.activityLogs.append(activityLog)
-                    
-                    if self.activityLogs.count > 1000 {
-                        self.activityLogs.removeFirst()
-                    }
+                if log["type"] == "connection" {
+                    self.handleConnectionLog(log)
+                } else {
+                    self.handleActivityLog(log)
                 }
             }
+        }
+    }
+    
+    private func handleConnectionLog(_ log: [String: String]) {
+        guard let proto = log["protocol"],
+              let process = log["process"],
+              let dest = log["destination"],
+              let port = log["port"],
+              let proxy = log["proxy"] else {
+            return
+        }
+        
+        let connectionLog = ConnectionLog(
+            timestamp: getCurrentTimestamp(),
+            connectionProtocol: proto,
+            process: process,
+            destination: dest,
+            port: port,
+            proxy: proxy
+        )
+        connections.append(connectionLog)
+        
+        if connections.count > maxLogEntries {
+            connections.removeFirst()
+        }
+    }
+    
+    private func handleActivityLog(_ log: [String: String]) {
+        guard let timestamp = log["timestamp"],
+              let level = log["level"],
+              let message = log["message"] else {
+            return
+        }
+        
+        let activityLog = ActivityLog(
+            timestamp: timestamp,
+            level: level,
+            message: message
+        )
+        activityLogs.append(activityLog)
+        
+        if activityLogs.count > maxLogEntries {
+            activityLogs.removeFirst()
         }
     }
     
@@ -283,7 +296,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         )
         activityLogs.append(log)
         
-        if activityLogs.count > 1000 {
+        if activityLogs.count > maxLogEntries {
             activityLogs.removeFirst()
         }
     }
