@@ -203,12 +203,14 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     UINT16 dest_port = ntohs(udp_header->DstPort);
 
                     RuleAction action;
-                    if (is_broadcast_or_multicast(dest_ip))
-                        action = RULE_ACTION_DIRECT;
-                    else if (dest_port == 53 && !g_dns_via_proxy)
+                    if (dest_port == 53 && !g_dns_via_proxy)
                         action = RULE_ACTION_DIRECT;
                     else
                         action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE);
+
+                    // Override PROXY to DIRECT for critical IPs
+                    if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
+                        action = RULE_ACTION_DIRECT;
 
                     if (g_connection_callback != NULL)
                     {
@@ -326,12 +328,14 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
 
                 RuleAction action;
-                if (is_broadcast_or_multicast(orig_dest_ip))
-                    action = RULE_ACTION_DIRECT;
-                else if (orig_dest_port == 53 && !g_dns_via_proxy)
+                if (orig_dest_port == 53 && !g_dns_via_proxy)
                     action = RULE_ACTION_DIRECT;
                 else
                     action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE);
+
+                // Override PROXY to DIRECT for criticl ips
+                if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(orig_dest_ip))
+                    action = RULE_ACTION_DIRECT;
 
                 // Log ALL connections (DIRECT, BLOCK, PROXY) - only ONCE per unique connection
                 if (g_connection_callback != NULL)
