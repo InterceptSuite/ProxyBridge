@@ -822,6 +822,11 @@ static BOOL is_broadcast_or_multicast(UINT32 ip)
     if (first_octet == 127)
         return TRUE;
 
+    // APIPA (Link-Local): 169.254.0.0/16 (169.254.x.x)
+    BYTE second_octet = (ip >> 8) & 0xFF;
+    if (first_octet == 169 && second_octet == 254)
+        return TRUE;
+
     // Broadcast: 255.255.255.255
     if (ip == 0xFFFFFFFF)
         return TRUE;
