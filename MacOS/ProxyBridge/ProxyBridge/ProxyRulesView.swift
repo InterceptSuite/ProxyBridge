@@ -1,7 +1,9 @@
 import SwiftUI
 import NetworkExtension
+import UniformTypeIdentifiers
+import AppKit
 
-struct ProxyRule: Identifiable {
+struct ProxyRule: Identifiable, Codable {
     let id: UInt32
     let processNames: String
     let targetHosts: String
@@ -9,11 +11,52 @@ struct ProxyRule: Identifiable {
     let ruleProtocol: String
     let action: String
     var enabled: Bool
+    
+    enum CodingKeys: String, CodingKey {
+        case processNames
+        case targetHosts
+        case targetPorts
+        case ruleProtocol = "protocol"
+        case action
+        case enabled
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = 0
+        self.processNames = try container.decode(String.self, forKey: .processNames)
+        self.targetHosts = try container.decode(String.self, forKey: .targetHosts)
+        self.targetPorts = try container.decode(String.self, forKey: .targetPorts)
+        self.ruleProtocol = try container.decode(String.self, forKey: .ruleProtocol)
+        self.action = try container.decode(String.self, forKey: .action)
+        self.enabled = try container.decode(Bool.self, forKey: .enabled)
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(processNames, forKey: .processNames)
+        try container.encode(targetHosts, forKey: .targetHosts)
+        try container.encode(targetPorts, forKey: .targetPorts)
+        try container.encode(ruleProtocol, forKey: .ruleProtocol)
+        try container.encode(action, forKey: .action)
+        try container.encode(enabled, forKey: .enabled)
+    }
+    
+    init(id: UInt32, processNames: String, targetHosts: String, targetPorts: String, ruleProtocol: String, action: String, enabled: Bool) {
+        self.id = id
+        self.processNames = processNames
+        self.targetHosts = targetHosts
+        self.targetPorts = targetPorts
+        self.ruleProtocol = ruleProtocol
+        self.action = action
+        self.enabled = enabled
+    }
 }
 
 struct ProxyRulesView: View {
     @ObservedObject var viewModel: ProxyBridgeViewModel
     @State private var rules: [ProxyRule] = []
+    @State private var selectedRuleIds: Set<UInt32> = []
     @State private var showAddRule = false
     @State private var editingRule: ProxyRule?
     @State private var isLoading = false
@@ -26,6 +69,25 @@ struct ProxyRulesView: View {
                     .fontWeight(.semibold)
                 
                 Spacer()
+                
+                Button(action: { exportSelectedRules() }) {
+                    HStack {
+                        Image(systemName: "square.and.arrow.up")
+                        Text("Export")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .disabled(selectedRuleIds.isEmpty)
+                
+                Button(action: { importRulesFromFile() }) {
+                    HStack {
+                        Image(systemName: "square.and.arrow.down")
+                        Text("Import")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
                 
                 Button(action: { showAddRule = true }) {
                     HStack {
@@ -60,6 +122,22 @@ struct ProxyRulesView: View {
                 Spacer()
             } else {
                 Table(rules) {
+                    TableColumn("Select") { rule in
+                        Toggle("", isOn: Binding(
+                            get: { selectedRuleIds.contains(rule.id) },
+                            set: { isSelected in
+                                if isSelected {
+                                    selectedRuleIds.insert(rule.id)
+                                } else {
+                                    selectedRuleIds.remove(rule.id)
+                                }
+                            }
+                        ))
+                        .toggleStyle(.checkbox)
+                        .labelsHidden()
+                    }
+                    .width(60)
+                    
                     TableColumn("Enabled") { rule in
                         Toggle("", isOn: binding(for: rule))
                             .toggleStyle(.switch)
@@ -195,6 +273,77 @@ struct ProxyRulesView: View {
         
         RuleManager.toggleRule(session: session, ruleId: rule.id, enabled: enabled) { [self] _, _ in
             loadRules()
+        }
+    }
+    
+    private func getSelectedRules() -> [ProxyRule] {
+        return rules.filter { selectedRuleIds.contains($0.id) }
+    }
+    
+    private func exportSelectedRules() {
+        guard !selectedRuleIds.isEmpty else { return }
+        
+        let selectedRules = getSelectedRules()
+        
+        let savePanel = NSSavePanel()
+        savePanel.title = "Export Proxy Rules"
+        savePanel.message = "Choose a location to save the selected rules"
+        savePanel.nameFieldStringValue = "ProxyBridge-Rules.json"
+        savePanel.allowedContentTypes = [.json]
+        savePanel.canCreateDirectories = true
+        
+        let response = savePanel.runModal()
+        guard response == .OK, let url = savePanel.url else { return }
+        
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(selectedRules)
+            try data.write(to: url)
+        } catch {
+            print("Export failed: \(error)")
+        }
+    }
+    
+    private func importRulesFromFile() {
+        let openPanel = NSOpenPanel()
+        openPanel.title = "Import Proxy Rules"
+        openPanel.message = "Choose a rules file to import"
+        openPanel.allowedContentTypes = [.json]
+        openPanel.allowsMultipleSelection = false
+        openPanel.canChooseDirectories = false
+        
+        let response = openPanel.runModal()
+        guard response == .OK, let url = openPanel.urls.first else { return }
+        
+        importRules(from: url)
+    }
+    
+    private func importRules(from url: URL) {
+        guard let session = viewModel.tunnelSession else { return }
+        
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            let importedRules = try decoder.decode([ProxyRule].self, from: data)
+            
+            for rule in importedRules {
+                RuleManager.addRule(
+                    session: session,
+                    processNames: rule.processNames,
+                    targetHosts: rule.targetHosts,
+                    targetPorts: rule.targetPorts,
+                    protocol: rule.ruleProtocol,
+                    action: rule.action,
+                    enabled: rule.enabled
+                ) { _, _, _ in }
+            }
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                loadRules()
+            }
+        } catch {
+            print("Failed to import rules: \(error)")
         }
     }
 }
@@ -357,5 +506,30 @@ struct RuleEditorView: View {
             onSave()
             dismiss()
         }
+    }
+}
+
+struct RulesDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    
+    var rules: [ProxyRule]
+    
+    init(rules: [ProxyRule]) {
+        self.rules = rules
+    }
+    
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        let decoder = JSONDecoder()
+        rules = try decoder.decode([ProxyRule].self, from: data)
+    }
+    
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(rules)
+        return FileWrapper(regularFileWithContents: data)
     }
 }
