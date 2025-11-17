@@ -211,7 +211,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     // Override PROXY to DIRECT for critical IPs and ports
                     if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
                         action = RULE_ACTION_DIRECT;
-                    
+
                     // Override PROXY to DIRECT for DHCP ports (67=server, 68=client)
                     if (action == RULE_ACTION_PROXY && (dest_port == 67 || dest_port == 68))
                         action = RULE_ACTION_DIRECT;
