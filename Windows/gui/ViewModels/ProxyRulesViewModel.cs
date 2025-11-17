@@ -420,7 +420,7 @@ public class ProxyRulesViewModel : ViewModelBase
             return;
 
         var selectedRules = ProxyRules.Where(r => r.IsSelected).ToList();
-        
+
         if (!selectedRules.Any())
         {
             await ShowMessageAsync("No Rules Selected", "Please select at least one rule to export.");
@@ -441,7 +441,7 @@ public class ProxyRulesViewModel : ViewModelBase
         };
 
         var result = await _window.StorageProvider.SaveFilePickerAsync(saveDialog);
-        
+
         if (result != null)
         {
             var exportData = selectedRules.Select(r => new ProxyRuleExport
@@ -457,7 +457,7 @@ public class ProxyRulesViewModel : ViewModelBase
             var json = System.Text.Json.JsonSerializer.Serialize(exportData, ProxyRuleJsonContext.Default.ListProxyRuleExport);
 
             await System.IO.File.WriteAllTextAsync(result.Path.LocalPath, json);
-            
+
             await ShowMessageAsync("Export Successful", $"Exported {selectedRules.Count} rule(s) to:\n{result.Path.LocalPath}");
         }
     }
@@ -487,7 +487,7 @@ public class ProxyRulesViewModel : ViewModelBase
         };
 
         var result = await _window.StorageProvider.OpenFilePickerAsync(openDialog);
-        
+
         if (result != null && result.Count > 0)
         {
             var filePath = result[0].Path.LocalPath;
