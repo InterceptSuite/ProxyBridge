@@ -201,21 +201,17 @@ struct ProxyRulesView: View {
     private func toggleRule(_ rule: ProxyRule, enabled: Bool) {
         guard let session = viewModel.tunnelSession else { return }
         
-        RuleManager.removeRule(session: session, ruleId: rule.id) { success, _ in
-            if success {
-                RuleManager.addRule(
-                    session: session,
-                    ruleId: rule.id,
-                    processNames: rule.processNames,
-                    targetHosts: rule.targetHosts,
-                    targetPorts: rule.targetPorts,
-                    protocol: rule.ruleProtocol,
-                    action: rule.action,
-                    enabled: enabled
-                ) { _, _ in
-                    loadRules()
-                }
-            }
+        RuleManager.updateRule(
+            session: session,
+            ruleId: rule.id,
+            processNames: rule.processNames,
+            targetHosts: rule.targetHosts,
+            targetPorts: rule.targetPorts,
+            protocol: rule.ruleProtocol,
+            action: rule.action,
+            enabled: enabled
+        ) { _, _ in
+            loadRules()
         }
     }
 }
@@ -331,32 +327,40 @@ struct RuleEditorView: View {
     private func saveRule() {
         guard let session = viewModel.tunnelSession else { return }
         
-        let ruleId = existingRule?.id ?? UInt32.random(in: 1...999999)
-        
         if let existing = existingRule {
-            RuleManager.removeRule(session: session, ruleId: existing.id) { _, _ in
-                addNewRule(session: session, ruleId: ruleId)
+            // Edit existing rule - use update
+            RuleManager.updateRule(
+                session: session,
+                ruleId: existing.id,
+                processNames: processNames,
+                targetHosts: targetHosts,
+                targetPorts: targetPorts,
+                protocol: selectedProtocol,
+                action: selectedAction,
+                enabled: true
+            ) { success, _ in
+                if success {
+                    DispatchQueue.main.async {
+                        onSave()
+                        dismiss()
+                    }
+                }
             }
         } else {
-            addNewRule(session: session, ruleId: ruleId)
-        }
-    }
-    
-    private func addNewRule(session: NETunnelProviderSession, ruleId: UInt32) {
-        RuleManager.addRule(
-            session: session,
-            ruleId: ruleId,
-            processNames: processNames,
-            targetHosts: targetHosts,
-            targetPorts: targetPorts,
-            protocol: selectedProtocol,
-            action: selectedAction,
-            enabled: true
-        ) { success, _ in
-            if success {
-                DispatchQueue.main.async {
-                    onSave()
-                    dismiss()
+            RuleManager.addRule(
+                session: session,
+                processNames: processNames,
+                targetHosts: targetHosts,
+                targetPorts: targetPorts,
+                protocol: selectedProtocol,
+                action: selectedAction,
+                enabled: true
+            ) { success, _, _ in
+                if success {
+                    DispatchQueue.main.async {
+                        onSave()
+                        dismiss()
+                    }
                 }
             }
         }

@@ -13,6 +13,50 @@ struct RuleManager {
     // Send addRule command to extension
     static func addRule(
         session: NETunnelProviderSession,
+        processNames: String,
+        targetHosts: String,
+        targetPorts: String,
+        protocol: String,
+        action: String,
+        enabled: Bool = true,
+        completion: @escaping (Bool, String, UInt32?) -> Void
+    ) {
+        let message: [String: Any] = [
+            "action": "addRule",
+            "processNames": processNames,
+            "targetHosts": targetHosts,
+            "targetPorts": targetPorts,
+            "ruleProtocol": `protocol`,
+            "ruleAction": action,
+            "enabled": enabled
+        ]
+        
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else {
+            completion(false, "Failed to serialize rule", nil)
+            return
+        }
+        
+        try? session.sendProviderMessage(data) { response in
+            guard let responseData = response,
+                  let result = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                  let status = result["status"] as? String else {
+                completion(false, "No response from extension", nil)
+                return
+            }
+            
+            if status == "ok" {
+                let ruleId = result["ruleId"] as? UInt32
+                completion(true, "Rule added successfully", ruleId)
+            } else if let message = result["message"] as? String {
+                completion(false, "Error: \(message)", nil)
+            } else {
+                completion(false, "Unknown error", nil)
+            }
+        }
+    }
+    
+    static func updateRule(
+        session: NETunnelProviderSession,
         ruleId: UInt32,
         processNames: String,
         targetHosts: String,
@@ -23,7 +67,7 @@ struct RuleManager {
         completion: @escaping (Bool, String) -> Void
     ) {
         let message: [String: Any] = [
-            "action": "addRule",
+            "action": "updateRule",
             "ruleId": ruleId,
             "processNames": processNames,
             "targetHosts": targetHosts,
@@ -47,7 +91,7 @@ struct RuleManager {
             }
             
             if status == "ok" {
-                completion(true, "Rule #\(ruleId) added successfully")
+                completion(true, "Rule #\(ruleId) updated successfully")
             } else if let message = result["message"] as? String {
                 completion(false, "Error: \(message)")
             } else {

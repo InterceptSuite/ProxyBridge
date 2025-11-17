@@ -316,6 +316,29 @@ class AppProxyProvider: NETransparentProxyProvider {
                 completionHandler?(try? JSONSerialization.data(withJSONObject: response))
             }
         
+        case "updateRule":
+            if let ruleId = message["ruleId"] as? UInt32,
+               let ruleData = try? JSONSerialization.data(withJSONObject: message),
+               let updatedRule = try? JSONDecoder().decode(ProxyRule.self, from: ruleData) {
+                rulesLock.lock()
+                if let index = rules.firstIndex(where: { $0.ruleId == ruleId }) {
+                    var rule = updatedRule
+                    rule.ruleId = ruleId
+                    rules[index] = rule
+                    rulesLock.unlock()
+                    log("Updated rule #\(ruleId): \(rule.processNames) -> \(rule.action.rawValue)")
+                    let response: [String: Any] = ["status": "ok", "ruleId": ruleId]
+                    completionHandler?(try? JSONSerialization.data(withJSONObject: response))
+                } else {
+                    rulesLock.unlock()
+                    let response = ["status": "error", "message": "Rule not found"]
+                    completionHandler?(try? JSONSerialization.data(withJSONObject: response))
+                }
+            } else {
+                let response = ["status": "error", "message": "Invalid update data"]
+                completionHandler?(try? JSONSerialization.data(withJSONObject: response))
+            }
+        
         case "removeRule":
             if let ruleId = message["ruleId"] as? UInt32 {
                 rulesLock.lock()
