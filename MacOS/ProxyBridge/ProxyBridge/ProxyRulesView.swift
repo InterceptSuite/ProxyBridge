@@ -70,6 +70,22 @@ struct ProxyRulesView: View {
                 
                 Spacer()
                 
+                Button(action: { 
+                    if selectedRuleIds.count == rules.count {
+                        selectedRuleIds.removeAll()
+                    } else {
+                        selectedRuleIds = Set(rules.map { $0.id })
+                    }
+                }) {
+                    HStack {
+                        Image(systemName: selectedRuleIds.count == rules.count ? "checkmark.square" : "square")
+                        Text(selectedRuleIds.count == rules.count ? "Deselect All" : "Select All")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .disabled(rules.isEmpty)
+                
                 Button(action: { exportSelectedRules() }) {
                     HStack {
                         Image(systemName: "square.and.arrow.up")
