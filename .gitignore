@@ -16,6 +16,11 @@ Windows/output/ProxyBridge_CLI.pdb
 
 ## macOS / Xcode / Swift
 
+# Build environment
+MacOS/ProxyBridge/.env
+MacOS/ProxyBridge/output/
+MacOS/ProxyBridge/build/
+
 # Xcode
 xcuserdata/
 *.xcscmblueprint
@@ -74,5 +79,6 @@ Network Trash Folder
 Temporary Items
 .apdisk
 MacOS/ProxyBridge/build/
+MacOS/ProxyBridge/output/
 
 Linux/**
