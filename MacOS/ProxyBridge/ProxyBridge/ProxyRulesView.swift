@@ -21,7 +21,7 @@ struct ProxyRulesView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Process Rules")
+                Text("Proxy Rules")
                     .font(.title2)
                     .fontWeight(.semibold)
                 
@@ -95,7 +95,7 @@ struct ProxyRulesView: View {
                     }
                     .width(50)
                     
-                    TableColumn("Process") { rule in
+                    TableColumn("Bundle ID") { rule in
                         Text(rule.processNames.isEmpty ? "Any" : rule.processNames)
                     }
                     .width(150)
@@ -234,10 +234,10 @@ struct RuleEditorView: View {
             Form {
                 Section {
                     formField(
-                        label: "Applications",
+                        label: "Bundle Identifier (Package Name)",
                         placeholder: "*",
                         text: $processNames,
-                        hint: "Example: iexplore.exe; \"C:\\some app.exe\"; fire*.exe; *.bin"
+                        hint: "Example: com.apple.Safari; com.google.Chrome; com.*.browser; *"
                     )
                     
                     formField(
