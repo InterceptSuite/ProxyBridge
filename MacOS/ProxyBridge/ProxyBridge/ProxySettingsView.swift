@@ -9,10 +9,11 @@ struct ProxySettingsView: View {
     @State private var proxyPort = ""
     @State private var username = ""
     @State private var password = ""
+    @State private var validationError = ""
     
     private let proxyTypes = ["http", "socks5"]
     private var isSaveDisabled: Bool {
-        proxyType.isEmpty || proxyHost.isEmpty || proxyPort.isEmpty
+        proxyType.isEmpty || proxyHost.isEmpty || proxyPort.isEmpty || !validationError.isEmpty
     }
     
     var body: some View {
@@ -44,10 +45,23 @@ struct ProxySettingsView: View {
         Form {
             Section {
                 formPicker(label: "Proxy Type", selection: $proxyType, required: true)
-                formTextField(label: "Proxy IP Address", placeholder: "127.0.0.1", text: $proxyHost, required: true)
+                formTextField(label: "Proxy IP/Domain", placeholder: "127.0.0.1 or proxy.example.com", text: $proxyHost, required: true)
+                    .onChange(of: proxyHost) { _ in validateInputs() }
                 formTextField(label: "Proxy Port", placeholder: "8080", text: $proxyPort, required: true)
+                    .onChange(of: proxyPort) { _ in validateInputs() }
                 formTextField(label: "Username", placeholder: "Leave empty if no auth required", text: $username)
                 formSecureField(label: "Password", placeholder: "Leave empty if no auth required", text: $password)
+                
+                if !validationError.isEmpty {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                        Text(validationError)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                    .padding(.top, 4)
+                }
                 
                 HStack {
                     Text("* Required fields")
@@ -136,6 +150,67 @@ struct ProxySettingsView: View {
             username = config.username ?? ""
             password = config.password ?? ""
         }
+        validateInputs()
+    }
+    
+    private func validateInputs() {
+        if !proxyHost.isEmpty && !isValidHost(proxyHost) {
+            validationError = "Invalid proxy IP/domain"
+            return
+        }
+        
+        if !proxyPort.isEmpty {
+            if let port = Int(proxyPort) {
+                if port < 1 || port > 65535 {
+                    validationError = "Port must be between 1 and 65535"
+                    return
+                }
+            } else {
+                validationError = "Port must be a valid number"
+                return
+            }
+        }
+        
+        validationError = ""
+    }
+    
+    private func isValidHost(_ host: String) -> Bool {
+        if isValidIPv4(host) {
+            return true
+        }
+        
+        if isValidIPv6(host) {
+            return true
+        }
+        
+        if isValidDomain(host) {
+            return true
+        }
+        
+        return false
+    }
+    
+    private func isValidIPv4(_ ip: String) -> Bool {
+        let parts = ip.split(separator: ".")
+        guard parts.count == 4 else { return false }
+        
+        for part in parts {
+            guard let num = Int(part), num >= 0 && num <= 255 else {
+                return false
+            }
+        }
+        return true
+    }
+    
+    private func isValidIPv6(_ ip: String) -> Bool {
+        let validChars = CharacterSet(charactersIn: "0123456789abcdefABCDEF:")
+        return ip.rangeOfCharacter(from: validChars.inverted) == nil && ip.contains(":")
+    }
+    
+    private func isValidDomain(_ domain: String) -> Bool {
+        let domainPattern = "^([a-zA-Z0-9]([a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?\\.)*[a-zA-Z0-9]([a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?$"
+        let predicate = NSPredicate(format: "SELF MATCHES %@", domainPattern)
+        return predicate.evaluate(with: domain) || domain == "localhost"
     }
     
     private func saveSettings() {
