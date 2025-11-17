@@ -495,11 +495,13 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         if let rule = matchedRule {
             log("UDP Rule #\(rule.ruleId) matched: \(processPath) -> \(rule.action.rawValue)")
-            
+            // We don't have access to UDP dest ip and port when os handles it in (apple proxy API limitation), we log with unknown ip and port to know specific package is using UDP
             switch rule.action {
             case .direct:
+                sendLogToApp(protocol: "UDP", process: processPath, destination: "unknown", port: "unknown", proxy: "Direct")
                 return false
             case .block:
+                sendLogToApp(protocol: "UDP", process: processPath, destination: "unknown", port: "unknown", proxy: "BLOCK")
                 return true
             case .proxy:
                 flow.open(withLocalEndpoint: nil) { [weak self] error in
@@ -517,6 +519,8 @@ class AppProxyProvider: NETransparentProxyProvider {
                 return true
             }
         } else {
+            // No rule matched let OS handle it, but log it so user knows this process is using UDP
+            sendLogToApp(protocol: "UDP", process: processPath, destination: "unknown", port: "unknown", proxy: "Direct")
             return false
         }
     }
