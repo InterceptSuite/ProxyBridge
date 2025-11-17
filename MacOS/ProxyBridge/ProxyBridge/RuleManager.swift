@@ -100,6 +100,42 @@ struct RuleManager {
         }
     }
     
+
+    static func toggleRule(
+        session: NETunnelProviderSession,
+        ruleId: UInt32,
+        enabled: Bool,
+        completion: @escaping (Bool, String) -> Void
+    ) {
+        let message: [String: Any] = [
+            "action": "toggleRule",
+            "ruleId": ruleId,
+            "enabled": enabled
+        ]
+        
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else {
+            completion(false, "Failed to serialize message")
+            return
+        }
+        
+        try? session.sendProviderMessage(data) { response in
+            guard let responseData = response,
+                  let result = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                  let status = result["status"] as? String else {
+                completion(false, "No response from extension")
+                return
+            }
+            
+            if status == "ok" {
+                completion(true, "Rule #\(ruleId) \(enabled ? "enabled" : "disabled")")
+            } else if let message = result["message"] as? String {
+                completion(false, "Error: \(message)")
+            } else {
+                completion(false, "Unknown error")
+            }
+        }
+    }
+    
     // Send removeRule command
     static func removeRule(
         session: NETunnelProviderSession,

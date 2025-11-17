@@ -201,14 +201,9 @@ struct ProxyRulesView: View {
     private func toggleRule(_ rule: ProxyRule, enabled: Bool) {
         guard let session = viewModel.tunnelSession else { return }
         
-        RuleManager.updateRule(
+        RuleManager.toggleRule(
             session: session,
             ruleId: rule.id,
-            processNames: rule.processNames,
-            targetHosts: rule.targetHosts,
-            targetPorts: rule.targetPorts,
-            protocol: rule.ruleProtocol,
-            action: rule.action,
             enabled: enabled
         ) { _, _ in
             loadRules()
