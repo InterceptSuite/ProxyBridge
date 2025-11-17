@@ -10,6 +10,7 @@ ProxyBridge is a transparent proxy application for macOS that allows you to rout
 - [Configuration](#configuration)
   - [Proxy Settings](#proxy-settings)
   - [Proxy Rules](#proxy-rules)
+  - [Exporting and Importing Rules](#exporting-and-importing-rules)
 - [Usage](#usage)
 - [Limitations](#limitations)
 - [Building from Source](#building-from-source)
@@ -274,6 +275,35 @@ IP/Hostname: (ignored for UDP)
 Port: (ignored for UDP)
 Protocol: UDP
 Action: PROXY
+```
+
+#### Exporting and Importing Rules
+
+ProxyBridge allows you to export selected rules to a JSON file and import rules from previously exported files.
+
+**Export Rules:**
+1. Select one or more rules using the checkboxes
+2. Click the **Select All** button to select all rules (optional)
+3. Click the **Export** button
+4. Choose a location and save the JSON file
+
+**Import Rules:**
+1. Click the **Import** button
+2. Select a previously exported JSON file
+3. Rules will be imported and added to your existing rules
+
+**JSON Format Example:**
+```json
+[
+  {
+    "action" : "DIRECT",
+    "enabled" : true,
+    "processNames" : "curl",
+    "protocol" : "BOTH",
+    "targetHosts" : "*",
+    "targetPorts" : "*"
+  }
+]
 ```
 
 ## Usage
