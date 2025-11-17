@@ -10,6 +10,7 @@ struct ProxyBridgeGUIApp: App {
             ContentView(viewModel: viewModel)
                 .onAppear {
                     AppDelegate.viewModel = viewModel
+                    checkForUpdatesOnStartup()
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -29,6 +30,12 @@ struct ProxyBridgeGUIApp: App {
             }
             
             CommandGroup(replacing: .help) {
+                Button("Check for Updates...") {
+                    openUpdateCheckWindow()
+                }
+                
+                Divider()
+                
                 Button("About ProxyBridge") {
                     openAboutWindow()
                 }
@@ -53,6 +60,12 @@ struct ProxyBridgeGUIApp: App {
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
+        
+        Window("Check for Updates", id: "update-check") {
+            UpdateCheckView()
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
     }
     
     private func openProxySettingsWindow() {
@@ -66,10 +79,33 @@ struct ProxyBridgeGUIApp: App {
     private func openAboutWindow() {
         NSApp.sendAction(#selector(AppDelegate.openAbout), to: nil, from: nil)
     }
+    
+    private func openUpdateCheckWindow() {
+        NSApp.sendAction(#selector(AppDelegate.openUpdateCheck), to: nil, from: nil)
+    }
+    
+    private func checkForUpdatesOnStartup() {
+        let shouldCheck = UserDefaults.standard.object(forKey: "checkForUpdatesOnStartup") as? Bool ?? true
+        
+        if shouldCheck {
+            Task {
+                let updateService = UpdateService()
+                let versionInfo = await updateService.checkForUpdates()
+                
+                if versionInfo.isUpdateAvailable {
+                    await MainActor.run {
+                        AppDelegate.pendingUpdateInfo = versionInfo
+                        NSApp.sendAction(#selector(AppDelegate.showUpdateNotification(_:)), to: nil, from: nil)
+                    }
+                }
+            }
+        }
+    }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     static var viewModel: ProxyBridgeViewModel?
+    static var pendingUpdateInfo: VersionInfo?
     
     func applicationWillTerminate(_ notification: Notification) {
         AppDelegate.viewModel?.stopProxy()
@@ -90,6 +126,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openAbout() {
         openWindow(title: "About ProxyBridge", size: NSSize(width: 400, height: 350)) {
             AboutView()
+        }
+    }
+    
+    @objc func openUpdateCheck() {
+        openWindow(title: "Check for Updates", size: NSSize(width: 450, height: 300)) {
+            UpdateCheckView()
+        }
+    }
+    
+    @objc func showUpdateNotification(_ sender: Any?) {
+        if let versionInfo = AppDelegate.pendingUpdateInfo {
+            openWindow(title: "Update Available", size: NSSize(width: 450, height: 350)) {
+                UpdateNotificationView(versionInfo: versionInfo)
+            }
+            AppDelegate.pendingUpdateInfo = nil
         }
     }
     
