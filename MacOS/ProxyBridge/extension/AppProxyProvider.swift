@@ -1,10 +1,3 @@
-//
-//  AppProxyProvider.swift
-//  extension
-//
-//  Created by sourav kalal on 13/11/25.
-//
-
 import NetworkExtension
 
 enum RuleProtocol: String, Codable {
@@ -448,7 +441,6 @@ class AppProxyProvider: NETransparentProxyProvider {
             processPath = metaData.sourceAppSigningIdentifier
         }
         
-        // Check if proxy is configured
         proxyLock.lock()
         let hasProxyConfig = (proxyHost != nil && proxyPort != nil)
         proxyLock.unlock()
@@ -458,7 +450,7 @@ class AppProxyProvider: NETransparentProxyProvider {
             return false
         }
         
-        let matchedRule = findMatchingRule(processPath: processPath, destination: destination, port: portNum, connectionProtocol: .tcp)
+        let matchedRule = findMatchingRule(processPath: processPath, destination: destination, port: portNum, connectionProtocol: .tcp, checkIpPort: true)
         
         if let rule = matchedRule {
             let action = rule.action.rawValue
@@ -489,7 +481,6 @@ class AppProxyProvider: NETransparentProxyProvider {
             processPath = metaData.sourceAppSigningIdentifier
         }
         
-        // Check if proxy is configured and is SOCKS5
         proxyLock.lock()
         let hasSOCKS5Proxy = (proxyHost != nil && proxyPort != nil && proxyType?.lowercased() == "socks5")
         let socksHost = self.proxyHost
@@ -497,22 +488,20 @@ class AppProxyProvider: NETransparentProxyProvider {
         proxyLock.unlock()
         
         if !hasSOCKS5Proxy {
-            return false  // Let OS handle - no SOCKS5 proxy configured
+            return false
         }
         
-        // Check rules - match by process name only (UDP flows don't have destination info yet)
-        let matchedRule = findMatchingUDPRule(processPath: processPath)
+        let matchedRule = findMatchingRule(processPath: processPath, destination: "", port: 0, connectionProtocol: .udp, checkIpPort: false)
         
         if let rule = matchedRule {
             log("UDP Rule #\(rule.ruleId) matched: \(processPath) -> \(rule.action.rawValue)")
             
             switch rule.action {
             case .direct:
-                return false  // Let OS handle
+                return false
             case .block:
-                return true  // Block by returning true without opening
+                return true
             case .proxy:
-                // Proxy via SOCKS5
                 flow.open(withLocalEndpoint: nil) { [weak self] error in
                     guard let self = self else { return }
                     
@@ -528,31 +517,8 @@ class AppProxyProvider: NETransparentProxyProvider {
                 return true
             }
         } else {
-            return false  // No matching rule, let OS handle
+            return false
         }
-    }
-    
-    private func findMatchingUDPRule(processPath: String) -> ProxyRule? {
-        rulesLock.lock()
-        defer { rulesLock.unlock() }
-        
-        for rule in rules {
-            guard rule.enabled else { continue }
-            
-            // Rule must apply to UDP (protocol is UDP or BOTH)
-            if rule.ruleProtocol != .udp && rule.ruleProtocol != .both {
-                continue
-            }
-            
-            // Match process name
-            if !rule.matchesProcess(processPath) {
-                continue
-            }
-            
-            return rule
-        }
-        
-        return nil
     }
     
     private func proxyUDPFlowViaSOCKS5(_ clientFlow: NEAppProxyUDPFlow, processPath: String, socksHost: String, socksPort: Int) {
@@ -743,8 +709,6 @@ class AppProxyProvider: NETransparentProxyProvider {
     }
     
     private func encapsulateSOCKS5UDP(datagram: Data, destHost: String, destPort: UInt16) -> Data? {
-        // Check datagram size (max UDP payload is typically 65507, but we need to account for SOCKS5 header)
-        // Conservative limit: 1400 bytes to avoid fragmentation
         if datagram.count > 1400 {
             self.log("Datagram too large (\(datagram.count) bytes), skipping", level: "WARN")
             return nil
@@ -892,7 +856,6 @@ class AppProxyProvider: NETransparentProxyProvider {
                 return
             }
             
-            // Read server response (2 bytes: version, chosen method)
             proxyConnection.readMinimumLength(2, maximumLength: 2) { [weak self] data, error in
                 guard let self = self else { return }
                 
@@ -924,10 +887,8 @@ class AppProxyProvider: NETransparentProxyProvider {
                 }
                 
                 if method == 0x00 {
-                    // No authentication required
                     self.sendSOCKS5ConnectRequest(clientFlow: clientFlow, proxyConnection: proxyConnection, destination: destination, port: port)
                 } else if method == 0x02 {
-                    // Username/password authentication required
                     self.sendSOCKS5Auth(clientFlow: clientFlow, proxyConnection: proxyConnection, destination: destination, port: port, username: username ?? "", password: password ?? "")
                 } else {
                     self.log("SOCKS5 no acceptable auth method: \(method)", level: "ERROR")
@@ -940,9 +901,8 @@ class AppProxyProvider: NETransparentProxyProvider {
     }
     
     private func sendSOCKS5Auth(clientFlow: NEAppProxyTCPFlow, proxyConnection: NWTCPConnection, destination: String, port: UInt16, username: String, password: String) {
-        // Auth format: [Version(1), Username length, Username, Password length, Password]
         var authData = Data()
-        authData.append(0x01) // Auth version
+        authData.append(0x01)
         authData.append(UInt8(username.count))
         authData.append(username.data(using: .utf8) ?? Data())
         authData.append(UInt8(password.count))
@@ -957,7 +917,6 @@ class AppProxyProvider: NETransparentProxyProvider {
                 return
             }
             
-            // Read auth response (2 bytes: version, status)
             proxyConnection.readMinimumLength(2, maximumLength: 2) { [weak self] data, error in
                 guard let self = self else { return }
                 
@@ -1012,7 +971,6 @@ class AppProxyProvider: NETransparentProxyProvider {
                 return
             }
             
-            // Read connect response (minimum 10 bytes)
             proxyConnection.readMinimumLength(10, maximumLength: 512) { [weak self] data, error in
                 guard let self = self else { return }
                 
@@ -1069,7 +1027,6 @@ class AppProxyProvider: NETransparentProxyProvider {
                 return
             }
             
-            // Read HTTP response
             proxyConnection.readMinimumLength(1, maximumLength: 8192) { [weak self] data, error in
                 guard let self = self else { return }
                 
@@ -1136,7 +1093,6 @@ class AppProxyProvider: NETransparentProxyProvider {
                     clientFlow.closeReadWithError(error)
                     clientFlow.closeWriteWithError(error)
                 } else {
-                    // Continue reading from client
                     self?.relayClientToProxy(clientFlow: clientFlow, proxyConnection: proxyConnection)
                 }
             }
@@ -1164,7 +1120,6 @@ class AppProxyProvider: NETransparentProxyProvider {
                     self?.log("Client write error: \(error.localizedDescription)", level: "ERROR")
                     proxyConnection.cancel()
                 } else {
-                    // Continue reading from proxy
                     self?.relayProxyToClient(clientFlow: clientFlow, proxyConnection: proxyConnection)
                 }
             }
@@ -1174,7 +1129,7 @@ class AppProxyProvider: NETransparentProxyProvider {
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
     }
     
-    private func findMatchingRule(processPath: String, destination: String, port: UInt16, connectionProtocol: RuleProtocol) -> ProxyRule? {
+    private func findMatchingRule(processPath: String, destination: String, port: UInt16, connectionProtocol: RuleProtocol, checkIpPort: Bool) -> ProxyRule? {
         rulesLock.lock()
         defer { rulesLock.unlock() }
         
@@ -1189,12 +1144,14 @@ class AppProxyProvider: NETransparentProxyProvider {
                 continue
             }
             
-            if !rule.matchesIP(destination) {
-                continue
-            }
-            
-            if !rule.matchesPort(port) {
-                continue
+            if checkIpPort {
+                if !rule.matchesIP(destination) {
+                    continue
+                }
+                
+                if !rule.matchesPort(port) {
+                    continue
+                }
             }
             
             return rule
