@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- Menu Items -->
+  <data name="MenuProxy" xml:space="preserve">
+    <value>代理</value>
+  </data>
+  <data name="MenuProxySettings" xml:space="preserve">
+    <value>代理设置</value>
+  </data>
+  <data name="MenuProxyRules" xml:space="preserve">
+    <value>代理规则</value>
+  </data>
+  <data name="MenuDnsViaProxy" xml:space="preserve">
+    <value>DNS通过代理</value>
+  </data>
+  <data name="MenuSettings" xml:space="preserve">
+    <value>设置</value>
+  </data>
+  <data name="MenuCloseToTray" xml:space="preserve">
+    <value>关闭到系统托盘</value>
+  </data>
+  <data name="MenuLanguage" xml:space="preserve">
+    <value>语言</value>
+  </data>
+  <data name="MenuAbout" xml:space="preserve">
+    <value>关于</value>
+  </data>
+  <data name="MenuAboutProxyBridge" xml:space="preserve">
+    <value>关于ProxyBridge</value>
+  </data>
+  <data name="MenuCheckUpdates" xml:space="preserve">
+    <value>检查更新</value>
+  </data>
+
+  <!-- Tabs -->
+  <data name="TabConnections" xml:space="preserve">
+    <value>🔌 网络连接</value>
+  </data>
+  <data name="TabActivity" xml:space="preserve">
+    <value>📝 活动日志</value>
+  </data>
+
+  <!-- Buttons -->
+  <data name="ButtonClear" xml:space="preserve">
+    <value>清除</value>
+  </data>
+  <data name="ButtonSave" xml:space="preserve">
+    <value>保存</value>
+  </data>
+  <data name="ButtonCancel" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="ButtonClose" xml:space="preserve">
+    <value>关闭</value>
+  </data>
+  <data name="ButtonAdd" xml:space="preserve">
+    <value>添加</value>
+  </data>
+  <data name="ButtonEdit" xml:space="preserve">
+    <value>编辑</value>
+  </data>
+  <data name="ButtonDelete" xml:space="preserve">
+    <value>删除</value>
+  </data>
+
+  <!-- Search Placeholders -->
+  <data name="SearchConnectionsPlaceholder" xml:space="preserve">
+    <value>🔍 搜索连接...</value>
+  </data>
+  <data name="SearchActivityPlaceholder" xml:space="preserve">
+    <value>🔍 搜索活动日志...</value>
+  </data>
+
+  <!-- Log Messages -->
+  <data name="LogInitialized" xml:space="preserve">
+    <value>ProxyBridge初始化成功</value>
+  </data>
+  <data name="LogServiceStarted" xml:space="preserve">
+    <value>ProxyBridge服务启动成功</value>
+  </data>
+  <data name="LogServiceStartFailed" xml:space="preserve">
+    <value>错误: ProxyBridge服务启动失败</value>
+  </data>
+  <data name="LogRestoredProxySettings" xml:space="preserve">
+    <value>已恢复代理设置</value>
+  </data>
+  <data name="LogRestoredRules" xml:space="preserve">
+    <value>已恢复 {0} 条代理规则</value>
+  </data>
+  <data name="LogConfigSaved" xml:space="preserve">
+    <value>配置保存成功</value>
+  </data>
+  <data name="LogConfigLoadFailed" xml:space="preserve">
+    <value>配置加载失败</value>
+  </data>
+  <data name="LogConfigSaveFailed" xml:space="preserve">
+    <value>配置保存失败</value>
+  </data>
+  <data name="LogProxySettingsSaved" xml:space="preserve">
+    <value>已保存代理设置</value>
+  </data>
+  <data name="LogProxySettingsFailed" xml:space="preserve">
+    <value>错误: 代理配置设置失败</value>
+  </data>
+  <data name="LogRuleAdded" xml:space="preserve">
+    <value>已添加规则</value>
+  </data>
+  <data name="LogRuleAddFailed" xml:space="preserve">
+    <value>错误: 添加规则失败</value>
+  </data>
+  <data name="LogDnsViaProxyEnabled" xml:space="preserve">
+    <value>DNS通过代理: 已启用</value>
+  </data>
+  <data name="LogDnsViaProxyDisabled" xml:space="preserve">
+    <value>DNS通过代理: 已禁用</value>
+  </data>
+  <data name="LogLanguageChanged" xml:space="preserve">
+    <value>语言已更改为</value>
+  </data>
+  <data name="LogWithAuth" xml:space="preserve">
+    <value>需要认证</value>
+  </data>
+
+  <!-- Proxy Settings Window -->
+  <data name="WindowProxySettings" xml:space="preserve">
+    <value>代理设置</value>
+  </data>
+  <data name="LabelProxyType" xml:space="preserve">
+    <value>代理类型</value>
+  </data>
+  <data name="LabelProxyIp" xml:space="preserve">
+    <value>代理IP地址 *</value>
+  </data>
+  <data name="LabelProxyPort" xml:space="preserve">
+    <value>代理端口 *</value>
+  </data>
+  <data name="LabelUsername" xml:space="preserve">
+    <value>用户名（可选）</value>
+  </data>
+  <data name="LabelPassword" xml:space="preserve">
+    <value>密码（可选）</value>
+  </data>
+  <data name="LabelRequiredFields" xml:space="preserve">
+    <value>* 必填字段</value>
+  </data>
+  <data name="LabelTestConnection" xml:space="preserve">
+    <value>测试连接</value>
+  </data>
+  <data name="ButtonTestProxy" xml:space="preserve">
+    <value>测试代理连接</value>
+  </data>
+  <data name="LabelTargetHost" xml:space="preserve">
+    <value>目标主机</value>
+  </data>
+  <data name="LabelPort" xml:space="preserve">
+    <value>端口</value>
+  </data>
+  <data name="ButtonStartTest" xml:space="preserve">
+    <value>▶ 开始测试</value>
+  </data>
+  <data name="LabelOutput" xml:space="preserve">
+    <value>输出</value>
+  </data>
+  <data name="ButtonSaveChanges" xml:space="preserve">
+    <value>保存更改</value>
+  </data>
+  <data name="PlaceholderIpAddress" xml:space="preserve">
+    <value>例如: 127.0.0.1</value>
+  </data>
+  <data name="PlaceholderPort" xml:space="preserve">
+    <value>例如: 1080</value>
+  </data>
+  <data name="PlaceholderNoAuth" xml:space="preserve">
+    <value>如不需要认证请留空</value>
+  </data>
+
+  <!-- Proxy Rules Window -->
+  <data name="WindowProxyRules" xml:space="preserve">
+    <value>进程规则</value>
+  </data>
+  <data name="LabelEnabled" xml:space="preserve">
+    <value>启用</value>
+  </data>
+  <data name="LabelActions" xml:space="preserve">
+    <value>操作</value>
+  </data>
+  <data name="LabelSR" xml:space="preserve">
+    <value>序号</value>
+  </data>
+  <data name="LabelProcess" xml:space="preserve">
+    <value>进程</value>
+  </data>
+  <data name="LabelTargetHosts" xml:space="preserve">
+    <value>目标主机</value>
+  </data>
+  <data name="LabelTargetPorts" xml:space="preserve">
+    <value>目标端口</value>
+  </data>
+  <data name="LabelProtocol" xml:space="preserve">
+    <value>协议</value>
+  </data>
+  <data name="LabelAction" xml:space="preserve">
+    <value>动作</value>
+  </data>
+  <data name="LabelApplications" xml:space="preserve">
+    <value>应用程序</value>
+  </data>
+  <data name="ButtonBrowse" xml:space="preserve">
+    <value>浏览...</value>
+  </data>
+  <data name="ExampleApplications" xml:space="preserve">
+    <value>示例: iexplore.exe; "C:\某个应用.exe"; fire*.exe; *.bin</value>
+  </data>
+  <data name="ExampleTargetHosts" xml:space="preserve">
+    <value>示例: 127.0.0.1; *.example.com; 192.168.1.*; 10.1.0.0-10.5.255.255</value>
+  </data>
+  <data name="ExampleTargetPorts" xml:space="preserve">
+    <value>示例: 80; 8000-9000; 3128</value>
+  </data>
+  <data name="ProtocolTCP" xml:space="preserve">
+    <value>TCP</value>
+  </data>
+  <data name="ProtocolUDP" xml:space="preserve">
+    <value>UDP</value>
+  </data>
+  <data name="ProtocolBoth" xml:space="preserve">
+    <value>两者 (TCP + UDP)</value>
+  </data>
+  <data name="ActionProxy" xml:space="preserve">
+    <value>代理</value>
+  </data>
+  <data name="ActionDirect" xml:space="preserve">
+    <value>直连</value>
+  </data>
+  <data name="ActionBlock" xml:space="preserve">
+    <value>阻止</value>
+  </data>
+  <data name="ButtonSaveRule" xml:space="preserve">
+    <value>保存规则</value>
+  </data>
+</root>

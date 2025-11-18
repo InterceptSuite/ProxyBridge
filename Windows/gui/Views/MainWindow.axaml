@@ -1,0 +1,316 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:ProxyBridge.GUI.ViewModels"
+        xmlns:services="using:ProxyBridge.GUI.Services"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="1100" d:DesignHeight="650"
+        x:Class="ProxyBridge.GUI.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        x:CompileBindings="True"
+        Title="{Binding Title}"
+        Icon="/Assets/logo.ico"
+        Width="1100" Height="650"
+        MinWidth="900" MinHeight="600"
+        Background="#1E1E1E"
+        TransparencyLevelHint="AcrylicBlur"
+        ExtendClientAreaToDecorationsHint="True">
+
+    <Design.DataContext>
+        <vm:MainWindowViewModel/>
+    </Design.DataContext>
+
+    <Window.Styles>
+        <!-- Modern Dark Theme -->
+        <Style Selector="Window">
+            <Setter Property="Background" Value="#FF1E1E1E"/>
+        </Style>
+
+        <!-- Menu Styling -->
+        <Style Selector="Menu">
+            <Setter Property="Background" Value="#FF2D2D30"/>
+            <Setter Property="Foreground" Value="#FFE0E0E0"/>
+            <Setter Property="Height" Value="30"/>
+        </Style>
+
+        <Style Selector="MenuItem">
+            <Setter Property="Foreground" Value="#FFE0E0E0"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="Height" Value="30"/>
+        </Style>
+
+        <Style Selector="MenuItem:pointerover /template/ Border#PART_LayoutRoot">
+            <Setter Property="Background" Value="#FF3E3E42"/>
+        </Style>
+
+        <Style Selector="MenuItem:selected /template/ Border#PART_LayoutRoot">
+            <Setter Property="Background" Value="#FF094771"/>
+        </Style>
+
+        <!-- Tab Control -->
+        <Style Selector="TabControl">
+            <Setter Property="Background" Value="Transparent"/>
+        </Style>
+
+        <Style Selector="TabItem">
+            <Setter Property="Foreground" Value="#FF9E9E9E"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="MinHeight" Value="36"/>
+        </Style>
+
+        <Style Selector="TabItem:selected">
+            <Setter Property="Foreground" Value="#FFFFFFFF"/>
+            <Setter Property="Background" Value="#FF2D2D30"/>
+        </Style>
+
+        <Style Selector="TabItem:pointerover">
+            <Setter Property="Foreground" Value="#FFCCCCCC"/>
+        </Style>
+
+        <!-- TextBox Styling -->
+        <Style Selector="TextBox">
+            <Setter Property="Background" Value="#FF1E1E1E"/>
+            <Setter Property="Foreground" Value="#FFD4D4D4"/>
+            <Setter Property="BorderBrush" Value="#FF3F3F46"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8"/>
+            <Setter Property="FontFamily" Value="Consolas,Courier New"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="SelectionBrush" Value="#FF264F78"/>
+            <Setter Property="SelectionForegroundBrush" Value="#FFFFFFFF"/>
+        </Style>
+
+        <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="#FF007ACC"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
+        <Style Selector="TextBox:pointerover /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="#FF555555"/>
+        </Style>
+
+        <!-- Button Styling -->
+        <Style Selector="Button">
+            <Setter Property="Background" Value="#FF0E639C"/>
+            <Setter Property="Foreground" Value="#FFFFFFFF"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="CornerRadius" Value="3"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+
+        <Style Selector="Button:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FF1177BB"/>
+        </Style>
+
+        <Style Selector="Button:pressed /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FF005A9E"/>
+        </Style>
+
+        <Style Selector="Button.secondary">
+            <Setter Property="Background" Value="#FF3E3E42"/>
+        </Style>
+
+        <Style Selector="Button.secondary:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FF505050"/>
+        </Style>
+
+        <Style Selector="Button.close">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Padding" Value="8"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Width" Value="36"/>
+            <Setter Property="Height" Value="36"/>
+        </Style>
+
+        <Style Selector="Button.close:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FFE81123"/>
+        </Style>
+
+        <!-- CheckBox -->
+        <Style Selector="CheckBox">
+            <Setter Property="Foreground" Value="#FFD4D4D4"/>
+        </Style>
+
+        <!-- ListBox -->
+        <Style Selector="ListBox">
+            <Setter Property="Background" Value="#FF252526"/>
+            <Setter Property="BorderBrush" Value="#FF3F3F46"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
+        <Style Selector="ListBoxItem">
+            <Setter Property="Padding" Value="12"/>
+            <Setter Property="MinHeight" Value="48"/>
+        </Style>
+
+        <Style Selector="ListBoxItem:selected /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FF094771"/>
+        </Style>
+
+        <Style Selector="ListBoxItem:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FF2A2D2E"/>
+        </Style>
+
+        <!-- ComboBox -->
+        <Style Selector="ComboBox">
+            <Setter Property="Background" Value="#FF3C3C3C"/>
+            <Setter Property="Foreground" Value="#FFD4D4D4"/>
+            <Setter Property="BorderBrush" Value="#FF3F3F46"/>
+            <Setter Property="Padding" Value="8"/>
+        </Style>
+
+        <Style Selector="ComboBox:pointerover /template/ Border#Background">
+            <Setter Property="BorderBrush" Value="#FF555555"/>
+        </Style>
+
+        <Style Selector="ComboBox:focus /template/ Border#Background">
+            <Setter Property="BorderBrush" Value="#FF007ACC"/>
+        </Style>
+
+        <!-- TextBlock -->
+        <Style Selector="TextBlock">
+            <Setter Property="Foreground" Value="#FFD4D4D4"/>
+        </Style>
+
+        <Style Selector="TextBlock.label">
+            <Setter Property="FontWeight" Value="Medium"/>
+            <Setter Property="Margin" Value="0,0,0,4"/>
+        </Style>
+
+        <Style Selector="TextBlock.secondary">
+            <Setter Property="Foreground" Value="#FF9E9E9E"/>
+        </Style>
+    </Window.Styles>
+
+    <Grid>
+        <!-- Main Content -->
+        <DockPanel>
+            <!-- Title Bar (Custom) -->
+            <Border DockPanel.Dock="Top" Background="#FF2D2D30" Height="32" IsHitTestVisible="False">
+                <Grid>
+                    <TextBlock Text="ProxyBridge"
+                               Foreground="#FFE0E0E0"
+                               FontSize="12"
+                               VerticalAlignment="Center"
+                               Margin="12,0,0,0"/>
+                </Grid>
+            </Border>
+
+            <!-- Menu Bar -->
+            <Menu DockPanel.Dock="Top" Background="#FF2D2D30">
+                <MenuItem Header="{Binding Loc.MenuProxy}">
+                    <MenuItem Header="{Binding Loc.MenuProxySettings}" Command="{Binding ShowProxySettingsCommand}"/>
+                    <MenuItem Header="{Binding Loc.MenuProxyRules}" Command="{Binding ShowProxyRulesCommand}"/>
+                    <Separator/>
+                    <MenuItem Header="{Binding Loc.MenuDnsViaProxy}"
+                              Command="{Binding ToggleDnsViaProxyCommand}">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding DnsViaProxy}"
+                                      IsHitTestVisible="False"
+                                      Margin="0"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                </MenuItem>
+                <MenuItem Header="{Binding Loc.MenuSettings}">
+                    <MenuItem Header="{Binding Loc.MenuCloseToTray}"
+                              Command="{Binding ToggleCloseToTrayCommand}">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding CloseToTray}"
+                                      IsHitTestVisible="False"
+                                      Margin="0"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                    <Separator/>
+                    <MenuItem Header="{Binding Loc.MenuLanguage}">
+                        <MenuItem Header="English" Click="OnChangeLanguageEnglish">
+                            <MenuItem.Icon>
+                                <TextBlock Text="{Binding EnglishCheckmark}" FontSize="14"/>
+                            </MenuItem.Icon>
+                        </MenuItem>
+                        <MenuItem Header="中文 (Chinese)" Click="OnChangeLanguageChinese">
+                            <MenuItem.Icon>
+                                <TextBlock Text="{Binding ChineseCheckmark}" FontSize="14"/>
+                            </MenuItem.Icon>
+                        </MenuItem>
+                    </MenuItem>
+                </MenuItem>
+                <MenuItem Header="{Binding Loc.MenuAbout}">
+                    <MenuItem Header="{Binding Loc.MenuAboutProxyBridge}" Command="{Binding ShowAboutCommand}"/>
+                    <MenuItem Header="{Binding Loc.MenuCheckUpdates}" Command="{Binding CheckForUpdatesCommand}"/>
+                </MenuItem>
+            </Menu>
+
+            <!-- Tab Control -->
+            <TabControl SelectedIndex="{Binding SelectedTabIndex}" Background="#FF1E1E1E" Padding="0">
+                <TabItem Header="{Binding Loc.TabConnections}">
+                    <Border Background="#FF252526" Margin="8" CornerRadius="4" BorderBrush="#FF3F3F46" BorderThickness="1">
+                        <DockPanel>
+                            <!-- Search and Clear Bar -->
+                            <Border DockPanel.Dock="Top" Background="#FF1E1E1E" Padding="8" BorderBrush="#FF3F3F46" BorderThickness="0,0,0,1">
+                                <Grid ColumnDefinitions="*,Auto,Auto">
+                                    <TextBox Grid.Column="0"
+                                             Text="{Binding ConnectionsSearchText}"
+                                             Watermark="{Binding Loc.SearchConnectionsPlaceholder}"
+                                             Margin="0,0,8,0"/>
+                                    <Button Grid.Column="1"
+                                            Content="{Binding Loc.ButtonClear}"
+                                            Classes="secondary"
+                                            Command="{Binding ClearConnectionsLogCommand}"
+                                            Padding="12,6"
+                                            Margin="0,0,8,0"/>
+                                </Grid>
+                            </Border>
+
+                            <!-- Connections Log -->
+                            <ScrollViewer>
+                                <TextBox Text="{Binding FilteredConnectionsLog, Mode=OneWay}"
+                                         IsReadOnly="True"
+                                         AcceptsReturn="True"
+                                         TextWrapping="Wrap"
+                                         Background="Transparent"
+                                         BorderThickness="0"
+                                         Watermark="No active connections..."
+                                         MinHeight="500"/>
+                            </ScrollViewer>
+                        </DockPanel>
+                    </Border>
+                </TabItem>
+                <TabItem Header="{Binding Loc.TabActivity}">
+                    <Border Background="#FF252526" Margin="8" CornerRadius="4" BorderBrush="#FF3F3F46" BorderThickness="1">
+                        <DockPanel>
+                            <!-- Search and Clear Bar -->
+                            <Border DockPanel.Dock="Top" Background="#FF1E1E1E" Padding="8" BorderBrush="#FF3F3F46" BorderThickness="0,0,0,1">
+                                <Grid ColumnDefinitions="*,Auto,Auto">
+                                    <TextBox Grid.Column="0"
+                                             Text="{Binding ActivitySearchText}"
+                                             Watermark="{Binding Loc.SearchActivityPlaceholder}"
+                                             Margin="0,0,8,0"/>
+                                    <Button Grid.Column="1"
+                                            Content="{Binding Loc.ButtonClear}"
+                                            Classes="secondary"
+                                            Command="{Binding ClearActivityLogCommand}"
+                                            Padding="12,6"
+                                            Margin="0,0,8,0"/>
+                                </Grid>
+                            </Border>
+
+                            <!-- Activity Log -->
+                            <ScrollViewer>
+                                <TextBox Text="{Binding FilteredActivityLog, Mode=OneWay}"
+                                         IsReadOnly="True"
+                                         AcceptsReturn="True"
+                                         TextWrapping="Wrap"
+                                         Background="Transparent"
+                                         BorderThickness="0"
+                                         MinHeight="500"/>
+                            </ScrollViewer>
+                        </DockPanel>
+                    </Border>
+                </TabItem>
+            </TabControl>
+        </DockPanel>
+    </Grid>
+</Window>

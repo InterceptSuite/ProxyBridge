@@ -1,0 +1,405 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:ProxyBridge.GUI.ViewModels"
+        xmlns:views="using:ProxyBridge.GUI.Views"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="700" d:DesignHeight="550"
+        x:Class="ProxyBridge.GUI.Views.ProxyRulesWindow"
+        x:DataType="vm:ProxyRulesViewModel"
+        x:CompileBindings="True"
+        Title="{Binding Loc.ProxyRulesTitle}"
+        Icon="/Assets/logo.ico"
+        Width="1000" Height="550"
+        MinWidth="900" MinHeight="400"
+        Background="#FF2D2D30"
+        WindowStartupLocation="CenterOwner">
+
+    <Window.Resources>
+        <views:SelectAllTextConverter x:Key="SelectAllTextConverter"/>
+        <views:SelectAllIconConverter x:Key="SelectAllIconConverter"/>
+    </Window.Resources>
+
+    <Window.Styles>
+        <Style Selector="TextBlock.label">
+            <Setter Property="Foreground" Value="#FFE0E0E0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="Medium"/>
+        </Style>
+
+        <Style Selector="TextBlock.secondary">
+            <Setter Property="Foreground" Value="#FF999999"/>
+        </Style>
+
+        <Style Selector="TextBox">
+            <Setter Property="Background" Value="#FF1E1E1E"/>
+            <Setter Property="Foreground" Value="#FFE0E0E0"/>
+            <Setter Property="BorderBrush" Value="#FF3F3F46"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="FontFamily" Value="Consolas,monospace"/>
+            <Setter Property="FontSize" Value="13"/>
+        </Style>
+
+        <Style Selector="TextBox:focus">
+            <Setter Property="BorderBrush" Value="#FF007ACC"/>
+        </Style>
+
+        <Style Selector="ComboBox">
+            <Setter Property="Background" Value="#FF1E1E1E"/>
+            <Setter Property="Foreground" Value="#FFE0E0E0"/>
+            <Setter Property="BorderBrush" Value="#FF3F3F46"/>
+            <Setter Property="Padding" Value="10,8"/>
+        </Style>
+
+        <Style Selector="ListBox">
+            <Setter Property="Background" Value="#FF252526"/>
+            <Setter Property="BorderBrush" Value="#FF3F3F46"/>
+        </Style>
+
+        <Style Selector="ListBoxItem">
+            <Setter Property="Padding" Value="16,14"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="MinHeight" Value="68"/>
+        </Style>
+
+        <Style Selector="ListBoxItem:selected /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FF094771"/>
+        </Style>
+
+        <Style Selector="ListBoxItem:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FF2A2D2E"/>
+        </Style>
+
+        <Style Selector="CheckBox">
+            <Setter Property="Foreground" Value="#FFE0E0E0"/>
+        </Style>
+
+        <Style Selector="Button">
+            <Setter Property="Background" Value="#FF0E639C"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+
+        <Style Selector="Button:pointerover">
+            <Setter Property="Background" Value="#FF1177BB"/>
+        </Style>
+
+        <Style Selector="Button.secondary">
+            <Setter Property="Background" Value="#FF3E3E42"/>
+        </Style>
+
+        <Style Selector="Button.secondary:pointerover">
+            <Setter Property="Background" Value="#FF4E4E52"/>
+        </Style>
+    </Window.Styles>
+
+    <DockPanel>
+        <!-- Header -->
+        <Border DockPanel.Dock="Top" Background="#FF1E1E1E" Padding="20,16">
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                    <TextBlock Text="⚙" FontSize="22" VerticalAlignment="Center"/>
+                    <TextBlock Text="{Binding Loc.ProxyRulesTitle}"
+                               FontSize="18"
+                               FontWeight="SemiBold"
+                               Foreground="#FFE0E0E0"
+                               VerticalAlignment="Center"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1"
+                            Orientation="Horizontal"
+                            Spacing="8"
+                            IsVisible="{Binding !IsAddRuleViewOpen}">
+                    <Button Content="{Binding AllRulesSelected, Converter={StaticResource SelectAllTextConverter}}"
+                            Command="{Binding ToggleSelectAllCommand}"
+                            Classes="secondary"
+                            Padding="12,8"
+                            IsEnabled="{Binding ProxyRules.Count}">
+                        <Button.Content>
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock Text="{Binding AllRulesSelected, Converter={StaticResource SelectAllIconConverter}}" FontSize="14"/>
+                                <TextBlock Text="{Binding AllRulesSelected, Converter={StaticResource SelectAllTextConverter}}"/>
+                            </StackPanel>
+                        </Button.Content>
+                    </Button>
+                    <Button Command="{Binding ExportRulesCommand}"
+                            Classes="secondary"
+                            Padding="12,8"
+                            IsEnabled="{Binding HasSelectedRules}">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock Text="↑" FontSize="14"/>
+                            <TextBlock Text="Export"/>
+                        </StackPanel>
+                    </Button>
+                    <Button Command="{Binding ImportRulesCommand}"
+                            Classes="secondary"
+                            Padding="12,8">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock Text="↓" FontSize="14"/>
+                            <TextBlock Text="Import"/>
+                        </StackPanel>
+                    </Button>
+                    <Button Content="{Binding Loc.ButtonAdd}"
+                            Command="{Binding AddRuleCommand}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Rules List View -->
+        <Grid IsVisible="{Binding !IsAddRuleViewOpen}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <!-- Table Header -->
+            <Border Grid.Row="0"
+                    Background="#FF1E1E1E"
+                    BorderBrush="#FF3F3F46"
+                    BorderThickness="0,1,0,1"
+                    Padding="20,12">
+                <Grid ColumnDefinitions="60,80,140,60,200,150,120,80,*">
+                    <TextBlock Grid.Column="0"
+                               Text="Select"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"
+                               Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="1"
+                               Text="{Binding Loc.EnabledLabel}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"
+                               Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="2"
+                               Text="{Binding Loc.ActionsLabel}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"
+                               Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="3"
+                               Text="{Binding Loc.SRLabel}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"
+                               Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="4"
+                               Text="{Binding Loc.ProcessLabel}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"
+                               Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="5"
+                               Text="{Binding Loc.TargetHostsLabel}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"
+                               Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="6"
+                               Text="{Binding Loc.TargetPortsLabel}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"
+                               Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="7"
+                               Text="{Binding Loc.ProtocolLabel}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"
+                               Margin="0,0,10,0"/>
+                    <TextBlock Grid.Column="8"
+                               Text="{Binding Loc.ActionLabel}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Foreground="#FFB0B0B0"/>
+                </Grid>
+            </Border>
+
+            <!-- Table Body -->
+            <ScrollViewer Grid.Row="1"
+                          HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding ProxyRules}" x:Name="RulesItemsControl">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Background="#FF252526"
+                                    BorderBrush="#FF3F3F46"
+                                    BorderThickness="0,0,0,1"
+                                    Padding="20,16">
+                                <Grid ColumnDefinitions="60,80,140,60,200,150,120,80,*">
+                                    <CheckBox Grid.Column="0"
+                                              IsChecked="{Binding IsSelected}"
+                                              VerticalAlignment="Center"
+                                              Margin="0,0,10,0"/>
+                                    <CheckBox Grid.Column="1"
+                                              IsChecked="{Binding IsEnabled}"
+                                              VerticalAlignment="Center"
+                                              Margin="0,0,10,0"/>
+                                    <StackPanel Grid.Column="2"
+                                                Orientation="Horizontal"
+                                                Spacing="8"
+                                                VerticalAlignment="Center"
+                                                Margin="0,0,10,0">
+                                        <Button Content="{Binding $parent[ItemsControl].((vm:ProxyRulesViewModel)DataContext).Loc.ButtonEdit, StringFormat='✏ {0}'}"
+                                                Command="{Binding $parent[ItemsControl].((vm:ProxyRulesViewModel)DataContext).EditRuleCommand}"
+                                                CommandParameter="{Binding}"
+                                                Padding="8,4"
+                                                MinWidth="60"
+                                                FontSize="12"/>
+                                        <Button Content="{Binding $parent[ItemsControl].((vm:ProxyRulesViewModel)DataContext).Loc.ButtonDelete, StringFormat='🗑 {0}'}"
+                                                Command="{Binding $parent[ItemsControl].((vm:ProxyRulesViewModel)DataContext).DeleteRuleCommand}"
+                                                CommandParameter="{Binding}"
+                                                Padding="8,4"
+                                                MinWidth="60"
+                                                FontSize="12"
+                                                Classes="secondary"/>
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="3"
+                                               Text="{Binding Index}"
+                                               FontSize="14"
+                                               Foreground="#FF999999"
+                                               VerticalAlignment="Center"
+                                               Margin="0,0,10,0"/>
+                                    <TextBlock Grid.Column="4"
+                                               Text="{Binding ProcessName}"
+                                               FontSize="14"
+                                               FontWeight="Medium"
+                                               Foreground="#FFE0E0E0"
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,0,10,0"/>
+                                    <TextBlock Grid.Column="5"
+                                               Text="{Binding TargetHosts}"
+                                               FontSize="13"
+                                               Foreground="#FF999999"
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,0,10,0"/>
+                                    <TextBlock Grid.Column="6"
+                                               Text="{Binding TargetPorts}"
+                                               FontSize="13"
+                                               Foreground="#FF999999"
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,0,10,0"/>
+                                    <TextBlock Grid.Column="7"
+                                               Text="{Binding Protocol}"
+                                               FontSize="13"
+                                               Foreground="#FF999999"
+                                               VerticalAlignment="Center"
+                                               Margin="0,0,10,0"/>
+                                    <TextBlock Grid.Column="8"
+                                               Text="{Binding Action}"
+                                               FontSize="14"
+                                               FontWeight="SemiBold"
+                                               Foreground="#FF4EC9B0"
+                                               VerticalAlignment="Center"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Grid>
+
+        <!-- Add Rule Form View -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      IsVisible="{Binding IsAddRuleViewOpen}">
+            <StackPanel Margin="24,20"
+                        Spacing="20">
+                <!-- Applications Section -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="{Binding Loc.ApplicationsLabel}" Classes="label"/>
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBox Grid.Column="0"
+                                 Text="{Binding NewProcessName}"
+                                 Watermark="Any"
+                                 Margin="0,0,8,0"/>
+                        <Button Grid.Column="1"
+                                Content="{Binding Loc.BrowseButton}"
+                                Command="{Binding BrowseProcessCommand}"
+                                Padding="12,8"
+                                MinWidth="100"/>
+                    </Grid>
+                    <TextBlock Text="{Binding Loc.ExampleApplications}"
+                               FontSize="11"
+                               Foreground="#FF999999"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0"/>
+                </StackPanel>
+
+                <!-- Target Hosts Section -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="{Binding Loc.TargetHostsLabel}" Classes="label"/>
+                    <TextBox Text="{Binding NewTargetHosts}"
+                             Watermark="Any"/>
+                    <TextBlock Text="{Binding Loc.ExampleTargetHosts}"
+                               FontSize="11"
+                               Foreground="#FF999999"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0"/>
+                </StackPanel>
+
+                <!-- Target Ports Section -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="{Binding Loc.TargetPortsLabel}" Classes="label"/>
+                    <TextBox Text="{Binding NewTargetPorts}"
+                             Watermark="Any"/>
+                    <TextBlock Text="{Binding Loc.ExampleTargetPorts}"
+                               FontSize="11"
+                               Foreground="#FF999999"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0"/>
+                </StackPanel>
+
+                <!-- Protocol Section -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="{Binding Loc.ProtocolLabel}" Classes="label"/>
+                    <ComboBox HorizontalAlignment="Stretch"
+                              x:Name="ProtocolComboBox">
+                        <ComboBoxItem Content="{Binding Loc.ProtocolTCP}" Tag="TCP"/>
+                        <ComboBoxItem Content="{Binding Loc.ProtocolUDP}" Tag="UDP"/>
+                        <ComboBoxItem Content="{Binding Loc.ProtocolBoth}" Tag="BOTH"/>
+                    </ComboBox>
+                </StackPanel>
+
+                <!-- Action Section -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="{Binding Loc.ActionLabel}" Classes="label"/>
+                    <ComboBox HorizontalAlignment="Stretch"
+                              x:Name="ActionComboBox"
+                              SelectionChanged="ActionComboBox_SelectionChanged">
+                        <ComboBoxItem Content="{Binding Loc.ActionProxy}" Tag="PROXY"/>
+                        <ComboBoxItem Content="{Binding Loc.ActionDirect}" Tag="DIRECT"/>
+                        <ComboBoxItem Content="{Binding Loc.ActionBlock}" Tag="BLOCK"/>
+                    </ComboBox>
+                </StackPanel>
+
+                <!-- Validation Error -->
+                <TextBlock Text="{Binding ProcessNameError}"
+                           IsVisible="{Binding ProcessNameError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                           Foreground="#FFFF6B6B"
+                           FontSize="12"
+                           Margin="0,4,0,0"/>
+
+                <!-- Action Buttons -->
+                <StackPanel Orientation="Horizontal"
+                            HorizontalAlignment="Right"
+                            Spacing="12"
+                            Margin="0,16,0,0">
+                    <Button Content="{Binding Loc.ButtonCancel}"
+                            Classes="secondary"
+                            Command="{Binding CancelAddRuleCommand}"
+                            Width="100"/>
+                    <Button Content="{Binding Loc.SaveRuleButton}"
+                            Command="{Binding SaveNewRuleCommand}"
+                            Width="130"/>
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>

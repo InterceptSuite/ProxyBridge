@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- Menu Items -->
+  <data name="MenuProxy" xml:space="preserve">
+    <value>Proxy</value>
+  </data>
+  <data name="MenuProxySettings" xml:space="preserve">
+    <value>Proxy Settings</value>
+  </data>
+  <data name="MenuProxyRules" xml:space="preserve">
+    <value>Proxy Rules</value>
+  </data>
+  <data name="MenuDnsViaProxy" xml:space="preserve">
+    <value>DNS via Proxy</value>
+  </data>
+  <data name="MenuSettings" xml:space="preserve">
+    <value>Settings</value>
+  </data>
+  <data name="MenuCloseToTray" xml:space="preserve">
+    <value>Close to System Tray</value>
+  </data>
+  <data name="MenuLanguage" xml:space="preserve">
+    <value>Language</value>
+  </data>
+  <data name="MenuAbout" xml:space="preserve">
+    <value>About</value>
+  </data>
+  <data name="MenuAboutProxyBridge" xml:space="preserve">
+    <value>About ProxyBridge</value>
+  </data>
+  <data name="MenuCheckUpdates" xml:space="preserve">
+    <value>Check for Updates</value>
+  </data>
+
+  <!-- Tabs -->
+  <data name="TabConnections" xml:space="preserve">
+    <value>🔌 Connections</value>
+  </data>
+  <data name="TabActivity" xml:space="preserve">
+    <value>📝 Activity Logs</value>
+  </data>
+
+  <!-- Buttons -->
+  <data name="ButtonClear" xml:space="preserve">
+    <value>Clear</value>
+  </data>
+  <data name="ButtonSave" xml:space="preserve">
+    <value>Save</value>
+  </data>
+  <data name="ButtonCancel" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="ButtonClose" xml:space="preserve">
+    <value>Close</value>
+  </data>
+  <data name="ButtonAdd" xml:space="preserve">
+    <value>Add</value>
+  </data>
+  <data name="ButtonEdit" xml:space="preserve">
+    <value>Edit</value>
+  </data>
+  <data name="ButtonDelete" xml:space="preserve">
+    <value>Delete</value>
+  </data>
+
+  <!-- Search Placeholders -->
+  <data name="SearchConnectionsPlaceholder" xml:space="preserve">
+    <value>🔍 Search connections...</value>
+  </data>
+  <data name="SearchActivityPlaceholder" xml:space="preserve">
+    <value>🔍 Search activity logs...</value>
+  </data>
+
+  <!-- Log Messages -->
+  <data name="LogInitialized" xml:space="preserve">
+    <value>ProxyBridge initialized successfully</value>
+  </data>
+  <data name="LogServiceStarted" xml:space="preserve">
+    <value>ProxyBridge service started successfully</value>
+  </data>
+  <data name="LogServiceStartFailed" xml:space="preserve">
+    <value>ERROR: Failed to start ProxyBridge service</value>
+  </data>
+  <data name="LogRestoredProxySettings" xml:space="preserve">
+    <value>Restored proxy settings</value>
+  </data>
+  <data name="LogRestoredRules" xml:space="preserve">
+    <value>Restored {0} proxy rule(s)</value>
+  </data>
+  <data name="LogConfigSaved" xml:space="preserve">
+    <value>Configuration saved successfully</value>
+  </data>
+  <data name="LogConfigLoadFailed" xml:space="preserve">
+    <value>Failed to load configuration</value>
+  </data>
+  <data name="LogConfigSaveFailed" xml:space="preserve">
+    <value>Failed to save configuration</value>
+  </data>
+  <data name="LogProxySettingsSaved" xml:space="preserve">
+    <value>Saved proxy settings</value>
+  </data>
+  <data name="LogProxySettingsFailed" xml:space="preserve">
+    <value>ERROR: Failed to set proxy config</value>
+  </data>
+  <data name="LogRuleAdded" xml:space="preserve">
+    <value>Added rule</value>
+  </data>
+  <data name="LogRuleAddFailed" xml:space="preserve">
+    <value>ERROR: Failed to add rule</value>
+  </data>
+  <data name="LogDnsViaProxyEnabled" xml:space="preserve">
+    <value>DNS via Proxy: Enabled</value>
+  </data>
+  <data name="LogDnsViaProxyDisabled" xml:space="preserve">
+    <value>DNS via Proxy: Disabled</value>
+  </data>
+  <data name="LogLanguageChanged" xml:space="preserve">
+    <value>Language changed to</value>
+  </data>
+  <data name="LogWithAuth" xml:space="preserve">
+    <value>with auth</value>
+  </data>
+
+  <!-- Proxy Settings Window -->
+  <data name="WindowProxySettings" xml:space="preserve">
+    <value>Proxy Settings</value>
+  </data>
+  <data name="LabelProxyType" xml:space="preserve">
+    <value>Proxy Type</value>
+  </data>
+  <data name="LabelProxyIp" xml:space="preserve">
+    <value>Proxy IP Address *</value>
+  </data>
+  <data name="LabelProxyPort" xml:space="preserve">
+    <value>Proxy Port *</value>
+  </data>
+  <data name="LabelUsername" xml:space="preserve">
+    <value>Username (Optional)</value>
+  </data>
+  <data name="LabelPassword" xml:space="preserve">
+    <value>Password (Optional)</value>
+  </data>
+  <data name="LabelRequiredFields" xml:space="preserve">
+    <value>* Required fields</value>
+  </data>
+  <data name="LabelTestConnection" xml:space="preserve">
+    <value>Test Connection</value>
+  </data>
+  <data name="ButtonTestProxy" xml:space="preserve">
+    <value>Test Proxy Connection</value>
+  </data>
+  <data name="LabelTargetHost" xml:space="preserve">
+    <value>Target Host</value>
+  </data>
+  <data name="LabelPort" xml:space="preserve">
+    <value>Port</value>
+  </data>
+  <data name="ButtonStartTest" xml:space="preserve">
+    <value>▶ Start Test</value>
+  </data>
+  <data name="LabelOutput" xml:space="preserve">
+    <value>Output</value>
+  </data>
+  <data name="ButtonSaveChanges" xml:space="preserve">
+    <value>Save Changes</value>
+  </data>
+  <data name="PlaceholderIpAddress" xml:space="preserve">
+    <value>e.g., 127.0.0.1</value>
+  </data>
+  <data name="PlaceholderPort" xml:space="preserve">
+    <value>e.g., 1080</value>
+  </data>
+  <data name="PlaceholderNoAuth" xml:space="preserve">
+    <value>Leave empty if no auth required</value>
+  </data>
+
+  <!-- Proxy Rules Window -->
+  <data name="WindowProxyRules" xml:space="preserve">
+    <value>Process Rules</value>
+  </data>
+  <data name="LabelEnabled" xml:space="preserve">
+    <value>Enabled</value>
+  </data>
+  <data name="LabelActions" xml:space="preserve">
+    <value>Actions</value>
+  </data>
+  <data name="LabelSR" xml:space="preserve">
+    <value>SR</value>
+  </data>
+  <data name="LabelProcess" xml:space="preserve">
+    <value>Process</value>
+  </data>
+  <data name="LabelTargetHosts" xml:space="preserve">
+    <value>Target Hosts</value>
+  </data>
+  <data name="LabelTargetPorts" xml:space="preserve">
+    <value>Target Ports</value>
+  </data>
+  <data name="LabelProtocol" xml:space="preserve">
+    <value>Protocol</value>
+  </data>
+  <data name="LabelAction" xml:space="preserve">
+    <value>Action</value>
+  </data>
+  <data name="LabelApplications" xml:space="preserve">
+    <value>Applications</value>
+  </data>
+  <data name="ButtonBrowse" xml:space="preserve">
+    <value>Browse...</value>
+  </data>
+  <data name="ExampleApplications" xml:space="preserve">
+    <value>Example: iexplore.exe; "C:\some app.exe"; fire*.exe; *.bin</value>
+  </data>
+  <data name="ExampleTargetHosts" xml:space="preserve">
+    <value>Example: 127.0.0.1; *.example.com; 192.168.1.*; 10.1.0.0-10.5.255.255</value>
+  </data>
+  <data name="ExampleTargetPorts" xml:space="preserve">
+    <value>Example: 80; 8000-9000; 3128</value>
+  </data>
+  <data name="ProtocolTCP" xml:space="preserve">
+    <value>TCP</value>
+  </data>
+  <data name="ProtocolUDP" xml:space="preserve">
+    <value>UDP</value>
+  </data>
+  <data name="ProtocolBoth" xml:space="preserve">
+    <value>Both (TCP + UDP)</value>
+  </data>
+  <data name="ActionProxy" xml:space="preserve">
+    <value>PROXY</value>
+  </data>
+  <data name="ActionDirect" xml:space="preserve">
+    <value>DIRECT</value>
+  </data>
+  <data name="ActionBlock" xml:space="preserve">
+    <value>BLOCK</value>
+  </data>
+  <data name="ButtonSaveRule" xml:space="preserve">
+    <value>Save Rule</value>
+  </data>
+</root>
