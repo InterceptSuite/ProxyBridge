@@ -441,6 +441,10 @@ class AppProxyProvider: NETransparentProxyProvider {
             processPath = metaData.sourceAppSigningIdentifier
         }
         
+        if processPath == "com.interceptsuite.ProxyBridge" || processPath == "com.interceptsuite.ProxyBridge.extension" {
+            return false
+        }
+        
         proxyLock.lock()
         let hasProxyConfig = (proxyHost != nil && proxyPort != nil)
         proxyLock.unlock()
@@ -479,6 +483,10 @@ class AppProxyProvider: NETransparentProxyProvider {
         var processPath = "unknown"
         if let metaData = flow.metaData as? NEFlowMetaData {
             processPath = metaData.sourceAppSigningIdentifier
+        }
+        
+        if processPath == "com.interceptsuite.ProxyBridge" || processPath == "com.interceptsuite.ProxyBridge.extension" {
+            return false
         }
         
         proxyLock.lock()
