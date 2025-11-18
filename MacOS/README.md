@@ -20,6 +20,12 @@ ProxyBridge is a transparent proxy application for macOS that allows you to rout
 
 ProxyBridge leverages macOS Network Extension framework to intercept and route network traffic. It provides a GUI application for configuration and uses a system extension to handle traffic routing based on user-defined rules.
 
+<p align="center">
+  <img src="../img/ProxyBridge-mac.png" alt="ProxyBridge macOS Main Interface" width="800"/>
+  <br/>
+  <em>ProxyBridge Main Window</em>
+</p>
+
 ## Architecture
 
 
@@ -174,6 +180,12 @@ ProxyBridge leverages macOS Network Extension framework to intercept and route n
 
 Access proxy settings from **Menu Bar → Proxy → Proxy Settings**.
 
+<p align="center">
+  <img src="../img/proxy-setting-mac.png" alt="Proxy Settings Configuration" width="600"/>
+  <br/>
+  <em>Proxy Settings Window</em>
+</p>
+
 #### Supported Proxy Types
 - **HTTP** - Standard HTTP/HTTPS proxy
 - **SOCKS5** - SOCKS5 proxy with optional UDP support
@@ -212,6 +224,12 @@ Password: (optional)
 
 Access proxy rules from **Menu Bar → Proxy → Proxy Rules**.
 
+<p align="center">
+  <img src="../img/proxy-rule-mac.png" alt="Proxy Rules Management" width="800"/>
+  <br/>
+  <em>Proxy Rules Window</em>
+</p>
+
 Rules determine how network traffic is handled. Multiple rules can be created, and they are evaluated in order until a match is found.
 
 #### Rule Components
@@ -238,6 +256,12 @@ Rules determine how network traffic is handled. Multiple rules can be created, a
 - **Enable/Disable** - Toggle rules on/off without deleting them
 - **Delete** - Remove rules permanently
 - **List All** - View all configured rules and their status
+
+<p align="center">
+  <img src="../img/proxy-rule2-mac.png" alt="Add/Edit Proxy Rule" width="600"/>
+  <br/>
+  <em>Add/Edit Rule Window</em>
+</p>
 
 #### Rule Examples
 

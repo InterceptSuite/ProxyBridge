@@ -8,6 +8,22 @@ ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alte
 
 > 🚀 **Need advanced traffic analysis?** Check out [**InterceptSuite**](https://github.com/InterceptSuite/InterceptSuite) - our comprehensive MITM proxy for analyzing TLS, TCP, UDP, DTLS traffic. Perfect for security testing, network debugging, and system administration!
 
+<p align="center">
+  <a href="https://github.com/sponsors/Anof-cyber">
+    <img src="https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86" alt="Sponsor Anof-cyber" width="230" height="50">
+  </a>
+</p>
+
+## Table of Contents
+
+- [Features](#features)
+- [Platform Documentation](#platform-documentation)
+- [Screenshots](#screenshots)
+- [Use Cases](#use-cases)
+- [License](#license)
+- [Author](#author)
+- [Credits](#credits)
+
 ## Features
 
 - **Cross-platform** - Available for Windows and macOS
@@ -26,6 +42,10 @@ ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alte
 
 ## Platform Documentation
 
+<a href="https://github.com/sponsors/Anof-cyber"><img src="https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86" alt="Sponsor Anof-cyber" width="230" height="50"></a>
+
+## Platform Documentation
+
 ProxyBridge is available for both Windows and macOS, with platform-specific implementations:
 
 ### 📘 [Windows Documentation](Windows/README.md)
@@ -40,6 +60,70 @@ ProxyBridge is available for both Windows and macOS, with platform-specific impl
 - **Distribution**: Direct download (.pkg installer) from [Releases](https://github.com/InterceptSuite/ProxyBridge/releases)
 - **Requirements**: macOS 13.0 (Ventura) or later, Apple Silicon (ARM) or Intel
 - **GUI**: Native SwiftUI interface
+
+## Screenshots
+
+### macOS
+
+<p align="center">
+  <img src="img/ProxyBridge-mac.png" alt="ProxyBridge macOS Main Interface" width="800"/>
+  <br/>
+  <em>ProxyBridge GUI - Main Interface</em>
+</p>
+
+<p align="center">
+  <img src="img/proxy-setting-mac.png" alt="Proxy Settings macOS" width="800"/>
+  <br/>
+  <em>Proxy Settings Configuration</em>
+</p>
+
+<p align="center">
+  <img src="img/proxy-rule-mac.png" alt="Proxy Rules macOS" width="800"/>
+  <br/>
+  <em>Proxy Rules Management</em>
+</p>
+
+<p align="center">
+  <img src="img/proxy-rule2-mac.png" alt="Add/Edit Rule macOS" width="800"/>
+  <br/>
+  <em>Add/Edit Proxy Rule</em>
+</p>
+
+### Windows
+
+#### GUI
+
+<p align="center">
+  <img src="img/ProxyBridge.png" alt="ProxyBridge Windows Main Interface" width="800"/>
+  <br/>
+  <em>ProxyBridge GUI - Main Interface</em>
+</p>
+
+<p align="center">
+  <img src="img/proxy-setting.png" alt="Proxy Settings" width="800"/>
+  <br/>
+  <em>Proxy Settings Configuration</em>
+</p>
+
+<p align="center">
+  <img src="img/proxy-rule.png" alt="Proxy Rules" width="800"/>
+  <br/>
+  <em>Proxy Rules Management</em>
+</p>
+
+<p align="center">
+  <img src="img/proxy-rule2.png" alt="Add/Edit Rule" width="800"/>
+  <br/>
+  <em>Add/Edit Proxy Rule</em>
+</p>
+
+#### CLI
+
+<p align="center">
+  <img src="img/ProxyBridge_CLI.png" alt="ProxyBridge CLI" width="800"/>
+  <br/>
+  <em>ProxyBridge CLI Interface</em>
+</p>
 
 ## Use Cases
 

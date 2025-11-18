@@ -11,7 +11,7 @@ fi
 PROJECT_NAME="ProxyBridge"
 SCHEME_NAME="ProxyBridge"
 OUTPUT_DIR="$SCRIPT_DIR/output"
-PKG_NAME="ProxyBridge-Installer.pkg"
+PKG_NAME="ProxyBridge-v3.0-Universal-Installer.pkg"
 PKG_PATH="$OUTPUT_DIR/$PKG_NAME"
 ARCHIVE_PATH="$SCRIPT_DIR/build/${PROJECT_NAME}.xcarchive"
 EXPORT_PATH="$SCRIPT_DIR/build/Export"
