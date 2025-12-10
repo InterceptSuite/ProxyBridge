@@ -48,11 +48,11 @@ function Compile-MSVC {
         }
     }
 
-    $cmd = "cl.exe /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /DPROXYBRIDGE_EXPORTS " +
+    $cmd = "cl.exe /nologo /O2 /GL /W3 /D_CRT_SECURE_NO_WARNINGS /DPROXYBRIDGE_EXPORTS " +
            "/I`"$WinDivertPath\include`" " +
            "$SourcePath\$SourceFile " +
            "/LD " +
-           "/link /LIBPATH:`"$WinDivertPath\$Arch`" " +
+           "/link /LTCG /OPT:REF /OPT:ICF /DEBUG:NONE /LIBPATH:`"$WinDivertPath\$Arch`" " +
            "WinDivert.lib ws2_32.lib iphlpapi.lib " +
            "/OUT:$OutputDLL"
 
@@ -77,7 +77,7 @@ function Compile-GCC {
 
     Write-Host "GCC found: $($gccVersion[0])" -ForegroundColor Cyan
 
-    $cmd = "gcc -shared -O2 -Wall -D_WIN32_WINNT=0x0601 -DPROXYBRIDGE_EXPORTS " +
+    $cmd = "gcc -shared -O2 -flto -s -Wall -D_WIN32_WINNT=0x0601 -DPROXYBRIDGE_EXPORTS " +
            "-I`"$WinDivertPath\include`" " +
            "$SourcePath\$SourceFile " +
            "-L`"$WinDivertPath\$Arch`" " +
@@ -154,6 +154,15 @@ if ($Compiler -eq 'auto') {
 
 if ($success) {
     Write-Host "`nCompilation SUCCESSFUL!" -ForegroundColor Green
+
+    Write-Host "`nCleaning up intermediate files..." -ForegroundColor Yellow
+    $intermediateFiles = @("*.obj", "*.exp", "*.lib", "ProxyBridge.obj")
+    foreach ($pattern in $intermediateFiles) {
+        Get-ChildItem -Path . -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+            Remove-Item $_.FullName -Force
+            Write-Host "  Removed: $($_.Name)" -ForegroundColor Gray
+        }
+    }
 
     Write-Host "`nMoving files to output directory..." -ForegroundColor Green
     Move-Item $OutputDLL -Destination $OutputDir -Force
