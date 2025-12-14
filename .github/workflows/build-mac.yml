@@ -22,7 +22,29 @@ jobs:
       with:
         xcode-version: latest-stable
     
-    - name: Build ProxyBridge (Universal Binary)
+    - name: Import Code Signing Certificates
+      env:
+        DEVELOPER_ID_APP_CERT: ${{ secrets.DEVELOPER_ID_APP_CERT }}
+        DEVELOPER_ID_APP_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_APP_CERT_PASSWORD }}
+        DEVELOPER_ID_INSTALLER_CERT: ${{ secrets.DEVELOPER_ID_INSTALLER_CERT }}
+        DEVELOPER_ID_INSTALLER_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}
+      run: |
+        security create-keychain -p actions build.keychain
+        security default-keychain -s build.keychain
+        security unlock-keychain -p actions build.keychain
+        security set-keychain-settings -t 3600 -u build.keychain
+        
+        echo "$DEVELOPER_ID_APP_CERT" | base64 --decode > app_cert.p12
+        security import app_cert.p12 -k build.keychain -P "$DEVELOPER_ID_APP_CERT_PASSWORD" -T /usr/bin/codesign
+        
+        echo "$DEVELOPER_ID_INSTALLER_CERT" | base64 --decode > installer_cert.p12
+        security import installer_cert.p12 -k build.keychain -P "$DEVELOPER_ID_INSTALLER_CERT_PASSWORD" -T /usr/bin/productsign
+        
+        security set-key-partition-list -S apple-tool:,apple: -s -k actions build.keychain
+        
+        rm app_cert.p12 installer_cert.p12
+    
+    - name: Build Universal Binary
       run: |
         cd MacOS/ProxyBridge
         xcodebuild \
@@ -37,14 +59,85 @@ jobs:
           CODE_SIGNING_ALLOWED=NO \
           clean build
     
-    - name: Verify Universal Binary
+    - name: Sign App and Extension
       run: |
         cd MacOS/ProxyBridge
-        lipo -info build/DerivedData/Build/Products/Release/ProxyBridge.app/Contents/MacOS/ProxyBridge
+        
+        codesign --force --deep --sign "${{ secrets.DEVELOPER_ID_IDENTITY }}" \
+          --entitlements extension/extensionRelease.entitlements \
+          --options runtime \
+          build/DerivedData/Build/Products/Release/ProxyBridge.app/Contents/Library/SystemExtensions/com.interceptsuite.ProxyBridge.extension.systemextension
+        
+        codesign --force --deep --sign "${{ secrets.DEVELOPER_ID_IDENTITY }}" \
+          --entitlements ProxyBridge/ProxyBridgeRelease.entitlements \
+          --options runtime \
+          build/DerivedData/Build/Products/Release/ProxyBridge.app
+        
+        codesign --verify --verbose=2 --deep --strict build/DerivedData/Build/Products/Release/ProxyBridge.app
     
-    - name: Upload App artifact
+    - name: Create and Sign PKG
+      run: |
+        cd MacOS/ProxyBridge
+        mkdir -p build/component output
+        cp -R build/DerivedData/Build/Products/Release/ProxyBridge.app build/component/
+        
+        pkgbuild \
+          --root build/component \
+          --identifier com.interceptsuite.ProxyBridge \
+          --version 3.0.0 \
+          --install-location /Applications \
+          build/temp.pkg
+        
+        cat > build/distribution.xml << 'EOF'
+        <?xml version="1.0" encoding="utf-8"?>
+        <installer-gui-script minSpecVersion="1">
+            <title>ProxyBridge</title>
+            <pkg-ref id="com.interceptsuite.ProxyBridge"/>
+            <options customize="never" require-scripts="false"/>
+            <choices-outline>
+                <line choice="default">
+                    <line choice="com.interceptsuite.ProxyBridge"/>
+                </line>
+            </choices-outline>
+            <choice id="default"/>
+            <choice id="com.interceptsuite.ProxyBridge" visible="false">
+                <pkg-ref id="com.interceptsuite.ProxyBridge"/>
+            </choice>
+            <pkg-ref id="com.interceptsuite.ProxyBridge" version="3.0.0" onConclusion="none">temp.pkg</pkg-ref>
+        </installer-gui-script>
+        EOF
+        
+        productbuild \
+          --distribution build/distribution.xml \
+          --package-path build \
+          --sign "${{ secrets.DEVELOPER_ID_INSTALLER_IDENTITY }}" \
+          output/ProxyBridge-Installer.pkg
+    
+    - name: Notarize PKG
+      env:
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        APPLE_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        TEAM_ID: ${{ secrets.TEAM_ID }}
+      run: |
+        cd MacOS/ProxyBridge
+        
+        xcrun notarytool submit output/ProxyBridge-Installer.pkg \
+          --apple-id "$APPLE_ID" \
+          --password "$APPLE_PASSWORD" \
+          --team-id "$TEAM_ID" \
+          --wait
+        
+        xcrun stapler staple output/ProxyBridge-Installer.pkg
+    
+    - name: Upload PKG
       uses: actions/upload-artifact@v4
       with:
-        name: ProxyBridge-macOS-Universal
-        path: MacOS/ProxyBridge/build/DerivedData/Build/Products/Release/ProxyBridge.app
+        name: ProxyBridge-macOS-Signed
+        path: MacOS/ProxyBridge/output/ProxyBridge-Installer.pkg
         retention-days: 30
+    
+    - name: Cleanup
+      if: always()
+      run: |
+        security delete-keychain build.keychain || true
+        security default-keychain -s login.keychain || true
