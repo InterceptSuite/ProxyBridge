@@ -22,19 +22,29 @@ jobs:
       with:
         xcode-version: latest-stable
     
-    - name: Build ProxyBridge
+    - name: Build ProxyBridge (Universal Binary)
       run: |
         cd MacOS/ProxyBridge
-        chmod +x build.sh
-        ./build.sh
-      env:
-        SIGN_APP: ""
-        SIGN_PKG: ""
-        NOTARIZE: ""
+        xcodebuild \
+          -project ProxyBridge.xcodeproj \
+          -scheme ProxyBridge \
+          -configuration Release \
+          -derivedDataPath build/DerivedData \
+          ARCHS="arm64 x86_64" \
+          ONLY_ACTIVE_ARCH=NO \
+          CODE_SIGN_IDENTITY="-" \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO \
+          clean build
     
-    - name: Upload PKG artifact
+    - name: Verify Universal Binary
+      run: |
+        cd MacOS/ProxyBridge
+        lipo -info build/DerivedData/Build/Products/Release/ProxyBridge.app/Contents/MacOS/ProxyBridge
+    
+    - name: Upload App artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ProxyBridge-macOS
-        path: MacOS/ProxyBridge/output/ProxyBridge-Installer.pkg
+        name: ProxyBridge-macOS-Universal
+        path: MacOS/ProxyBridge/build/DerivedData/Build/Products/Release/ProxyBridge.app
         retention-days: 30
