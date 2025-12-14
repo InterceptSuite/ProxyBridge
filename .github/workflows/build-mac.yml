@@ -93,8 +93,6 @@ jobs:
     
     - name: Create and Sign PKG
       env:
-        TEAM_ID: ${{ secrets.TEAM_ID }}
-      run: |
         DEVELOPER_ID_INSTALLER_IDENTITY: ${{ secrets.DEVELOPER_ID_INSTALLER_IDENTITY }}
       run: |
         cd MacOS/ProxyBridge
