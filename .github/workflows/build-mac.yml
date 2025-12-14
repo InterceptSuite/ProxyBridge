@@ -107,10 +107,13 @@ jobs:
         </installer-gui-script>
         EOF
         
+        security unlock-keychain -p actions build.keychain
+        
         productbuild \
           --distribution build/distribution.xml \
           --package-path build \
           --sign "${{ secrets.DEVELOPER_ID_INSTALLER_IDENTITY }}" \
+          --timestamp \
           output/ProxyBridge-Installer.pkg
     
     - name: Notarize PKG
