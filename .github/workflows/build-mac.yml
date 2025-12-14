@@ -96,11 +96,10 @@ jobs:
         DEVELOPER_ID_INSTALLER_IDENTITY: ${{ secrets.DEVELOPER_ID_INSTALLER_IDENTITY }}
       run: |
         cd MacOS/ProxyBridge
-        mkdir -p build/component output
-        cp -R build/DerivedData/Build/Products/Release/ProxyBridge.app build/component/
+        mkdir -p output
         
         pkgbuild \
-          --root build/component \
+          --root build/DerivedData/Build/Products/Release \
           --identifier com.interceptsuite.ProxyBridge \
           --version 3.0.0 \
           --install-location /Applications \
