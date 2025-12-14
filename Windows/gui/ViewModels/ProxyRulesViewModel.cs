@@ -136,9 +136,9 @@ public class ProxyRulesViewModel : ViewModelBase
             }
 
             // This could be an issue if app name contain char
-            if (!System.Text.RegularExpressions.Regex.IsMatch(NewProcessName, @"^[a-zA-Z0-9\s._\-*;""\\:]+$"))
+            if (!System.Text.RegularExpressions.Regex.IsMatch(NewProcessName, @"^[a-zA-Z0-9\s._\-*;""\\:()]+$"))
             {
-                ProcessNameError = "Invalid characters in process name. Only letters, numbers, spaces, dots, dashes, underscores, semicolons, quotes, and * are allowed";
+                ProcessNameError = "Invalid characters in process name. Only letters, numbers, spaces, dots, dashes, underscores, semicolons, quotes, parentheses, and * are allowed";
                 return;
             }
 

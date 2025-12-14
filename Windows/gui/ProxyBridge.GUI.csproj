@@ -7,7 +7,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>ProxyBridge</AssemblyName>
     <RootNamespace>ProxyBridge.GUI</RootNamespace>
-    <Version>2.0.1</Version>
+    <Version>3.0.0</Version>
     <ApplicationIcon>Assets\logo.ico</ApplicationIcon>
     <!-- Native AOT Configuration -->
     <PublishAot>true</PublishAot>

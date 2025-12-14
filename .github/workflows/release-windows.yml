@@ -1,0 +1,53 @@
+name: Release ProxyBridge Windows
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build-and-release:
+    runs-on: self-hosted
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+
+    - name: Verify WinDivert installation
+      run: |
+        if (Test-Path "C:\WinDivert-2.2.2-A") {
+          Write-Host "WinDivert found at C:\WinDivert-2.2.2-A"
+        } else {
+          Write-Error "WinDivert not found. Please install WinDivert 2.2.2-A at C:\WinDivert-2.2.2-A"
+          exit 1
+        }
+      shell: pwsh
+
+    - name: Build and sign project
+      run: .\Windows\compile.ps1
+      shell: pwsh
+
+    - name: List built files
+      run: |
+        Write-Host "`nBuild artifacts:"
+        Get-ChildItem Windows/output -Recurse | ForEach-Object {
+          $size = [math]::Round($_.Length/1MB, 2)
+          Write-Host "  $($_.Name) - $size MB"
+        }
+      shell: pwsh
+
+    - name: Upload installer to release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: Windows/output/ProxyBridge-Setup-*.exe
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ProxyBridge-Release-${{ github.event.release.tag_name }}
+        path: Windows/output/
+        retention-days: 90
