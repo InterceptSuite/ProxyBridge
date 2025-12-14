@@ -127,7 +127,9 @@ jobs:
         
         productsign \
           --keychain build.keychain \
-          --sign "$DEVELOPER_ID_INSTALLER
+          --sign "$DEVELOPER_ID_INSTALLER_IDENTITY" \
+          --distribution build/distribution.xml \
+          --package-path build \
           output/ProxyBridge-Installer.pkg
         
         pkgutil --check-signature output/ProxyBridge-Installer.pkg
