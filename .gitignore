@@ -20,6 +20,7 @@ Windows/output/ProxyBridge_CLI.pdb
 MacOS/ProxyBridge/.env
 MacOS/ProxyBridge/output/
 MacOS/ProxyBridge/build/
+MacOS/ProxyBridge/provision/**
 
 # Xcode
 xcuserdata/

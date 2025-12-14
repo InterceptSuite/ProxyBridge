@@ -13,90 +13,39 @@ SCHEME_NAME="ProxyBridge"
 OUTPUT_DIR="$SCRIPT_DIR/output"
 PKG_NAME="ProxyBridge-v3.0-Universal-Installer.pkg"
 PKG_PATH="$OUTPUT_DIR/$PKG_NAME"
-ARCHIVE_PATH="$SCRIPT_DIR/build/${PROJECT_NAME}.xcarchive"
-EXPORT_PATH="$SCRIPT_DIR/build/Export"
 APP_NAME="${PROJECT_NAME}.app"
+APP_PATH="$OUTPUT_DIR/$APP_NAME"
 LICENSE_FILE="$SCRIPT_DIR/../../LICENSE"
 
-SIGN_APP=${SIGN_APP:-""}
 SIGN_PKG=${SIGN_PKG:-""}
 NOTARIZE=${NOTARIZE:-""}
 APPLE_ID=${APPLE_ID:-""}
 TEAM_ID=${TEAM_ID:-""}
 APP_PASSWORD=${APP_PASSWORD:-""}
 
-echo "Building ProxyBridge Universal Installer..."
+echo "Creating PKG installer from notarized app..."
 
-if [ ! -d "$OUTPUT_DIR" ]; then
-    mkdir -p "$OUTPUT_DIR"
+# Check if app exists
+if [ ! -d "$APP_PATH" ]; then
+    echo "Error: $APP_NAME not found in $OUTPUT_DIR"
+    echo "Please export the notarized app from Xcode to the output folder first."
+    exit 1
 fi
 
+# Remove old PKG if exists
 if [ -f "$PKG_PATH" ]; then
+    echo "Removing old PKG..."
     rm -f "$PKG_PATH"
 fi
 
-echo "Cleaning build directory..."
-rm -rf "$SCRIPT_DIR/build"
-mkdir -p "$SCRIPT_DIR/build"
-
-echo "Building universal binary (ARM64 + x86_64)..."
-xcodebuild archive \
-    -project "${PROJECT_NAME}.xcodeproj" \
-    -scheme "$SCHEME_NAME" \
-    -configuration Release \
-    -archivePath "$ARCHIVE_PATH" \
-    -destination "generic/platform=macOS" \
-    ARCHS="arm64 x86_64" \
-    ONLY_ACTIVE_ARCH=NO \
-    CODE_SIGN_IDENTITY="" \
-    CODE_SIGNING_REQUIRED=NO \
-    CODE_SIGNING_ALLOWED=NO
-
-if [ $? -ne 0 ]; then
-    echo "Build failed!"
-    exit 1
-fi
-
-echo "Build completed successfully!"
-
-echo "Exporting archive..."
-xcodebuild -exportArchive \
-    -archivePath "$ARCHIVE_PATH" \
-    -exportPath "$EXPORT_PATH" \
-    -exportOptionsPlist "${SCRIPT_DIR}/ExportOptions.plist"
-
-if [ $? -ne 0 ]; then
-    echo "Export failed, copying app manually..."
-    mkdir -p "$EXPORT_PATH"
-    cp -R "${ARCHIVE_PATH}/Products/Applications/${APP_NAME}" "$EXPORT_PATH/"
-fi
-
-if [ ! -d "$EXPORT_PATH/$APP_NAME" ]; then
-    echo "App not found at $EXPORT_PATH/$APP_NAME"
-    exit 1
-fi
+echo "Verifying app signature..."
+codesign --verify --verbose=2 --deep --strict "$APP_PATH"
 
 echo "Verifying universal binary..."
-lipo -info "$EXPORT_PATH/$APP_NAME/Contents/MacOS/$PROJECT_NAME"
+lipo -info "$APP_PATH/Contents/MacOS/$PROJECT_NAME"
 
-if [ -n "$SIGN_APP" ]; then
-    echo "Signing application..."
-    
-    codesign --force --sign "$SIGN_APP" \
-        --timestamp \
-        --options runtime \
-        --entitlements "$SCRIPT_DIR/extension/extension.entitlements" \
-        "$EXPORT_PATH/$APP_NAME/Contents/Library/SystemExtensions/com.interceptsuite.ProxyBridge.extension.systemextension"
-    
-    codesign --force --sign "$SIGN_APP" \
-        --timestamp \
-        --options runtime \
-        --entitlements "$SCRIPT_DIR/ProxyBridge/ProxyBridgeRelease.entitlements" \
-        "$EXPORT_PATH/$APP_NAME"
-    
-    echo "Verifying application signature..."
-    codesign --verify --verbose=2 "$EXPORT_PATH/$APP_NAME"
-fi
+echo "Verifying universal binary..."
+lipo -info "$APP_PATH/Contents/MacOS/$PROJECT_NAME"
 
 echo "Creating PKG installer..."
 
@@ -104,13 +53,14 @@ COMPONENT_DIR="$SCRIPT_DIR/build/component"
 TEMP_PKG="$SCRIPT_DIR/build/temp.pkg"
 DISTRIBUTION_FILE="$SCRIPT_DIR/build/distribution.xml"
 
+mkdir -p "$SCRIPT_DIR/build"
 mkdir -p "$COMPONENT_DIR"
-cp -R "$EXPORT_PATH/$APP_NAME" "$COMPONENT_DIR/"
+cp -R "$APP_PATH" "$COMPONENT_DIR/"
 
 pkgbuild \
     --root "$COMPONENT_DIR" \
     --identifier "com.interceptsuite.${PROJECT_NAME}" \
-    --version "1.0.0" \
+    --version "3.0.0" \
     --install-location "/Applications" \
     "$TEMP_PKG"
 
@@ -135,7 +85,7 @@ cat > "$DISTRIBUTION_FILE" << 'EOF'
     <choice id="com.interceptsuite.ProxyBridge" visible="false">
         <pkg-ref id="com.interceptsuite.ProxyBridge"/>
     </choice>
-    <pkg-ref id="com.interceptsuite.ProxyBridge" version="1.0.0" onConclusion="none">temp.pkg</pkg-ref>
+    <pkg-ref id="com.interceptsuite.ProxyBridge" version="3.0.0" onConclusion="none">temp.pkg</pkg-ref>
 </installer-gui-script>
 EOF
 
