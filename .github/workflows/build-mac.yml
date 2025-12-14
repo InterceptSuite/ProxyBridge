@@ -106,30 +106,10 @@ jobs:
           --install-location /Applications \
           build/temp.pkg
         
-        cat > build/distribution.xml << 'EOF'
-        <?xml version="1.0" encoding="utf-8"?>
-        <installer-gui-script minSpecVersion="1">
-            <title>ProxyBridge</title>
-            <pkg-ref id="com.interceptsuite.ProxyBridge"/>
-            <options customize="never" require-scripts="false"/>
-            <choices-outline>
-                <line choice="default">
-                    <line choice="com.interceptsuite.ProxyBridge"/>
-                </line>
-            </choices-outline>
-            <choice id="default"/>
-            <choice id="com.interceptsuite.ProxyBridge" visible="false">
-                <pkg-ref id="com.interceptsuite.ProxyBridge"/>
-            </choice>
-            <pkg-ref id="com.interceptsuite.ProxyBridge" version="3.0.0" onConclusion="none">temp.pkg</pkg-ref>
-        </installer-gui-script>
-        EOF
-        
         productsign \
           --keychain build.keychain \
           --sign "$DEVELOPER_ID_INSTALLER_IDENTITY" \
-          --distribution build/distribution.xml \
-          --package-path build \
+          build/temp.pkg \
           output/ProxyBridge-Installer.pkg
         
         pkgutil --check-signature output/ProxyBridge-Installer.pkg
