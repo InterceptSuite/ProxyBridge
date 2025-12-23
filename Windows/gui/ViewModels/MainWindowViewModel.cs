@@ -29,6 +29,7 @@ public class MainWindowViewModel : ViewModelBase
     private string _newProxyAction = "PROXY";
     private Window? _mainWindow;
     private ProxyBridgeService? _proxyService;
+    private bool _isServiceInitialized = false;
 
     private string _currentProxyType = "SOCKS5";
     private string _currentProxyIp = "";
@@ -44,6 +45,11 @@ public class MainWindowViewModel : ViewModelBase
     public void SetMainWindow(Window window)
     {
         _mainWindow = window;
+
+        if (_isServiceInitialized)
+            return;
+
+        _isServiceInitialized = true;
         LoadConfiguration();
 
         try
@@ -257,6 +263,7 @@ public class MainWindowViewModel : ViewModelBase
             if (SetProperty(ref _dnsViaProxy, value))
             {
                 _proxyService?.SetDnsViaProxy(value);
+                SaveConfigurationInternal();
                 ActivityLog += $"[{DateTime.Now:HH:mm:ss}] DNS via Proxy: {(value ? "Enabled" : "Disabled")}\n";
             }
         }
@@ -327,6 +334,7 @@ public class MainWindowViewModel : ViewModelBase
                             _currentProxyUsername = username;
                             _currentProxyPassword = password;
 
+                            SaveConfigurationInternal();
                             string authInfo = string.IsNullOrEmpty(username) ? "" : " (with auth)";
                             ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Saved proxy settings: {type} {ip}:{port}{authInfo}\n";
                         }
@@ -373,6 +381,7 @@ public class MainWindowViewModel : ViewModelBase
                             rule.RuleId = ruleId;
                             rule.Index = ProxyRules.Count + 1;
                             ProxyRules.Add(rule);
+                            SaveConfigurationInternal();
                             ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Added rule: {rule.ProcessName} ({rule.TargetHosts}:{rule.TargetPorts} {rule.Protocol}) -> {rule.Action} (ID: {ruleId})\n";
                         }
                         else
@@ -385,7 +394,8 @@ public class MainWindowViewModel : ViewModelBase
                 {
                     window.Close();
                 },
-                proxyService: _proxyService
+                proxyService: _proxyService,
+                onConfigChanged: SaveConfigurationInternal
             );
 
             window.DataContext = viewModel;
@@ -435,7 +445,7 @@ public class MainWindowViewModel : ViewModelBase
         ToggleCloseToTrayCommand = new RelayCommand(() =>
         {
             CloseToTray = !CloseToTray;
-            SaveConfiguration();
+            SaveConfigurationInternal();
         });
 
         CloseDialogCommand = new RelayCommand(CloseDialogs);
@@ -481,6 +491,7 @@ public class MainWindowViewModel : ViewModelBase
                 {
                     rule.RuleId = ruleId;
                     ProxyRules.Add(rule);
+                    SaveConfigurationInternal();
                     ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Added rule: {NewProcessName} -> {NewProxyAction}\n";
                     IsAddRuleViewOpen = false;
                     NewProcessName = "";
@@ -579,36 +590,14 @@ public class MainWindowViewModel : ViewModelBase
 
     public void Cleanup()
     {
-        try
-        {
-            var config = new AppConfig
-            {
-                ProxyType = _currentProxyType,
-                ProxyIp = _currentProxyIp,
-                ProxyPort = _currentProxyPort,
-                ProxyUsername = _currentProxyUsername,
-                ProxyPassword = _currentProxyPassword,
-                DnsViaProxy = _dnsViaProxy,
-                Language = _currentLanguage,
-                CloseToTray = _closeToTray,
-                ProxyRules = ProxyRules.Select(r => new ProxyRuleConfig
-                {
-                    ProcessName = r.ProcessName,
-                    TargetHosts = r.TargetHosts,
-                    TargetPorts = r.TargetPorts,
-                    Protocol = r.Protocol,
-                    Action = r.Action,
-                    IsEnabled = r.IsEnabled
-                }).ToList()
-            };
+        // this something can be improved maybe config doesnt need save during cleanup
+        try { SaveConfigurationInternal(); } catch { }
 
-            ConfigManager.SaveConfig(config);
-        }
+        try { _proxyService?.Dispose(); _proxyService = null; }
         catch { }
+    }
 
-        _proxyService?.Dispose();
-        _proxyService = null;
-    }    private void LoadConfiguration()
+    private void LoadConfiguration()
     {
         try
         {
@@ -648,7 +637,12 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
-    private void SaveConfiguration()
+    private void SaveConfigurationInternal()
+    {
+        Task.Run(() => SaveConfigurationInternalAsync());
+    }
+
+    private void SaveConfigurationInternalAsync()
     {
         try
         {
@@ -673,15 +667,9 @@ public class MainWindowViewModel : ViewModelBase
                 }).ToList()
             };
 
-            if (ConfigManager.SaveConfig(config))
-            {
-                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Configuration saved successfully\n";
-            }
+            ConfigManager.SaveConfig(config);
         }
-        catch (Exception ex)
-        {
-            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Failed to save configuration: {ex.Message}\n";
-        }
+        catch { }
     }
 }
 

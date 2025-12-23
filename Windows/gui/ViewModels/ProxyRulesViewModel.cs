@@ -24,6 +24,7 @@ public class ProxyRulesViewModel : ViewModelBase
     private string _processNameError = "";
     private Action<ProxyRule>? _onAddRule;
     private Action? _onClose;
+    private Action? _onConfigChanged;
     private ProxyBridgeService? _proxyService;
     private Window? _window;
 
@@ -94,12 +95,13 @@ public class ProxyRulesViewModel : ViewModelBase
         _window = window;
     }
 
-    public ProxyRulesViewModel(ObservableCollection<ProxyRule> proxyRules, Action<ProxyRule> onAddRule, Action onClose, ProxyBridgeService? proxyService = null)
+    public ProxyRulesViewModel(ObservableCollection<ProxyRule> proxyRules, Action<ProxyRule> onAddRule, Action onClose, ProxyBridgeService? proxyService = null, Action? onConfigChanged = null)
     {
         ProxyRules = proxyRules;
         _onAddRule = onAddRule;
         _onClose = onClose;
         _proxyService = proxyService;
+        _onConfigChanged = onConfigChanged;
 
         foreach (var rule in ProxyRules)
         {
@@ -167,6 +169,7 @@ public class ProxyRulesViewModel : ViewModelBase
                         existingRule.Protocol = NewProtocol;
                         existingRule.Action = NewProxyAction;
                     }
+                    _onConfigChanged?.Invoke();
                 }
 
                 _isEditMode = false;
@@ -271,6 +274,7 @@ public class ProxyRulesViewModel : ViewModelBase
                 if (_proxyService.DeleteRule(rule.RuleId))
                 {
                     ProxyRules.Remove(rule);
+                    _onConfigChanged?.Invoke();
                 }
             }
         });
@@ -406,6 +410,7 @@ public class ProxyRulesViewModel : ViewModelBase
             {
                 _proxyService.DisableRule(rule.RuleId);
             }
+            _onConfigChanged?.Invoke();
         }
         else if (e.PropertyName == nameof(ProxyRule.IsSelected))
         {
