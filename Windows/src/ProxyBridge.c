@@ -2083,6 +2083,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
     rules_list = rule;
 
     update_has_active_rules();
+    log_message("Added rule ID: %u for process '%s' (Protocol: %d, Action: %d)", rule->rule_id, process_name, protocol, action);
 
     return rule->rule_id;
 }
@@ -2099,6 +2100,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id)
         {
             rule->enabled = TRUE;
             update_has_active_rules();
+            log_message("Enabled rule ID: %u", rule_id);
             return TRUE;
         }
         rule = rule->next;
@@ -2118,6 +2120,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id)
         {
             rule->enabled = FALSE;
             update_has_active_rules();  // Phase 1: Update fast-path flag
+            log_message("Disabled rule ID: %u", rule_id);
             return TRUE;
         }
         rule = rule->next;
