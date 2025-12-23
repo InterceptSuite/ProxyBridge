@@ -175,8 +175,11 @@ public class MainWindowViewModel : ViewModelBase
         get => _connectionsLog;
         set
         {
-            SetProperty(ref _connectionsLog, value);
-            FilterConnectionsLog();
+            if (SetProperty(ref _connectionsLog, value))
+            {
+                if (string.IsNullOrWhiteSpace(_connectionsSearchText))
+                    FilteredConnectionsLog = _connectionsLog;
+            }
         }
     }
 
@@ -185,42 +188,15 @@ public class MainWindowViewModel : ViewModelBase
         get => _activityLog;
         set
         {
-            SetProperty(ref _activityLog, value);
-            FilterActivityLog();
+            if (SetProperty(ref _activityLog, value))
+            {
+                if (string.IsNullOrWhiteSpace(_activitySearchText))
+                    FilteredActivityLog = _activityLog;
+            }
         }
     }
 
-    public string ConnectionsSearchText
-    {
-        get => _connectionsSearchText;
-        set
-        {
-            SetProperty(ref _connectionsSearchText, value);
-            FilterConnectionsLog();
-        }
-    }
 
-    public string ActivitySearchText
-    {
-        get => _activitySearchText;
-        set
-        {
-            SetProperty(ref _activitySearchText, value);
-            FilterActivityLog();
-        }
-    }
-
-    public string FilteredConnectionsLog
-    {
-        get => _filteredConnectionsLog;
-        set => SetProperty(ref _filteredConnectionsLog, value);
-    }
-
-    public string FilteredActivityLog
-    {
-        get => _filteredActivityLog;
-        set => SetProperty(ref _filteredActivityLog, value);
-    }
 
     public bool IsProxyRulesDialogOpen
     {
@@ -238,6 +214,30 @@ public class MainWindowViewModel : ViewModelBase
     {
         get => _isAddRuleViewOpen;
         set => SetProperty(ref _isAddRuleViewOpen, value);
+    }
+
+    public string ConnectionsSearchText
+    {
+        get => _connectionsSearchText;
+        set => SetProperty(ref _connectionsSearchText, value);
+    }
+
+    public string ActivitySearchText
+    {
+        get => _activitySearchText;
+        set => SetProperty(ref _activitySearchText, value);
+    }
+
+    public string FilteredConnectionsLog
+    {
+        get => _filteredConnectionsLog;
+        set => SetProperty(ref _filteredConnectionsLog, value);
+    }
+
+    public string FilteredActivityLog
+    {
+        get => _filteredActivityLog;
+        set => SetProperty(ref _filteredActivityLog, value);
     }
 
     public string NewProcessName
@@ -305,6 +305,8 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand CloseDialogCommand { get; }
     public ICommand ClearConnectionsLogCommand { get; }
     public ICommand ClearActivityLogCommand { get; }
+    public ICommand SearchConnectionsCommand { get; }
+    public ICommand SearchActivityCommand { get; }
     public ICommand AddRuleCommand { get; }
     public ICommand SaveNewRuleCommand { get; }
     public ICommand CancelAddRuleCommand { get; }
@@ -453,11 +455,25 @@ public class MainWindowViewModel : ViewModelBase
         ClearConnectionsLogCommand = new RelayCommand(() =>
         {
             ConnectionsLog = "";
+            ConnectionsSearchText = "";
+            FilteredConnectionsLog = "";
         });
 
         ClearActivityLogCommand = new RelayCommand(() =>
         {
             ActivityLog = "ProxyBridge initialized successfully\n";
+            ActivitySearchText = "";
+            FilteredActivityLog = "ProxyBridge initialized successfully\n";
+        });
+
+        SearchConnectionsCommand = new RelayCommand(() =>
+        {
+            FilteredConnectionsLog = FilterLog(_connectionsLog, _connectionsSearchText);
+        });
+
+        SearchActivityCommand = new RelayCommand(() =>
+        {
+            FilteredActivityLog = FilterLog(_activityLog, _activitySearchText);
         });
 
         AddRuleCommand = new RelayCommand(() =>
@@ -527,33 +543,7 @@ public class MainWindowViewModel : ViewModelBase
         ActivityLog += $"[{DateTime.Now:HH:mm:ss}] {_loc.LogLanguageChanged}: {languageCode}\n";
     }
 
-    private void FilterConnectionsLog()
-    {
-        if (string.IsNullOrWhiteSpace(_connectionsSearchText))
-        {
-            FilteredConnectionsLog = _connectionsLog;
-        }
-        else
-        {
-            var lines = _connectionsLog.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            var filtered = lines.Where(line => line.Contains(_connectionsSearchText, StringComparison.OrdinalIgnoreCase));
-            FilteredConnectionsLog = string.Join('\n', filtered) + (filtered.Any() ? "\n" : "");
-        }
-    }
 
-    private void FilterActivityLog()
-    {
-        if (string.IsNullOrWhiteSpace(_activitySearchText))
-        {
-            FilteredActivityLog = _activityLog;
-        }
-        else
-        {
-            var lines = _activityLog.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            var filtered = lines.Where(line => line.Contains(_activitySearchText, StringComparison.OrdinalIgnoreCase));
-            FilteredActivityLog = string.Join('\n', filtered) + (filtered.Any() ? "\n" : "");
-        }
-    }
 
     private void CloseDialogs()
     {
@@ -595,6 +585,26 @@ public class MainWindowViewModel : ViewModelBase
 
         try { _proxyService?.Dispose(); _proxyService = null; }
         catch { }
+    }
+
+    private string FilterLog(string log, string searchText)
+    {
+        if (string.IsNullOrWhiteSpace(searchText))
+            return log;
+
+        var sb = new StringBuilder(log.Length / 2);
+        var lines = log.Split('\n');
+
+        foreach (var line in lines)
+        {
+            if (line.Contains(searchText, StringComparison.OrdinalIgnoreCase))
+            {
+                sb.Append(line);
+                sb.Append('\n');
+            }
+        }
+
+        return sb.ToString();
     }
 
     private void LoadConfiguration()
