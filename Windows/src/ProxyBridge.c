@@ -17,6 +17,9 @@
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 256
 #define VERSION "3.0.0"
+#define PID_CACHE_SIZE 1024
+#define PID_CACHE_TTL_MS 1000
+#define NUM_PACKET_THREADS 4  //  Added Mlutiple threads
 
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
@@ -64,15 +67,27 @@ typedef struct LOGGED_CONNECTION {
     struct LOGGED_CONNECTION *next;
 } LOGGED_CONNECTION;
 
+// Impoved slow speed due to PID checking // Added pid cache
+typedef struct PID_CACHE_ENTRY {
+    UINT32 src_ip;
+    UINT16 src_port;
+    DWORD pid;
+    DWORD timestamp;
+    BOOL is_udp;
+    struct PID_CACHE_ENTRY *next;
+} PID_CACHE_ENTRY;
+
 static CONNECTION_INFO *connection_list = NULL;
 static LOGGED_CONNECTION *logged_connections = NULL;
 static PROCESS_RULE *rules_list = NULL;
 static UINT32 g_next_rule_id = 1;
 static HANDLE lock = NULL;
 static HANDLE windivert_handle = INVALID_HANDLE_VALUE;
-static HANDLE packet_thread = NULL;
+static HANDLE packet_thread[NUM_PACKET_THREADS] = {NULL};
 static HANDLE proxy_thread = NULL;
 static HANDLE udp_relay_thread = NULL;
+static PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE] = {NULL};
+static BOOL g_has_active_rules = FALSE;
 static SOCKET udp_relay_socket = INVALID_SOCKET;
 static SOCKET socks5_udp_socket = INVALID_SOCKET;
 static SOCKET socks5_udp_send_socket = INVALID_SOCKET;
@@ -134,7 +149,7 @@ static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port);
 static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port);
 static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
 static RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp);
-static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp);
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, DWORD *out_pid);
 static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port);
 static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port);
 static BOOL is_connection_tracked(UINT16 src_port);
@@ -143,6 +158,10 @@ static BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_
 static void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 static void clear_logged_connections(void);
 static BOOL is_broadcast_or_multicast(UINT32 ip);
+static DWORD get_cached_pid(UINT32 src_ip, UINT16 src_port, BOOL is_udp);
+static void cache_pid(UINT32 src_ip, UINT16 src_port, DWORD pid, BOOL is_udp);
+static void clear_pid_cache(void);
+static void update_has_active_rules(void);
 
 
 static DWORD WINAPI packet_processor(LPVOID arg)
@@ -203,11 +222,22 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     UINT32 dest_ip = ip_header->DstAddr;
                     UINT16 dest_port = ntohs(udp_header->DstPort);
 
+                    // if no rule configuree all connection direct with no checks avoid unwanted memory and pocessing whcich could delay
+                    if (!g_has_active_rules && g_connection_callback == NULL)
+                    {
+                        // No rules and no logging - pass through immediately
+                        WinDivertHelperCalcChecksums(packet, packet_len, &addr, 0);
+                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                        continue;
+                    }
+
                     RuleAction action;
+                    DWORD pid = 0;
+
                     if (dest_port == 53 && !g_dns_via_proxy)
                         action = RULE_ACTION_DIRECT;
                     else
-                        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE);
+                        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, &pid);
 
                     // Override PROXY to DIRECT for critical IPs and ports
                     if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
@@ -217,12 +247,12 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     if (action == RULE_ACTION_PROXY && (dest_port == 67 || dest_port == 68))
                         action = RULE_ACTION_DIRECT;
 
-                    if (g_connection_callback != NULL)
+                    // only log if callback is set
+                    // reuse pid from check_process_rule
+                    // CLI use no log flag
+                    if (g_connection_callback != NULL && pid > 0)
                     {
                         char process_name[MAX_PROCESS_NAME];
-                        DWORD pid = get_process_id_from_udp_connection(src_ip, src_port);
-                        if (pid == 0)
-                            pid = get_process_id_from_connection(src_ip, src_port);
 
                         if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
                         {
@@ -332,21 +362,29 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT32 orig_dest_ip = ip_header->DstAddr;
                 UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
 
+                // avoid rule pocess and packet process if no rules
+                if (!g_has_active_rules && g_connection_callback == NULL)
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
+
                 RuleAction action;
+                DWORD pid = 0;
+
                 if (orig_dest_port == 53 && !g_dns_via_proxy)
                     action = RULE_ACTION_DIRECT;
                 else
-                    action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE);
+                    action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, &pid);
 
                 // Override PROXY to DIRECT for criticl ips
                 if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(orig_dest_ip))
                     action = RULE_ACTION_DIRECT;
 
-                // Log ALL connections (DIRECT, BLOCK, PROXY) - only ONCE per unique connection
-                if (g_connection_callback != NULL)
+                // only new TCP/SYN inital fist packet
+                if (g_connection_callback != NULL && tcp_header->Syn && !tcp_header->Ack && pid > 0)
                 {
                     char process_name[MAX_PROCESS_NAME];
-                    DWORD pid = get_process_id_from_connection(src_ip, src_port);
                     if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
                     {
                         if (!is_connection_already_logged(pid, orig_dest_ip, orig_dest_port, action))
@@ -475,6 +513,11 @@ static UINT32 resolve_hostname(const char *hostname)
 
 static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
 {
+    // check cache first
+    DWORD cached_pid = get_cached_pid(src_ip, src_port, FALSE);
+    if (cached_pid != 0)
+        return cached_pid;
+
     MIB_TCPTABLE_OWNER_PID *tcp_table = NULL;
     DWORD size = 0;
     DWORD pid = 0;
@@ -511,12 +554,21 @@ static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
     }
 
     free(tcp_table);
+
+    // store cache the result
+    if (pid != 0)
+        cache_pid(src_ip, src_port, pid, FALSE);
+
     return pid;
 }
 
 // Get process ID for UDP connection
 static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port)
 {
+    DWORD cached_pid = get_cached_pid(src_ip, src_port, TRUE);
+    if (cached_pid != 0)
+        return cached_pid;
+
     MIB_UDPTABLE_OWNER_PID *udp_table = NULL;
     DWORD size = 0;
     DWORD pid = 0;
@@ -571,6 +623,10 @@ static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port)
     }
 
     free(udp_table);
+
+    if (pid != 0)
+        cache_pid(src_ip, src_port, pid, TRUE);
+
     return pid;
 }
 
@@ -981,7 +1037,7 @@ static RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 de
     return RULE_ACTION_DIRECT;
 }
 
-static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp)
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, DWORD *out_pid)
 {
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
@@ -989,6 +1045,11 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
     pid = is_udp ? get_process_id_from_udp_connection(src_ip, src_port) : get_process_id_from_connection(src_ip, src_port);
     if (pid == 0 && is_udp)
         pid = get_process_id_from_connection(src_ip, src_port);
+
+        // this may cause issues - need to find alternative
+    if (out_pid != NULL)
+        *out_pid = pid;
+
     if (pid == 0)
         return RULE_ACTION_DIRECT;
 
@@ -2021,6 +2082,8 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
     rule->next = rules_list;
     rules_list = rule;
 
+    update_has_active_rules();
+
     return rule->rule_id;
 }
 
@@ -2035,6 +2098,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id)
         if (rule->rule_id == rule_id)
         {
             rule->enabled = TRUE;
+            update_has_active_rules();
             return TRUE;
         }
         rule = rule->next;
@@ -2053,6 +2117,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id)
         if (rule->rule_id == rule_id)
         {
             rule->enabled = FALSE;
+            update_has_active_rules();  // Phase 1: Update fast-path flag
             return TRUE;
         }
         rule = rule->next;
@@ -2083,6 +2148,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_DeleteRule(UINT32 rule_id)
                 free(rule->target_ports);
             free(rule);
 
+            update_has_active_rules();
             log_message("Deleted rule ID: %u", rule_id);
             return TRUE;
         }
@@ -2116,6 +2182,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_na
             rule->protocol = protocol;
             rule->action = action;
 
+            update_has_active_rules();
             log_message("Updated rule ID: %u", rule_id);
             return TRUE;
         }
@@ -2234,6 +2301,117 @@ static void clear_logged_connections(void)
     ReleaseMutex(lock);
 }
 
+//  cache pid
+// This can be imprroved
+// Need to work on this before releease for potential collusion
+// need to remove unwanted entires from table
+static UINT32 pid_cache_hash(UINT32 src_ip, UINT16 src_port, BOOL is_udp)
+{
+    UINT32 hash = src_ip ^ ((UINT32)src_port << 16) ^ (is_udp ? 0x80000000 : 0);
+    return hash % PID_CACHE_SIZE;
+}
+
+static DWORD get_cached_pid(UINT32 src_ip, UINT16 src_port, BOOL is_udp)
+{
+    UINT32 hash = pid_cache_hash(src_ip, src_port, is_udp);
+    DWORD current_time = GetTickCount();
+    DWORD pid = 0;
+
+    WaitForSingleObject(lock, INFINITE);
+
+    PID_CACHE_ENTRY *entry = pid_cache[hash];
+    while (entry != NULL)
+    {
+        if (entry->src_ip == src_ip &&
+            entry->src_port == src_port &&
+            entry->is_udp == is_udp)
+        {
+            if (current_time - entry->timestamp < PID_CACHE_TTL_MS)
+            {
+                pid = entry->pid;
+                break;
+            }
+            else
+            {
+                break;
+            }
+        }
+        entry = entry->next;
+    }
+
+    ReleaseMutex(lock);
+    return pid;
+}
+
+static void cache_pid(UINT32 src_ip, UINT16 src_port, DWORD pid, BOOL is_udp)
+{
+    UINT32 hash = pid_cache_hash(src_ip, src_port, is_udp);
+    DWORD current_time = GetTickCount();
+
+    WaitForSingleObject(lock, INFINITE);
+
+    PID_CACHE_ENTRY *entry = pid_cache[hash];
+    while (entry != NULL)
+    {
+        if (entry->src_ip == src_ip &&
+            entry->src_port == src_port &&
+            entry->is_udp == is_udp)
+        {
+            entry->pid = pid;
+            entry->timestamp = current_time;
+            ReleaseMutex(lock);
+            return;
+        }
+        entry = entry->next;
+    }
+
+    PID_CACHE_ENTRY *new_entry = (PID_CACHE_ENTRY *)malloc(sizeof(PID_CACHE_ENTRY));
+    if (new_entry != NULL)
+    {
+        new_entry->src_ip = src_ip;
+        new_entry->src_port = src_port;
+        new_entry->pid = pid;
+        new_entry->timestamp = current_time;
+        new_entry->is_udp = is_udp;
+        new_entry->next = pid_cache[hash];
+        pid_cache[hash] = new_entry;
+    }
+
+    ReleaseMutex(lock);
+}
+
+static void clear_pid_cache(void)
+{
+    WaitForSingleObject(lock, INFINITE);
+
+    for (int i = 0; i < PID_CACHE_SIZE; i++)
+    {
+        while (pid_cache[i] != NULL)
+        {
+            PID_CACHE_ENTRY *to_free = pid_cache[i];
+            pid_cache[i] = pid_cache[i]->next;
+            free(to_free);
+        }
+    }
+
+    ReleaseMutex(lock);
+}
+
+static void update_has_active_rules(void)
+{
+    g_has_active_rules = FALSE;
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->enabled)
+        {
+            g_has_active_rules = TRUE;
+            break;
+        }
+        rule = rule->next;
+    }
+}
+
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 {
     char filter[512];
@@ -2291,17 +2469,31 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_LENGTH, 8192);
     WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 2000);
 
-    packet_thread = CreateThread(NULL, 1, packet_processor, NULL, 0, NULL);
-    if (packet_thread == NULL)
+    for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
-        WinDivertClose(windivert_handle);
-        windivert_handle = INVALID_HANDLE_VALUE;
-        running = FALSE;
-        WaitForSingleObject(proxy_thread, INFINITE);
-        CloseHandle(proxy_thread);
-        proxy_thread = NULL;
-        return FALSE;
+        packet_thread[i] = CreateThread(NULL, 0, packet_processor, NULL, 0, NULL);
+        if (packet_thread[i] == NULL)
+        {
+            running = FALSE;
+            for (int j = 0; j < i; j++)
+            {
+                if (packet_thread[j] != NULL)
+                {
+                    WaitForSingleObject(packet_thread[j], 5000);
+                    CloseHandle(packet_thread[j]);
+                    packet_thread[j] = NULL;
+                }
+            }
+            WinDivertClose(windivert_handle);
+            windivert_handle = INVALID_HANDLE_VALUE;
+            WaitForSingleObject(proxy_thread, INFINITE);
+            CloseHandle(proxy_thread);
+            proxy_thread = NULL;
+            return FALSE;
+        }
     }
+
+    update_has_active_rules();
 
     log_message("ProxyBridge started");
     log_message("Local relay: localhost:%d", g_local_relay_port);
@@ -2336,11 +2528,15 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
         windivert_handle = INVALID_HANDLE_VALUE;
     }
 
-    if (packet_thread != NULL)
+    // process alll packets before we stop, make sure packets are not dropped
+    for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
-        WaitForSingleObject(packet_thread, 5000);
-        CloseHandle(packet_thread);
-        packet_thread = NULL;
+        if (packet_thread[i] != NULL)
+        {
+            WaitForSingleObject(packet_thread[i], 5000);
+            CloseHandle(packet_thread[i]);
+            packet_thread[i] = NULL;
+        }
     }
 
     if (proxy_thread != NULL)
@@ -2368,6 +2564,8 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
 
     // Clear logged connections list
     clear_logged_connections();
+
+    clear_pid_cache();
 
     log_message("ProxyBridge stopped");
 
