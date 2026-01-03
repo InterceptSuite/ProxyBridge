@@ -82,4 +82,5 @@ Temporary Items
 MacOS/ProxyBridge/build/
 MacOS/ProxyBridge/output/
 
-Linux/**
+# Linux/**
+Linux/*.so
