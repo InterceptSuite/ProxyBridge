@@ -83,4 +83,4 @@ MacOS/ProxyBridge/build/
 MacOS/ProxyBridge/output/
 
 # Linux/**
-Linux/*.so
+Linux/output/**

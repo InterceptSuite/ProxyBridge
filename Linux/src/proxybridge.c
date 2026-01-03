@@ -10,8 +10,7 @@
 
 static struct proxybridge_bpf *skel = NULL;
 static struct ring_buffer *rb = NULL;
-static event_callback_t user_callback = NULL;
-static void *user_ctx = NULL;
+static ConnectionCallback user_callback = NULL;
 static volatile sig_atomic_t should_stop = 0;
 
 static int handle_event(void *ctx, void *data, size_t data_sz)
@@ -25,20 +24,17 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
         return 0;
 
     if (user_callback)
-        user_callback(e, user_ctx);
+        user_callback(e);
 
     return 0;
 }
 
-int proxybridge_init(event_callback_t callback, void *ctx)
+int ProxyBridge_Start(void)
 {
     int err;
 
     if (skel)
         return -EBUSY;
-
-    user_callback = callback;
-    user_ctx = ctx;
 
     libbpf_set_print(NULL);
 
@@ -64,12 +60,14 @@ int proxybridge_init(event_callback_t callback, void *ctx)
     return 0;
 
 cleanup:
-    proxybridge_cleanup();
+    ProxyBridge_Stop();
     return err;
 }
 
-void proxybridge_cleanup(void)
+void ProxyBridge_Stop(void)
 {
+    should_stop = 1;
+    
     if (rb) {
         ring_buffer__free(rb);
         rb = NULL;
@@ -79,10 +77,14 @@ void proxybridge_cleanup(void)
         skel = NULL;
     }
     user_callback = NULL;
-    user_ctx = NULL;
 }
 
-int proxybridge_poll(int timeout_ms)
+void ProxyBridge_SetConnectionCallback(ConnectionCallback callback)
+{
+    user_callback = callback;
+}
+
+int ProxyBridge_Poll(int timeout_ms)
 {
     if (!rb)
         return -EINVAL;
@@ -91,9 +93,4 @@ int proxybridge_poll(int timeout_ms)
         return 0;
 
     return ring_buffer__poll(rb, timeout_ms);
-}
-
-void proxybridge_stop(void)
-{
-    should_stop = 1;
 }
