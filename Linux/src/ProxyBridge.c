@@ -82,9 +82,16 @@ static void log_connection(const char *process, uint32_t pid, uint32_t dest_ip, 
     snprintf(dest_ip_str, sizeof(dest_ip_str), "%u.%u.%u.%u",
              (dest_ip>>24)&0xFF, (dest_ip>>16)&0xFF, (dest_ip>>8)&0xFF, dest_ip&0xFF);
     
-    const char *action_str = (action == ACTION_PROXY) ? "PROXY" : (action == ACTION_BLOCK) ? "BLOCK" : "DIRECT";
-    printf("[CONN] %s (PID:%u) -> %s:%u [%s]\n", process, pid, dest_ip_str, dest_port, action_str);
+    // Format log based on action
+    if (action == ACTION_PROXY) {
+        printf("[CONN] %s (PID:%u) -> %s:%u via %s:%d\n", 
+               process, pid, dest_ip_str, dest_port, g_proxy.proxy_host, g_proxy.proxy_port);
+    } else {
+        const char *action_str = (action == ACTION_BLOCK) ? "BLOCK" : "DIRECT";
+        printf("[CONN] %s (PID:%u) -> %s:%u [%s]\n", process, pid, dest_ip_str, dest_port, action_str);
+    }
     
+    // Invoke callback if set
     if (g_callback) {
         char proxy_info[256];
         snprintf(proxy_info, sizeof(proxy_info), "%s:%d", g_proxy.proxy_host, g_proxy.proxy_port);
