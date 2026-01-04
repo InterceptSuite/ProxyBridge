@@ -75,9 +75,12 @@ struct orig_dest_info {
 };
 
 static void log_connection(const char *process, uint32_t pid, uint32_t dest_ip, uint16_t dest_port, int action) {
+    // Don't log our own connections to the proxy server
+    if (pid == getpid()) return;
+    
     char dest_ip_str[32];
-    snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
-             (dest_ip>>0)&0xFF, (dest_ip>>8)&0xFF, (dest_ip>>16)&0xFF, (dest_ip>>24)&0xFF);
+    snprintf(dest_ip_str, sizeof(dest_ip_str), "%u.%u.%u.%u",
+             (dest_ip>>24)&0xFF, (dest_ip>>16)&0xFF, (dest_ip>>8)&0xFF, dest_ip&0xFF);
     
     const char *action_str = (action == ACTION_PROXY) ? "PROXY" : (action == ACTION_BLOCK) ? "BLOCK" : "DIRECT";
     printf("[CONN] %s (PID:%u) -> %s:%u [%s]\n", process, pid, dest_ip_str, dest_port, action_str);
@@ -90,34 +93,24 @@ static void log_connection(const char *process, uint32_t pid, uint32_t dest_ip, 
 }
 
 static int get_original_dest_from_map(int fd, uint32_t *ip, uint16_t *port) {
-    if (!skel) {
-        printf("[DEBUG] skel is NULL\n");
-        return -1;
-    }
+    if (!skel) return -1;
     
-    // For now, we'll iterate the map to find our connection
+    // Iterate the map to find our connection
     uint64_t key = 0, next_key;
     struct orig_dest_info value;
     int map_fd = bpf_map__fd(skel->maps.socket_map);
     
-    printf("[DEBUG] Checking socket map...\n");
-    int found = 0;
     while (bpf_map_get_next_key(map_fd, &key, &next_key) == 0) {
         if (bpf_map_lookup_elem(map_fd, &next_key, &value) == 0) {
-            printf("[DEBUG] Found entry: %d.%d.%d.%d:%d\n",
-                   (value.ip>>0)&0xFF, (value.ip>>8)&0xFF, (value.ip>>16)&0xFF, (value.ip>>24)&0xFF, value.port);
-            // Found it - return and delete
             *ip = value.ip;
             *port = value.port;
             bpf_map_delete_elem(map_fd, &next_key);
-            found = 1;
-            break;
+            return 0;
         }
         key = next_key;
     }
     
-    if (!found) printf("[DEBUG] No entry found in socket map\n");
-    return found ? 0 : -1;
+    return -1;
 }
 
 static uint32_t resolve_host(const char *host) {
@@ -226,16 +219,12 @@ static void* handle_tcp_conn(void *arg) {
     uint32_t dest_ip, proxy_ip;
     uint16_t dest_port;
     
-    printf("[TCP] New connection accepted\n");
-    
     if (get_original_dest_from_map(client_fd, &dest_ip, &dest_port) != 0) {
-        printf("[TCP] Failed to get original destination\n");
         close(client_fd);
         return NULL;
     }
     
-    printf("[TCP] Proxying %d.%d.%d.%d:%d\n",(dest_ip>>0)&0xFF,(dest_ip>>8)&0xFF,(dest_ip>>16)&0xFF,(dest_ip>>24)&0xFF,dest_port);
-    log_connection("unknown", 0, dest_ip, dest_port, ACTION_PROXY);
+    // Don't log here - already logged by BPF event
     proxy_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (proxy_fd < 0) goto cleanup;
     proxy_ip = resolve_host(g_proxy.proxy_host);
@@ -272,7 +261,7 @@ static void* tcp_relay(void *arg) {
         g_tcp_fd = -1;
         return NULL;
     }
-    printf("[RELAY] TCP listening on 127.0.0.1:%d\n", LOCAL_PROXY_PORT);
+    // TCP relay listening
     while (g_running) {
         fd_set rdfds;
         FD_ZERO(&rdfds);
@@ -319,7 +308,7 @@ static void* event_reader(void *arg) {
         return NULL;
     }
     
-    printf("[LOG] Event reader started\n");
+    // Event reader started
     while (g_running) {
         perf_buffer__poll(pb, 100);
     }
