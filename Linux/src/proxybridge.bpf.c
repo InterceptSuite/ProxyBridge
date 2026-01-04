@@ -51,9 +51,9 @@ struct {
 
 // Rule structure (matches Windows PROCESS_RULE)
 struct proxy_rule {
-    char process_name[MAX_PROCESS_NAME];  // "*" or "chrome.exe" or "firefox.exe; chrome.exe"
-    char target_hosts[512];               // "*" or "192.168.*.*" or "10.0.0.1; 172.16.0.1"
-    char target_ports[256];               // "*" or "80; 443" or "80-8000"
+    char process_name[MAX_PROCESS_NAME];  // "*" or "curl" or "firefox;chrome;wget"
+    char target_hosts[512];               // "*" or "192.168.*.*" or "10.0.0.1;172.16.0.1" or "10.10.1.1-10.10.255.255"
+    char target_ports[256];               // "*" or "80;443" or "80-8000"
     __u8 proto;                           // PROTO_TCP/UDP/BOTH
     __u8 action;                          // ACTION_DIRECT/PROXY/BLOCK
     __u8 enabled;                         // 1 = enabled, 0 = disabled
@@ -102,19 +102,77 @@ static __always_inline int match_pattern(const char *str, const char *pattern) {
     return 0;
 }
 
+// Helper: compare two strings up to delimiter
+static __always_inline int str_equals_delim(const char *s1, const char *s2, int max_len) {
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+        if (i >= max_len)
+            return 0;
+        
+        // s2 ends at delimiter or null
+        if (s2[i] == ';' || s2[i] == '\0')
+            return (s1[i] == '\0') ? 1 : 0;
+        
+        // s1 ends but s2 continues
+        if (s1[i] == '\0')
+            return 0;
+        
+        // Mismatch
+        if (s1[i] != s2[i])
+            return 0;
+    }
+    return 0;
+}
+
 // Helper: check if process name matches rule
-// Windows logic: rule.process_name can be "*" or "chrome.exe" or "firefox.exe; chrome.exe"
+// Linux: rule.process_name can be "*" or "curl" or "firefox;chrome;wget"
 static __always_inline int match_process(const char *proc_name, const char *rule_pattern) {
     // "*" = match all
     if (rule_pattern[0] == '*')
         return 1;
     
-    // Exact match
-    return match_pattern(proc_name, rule_pattern);
+    int pos = 0;
+    
+    // Check each process name in semicolon-separated list (support up to 10 entries)
+    #pragma unroll
+    for (int i = 0; i < 10; i++) {
+        if (pos >= MAX_PROCESS_NAME || rule_pattern[pos] == '\0')
+            break;
+        
+        // Skip whitespace
+        while (pos < MAX_PROCESS_NAME && rule_pattern[pos] == ' ') pos++;
+        if (pos >= MAX_PROCESS_NAME || rule_pattern[pos] == '\0')
+            break;
+        
+        // Compare process name with current pattern entry
+        if (str_equals_delim(proc_name, &rule_pattern[pos], MAX_PROCESS_NAME - pos))
+            return 1;
+        
+        // Skip to next semicolon
+        while (pos < MAX_PROCESS_NAME && rule_pattern[pos] != ';' && rule_pattern[pos] != '\0')
+            pos++;
+        if (pos < MAX_PROCESS_NAME && rule_pattern[pos] == ';')
+            pos++;
+    }
+    
+    return 0;
+}
+
+// Helper: parse number from string
+static __always_inline int parse_number(const char *str, int *pos, int max_len) {
+    int num = 0;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        if (*pos >= max_len || str[*pos] < '0' || str[*pos] > '9')
+            break;
+        num = num * 10 + (str[*pos] - '0');
+        (*pos)++;
+    }
+    return num;
 }
 
 // Helper: check if port matches rule
-// Windows logic: "*" or "80" or "80; 443" or "80-8000"
+// Windows logic: "*" or "80" or "80;443" or "80-8000"
 static __always_inline int match_port(__u16 port, const char *rule_ports) {
     // "*" = match all
     if (rule_ports[0] == '*')
@@ -124,13 +182,137 @@ static __always_inline int match_port(__u16 port, const char *rule_ports) {
     if (rule_ports[0] == '\0')
         return 1;
     
-    // TODO: Parse port numbers/ranges (complex for BPF)
-    // For now: always match if not wildcard
+    int pos = 0;
+    
+    // Parse port patterns (support up to 10 entries)
+    #pragma unroll
+    for (int i = 0; i < 10; i++) {
+        if (pos >= 256 || rule_ports[pos] == '\0')
+            break;
+        
+        // Skip whitespace
+        while (pos < 256 && rule_ports[pos] == ' ') pos++;
+        if (pos >= 256 || rule_ports[pos] == '\0')
+            break;
+        
+        // Parse first number
+        int start_port = parse_number(rule_ports, &pos, 256);
+        
+        // Check for range (80-8000)
+        if (pos < 256 && rule_ports[pos] == '-') {
+            pos++;
+            int end_port = parse_number(rule_ports, &pos, 256);
+            if (port >= start_port && port <= end_port)
+                return 1;
+        } else {
+            // Single port
+            if (port == start_port)
+                return 1;
+        }
+        
+        // Skip to next entry (semicolon)
+        while (pos < 256 && rule_ports[pos] != ';' && rule_ports[pos] != '\0') pos++;
+        if (pos < 256 && rule_ports[pos] == ';') pos++;
+    }
+    
+    return 0;
+}
+
+// Helper: check if IP octet matches pattern
+static __always_inline int match_octet(__u8 octet, const char *pattern, int *pos, int max_len) {
+    if (*pos >= max_len)
+        return 0;
+    
+    // Wildcard matches anything
+    if (pattern[*pos] == '*') {
+        (*pos)++;
+        return 1;
+    }
+    
+    // Parse number
+    int num = parse_number(pattern, pos, max_len);
+    return (octet == num);
+}
+
+// Helper: parse full IP address from string (returns IP as u32)
+static __always_inline __u32 parse_ip_address(const char *pattern, int *pos, int max_len) {
+    __u32 ip = 0;
+    
+    // Parse 4 octets
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        int octet = parse_number(pattern, pos, max_len);
+        ip = (ip << 8) | (octet & 0xFF);
+        
+        // Skip dot (except after last octet)
+        if (i < 3 && *pos < max_len && pattern[*pos] == '.')
+            (*pos)++;
+    }
+    
+    return ip;
+}
+
+// Helper: check if single IP pattern matches (supports wildcards and ranges)
+static __always_inline int match_single_ip(__u32 ip, const char *pattern, int start_pos, int end_pos) {
+    int pos = start_pos;
+    
+    // Check for IP range format: 10.10.1.1-10.10.255.255
+    int has_range = 0;
+    #pragma unroll
+    for (int i = start_pos; i < end_pos && i < start_pos + 40; i++) {
+        if (pattern[i] == '-' && i > start_pos) {
+            has_range = 1;
+            break;
+        }
+    }
+    
+    if (has_range) {
+        // Parse start IP
+        __u32 start_ip = parse_ip_address(pattern, &pos, end_pos);
+        
+        // Skip hyphen
+        if (pos < end_pos && pattern[pos] == '-')
+            pos++;
+        
+        // Parse end IP
+        __u32 end_ip = parse_ip_address(pattern, &pos, end_pos);
+        
+        // Check if IP is in range
+        return (ip >= start_ip && ip <= end_ip) ? 1 : 0;
+    }
+    
+    // Wildcard pattern matching (192.168.*.*)
+    __u8 oct1 = (ip >> 24) & 0xFF;
+    __u8 oct2 = (ip >> 16) & 0xFF;
+    __u8 oct3 = (ip >> 8) & 0xFF;
+    __u8 oct4 = ip & 0xFF;
+    
+    pos = start_pos;
+    
+    // Match each octet
+    if (!match_octet(oct1, pattern, &pos, end_pos))
+        return 0;
+    if (pos >= end_pos || pattern[pos++] != '.')
+        return 0;
+    
+    if (!match_octet(oct2, pattern, &pos, end_pos))
+        return 0;
+    if (pos >= end_pos || pattern[pos++] != '.')
+        return 0;
+    
+    if (!match_octet(oct3, pattern, &pos, end_pos))
+        return 0;
+    if (pos >= end_pos || pattern[pos++] != '.')
+        return 0;
+    
+    if (!match_octet(oct4, pattern, &pos, end_pos))
+        return 0;
+    
     return 1;
 }
 
 // Helper: check if IP matches rule
-// Windows logic: "*" or "192.168.*.*" or "10.0.0.1; 172.16.0.1"
+// Windows logic: "*" or "192.168.*.*" or "10.0.0.1;172.16.0.1" or "10.10.1.1-10.10.255.255"
 static __always_inline int match_ip(__u32 ip, const char *rule_hosts) {
     // "*" = match all
     if (rule_hosts[0] == '*')
@@ -140,9 +322,40 @@ static __always_inline int match_ip(__u32 ip, const char *rule_hosts) {
     if (rule_hosts[0] == '\0')
         return 1;
     
-    // TODO: Parse IP patterns (complex for BPF)
-    // For now: always match if not wildcard
-    return 1;
+    int pos = 0;
+    
+    // Parse IP patterns separated by semicolons (support up to 10 entries)
+    #pragma unroll
+    for (int i = 0; i < 10; i++) {
+        if (pos >= 512 || rule_hosts[pos] == '\0')
+            break;
+        
+        // Skip whitespace
+        while (pos < 512 && rule_hosts[pos] == ' ') pos++;
+        if (pos >= 512 || rule_hosts[pos] == '\0')
+            break;
+        
+        // Find end of this pattern (semicolon or end)
+        int start = pos;
+        int end = pos;
+        #pragma unroll
+        for (int j = 0; j < 20; j++) {
+            if (end >= 512 || rule_hosts[end] == '\0' || rule_hosts[end] == ';')
+                break;
+            end++;
+        }
+        
+        // Check if this pattern matches
+        if (match_single_ip(ip, rule_hosts, start, end))
+            return 1;
+        
+        // Move to next pattern
+        pos = end;
+        if (pos < 512 && rule_hosts[pos] == ';')
+            pos++;
+    }
+    
+    return 0;
 }
 
 // Check rules (EXACT Windows check_process_rule logic)
