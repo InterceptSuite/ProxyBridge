@@ -12,6 +12,7 @@
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+#include <bpf/bpf_core_read.h>
 
 #define MAX_RULES 100
 #define MAX_PROCESS_NAME 256
@@ -206,9 +207,11 @@ static __always_inline __u8 check_rules(const char *proc_name, __u32 dst_ip, __u
 SEC("cgroup/connect4")
 int cgroup_connect4(struct bpf_sock_addr *ctx)
 {
-    // Get process name
+    // Get process name (thread group leader, not thread name)
     char proc_name[16];
-    bpf_get_current_comm(proc_name, sizeof(proc_name));
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *group_leader = BPF_CORE_READ(task, group_leader);
+    bpf_probe_read_kernel_str(proc_name, sizeof(proc_name), &group_leader->comm);
     
     // Get destination
     __u32 dst_ip = bpf_ntohl(ctx->user_ip4);

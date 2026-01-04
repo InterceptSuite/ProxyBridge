@@ -90,13 +90,6 @@ static void log_connection(const char *process, uint32_t pid, uint32_t dest_ip, 
         const char *action_str = (action == ACTION_BLOCK) ? "BLOCK" : "DIRECT";
         printf("[CONN] %s (PID:%u) -> %s:%u [%s]\n", process, pid, dest_ip_str, dest_port, action_str);
     }
-    
-    // Invoke callback if set
-    if (g_callback) {
-        char proxy_info[256];
-        snprintf(proxy_info, sizeof(proxy_info), "%s:%d", g_proxy.proxy_host, g_proxy.proxy_port);
-        g_callback(process, pid, dest_ip_str, dest_port, proxy_info);
-    }
 }
 
 static int get_original_dest_from_map(int fd, uint32_t *ip, uint16_t *port) {
