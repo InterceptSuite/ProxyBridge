@@ -74,21 +74,27 @@ struct orig_dest_info {
     uint16_t local_port;
 };
 
-static void log_connection(const char *process, uint32_t pid, uint32_t dest_ip, uint16_t dest_port, int action) {
+static void log_connection(const char *process, uint32_t pid, uint32_t dest_ip, uint16_t dest_port, int action, int proto) {
     // Don't log our own connections to the proxy server
     if (pid == getpid()) return;
+    
+    // Skip port 0 connections (DNS lookups, incomplete connections)
+    if (dest_port == 0) return;
     
     char dest_ip_str[32];
     snprintf(dest_ip_str, sizeof(dest_ip_str), "%u.%u.%u.%u",
              (dest_ip>>24)&0xFF, (dest_ip>>16)&0xFF, (dest_ip>>8)&0xFF, dest_ip&0xFF);
     
+    // Protocol suffix (only show for UDP, like Windows)
+    const char *proto_str = (proto == PROTO_UDP) ? " (UDP)" : "";
+    
     // Format log based on action
     if (action == ACTION_PROXY) {
-        printf("[CONN] %s (PID:%u) -> %s:%u via %s:%d\n", 
-               process, pid, dest_ip_str, dest_port, g_proxy.proxy_host, g_proxy.proxy_port);
+        printf("[CONN] %s (PID:%u) -> %s:%u via %s:%d%s\n", 
+               process, pid, dest_ip_str, dest_port, g_proxy.proxy_host, g_proxy.proxy_port, proto_str);
     } else {
         const char *action_str = (action == ACTION_BLOCK) ? "BLOCK" : "DIRECT";
-        printf("[CONN] %s (PID:%u) -> %s:%u [%s]\n", process, pid, dest_ip_str, dest_port, action_str);
+        printf("[CONN] %s (PID:%u) -> %s:%u [%s]%s\n", process, pid, dest_ip_str, dest_port, action_str, proto_str);
     }
 }
 
@@ -293,7 +299,7 @@ static void handle_event(void *ctx, int cpu, void *data, unsigned int data_sz) {
     const char *action_str = (e->action == ACTION_PROXY) ? "Proxy" : 
                             (e->action == ACTION_BLOCK) ? "Blocked" : "Direct";
     
-    log_connection(e->process_name, e->pid, e->dest_ip, e->dest_port, e->action);
+    log_connection(e->process_name, e->pid, e->dest_ip, e->dest_port, e->action, e->proto);
 }
 
 static void* event_reader(void *arg) {
@@ -329,6 +335,8 @@ bool ProxyBridge_Start(void) {
         return false;
     }
     int cgroup_fd = open(CGROUP_PATH, O_RDONLY);
+    
+    // Attach TCP hook (connect4)
     if (cgroup_fd < 0 || bpf_prog_attach(bpf_program__fd(skel->progs.cgroup_connect4), cgroup_fd, BPF_CGROUP_INET4_CONNECT, 0) != 0) {
         fprintf(stderr, "[ERROR] Failed to attach connect4\n");
         proxybridge_bpf__destroy(skel);
@@ -337,6 +345,17 @@ bool ProxyBridge_Start(void) {
         if (cgroup_fd >= 0) close(cgroup_fd);
         return false;
     }
+    
+    // Attach UDP hook (sendmsg4)
+    if (bpf_prog_attach(bpf_program__fd(skel->progs.cgroup_sendmsg4), cgroup_fd, BPF_CGROUP_UDP4_SENDMSG, 0) != 0) {
+        fprintf(stderr, "[ERROR] Failed to attach sendmsg4\n");
+        proxybridge_bpf__destroy(skel);
+        skel = NULL;
+        g_running = false;
+        close(cgroup_fd);
+        return false;
+    }
+    
     close(cgroup_fd);
     printf("[BPF] Attached to cgroup\n");
     pthread_create(&g_tcp_thread, NULL, tcp_relay, NULL);

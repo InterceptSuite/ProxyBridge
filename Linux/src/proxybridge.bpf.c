@@ -273,4 +273,63 @@ int cgroup_connect4(struct bpf_sock_addr *ctx)
     return 1;  // Allow (possibly modified) connection
 }
 
+// cgroup/sendmsg4: Intercept UDP sendmsg() calls
+SEC("cgroup/sendmsg4")
+int cgroup_sendmsg4(struct bpf_sock_addr *ctx)
+{
+    // Get process name (thread group leader, not thread name)
+    char proc_name[16];
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *group_leader = BPF_CORE_READ(task, group_leader);
+    bpf_probe_read_kernel_str(proc_name, sizeof(proc_name), &group_leader->comm);
+    
+    // Get destination
+    __u32 dst_ip = bpf_ntohl(ctx->user_ip4);
+    __u16 dst_port = bpf_ntohs(ctx->user_port);
+    
+    // Skip port 0 and localhost
+    if (dst_port == 0 || dst_ip == 0x7f000001) return 1;
+    
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    
+    // Check rules with UDP protocol
+    int action = check_rules(proc_name, dst_ip, dst_port, PROTO_UDP);
+    
+    // Send event (with UDP protocol)
+    struct conn_event event = {0};
+    __builtin_memcpy(event.process_name, proc_name, sizeof(event.process_name));
+    event.pid = pid;
+    event.dest_ip = dst_ip;
+    event.dest_port = dst_port;
+    event.action = action;
+    event.proto = PROTO_UDP;
+    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+    
+    // DIRECT → allow normally
+    if (action == ACTION_DIRECT)
+        return 1;
+    
+    // BLOCK → reject
+    if (action == ACTION_BLOCK)
+        return 0;
+    
+    // PROXY → redirect to local UDP relay
+    if (action == ACTION_PROXY) {
+        // Save original destination
+        __u64 cookie = bpf_get_socket_cookie(ctx);
+        struct orig_dest orig = {
+            .ip = dst_ip,
+            .port = dst_port,
+            .local_port = 0
+        };
+        bpf_map_update_elem(&socket_map, &cookie, &orig, BPF_ANY);
+        
+        // Redirect to local UDP relay (127.0.0.1:34011)
+        ctx->user_ip4 = bpf_htonl(0x7f000001);  // 127.0.0.1
+        ctx->user_port = bpf_htons(LOCAL_UDP_RELAY_PORT);
+    }
+    
+    return 1;
+}
+
 char _license[] SEC("license") = "GPL";
