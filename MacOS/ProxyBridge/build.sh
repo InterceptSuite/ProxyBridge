@@ -11,7 +11,7 @@ fi
 PROJECT_NAME="ProxyBridge"
 SCHEME_NAME="ProxyBridge"
 OUTPUT_DIR="$SCRIPT_DIR/output"
-PKG_NAME="ProxyBridge-v3.0-Universal-Installer.pkg"
+PKG_NAME="ProxyBridge-v3.1-Universal-Installer.pkg"
 PKG_PATH="$OUTPUT_DIR/$PKG_NAME"
 ARCHIVE_PATH="$SCRIPT_DIR/build/${PROJECT_NAME}.xcarchive"
 EXPORT_PATH="$SCRIPT_DIR/build/Export"
@@ -110,7 +110,7 @@ cp -R "$EXPORT_PATH/$APP_NAME" "$COMPONENT_DIR/"
 pkgbuild \
     --root "$COMPONENT_DIR" \
     --identifier "com.interceptsuite.${PROJECT_NAME}" \
-    --version "1.0.0" \
+    --version "3.1.0" \
     --install-location "/Applications" \
     "$TEMP_PKG"
 
@@ -125,7 +125,7 @@ cat > "$DISTRIBUTION_FILE" << 'EOF'
     <title>ProxyBridge</title>
     <license file="LICENSE"/>
     <pkg-ref id="com.interceptsuite.ProxyBridge"/>
-    <options customize="never" require-scripts="false"/>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
     <choices-outline>
         <line choice="default">
             <line choice="com.interceptsuite.ProxyBridge"/>
@@ -135,7 +135,7 @@ cat > "$DISTRIBUTION_FILE" << 'EOF'
     <choice id="com.interceptsuite.ProxyBridge" visible="false">
         <pkg-ref id="com.interceptsuite.ProxyBridge"/>
     </choice>
-    <pkg-ref id="com.interceptsuite.ProxyBridge" version="1.0.0" onConclusion="none">temp.pkg</pkg-ref>
+    <pkg-ref id="com.interceptsuite.ProxyBridge" version="3.1.0" onConclusion="none">temp.pkg</pkg-ref>
 </installer-gui-script>
 EOF
 
