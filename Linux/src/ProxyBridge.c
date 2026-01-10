@@ -60,6 +60,21 @@ static volatile bool g_running = false;
 static int g_tcp_fd = -1;
 static int g_udp_fd = -1;
 static uint32_t g_next_rule_id = 1;
+static int g_cgroup_fd = -1;  // Store for proper cleanup
+
+// Userspace rule storage (complex patterns allowed)
+static ProxyRule g_rules[100];
+static int g_rule_count = 0;
+static pthread_mutex_t g_rules_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Store process names from BPF events (keyed by dest_ip:dest_port)
+struct conn_info {
+    char process[16];
+    uint32_t pid;
+};
+static struct conn_info g_conn_map[1000];
+static int g_conn_map_count = 0;
+static pthread_mutex_t g_conn_map_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct sockaddr_in_orig {
     uint16_t sin_family;
@@ -71,8 +86,89 @@ struct sockaddr_in_orig {
 struct orig_dest_info {
     uint32_t ip;
     uint16_t port;
-    uint16_t local_port;
+    char process[16];
+    uint32_t pid;
 };
+
+// Complex pattern matching (userspace only)
+static bool match_wildcard(const char *str, const char *pattern) {
+    if (strcmp(pattern, "*") == 0) return true;
+    const char *s = str, *p = pattern;
+    while (*s && *p) {
+        if (*p == '*') {
+            p++;
+            if (!*p) return true;
+            while (*s && *s != *p) s++;
+            if (!*s) return false;
+        } else if (*p == *s) {
+            p++; s++;
+        } else {
+            return false;
+        }
+    }
+    return !*p && !*s;
+}
+
+static bool match_list(const char *item, const char *list) {
+    if (strcmp(list, "*") == 0) return true;
+    char buf[512];
+    strncpy(buf, list, sizeof(buf)-1);
+    buf[sizeof(buf)-1] = '\0';
+    char *token = strtok(buf, ";");
+    while (token) {
+        while (*token == ' ') token++;
+        if (strcmp(token, item) == 0) return true;
+        token = strtok(NULL, ";");
+    }
+    return false;
+}
+
+static bool match_port(uint16_t port, const char *pattern) {
+    if (strcmp(pattern, "*") == 0) return true;
+    char buf[256];
+    strncpy(buf, pattern, sizeof(buf)-1);
+    buf[sizeof(buf)-1] = '\0';
+    char *token = strtok(buf, ";");
+    while (token) {
+        while (*token == ' ') token++;
+        if (strchr(token, '-')) {
+            int start, end;
+            if (sscanf(token, "%d-%d", &start, &end) == 2) {
+                if (port >= start && port <= end) return true;
+            }
+        } else {
+            if (port == atoi(token)) return true;
+        }
+        token = strtok(NULL, ";");
+    }
+    return false;
+}
+
+static bool match_ip(uint32_t ip, const char *pattern) {
+    if (strcmp(pattern, "*") == 0) return true;
+    char ip_str[32];
+    snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u",
+             (ip>>24)&0xFF, (ip>>16)&0xFF, (ip>>8)&0xFF, ip&0xFF);
+    return match_wildcard(ip_str, pattern);
+}
+
+// Check rules in userspace
+static uint8_t check_proxy_rules(const char *process, uint32_t dest_ip, uint16_t dest_port, uint8_t proto) {
+    pthread_mutex_lock(&g_rules_mutex);
+    for (int i = 0; i < g_rule_count; i++) {
+        ProxyRule *rule = &g_rules[i];
+        if (!rule->enabled) continue;
+        if (!(rule->proto & proto)) continue;
+        if (!match_list(process, rule->process_name)) continue;
+        if (!match_ip(dest_ip, rule->target_hosts)) continue;
+        if (!match_port(dest_port, rule->target_ports)) continue;
+        uint8_t action = rule->action;
+        pthread_mutex_unlock(&g_rules_mutex);
+        return action;
+    }
+    pthread_mutex_unlock(&g_rules_mutex);
+    return ACTION_DIRECT;  // Default
+}
 
 static void log_connection(const char *process, uint32_t pid, uint32_t dest_ip, uint16_t dest_port, int action, int proto) {
     // Don't log our own connections to the proxy server
@@ -98,7 +194,7 @@ static void log_connection(const char *process, uint32_t pid, uint32_t dest_ip, 
     }
 }
 
-static int get_original_dest_from_map(int fd, uint32_t *ip, uint16_t *port) {
+static int get_original_dest_from_map(int fd, uint32_t *ip, uint16_t *port, char *process, uint32_t *pid) {
     if (!skel) return -1;
     
     // Iterate the map to find our connection
@@ -110,6 +206,9 @@ static int get_original_dest_from_map(int fd, uint32_t *ip, uint16_t *port) {
         if (bpf_map_lookup_elem(map_fd, &next_key, &value) == 0) {
             *ip = value.ip;
             *port = value.port;
+            strncpy(process, value.process, 16);
+            process[15] = '\0';
+            *pid = value.pid;
             bpf_map_delete_elem(map_fd, &next_key);
             return 0;
         }
@@ -221,33 +320,66 @@ static void forward_data(int client_fd, int proxy_fd) {
 
 static void* handle_tcp_conn(void *arg) {
     int client_fd = (int)(long)arg;
-    int proxy_fd = -1;
-    uint32_t dest_ip, proxy_ip;
+    int dest_fd = -1;
+    uint32_t dest_ip;
     uint16_t dest_port;
+    char process[16] = "unknown";
+    uint32_t pid = 0;
     
-    if (get_original_dest_from_map(client_fd, &dest_ip, &dest_port) != 0) {
+    if (get_original_dest_from_map(client_fd, &dest_ip, &dest_port, process, &pid) != 0) {
+        fprintf(stderr, "[ERROR] Failed to get socket info from BPF map\n");
         close(client_fd);
         return NULL;
     }
     
-    // Don't log here - already logged by BPF event
-    proxy_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (proxy_fd < 0) goto cleanup;
-    proxy_ip = resolve_host(g_proxy.proxy_host);
-    if (proxy_ip == 0) goto cleanup;
-    struct sockaddr_in paddr = {0};
-    paddr.sin_family = AF_INET;
-    paddr.sin_addr.s_addr = htonl(proxy_ip);
-    paddr.sin_port = htons(g_proxy.proxy_port);
-    if (connect(proxy_fd, (struct sockaddr*)&paddr, sizeof(paddr)) != 0) goto cleanup;
-    if (g_proxy.proxy_type == PROXY_TYPE_SOCKS5) {
-        if (socks5_connect(proxy_fd, dest_ip, dest_port) != 0) goto cleanup;
-    } else {
-        if (http_connect(proxy_fd, dest_ip, dest_port) != 0) goto cleanup;
+    // Always log intercepted connections for debugging
+    printf("[TCP] %s (PID %u) -> %u.%u.%u.%u:%u\n",
+           process, pid,
+           (dest_ip >> 24) & 0xFF, (dest_ip >> 16) & 0xFF,
+           (dest_ip >> 8) & 0xFF, dest_ip & 0xFF, dest_port);
+    
+    // Check rules in userspace
+    uint8_t action = check_proxy_rules(process, dest_ip, dest_port, PROTO_TCP);
+    
+    // Log connection with actual action
+    log_connection(process, pid, dest_ip, dest_port, action, PROTO_TCP);
+    
+    if (action == ACTION_BLOCK) {
+        // BLOCK: just close
+        close(client_fd);
+        return NULL;
     }
-    forward_data(client_fd, proxy_fd);
+    
+    if (action == ACTION_DIRECT) {
+        // DIRECT: connect directly to original destination
+        dest_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (dest_fd < 0) goto cleanup;
+        struct sockaddr_in daddr = {0};
+        daddr.sin_family = AF_INET;
+        daddr.sin_addr.s_addr = htonl(dest_ip);
+        daddr.sin_port = htons(dest_port);
+        if (connect(dest_fd, (struct sockaddr*)&daddr, sizeof(daddr)) != 0) goto cleanup;
+        forward_data(client_fd, dest_fd);
+    } else {
+        // PROXY: connect via proxy
+        dest_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (dest_fd < 0) goto cleanup;
+        uint32_t proxy_ip = resolve_host(g_proxy.proxy_host);
+        if (proxy_ip == 0) goto cleanup;
+        struct sockaddr_in paddr = {0};
+        paddr.sin_family = AF_INET;
+        paddr.sin_addr.s_addr = htonl(proxy_ip);
+        paddr.sin_port = htons(g_proxy.proxy_port);
+        if (connect(dest_fd, (struct sockaddr*)&paddr, sizeof(paddr)) != 0) goto cleanup;
+        if (g_proxy.proxy_type == PROXY_TYPE_SOCKS5) {
+            if (socks5_connect(dest_fd, dest_ip, dest_port) != 0) goto cleanup;
+        } else {
+            if (http_connect(dest_fd, dest_ip, dest_port) != 0) goto cleanup;
+        }
+        forward_data(client_fd, dest_fd);
+    }
 cleanup:
-    if (proxy_fd >= 0) close(proxy_fd);
+    if (dest_fd >= 0) close(dest_fd);
     close(client_fd);
     return NULL;
 }
@@ -290,16 +422,20 @@ static void* udp_relay(void *arg) {
     return NULL;
 }
 
-// Event reader thread - reads connection events from BPF
+// Event reader thread - stores process names from BPF
 static void handle_event(void *ctx, int cpu, void *data, unsigned int data_sz) {
     (void)ctx; (void)cpu;
     struct conn_event *e = (struct conn_event *)data;
     if (data_sz < sizeof(*e)) return;
     
-    const char *action_str = (e->action == ACTION_PROXY) ? "Proxy" : 
-                            (e->action == ACTION_BLOCK) ? "Blocked" : "Direct";
-    
-    log_connection(e->process_name, e->pid, e->dest_ip, e->dest_port, e->action, e->proto);
+    // Store process name for relay to use
+    pthread_mutex_lock(&g_conn_map_mutex);
+    if (g_conn_map_count < 1000) {
+        strncpy(g_conn_map[g_conn_map_count].process, e->process_name, 16);
+        g_conn_map[g_conn_map_count].pid = e->pid;
+        g_conn_map_count++;
+    }
+    pthread_mutex_unlock(&g_conn_map_mutex);
 }
 
 static void* event_reader(void *arg) {
@@ -334,30 +470,39 @@ bool ProxyBridge_Start(void) {
         g_running = false;
         return false;
     }
-    int cgroup_fd = open(CGROUP_PATH, O_RDONLY);
+    g_cgroup_fd = open(CGROUP_PATH, O_RDONLY);
     
     // Attach TCP hook (connect4)
-    if (cgroup_fd < 0 || bpf_prog_attach(bpf_program__fd(skel->progs.cgroup_connect4), cgroup_fd, BPF_CGROUP_INET4_CONNECT, 0) != 0) {
+    if (g_cgroup_fd < 0 || bpf_prog_attach(bpf_program__fd(skel->progs.cgroup_connect4), g_cgroup_fd, BPF_CGROUP_INET4_CONNECT, 0) != 0) {
         fprintf(stderr, "[ERROR] Failed to attach connect4\n");
         proxybridge_bpf__destroy(skel);
         skel = NULL;
         g_running = false;
-        if (cgroup_fd >= 0) close(cgroup_fd);
+        if (g_cgroup_fd >= 0) close(g_cgroup_fd);
+        g_cgroup_fd = -1;
         return false;
     }
     
     // Attach UDP hook (sendmsg4)
-    if (bpf_prog_attach(bpf_program__fd(skel->progs.cgroup_sendmsg4), cgroup_fd, BPF_CGROUP_UDP4_SENDMSG, 0) != 0) {
+    if (bpf_prog_attach(bpf_program__fd(skel->progs.cgroup_sendmsg4), g_cgroup_fd, BPF_CGROUP_UDP4_SENDMSG, 0) != 0) {
         fprintf(stderr, "[ERROR] Failed to attach sendmsg4\n");
         proxybridge_bpf__destroy(skel);
         skel = NULL;
         g_running = false;
-        close(cgroup_fd);
+        close(g_cgroup_fd);
+        g_cgroup_fd = -1;
         return false;
     }
     
-    close(cgroup_fd);
     printf("[BPF] Attached to cgroup\n");
+    
+    // Store our PID in BPF map so we can skip our own connections (prevent redirect loop)
+    uint32_t key = 0;
+    uint32_t our_pid = getpid();
+    int relay_pid_fd = bpf_map__fd(skel->maps.relay_pid);
+    bpf_map_update_elem(relay_pid_fd, &key, &our_pid, BPF_ANY);
+    printf("[BPF] Stored relay PID %u to skip redirect loop\n", our_pid);
+    
     pthread_create(&g_tcp_thread, NULL, tcp_relay, NULL);
     if (g_proxy.proxy_type == PROXY_TYPE_SOCKS5) pthread_create(&g_udp_thread, NULL, udp_relay, NULL);
     pthread_create(&g_event_thread, NULL, event_reader, NULL);
@@ -372,8 +517,17 @@ void ProxyBridge_Stop(void) {
     if (g_tcp_thread) { pthread_join(g_tcp_thread, NULL); g_tcp_thread = 0; }
     if (g_udp_thread) { pthread_join(g_udp_thread, NULL); g_udp_thread = 0; }
     if (g_event_thread) { pthread_join(g_event_thread, NULL); g_event_thread = 0; }
-    if (skel) {
+    if (skel && g_cgroup_fd >= 0) {
         printf("[BPF] Detaching...\n");
+        // Explicitly detach programs
+        int ret1 = bpf_prog_detach2(bpf_program__fd(skel->progs.cgroup_connect4), g_cgroup_fd, BPF_CGROUP_INET4_CONNECT);
+        int ret2 = bpf_prog_detach2(bpf_program__fd(skel->progs.cgroup_sendmsg4), g_cgroup_fd, BPF_CGROUP_UDP4_SENDMSG);
+        
+        if (ret1 != 0) fprintf(stderr, "[ERROR] Failed to detach connect4: %d (%s)\n", ret1, strerror(errno));
+        if (ret2 != 0) fprintf(stderr, "[ERROR] Failed to detach sendmsg4: %d (%s)\n", ret2, strerror(errno));
+        
+        close(g_cgroup_fd);
+        g_cgroup_fd = -1;
         proxybridge_bpf__destroy(skel);
         skel = NULL;
         printf("[BPF] Detached\n");
@@ -383,48 +537,42 @@ void ProxyBridge_Stop(void) {
 void ProxyBridge_SetProxySettings(const ProxySettings *settings) { if (settings) g_proxy = *settings; }
 
 uint32_t ProxyBridge_AddRule(const ProxyRule *rule) {
-    if (!rule || !skel) return 0;
+    if (!rule) return 0;
+    pthread_mutex_lock(&g_rules_mutex);
+    if (g_rule_count >= 100) {
+        pthread_mutex_unlock(&g_rules_mutex);
+        return 0;
+    }
     uint32_t id = g_next_rule_id++;
-    struct proxy_rule bpf_rule = {0};
-    strncpy(bpf_rule.process_name, rule->process_name, sizeof(bpf_rule.process_name)-1);
-    strncpy(bpf_rule.target_hosts, rule->target_hosts, sizeof(bpf_rule.target_hosts)-1);
-    strncpy(bpf_rule.target_ports, rule->target_ports, sizeof(bpf_rule.target_ports)-1);
-    bpf_rule.proto = rule->proto;
-    bpf_rule.action = rule->action;
-    bpf_rule.enabled = rule->enabled ? 1 : 0;
-    uint32_t idx = id - 1;
-    bpf_map_update_elem(bpf_map__fd(skel->maps.rules_map), &idx, &bpf_rule, BPF_ANY);
+    g_rules[g_rule_count++] = *rule;
+    pthread_mutex_unlock(&g_rules_mutex);
     printf("[RULE %u] %s %s:%s %s\n", id, rule->process_name, rule->target_hosts, rule->target_ports,
            rule->action == ACTION_PROXY ? "PROXY" : rule->action == ACTION_BLOCK ? "BLOCK" : "DIRECT");
     return id;
 }
 
 bool ProxyBridge_UpdateRule(uint32_t rule_id, const ProxyRule *rule) {
-    if (!rule || !skel || rule_id == 0) return false;
-    struct proxy_rule bpf_rule = {0};
-    strncpy(bpf_rule.process_name, rule->process_name, sizeof(bpf_rule.process_name)-1);
-    strncpy(bpf_rule.target_hosts, rule->target_hosts, sizeof(bpf_rule.target_hosts)-1);
-    strncpy(bpf_rule.target_ports, rule->target_ports, sizeof(bpf_rule.target_ports)-1);
-    bpf_rule.proto = rule->proto;
-    bpf_rule.action = rule->action;
-    bpf_rule.enabled = rule->enabled ? 1 : 0;
-    uint32_t idx = rule_id - 1;
-    return bpf_map_update_elem(bpf_map__fd(skel->maps.rules_map), &idx, &bpf_rule, BPF_ANY) == 0;
+    if (!rule || rule_id == 0 || rule_id > g_rule_count) return false;
+    pthread_mutex_lock(&g_rules_mutex);
+    g_rules[rule_id - 1] = *rule;
+    pthread_mutex_unlock(&g_rules_mutex);
+    return true;
 }
 
 bool ProxyBridge_RemoveRule(uint32_t rule_id) {
-    if (!skel || rule_id == 0) return false;
-    struct proxy_rule bpf_rule = {0};
-    uint32_t idx = rule_id - 1;
-    return bpf_map_update_elem(bpf_map__fd(skel->maps.rules_map), &idx, &bpf_rule, BPF_ANY) == 0;
+    if (rule_id == 0 || rule_id > g_rule_count) return false;
+    pthread_mutex_lock(&g_rules_mutex);
+    g_rules[rule_id - 1].enabled = false;
+    pthread_mutex_unlock(&g_rules_mutex);
+    return true;
 }
 
 void ProxyBridge_ClearRules(void) {
-    if (!skel) return;
-    struct proxy_rule bpf_rule = {0};
-    for (uint32_t i = 0; i < 100; i++)
-        bpf_map_update_elem(bpf_map__fd(skel->maps.rules_map), &i, &bpf_rule, BPF_ANY);
+    pthread_mutex_lock(&g_rules_mutex);
+    memset(g_rules, 0, sizeof(g_rules));
+    g_rule_count = 0;
     g_next_rule_id = 1;
+    pthread_mutex_unlock(&g_rules_mutex);
 }
 
 void ProxyBridge_SetConnectionCallback(ConnectionCallback callback) { g_callback = callback; }
