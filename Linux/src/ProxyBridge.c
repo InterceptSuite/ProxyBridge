@@ -92,9 +92,12 @@ struct orig_dest_info {
 
 // Complex pattern matching (userspace only)
 static bool match_wildcard(const char *str, const char *pattern) {
+    if (!str || !pattern) return false;
     if (strcmp(pattern, "*") == 0) return true;
     const char *s = str, *p = pattern;
-    while (*s && *p) {
+    int iterations = 0;
+    const int MAX_ITERS = 10000; // Prevent DoS
+    while (*s && *p && iterations++ < MAX_ITERS) {
         if (*p == '*') {
             p++;
             if (!*p) return true;
@@ -195,18 +198,20 @@ static void log_connection(const char *process, uint32_t pid, uint32_t dest_ip, 
 }
 
 static int get_original_dest_from_map(int fd, uint32_t *ip, uint16_t *port, char *process, uint32_t *pid) {
-    if (!skel) return -1;
+    if (!skel || !ip || !port || !process || !pid) return -1;
     
     // Iterate the map to find our connection
     uint64_t key = 0, next_key;
     struct orig_dest_info value;
     int map_fd = bpf_map__fd(skel->maps.socket_map);
+    if (map_fd < 0) return -1;
     
     while (bpf_map_get_next_key(map_fd, &key, &next_key) == 0) {
         if (bpf_map_lookup_elem(map_fd, &next_key, &value) == 0) {
             *ip = value.ip;
             *port = value.port;
-            strncpy(process, value.process, 16);
+            // Secure copy with explicit bounds
+            memcpy(process, value.process, 15);
             process[15] = '\0';
             *pid = value.pid;
             bpf_map_delete_elem(map_fd, &next_key);
@@ -219,8 +224,11 @@ static int get_original_dest_from_map(int fd, uint32_t *ip, uint16_t *port, char
 }
 
 static uint32_t resolve_host(const char *host) {
+    if (!host || strlen(host) == 0 || strlen(host) > 255) return 0;
+    
     struct in_addr addr;
     if (inet_pton(AF_INET, host, &addr) == 1) return ntohl(addr.s_addr);
+    
     struct hostent *he = gethostbyname(host);
     if (!he || !he->h_addr_list[0]) return 0;
     memcpy(&addr, he->h_addr_list[0], sizeof(addr));
@@ -296,24 +304,34 @@ static int http_connect(int fd, uint32_t dest_ip, uint16_t dest_port) {
 }
 
 static void forward_data(int client_fd, int proxy_fd) {
+    if (client_fd < 0 || proxy_fd < 0) return;
+    
     fd_set rdfds;
     char buf[8192];
     int maxfd = (client_fd > proxy_fd) ? client_fd : proxy_fd;
-    while (g_running) {
+    int idle_seconds = 0;
+    const int IDLE_TIMEOUT = 300; // 5 minutes
+    
+    while (g_running && idle_seconds < IDLE_TIMEOUT) {
         FD_ZERO(&rdfds);
         FD_SET(client_fd, &rdfds);
         FD_SET(proxy_fd, &rdfds);
         struct timeval tv = {1, 0};
-        if (select(maxfd + 1, &rdfds, NULL, NULL, &tv) <= 0) continue;
+        int ret = select(maxfd + 1, &rdfds, NULL, NULL, &tv);
+        
+        if (ret < 0) break; // Error
+        if (ret == 0) { idle_seconds++; continue; } // Timeout
+        idle_seconds = 0; // Reset on activity
+        
         if (FD_ISSET(client_fd, &rdfds)) {
             ssize_t n = recv(client_fd, buf, sizeof(buf), 0);
             if (n <= 0) break;
-            if (send(proxy_fd, buf, n, 0) != n) break;
+            if (send(proxy_fd, buf, n, MSG_NOSIGNAL) != n) break;
         }
         if (FD_ISSET(proxy_fd, &rdfds)) {
             ssize_t n = recv(proxy_fd, buf, sizeof(buf), 0);
             if (n <= 0) break;
-            if (send(client_fd, buf, n, 0) != n) break;
+            if (send(client_fd, buf, n, MSG_NOSIGNAL) != n) break;
         }
     }
 }
@@ -327,16 +345,9 @@ static void* handle_tcp_conn(void *arg) {
     uint32_t pid = 0;
     
     if (get_original_dest_from_map(client_fd, &dest_ip, &dest_port, process, &pid) != 0) {
-        fprintf(stderr, "[ERROR] Failed to get socket info from BPF map\n");
         close(client_fd);
         return NULL;
     }
-    
-    // Always log intercepted connections for debugging
-    printf("[TCP] %s (PID %u) -> %u.%u.%u.%u:%u\n",
-           process, pid,
-           (dest_ip >> 24) & 0xFF, (dest_ip >> 16) & 0xFF,
-           (dest_ip >> 8) & 0xFF, dest_ip & 0xFF, dest_port);
     
     // Check rules in userspace
     uint8_t action = check_proxy_rules(process, dest_ip, dest_port, PROTO_TCP);
@@ -510,27 +521,43 @@ bool ProxyBridge_Start(void) {
 }
 
 void ProxyBridge_Stop(void) {
-    if (!g_running) return;
+    static volatile bool stopping = false;
+    
+    // Prevent re-entry (multiple Ctrl+C)
+    if (stopping || !g_running) return;
+    stopping = true;
+    
     g_running = false;
+    
+    // Close listening sockets first to stop accepting new connections
     if (g_tcp_fd >= 0) { close(g_tcp_fd); g_tcp_fd = -1; }
     if (g_udp_fd >= 0) { close(g_udp_fd); g_udp_fd = -1; }
-    if (g_tcp_thread) { pthread_join(g_tcp_thread, NULL); g_tcp_thread = 0; }
-    if (g_udp_thread) { pthread_join(g_udp_thread, NULL); g_udp_thread = 0; }
-    if (g_event_thread) { pthread_join(g_event_thread, NULL); g_event_thread = 0; }
+    
+    // Detach BPF BEFORE waiting for threads (critical!)
     if (skel && g_cgroup_fd >= 0) {
         printf("[BPF] Detaching...\n");
-        // Explicitly detach programs
-        int ret1 = bpf_prog_detach2(bpf_program__fd(skel->progs.cgroup_connect4), g_cgroup_fd, BPF_CGROUP_INET4_CONNECT);
-        int ret2 = bpf_prog_detach2(bpf_program__fd(skel->progs.cgroup_sendmsg4), g_cgroup_fd, BPF_CGROUP_UDP4_SENDMSG);
         
-        if (ret1 != 0) fprintf(stderr, "[ERROR] Failed to detach connect4: %d (%s)\n", ret1, strerror(errno));
-        if (ret2 != 0) fprintf(stderr, "[ERROR] Failed to detach sendmsg4: %d (%s)\n", ret2, strerror(errno));
+        int connect4_fd = bpf_program__fd(skel->progs.cgroup_connect4);
+        int sendmsg4_fd = bpf_program__fd(skel->progs.cgroup_sendmsg4);
+        
+        // Try to detach, ignore errors if already detached
+        bpf_prog_detach2(connect4_fd, g_cgroup_fd, BPF_CGROUP_INET4_CONNECT);
+        bpf_prog_detach2(sendmsg4_fd, g_cgroup_fd, BPF_CGROUP_UDP4_SENDMSG);
         
         close(g_cgroup_fd);
         g_cgroup_fd = -1;
+        printf("[BPF] Detached\n");
+    }
+    
+    // Now wait for threads to finish (they'll exit because g_running = false)
+    if (g_tcp_thread) { pthread_cancel(g_tcp_thread); pthread_join(g_tcp_thread, NULL); g_tcp_thread = 0; }
+    if (g_udp_thread) { pthread_cancel(g_udp_thread); pthread_join(g_udp_thread, NULL); g_udp_thread = 0; }
+    if (g_event_thread) { pthread_cancel(g_event_thread); pthread_join(g_event_thread, NULL); g_event_thread = 0; }
+    
+    // Destroy skeleton last
+    if (skel) {
         proxybridge_bpf__destroy(skel);
         skel = NULL;
-        printf("[BPF] Detached\n");
     }
 }
 

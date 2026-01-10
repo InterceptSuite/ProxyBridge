@@ -8,15 +8,27 @@
 #include <ctype.h>
 
 static volatile bool g_running = false;
+static volatile bool g_stopping = false;
 static int g_verbose = 0;
 
 static void signal_handler(int sig) {
     (void)sig;
-    printf("\n\nStopping ProxyBridge...\n");
-    if (g_running) {
-        ProxyBridge_Stop();
-        g_running = false;
+    
+    // Prevent multiple signal handlers from running simultaneously
+    if (g_stopping) {
+        // Already stopping, force exit on second Ctrl+C
+        fprintf(stderr, "\nForce quit! BPF may still be attached. Run: sudo ./emergency_detach.sh\n");
+        _exit(1);
     }
+    
+    g_stopping = true;
+    printf("\n\nStopping ProxyBridge...\n");
+    
+    if (g_running) {
+        g_running = false;
+        ProxyBridge_Stop();
+    }
+    
     printf("ProxyBridge stopped.\n");
     exit(0);
 }
