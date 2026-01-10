@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-// ProxyBridge - EXACT Windows WinDivert equivalent using cgroup/connect4
-//
-// Flow (same as Windows):
-// 1. Application calls connect() → cgroup/connect4 hook intercepts
-// 2. Get process name, dst IP, dst port, protocol
-// 3. Check rules (EXACT Windows match_rule logic)
-// 4. If ACTION_PROXY → redirect to local relay (save original dest)
-// 5. If ACTION_DIRECT → allow normal connection
-// 6. If ACTION_BLOCK → reject connection
+// ProxyBridge - Linux eBPF 
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -17,7 +9,6 @@
 #define MAX_RULES 100
 #define MAX_PROCESS_NAME 256
 
-// Rule definitions (EXACT match to Windows)
 #define PROTO_TCP  0x01
 #define PROTO_UDP  0x02
 #define PROTO_BOTH 0x03
@@ -26,15 +17,12 @@
 #define ACTION_PROXY  1
 #define ACTION_BLOCK  2
 
-// Local relay ports (must match Windows LOCAL_PROXY_PORT)
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011
 
-// Socket constants
 #define SOL_IP 0
 #define SO_ORIGINAL_DST 80
 
-// Connection event for logging
 struct conn_event {
     char process_name[16];
     __u32 pid;
@@ -64,8 +52,6 @@ struct {
     __type(key, __u64);  // socket cookie
     __type(value, struct sock_info);
 } socket_map SEC(".maps");
-
-// ProxyBridge process PID to skip (prevent redirect loop)
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -73,31 +59,24 @@ struct {
     __type(value, __u32);
 } relay_pid SEC(".maps");
 
-// TCP connection interception - redirect ALL to relay
 SEC("cgroup/connect4")
 int cgroup_connect4(struct bpf_sock_addr *ctx)
 {
     __u32 dst_ip = bpf_ntohl(ctx->user_ip4);
     __u16 dst_port = bpf_ntohs(ctx->user_port);
     
-    // Skip port 0, localhost, and DNS (port 53) to prevent breaking DNS
     if (dst_port == 0 || (dst_ip >> 24) == 127 || dst_port == 53) return 1;
     
-    // CRITICAL FIX: Skip ProxyBridge relay process (prevent redirect loop)
     __u32 current_pid = bpf_get_current_pid_tgid() >> 32;
     __u32 key = 0;
     __u32 *relay_pid_ptr = bpf_map_lookup_elem(&relay_pid, &key);
-    if (relay_pid_ptr && *relay_pid_ptr == current_pid) {
-        return 1;  // Allow relay's own connections to bypass
-    }
+    if (relay_pid_ptr && *relay_pid_ptr == current_pid) return 1;
     
-    // Get process name
     char proc_name[16];
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct task_struct *group_leader = BPF_CORE_READ(task, group_leader);
     bpf_probe_read_kernel_str(proc_name, sizeof(proc_name), &group_leader->comm);
     
-    // Send connection info to userspace (for process name)
     struct conn_event event = {0};
     __builtin_memcpy(event.process_name, proc_name, 16);
     event.pid = bpf_get_current_pid_tgid() >> 32;
@@ -106,7 +85,6 @@ int cgroup_connect4(struct bpf_sock_addr *ctx)
     event.proto = PROTO_TCP;
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     
-    // Save original destination AND process info
     __u64 cookie = bpf_get_socket_cookie(ctx);
     struct sock_info info = {0};
     info.orig_ip = dst_ip;
@@ -115,38 +93,30 @@ int cgroup_connect4(struct bpf_sock_addr *ctx)
     __builtin_memcpy(info.process, proc_name, 16);
     bpf_map_update_elem(&socket_map, &cookie, &info, BPF_ANY);
     
-    // Redirect ALL to TCP relay
-    ctx->user_ip4 = bpf_htonl(0x7f000001);  // 127.0.0.1
+    ctx->user_ip4 = bpf_htonl(0x7f000001);
     ctx->user_port = bpf_htons(LOCAL_PROXY_PORT);
     
     return 1;
 }
 
-// UDP packet interception - redirect ALL to relay
 SEC("cgroup/sendmsg4")
 int cgroup_sendmsg4(struct bpf_sock_addr *ctx)
 {
     __u32 dst_ip = bpf_ntohl(ctx->user_ip4);
     __u16 dst_port = bpf_ntohs(ctx->user_port);
     
-    // Skip port 0, localhost, and DNS (port 53)
     if (dst_port == 0 || dst_ip == 0x7f000001 || dst_port == 53) return 1;
     
-    // CRITICAL FIX: Skip ProxyBridge relay process (prevent redirect loop)
     __u32 current_pid = bpf_get_current_pid_tgid() >> 32;
     __u32 key = 0;
     __u32 *relay_pid_ptr = bpf_map_lookup_elem(&relay_pid, &key);
-    if (relay_pid_ptr && *relay_pid_ptr == current_pid) {
-        return 1;  // Allow relay's own connections to bypass
-    }
+    if (relay_pid_ptr && *relay_pid_ptr == current_pid) return 1;
     
-    // Get process name
     char proc_name[16];
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct task_struct *group_leader = BPF_CORE_READ(task, group_leader);
     bpf_probe_read_kernel_str(proc_name, sizeof(proc_name), &group_leader->comm);
     
-    // Send connection info to userspace
     struct conn_event event = {0};
     __builtin_memcpy(event.process_name, proc_name, sizeof(event.process_name));
     event.pid = bpf_get_current_pid_tgid() >> 32;
@@ -155,7 +125,6 @@ int cgroup_sendmsg4(struct bpf_sock_addr *ctx)
     event.proto = PROTO_UDP;
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     
-    // Save original destination AND process info
     __u64 cookie = bpf_get_socket_cookie(ctx);
     struct sock_info info = {0};
     info.orig_ip = dst_ip;
@@ -164,8 +133,7 @@ int cgroup_sendmsg4(struct bpf_sock_addr *ctx)
     __builtin_memcpy(info.process, proc_name, 16);
     bpf_map_update_elem(&socket_map, &cookie, &info, BPF_ANY);
     
-    // Redirect ALL to UDP relay
-    ctx->user_ip4 = bpf_htonl(0x7f000001);  // 127.0.0.1
+    ctx->user_ip4 = bpf_htonl(0x7f000001);
     ctx->user_port = bpf_htons(LOCAL_UDP_RELAY_PORT);
     
     return 1;

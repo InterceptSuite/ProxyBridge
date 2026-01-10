@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <bpf/libbpf.h>
@@ -25,6 +26,7 @@
 // SOCKS5
 #define SOCKS5_VERSION 0x05
 #define SOCKS5_CMD_CONNECT 0x01
+#define SOCKS5_CMD_UDP_ASSOCIATE 0x03
 #define SOCKS5_ATYP_IPV4 0x01
 #define SOCKS5_AUTH_NONE 0x00
 #define SOCKS5_AUTH_USERPASS 0x02
@@ -60,17 +62,26 @@ static volatile bool g_running = false;
 static int g_tcp_fd = -1;
 static int g_udp_fd = -1;
 static uint32_t g_next_rule_id = 1;
-static int g_cgroup_fd = -1;  // Store for proper cleanup
+static int g_cgroup_fd = -1;
 
-// Userspace rule storage (complex patterns allowed)
 static ProxyRule g_rules[100];
 static int g_rule_count = 0;
 static pthread_mutex_t g_rules_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int socks5_udp_socket = -1;
+static int socks5_udp_send_socket = -1;
+static struct sockaddr_in socks5_udp_relay_addr;
+static bool udp_associate_connected = false;
+static time_t last_udp_connect_attempt = 0;
 
 // Store process names from BPF events (keyed by dest_ip:dest_port)
 struct conn_info {
     char process[16];
     uint32_t pid;
+    uint32_t dest_ip;
+    uint16_t dest_port;
+    uint8_t proto;
+    time_t timestamp;
 };
 static struct conn_info g_conn_map[1000];
 static int g_conn_map_count = 0;
@@ -155,13 +166,11 @@ static bool match_ip(uint32_t ip, const char *pattern) {
     return match_wildcard(ip_str, pattern);
 }
 
-// Check rules in userspace
 static uint8_t check_proxy_rules(const char *process, uint32_t dest_ip, uint16_t dest_port, uint8_t proto) {
     pthread_mutex_lock(&g_rules_mutex);
     for (int i = 0; i < g_rule_count; i++) {
         ProxyRule *rule = &g_rules[i];
-        if (!rule->enabled) continue;
-        if (!(rule->proto & proto)) continue;
+        if (!rule->enabled || !(rule->proto & proto)) continue;
         if (!match_list(process, rule->process_name)) continue;
         if (!match_ip(dest_ip, rule->target_hosts)) continue;
         if (!match_port(dest_port, rule->target_ports)) continue;
@@ -170,24 +179,18 @@ static uint8_t check_proxy_rules(const char *process, uint32_t dest_ip, uint16_t
         return action;
     }
     pthread_mutex_unlock(&g_rules_mutex);
-    return ACTION_DIRECT;  // Default
+    return ACTION_DIRECT;
 }
 
 static void log_connection(const char *process, uint32_t pid, uint32_t dest_ip, uint16_t dest_port, int action, int proto) {
-    // Don't log our own connections to the proxy server
-    if (pid == getpid()) return;
-    
-    // Skip port 0 connections (DNS lookups, incomplete connections)
-    if (dest_port == 0) return;
+    if (pid == getpid() || dest_port == 0) return;
     
     char dest_ip_str[32];
     snprintf(dest_ip_str, sizeof(dest_ip_str), "%u.%u.%u.%u",
              (dest_ip>>24)&0xFF, (dest_ip>>16)&0xFF, (dest_ip>>8)&0xFF, dest_ip&0xFF);
     
-    // Protocol suffix (only show for UDP, like Windows)
     const char *proto_str = (proto == PROTO_UDP) ? " (UDP)" : "";
     
-    // Format log based on action
     if (action == ACTION_PROXY) {
         printf("[CONN] %s (PID:%u) -> %s:%u via %s:%d%s\n", 
                process, pid, dest_ip_str, dest_port, g_proxy.proxy_host, g_proxy.proxy_port, proto_str);
@@ -265,6 +268,105 @@ static int socks5_connect(int fd, uint32_t dest_ip, uint16_t dest_port) {
     return 0;
 }
 
+static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr) {
+    unsigned char buf[512];
+    bool use_auth = (g_proxy.username[0] != '\0');
+
+    buf[0] = SOCKS5_VERSION;
+    if (use_auth) {
+        buf[1] = 2; buf[2] = SOCKS5_AUTH_NONE; buf[3] = SOCKS5_AUTH_USERPASS;
+        if (send(s, buf, 4, 0) != 4) return -1;
+    } else {
+        buf[1] = 1; buf[2] = SOCKS5_AUTH_NONE;
+        if (send(s, buf, 3, 0) != 3) return -1;
+    }
+
+    if (recv(s, buf, 2, 0) != 2 || buf[0] != SOCKS5_VERSION) return -1;
+
+    if (buf[1] == SOCKS5_AUTH_USERPASS) {
+        if (!use_auth) return -1;
+        int ulen = strlen(g_proxy.username), plen = strlen(g_proxy.password);
+        if (ulen > 255 || plen > 255 || ulen + plen + 3 > sizeof(buf)) return -1;
+        buf[0] = 0x01; buf[1] = ulen;
+        memcpy(&buf[2], g_proxy.username, ulen);
+        buf[2 + ulen] = plen;
+        memcpy(&buf[3 + ulen], g_proxy.password, plen);
+        if (send(s, buf, 3 + ulen + plen, 0) < 0) return -1;
+        if (recv(s, buf, 2, 0) != 2 || buf[1] != 0x00) return -1;
+    } else if (buf[1] != SOCKS5_AUTH_NONE) return -1;
+
+    buf[0] = SOCKS5_VERSION;
+    buf[1] = SOCKS5_CMD_UDP_ASSOCIATE;
+    buf[2] = 0x00;
+    buf[3] = SOCKS5_ATYP_IPV4;
+    buf[4] = buf[5] = buf[6] = buf[7] = 0;
+    buf[8] = buf[9] = 0;
+
+    if (send(s, buf, 10, 0) != 10) return -1;
+    if (recv(s, buf, 10, 0) < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00) return -1;
+
+    relay_addr->sin_family = AF_INET;
+    memcpy(&relay_addr->sin_addr.s_addr, &buf[4], 4);
+    memcpy(&relay_addr->sin_port, &buf[8], 2);
+
+    return 0;
+}
+
+static bool establish_udp_associate(void) {
+    time_t now = time(NULL);
+    if (now - last_udp_connect_attempt < 5) return false;
+    last_udp_connect_attempt = now;
+
+    if (socks5_udp_socket >= 0) {
+        close(socks5_udp_socket);
+        socks5_udp_socket = -1;
+    }
+    if (socks5_udp_send_socket >= 0) {
+        close(socks5_udp_send_socket);
+        socks5_udp_send_socket = -1;
+    }
+
+    int tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_sock < 0) return false;
+
+    struct timeval timeout = {3, 0};
+    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    uint32_t socks5_ip = resolve_host(g_proxy.proxy_host);
+    if (socks5_ip == 0) {
+        close(tcp_sock);
+        return false;
+    }
+
+    struct sockaddr_in socks_addr = {0};
+    socks_addr.sin_family = AF_INET;
+    socks_addr.sin_addr.s_addr = htonl(socks5_ip);
+    socks_addr.sin_port = htons(g_proxy.proxy_port);
+
+    if (connect(tcp_sock, (struct sockaddr*)&socks_addr, sizeof(socks_addr)) != 0) {
+        close(tcp_sock);
+        return false;
+    }
+
+    if (socks5_udp_associate(tcp_sock, &socks5_udp_relay_addr) != 0) {
+        close(tcp_sock);
+        return false;
+    }
+
+    socks5_udp_socket = tcp_sock;
+
+    socks5_udp_send_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (socks5_udp_send_socket < 0) {
+        close(socks5_udp_socket);
+        socks5_udp_socket = -1;
+        return false;
+    }
+
+    printf("[UDP] SOCKS5 UDP ASSOCIATE established\n");
+    return true;
+}
+
 static void base64_encode(const char *in, char *out, size_t out_size) {
     static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     size_t len = strlen(in), olen = 0;
@@ -307,21 +409,21 @@ static void forward_data(int client_fd, int proxy_fd) {
     if (client_fd < 0 || proxy_fd < 0) return;
     
     fd_set rdfds;
-    char buf[8192];
+    char buf[32768];
     int maxfd = (client_fd > proxy_fd) ? client_fd : proxy_fd;
-    int idle_seconds = 0;
-    const int IDLE_TIMEOUT = 300; // 5 minutes
+    int idle_count = 0;
+    const int IDLE_TIMEOUT = 3000;
     
-    while (g_running && idle_seconds < IDLE_TIMEOUT) {
+    while (g_running && idle_count < IDLE_TIMEOUT) {
         FD_ZERO(&rdfds);
         FD_SET(client_fd, &rdfds);
         FD_SET(proxy_fd, &rdfds);
-        struct timeval tv = {1, 0};
+        struct timeval tv = {0, 100000};
         int ret = select(maxfd + 1, &rdfds, NULL, NULL, &tv);
         
-        if (ret < 0) break; // Error
-        if (ret == 0) { idle_seconds++; continue; } // Timeout
-        idle_seconds = 0; // Reset on activity
+        if (ret < 0) break;
+        if (ret == 0) { idle_count++; continue; }
+        idle_count = 0;
         
         if (FD_ISSET(client_fd, &rdfds)) {
             ssize_t n = recv(client_fd, buf, sizeof(buf), 0);
@@ -344,27 +446,27 @@ static void* handle_tcp_conn(void *arg) {
     char process[16] = "unknown";
     uint32_t pid = 0;
     
+    int opt = 1;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+    
     if (get_original_dest_from_map(client_fd, &dest_ip, &dest_port, process, &pid) != 0) {
         close(client_fd);
         return NULL;
     }
     
-    // Check rules in userspace
     uint8_t action = check_proxy_rules(process, dest_ip, dest_port, PROTO_TCP);
-    
-    // Log connection with actual action
     log_connection(process, pid, dest_ip, dest_port, action, PROTO_TCP);
     
     if (action == ACTION_BLOCK) {
-        // BLOCK: just close
         close(client_fd);
         return NULL;
     }
     
     if (action == ACTION_DIRECT) {
-        // DIRECT: connect directly to original destination
         dest_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (dest_fd < 0) goto cleanup;
+        int opt = 1;
+        setsockopt(dest_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
         struct sockaddr_in daddr = {0};
         daddr.sin_family = AF_INET;
         daddr.sin_addr.s_addr = htonl(dest_ip);
@@ -372,9 +474,10 @@ static void* handle_tcp_conn(void *arg) {
         if (connect(dest_fd, (struct sockaddr*)&daddr, sizeof(daddr)) != 0) goto cleanup;
         forward_data(client_fd, dest_fd);
     } else {
-        // PROXY: connect via proxy
         dest_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (dest_fd < 0) goto cleanup;
+        int opt = 1;
+        setsockopt(dest_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
         uint32_t proxy_ip = resolve_host(g_proxy.proxy_host);
         if (proxy_ip == 0) goto cleanup;
         struct sockaddr_in paddr = {0};
@@ -401,21 +504,25 @@ static void* tcp_relay(void *arg) {
     if (g_tcp_fd < 0) return NULL;
     int opt = 1;
     setsockopt(g_tcp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(g_tcp_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+    int bufsize = 262144;
+    setsockopt(g_tcp_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(g_tcp_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(LOCAL_PROXY_PORT);
-    if (bind(g_tcp_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 || listen(g_tcp_fd, 128) < 0) {
+    if (bind(g_tcp_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 || listen(g_tcp_fd, 512) < 0) {
         close(g_tcp_fd);
         g_tcp_fd = -1;
         return NULL;
     }
-    // TCP relay listening
+    
     while (g_running) {
         fd_set rdfds;
         FD_ZERO(&rdfds);
         FD_SET(g_tcp_fd, &rdfds);
-        struct timeval tv = {1, 0};
+        struct timeval tv = {0, 100000};
         if (select(g_tcp_fd + 1, &rdfds, NULL, NULL, &tv) <= 0) continue;
         int client_fd = accept(g_tcp_fd, NULL, NULL);
         if (client_fd >= 0) {
@@ -430,6 +537,152 @@ static void* tcp_relay(void *arg) {
 
 static void* udp_relay(void *arg) {
     (void)arg;
+    struct sockaddr_in addr;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return NULL;
+    
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);
+    
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return NULL;
+    }
+    
+    g_udp_fd = fd;
+    static unsigned char recv_buf[65536];
+    static unsigned char send_buf[65536];
+    
+    if (g_proxy.proxy_type == PROXY_TYPE_SOCKS5) {
+        udp_associate_connected = establish_udp_associate();
+    }
+    
+    while (g_running) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        int maxfd = fd;
+        
+        if (udp_associate_connected && socks5_udp_send_socket >= 0) {
+            FD_SET(socks5_udp_send_socket, &rfds);
+            if (socks5_udp_send_socket > maxfd) maxfd = socks5_udp_send_socket;
+        }
+        
+        struct timeval tv = {0, 50000};
+        int ret = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+        if (ret <= 0) continue;
+        
+        if (FD_ISSET(fd, &rfds)) {
+            struct sockaddr_in client_addr;
+            socklen_t client_len = sizeof(client_addr);
+            ssize_t n = recvfrom(fd, recv_buf, sizeof(recv_buf), 0, (struct sockaddr*)&client_addr, &client_len);
+            if (n <= 0) continue;
+            
+            uint32_t dest_ip = 0;
+            uint16_t dest_port = 0;
+            uint32_t pid = 0;
+            char process[16] = "unknown";
+            
+            pthread_mutex_lock(&g_conn_map_mutex);
+            time_t now = time(NULL);
+            for (int i = g_conn_map_count - 1; i >= 0; i--) {
+                if (g_conn_map[i].proto == PROTO_UDP && (now - g_conn_map[i].timestamp) < 5) {
+                    dest_ip = g_conn_map[i].dest_ip;
+                    dest_port = g_conn_map[i].dest_port;
+                    pid = g_conn_map[i].pid;
+                    strncpy(process, g_conn_map[i].process, 16);
+                    
+                    if (i < g_conn_map_count - 1) {
+                        memmove(&g_conn_map[i], &g_conn_map[i+1], (g_conn_map_count - i - 1) * sizeof(struct conn_info));
+                    }
+                    g_conn_map_count--;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&g_conn_map_mutex);
+            
+            if (dest_ip == 0 || dest_port == 0) continue;
+            
+            uint8_t action = check_proxy_rules(process, dest_ip, dest_port, PROTO_UDP);
+            
+            if (g_proxy.proxy_type == PROXY_TYPE_HTTP && action == ACTION_PROXY) {
+                action = ACTION_DIRECT;
+            }
+            
+            log_connection(process, pid, dest_ip, dest_port, action, PROTO_UDP);
+            
+            if (action == ACTION_BLOCK) continue;
+            
+            if (action == ACTION_DIRECT) {
+                int out_fd = socket(AF_INET, SOCK_DGRAM, 0);
+                if (out_fd < 0) continue;
+                
+                struct sockaddr_in dest_addr = {0};
+                dest_addr.sin_family = AF_INET;
+                dest_addr.sin_addr.s_addr = htonl(dest_ip);
+                dest_addr.sin_port = htons(dest_port);
+                sendto(out_fd, recv_buf, n, 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+                
+                fd_set r;
+                struct timeval t = {1, 0};
+                FD_ZERO(&r);
+                FD_SET(out_fd, &r);
+                if (select(out_fd + 1, &r, NULL, NULL, &t) > 0) {
+                    char resp[65536];
+                    ssize_t rn = recvfrom(out_fd, resp, sizeof(resp), 0, NULL, NULL);
+                    if (rn > 0) sendto(fd, resp, rn, 0, (struct sockaddr*)&client_addr, client_len);
+                }
+                close(out_fd);
+            } else {
+                if (!udp_associate_connected) {
+                    udp_associate_connected = establish_udp_associate();
+                    if (!udp_associate_connected) continue;
+                }
+                
+                send_buf[0] = send_buf[1] = send_buf[2] = 0;
+                send_buf[3] = SOCKS5_ATYP_IPV4;
+                send_buf[4] = (dest_ip >> 0) & 0xFF;
+                send_buf[5] = (dest_ip >> 8) & 0xFF;
+                send_buf[6] = (dest_ip >> 16) & 0xFF;
+                send_buf[7] = (dest_ip >> 24) & 0xFF;
+                send_buf[8] = (dest_port >> 8) & 0xFF;
+                send_buf[9] = (dest_port >> 0) & 0xFF;
+                memcpy(&send_buf[10], recv_buf, n);
+                
+                int sent = sendto(socks5_udp_send_socket, send_buf, 10 + n, 0,
+                                  (struct sockaddr*)&socks5_udp_relay_addr, sizeof(socks5_udp_relay_addr));
+                
+                if (sent < 0) {
+                    if (socks5_udp_socket >= 0) close(socks5_udp_socket);
+                    if (socks5_udp_send_socket >= 0) close(socks5_udp_send_socket);
+                    socks5_udp_socket = socks5_udp_send_socket = -1;
+                    udp_associate_connected = false;
+                }
+            }
+        }
+        
+        if (udp_associate_connected && socks5_udp_send_socket >= 0 && FD_ISSET(socks5_udp_send_socket, &rfds)) {
+            struct sockaddr_in from_addr;
+            socklen_t from_len = sizeof(from_addr);
+            ssize_t n = recvfrom(socks5_udp_send_socket, recv_buf, sizeof(recv_buf), 0,
+                                 (struct sockaddr*)&from_addr, &from_len);
+            
+            if (n < 0) {
+                if (socks5_udp_socket >= 0) close(socks5_udp_socket);
+                if (socks5_udp_send_socket >= 0) close(socks5_udp_send_socket);
+                socks5_udp_socket = socks5_udp_send_socket = -1;
+                udp_associate_connected = false;
+                continue;
+            }
+            
+            if (n > 10 && recv_buf[2] == 0x00 && recv_buf[3] == SOCKS5_ATYP_IPV4) {
+                sendto(fd, &recv_buf[10], n - 10, 0, (struct sockaddr*)&from_addr, from_len);
+            }
+        }
+    }
+    
+    close(fd);
     return NULL;
 }
 
@@ -439,11 +692,14 @@ static void handle_event(void *ctx, int cpu, void *data, unsigned int data_sz) {
     struct conn_event *e = (struct conn_event *)data;
     if (data_sz < sizeof(*e)) return;
     
-    // Store process name for relay to use
     pthread_mutex_lock(&g_conn_map_mutex);
     if (g_conn_map_count < 1000) {
         strncpy(g_conn_map[g_conn_map_count].process, e->process_name, 16);
         g_conn_map[g_conn_map_count].pid = e->pid;
+        g_conn_map[g_conn_map_count].dest_ip = e->dest_ip;
+        g_conn_map[g_conn_map_count].dest_port = e->dest_port;
+        g_conn_map[g_conn_map_count].proto = e->proto;
+        g_conn_map[g_conn_map_count].timestamp = time(NULL);
         g_conn_map_count++;
     }
     pthread_mutex_unlock(&g_conn_map_mutex);
@@ -515,7 +771,7 @@ bool ProxyBridge_Start(void) {
     printf("[BPF] Stored relay PID %u to skip redirect loop\n", our_pid);
     
     pthread_create(&g_tcp_thread, NULL, tcp_relay, NULL);
-    if (g_proxy.proxy_type == PROXY_TYPE_SOCKS5) pthread_create(&g_udp_thread, NULL, udp_relay, NULL);
+    pthread_create(&g_udp_thread, NULL, udp_relay, NULL);
     pthread_create(&g_event_thread, NULL, event_reader, NULL);
     return true;
 }
