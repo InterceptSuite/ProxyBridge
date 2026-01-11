@@ -193,17 +193,20 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         
         try? session.sendProviderMessage(data) { [weak self] response in
             guard let self = self,
-                  let responseData = response,
-                  let log = try? JSONSerialization.jsonObject(with: responseData) as? [String: String] else {
+                  let responseData = response else {
                 return
             }
             
-            DispatchQueue.main.async {
-                if log["type"] == "connection" {
-                    self.handleConnectionLog(log)
-                } else {
-                    self.handleActivityLog(log)
-                }                
+            if let logs = try? JSONSerialization.jsonObject(with: responseData) as? [[String: String]] {
+                DispatchQueue.main.async {
+                    for log in logs {
+                        if log["type"] == "connection" {
+                            self.handleConnectionLog(log)
+                        } else {
+                            self.handleActivityLog(log)
+                        }
+                    }
+                }
             }
         }
     }

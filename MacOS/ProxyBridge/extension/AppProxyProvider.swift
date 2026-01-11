@@ -253,9 +253,10 @@ class AppProxyProvider: NETransparentProxyProvider {
         case "getLogs":
             logQueueLock.lock()
             if !logQueue.isEmpty {
-                let logEntry = logQueue.removeFirst()
+                let logsToSend = Array(logQueue.prefix(min(100, logQueue.count)))
+                logQueue.removeFirst(logsToSend.count)
                 logQueueLock.unlock()
-                completionHandler?(try? JSONSerialization.data(withJSONObject: logEntry))
+                completionHandler?(try? JSONSerialization.data(withJSONObject: logsToSend))
             } else {
                 logQueueLock.unlock()
                 completionHandler?(nil)

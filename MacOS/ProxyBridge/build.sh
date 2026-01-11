@@ -3,26 +3,19 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_PATH="$SCRIPT_DIR/output/ProxyBridge.app"
 
-rm -rf "$SCRIPT_DIR/output"
-mkdir -p "$SCRIPT_DIR/output"
+if [ ! -d "$APP_PATH" ]; then
+    echo "Error: ProxyBridge.app not found in output directory"
+    echo "Export the app from Xcode to output/ first"
+    exit 1
+fi
 
-xcodebuild \
-    -project ProxyBridge.xcodeproj \
-    -scheme ProxyBridge \
-    -configuration Release \
-    -derivedDataPath build/DerivedData \
-    ARCHS="arm64 x86_64" \
-    ONLY_ACTIVE_ARCH=NO \
-    CODE_SIGN_IDENTITY="-" \
-    CODE_SIGNING_REQUIRED=NO \
-    CODE_SIGNING_ALLOWED=NO \
-    clean build
+mkdir -p "$SCRIPT_DIR/build/component"
 
-cp -R build/DerivedData/Build/Products/Release/ProxyBridge.app output/
+cp -R "$APP_PATH" "$SCRIPT_DIR/build/component/"
 
-mkdir -p build/component
-cp -R output/ProxyBridge.app build/component/
+echo "Creating installer package..."
 
 pkgbuild \
     --root build/component \
@@ -54,6 +47,23 @@ productbuild \
     --distribution build/distribution.xml \
     --package-path build \
     output/ProxyBridge-Installer.pkg
+
+echo "Package created: output/ProxyBridge-Installer.pkg"
+
+if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+    echo "Notarizing installer..."
+    xcrun notarytool submit output/ProxyBridge-Installer.pkg \
+        --apple-id "$APPLE_ID" \
+        --team-id "L4HJT32Z59" \
+        --password "$APPLE_APP_PASSWORD" \
+        --wait
+    
+    echo "Stapling notarization ticket..."
+    xcrun stapler staple output/ProxyBridge-Installer.pkg
+    echo "Installer notarized"
+else
+    echo "Skipping notarization - set APPLE_ID and APPLE_APP_PASSWORD to notarize"
+fi
 
 rm -rf build
 
