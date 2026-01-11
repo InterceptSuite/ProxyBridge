@@ -7,6 +7,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     @Published var connections: [ConnectionLog] = []
     @Published var activityLogs: [ActivityLog] = []
     @Published var isProxyActive = false
+    @Published var isTrafficLoggingEnabled = true
     
     var tunnelSession: NETunnelProviderSession?
     private var logTimer: Timer?
@@ -43,8 +44,32 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     
     override init() {
         super.init()
+        loadTrafficLoggingSetting()
         loadProxyConfig()
         installAndStartProxy()
+    }
+    
+    private func loadTrafficLoggingSetting() {
+        isTrafficLoggingEnabled = UserDefaults.standard.object(forKey: "trafficLoggingEnabled") as? Bool ?? true
+    }
+    
+    func toggleTrafficLogging() {
+        isTrafficLoggingEnabled.toggle()
+        UserDefaults.standard.set(isTrafficLoggingEnabled, forKey: "trafficLoggingEnabled")
+        sendTrafficLoggingToExtension(isTrafficLoggingEnabled)
+    }
+    
+    private func sendTrafficLoggingToExtension(_ enabled: Bool) {
+        guard let session = tunnelSession else { return }
+        
+        let message: [String: Any] = [
+            "action": "setTrafficLogging",
+            "enabled": enabled
+        ]
+        
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
+        
+        try? session.sendProviderMessage(data) { _ in }
     }
     
     private func loadProxyConfig() {
@@ -173,6 +198,8 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     private func setupLogPolling(session: NETunnelProviderSession) {
         tunnelSession = session
         
+        sendTrafficLoggingToExtension(isTrafficLoggingEnabled)
+        
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.logTimer?.invalidate()
@@ -212,6 +239,8 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     private func handleConnectionLog(_ log: [String: String]) {
+        guard isTrafficLoggingEnabled else { return }
+        
         guard let proto = log["protocol"],
               let process = log["process"],
               let dest = log["destination"],

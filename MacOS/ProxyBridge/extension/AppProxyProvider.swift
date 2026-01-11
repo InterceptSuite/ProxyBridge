@@ -189,6 +189,8 @@ class AppProxyProvider: NETransparentProxyProvider {
     private var logQueue: [[String: String]] = []
     private let logQueueLock = NSLock()
     
+    private var trafficLoggingEnabled = true
+    
     private var rules: [ProxyRule] = []
     private let rulesLock = NSLock()
     private var nextRuleId: UInt32 = 1
@@ -259,6 +261,14 @@ class AppProxyProvider: NETransparentProxyProvider {
                 completionHandler?(try? JSONSerialization.data(withJSONObject: logsToSend))
             } else {
                 logQueueLock.unlock()
+                completionHandler?(nil)
+            }
+        case "setTrafficLogging":
+            if let enabled = message["enabled"] as? Bool {
+                trafficLoggingEnabled = enabled
+                let response = ["status": "ok"]
+                completionHandler?(try? JSONSerialization.data(withJSONObject: response))
+            } else {
                 completionHandler?(nil)
             }
         case "setProxyConfig":
@@ -1174,6 +1184,8 @@ class AppProxyProvider: NETransparentProxyProvider {
     }
     
     private func sendLogToApp(protocol: String, process: String, destination: String, port: String, proxy: String) {
+        guard trafficLoggingEnabled else { return }
+        
         let logData: [String: String] = [
             "type": "connection",
             "protocol": `protocol`,

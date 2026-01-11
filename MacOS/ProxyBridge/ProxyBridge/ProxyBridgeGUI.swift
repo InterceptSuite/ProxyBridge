@@ -27,6 +27,13 @@ struct ProxyBridgeGUIApp: App {
                     openProxyRulesWindow()
                 }
                 .keyboardShortcut("r", modifiers: .command)
+                
+                Divider()
+                
+                Toggle("Enable Traffic Logging", isOn: Binding(
+                    get: { viewModel.isTrafficLoggingEnabled },
+                    set: { _ in viewModel.toggleTrafficLogging() }
+                ))
             }
             
             CommandGroup(replacing: .help) {
