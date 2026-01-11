@@ -54,7 +54,7 @@ if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
     echo "Notarizing installer..."
     xcrun notarytool submit output/ProxyBridge-Installer.pkg \
         --apple-id "$APPLE_ID" \
-        --team-id "L4HJT32Z59" \
+        --team-id "" \
         --password "$APPLE_APP_PASSWORD" \
         --wait
     
