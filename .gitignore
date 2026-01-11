@@ -87,7 +87,9 @@ Temporary Items
 MacOS/ProxyBridge/build/
 MacOS/ProxyBridge/output/
 
-Linux/**
+# Linux/**
 MacOS/ProxyBridge/Signing-Config.xcconfig
 MacOS/ProxyBridge/Signing-Config-app.xcconfig
 MacOS/ProxyBridge/Signing-Config-ext.xcconfig
+Linux/output/**
+Linux/build/**

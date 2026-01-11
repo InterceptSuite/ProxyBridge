@@ -134,27 +134,7 @@ public class ProxyBridgeService : IDisposable
     {
         if (_isRunning)
         {
-            Stop();
-
-            // WinDivert takes few seconds to stop
-            System.Threading.Thread.Sleep(500);
-
-            // STOP WinDivert kernel driver
-            try
-            {
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "sc.exe",
-                    Arguments = "stop WinDivert",
-                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
-                    CreateNoWindow = true,
-                    UseShellExecute = false
-                };
-                var process = System.Diagnostics.Process.Start(psi);
-                process?.WaitForExit(2000);
-            }
-            catch {
-             }
+            Stop(); // removing the threads, C code handle close no need to manually handle drives
         }
         GC.SuppressFinalize(this);
     }
