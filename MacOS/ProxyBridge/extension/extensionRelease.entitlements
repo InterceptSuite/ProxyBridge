@@ -4,15 +4,24 @@
 <dict>
 	<key>com.apple.developer.networking.networkextension</key>
 	<array>
-		<string>dns-proxy</string>
-		<string>content-filter-provider</string>
-		<string>app-proxy-provider-systemextension</string>
-		<string>app-proxy-provider</string>
-		<string>packet-tunnel-provider</string>
-	</array>
+				<string>packet-tunnel-provider-systemextension</string>
+				<string>app-proxy-provider-systemextension</string>
+				<string>content-filter-provider-systemextension</string>
+				<string>dns-proxy-systemextension</string>
+				<string>dns-settings</string>
+				<string>relay</string>
+				<string>url-filter-provider</string>
+				<string>hotspot-provider</string>
+		</array>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>group.com.interceptsuite.ProxyBridge</string>
 	</array>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
 </dict>
 </plist>

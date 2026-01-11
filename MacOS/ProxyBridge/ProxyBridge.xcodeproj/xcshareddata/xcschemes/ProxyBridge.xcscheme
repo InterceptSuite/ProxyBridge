@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "8466A1D22EC63B9400A8C2E5"
-               BuildableName = "ProxyBridge.app"
+               BuildableName = ".app"
                BlueprintName = "ProxyBridge"
                ReferencedContainer = "container:ProxyBridge.xcodeproj">
             </BuildableReference>
@@ -45,7 +45,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "8466A1D22EC63B9400A8C2E5"
-            BuildableName = "ProxyBridge.app"
+            BuildableName = ".app"
             BlueprintName = "ProxyBridge"
             ReferencedContainer = "container:ProxyBridge.xcodeproj">
          </BuildableReference>
@@ -62,7 +62,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "8466A1D22EC63B9400A8C2E5"
-            BuildableName = "ProxyBridge.app"
+            BuildableName = ".app"
             BlueprintName = "ProxyBridge"
             ReferencedContainer = "container:ProxyBridge.xcodeproj">
          </BuildableReference>

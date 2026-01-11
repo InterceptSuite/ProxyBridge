@@ -22,6 +22,11 @@ MacOS/ProxyBridge/output/
 MacOS/ProxyBridge/build/
 MacOS/ProxyBridge/provision/**
 
+# Signing configuration files (sensitive)
+MacOS/ProxyBridge/Signing-App.xcconfig
+MacOS/ProxyBridge/Signing-Extension.xcconfig
+MacOS/ProxyBridge/Signing-Config.xcconfig
+
 # Xcode
 xcuserdata/
 *.xcscmblueprint
@@ -83,3 +88,6 @@ MacOS/ProxyBridge/build/
 MacOS/ProxyBridge/output/
 
 Linux/**
+MacOS/ProxyBridge/Signing-Config.xcconfig
+MacOS/ProxyBridge/Signing-Config-app.xcconfig
+MacOS/ProxyBridge/Signing-Config-ext.xcconfig
