@@ -22,6 +22,14 @@ jobs:
       with:
         xcode-version: latest-stable
     
+    - name: Create xcconfig files
+      run: |
+        cd MacOS/ProxyBridge
+        cp proxybridge-app.xcconfig Signing-Config-app.xcconfig
+        cp proxybridge-ext.xcconfig Signing-Config-ext.xcconfig
+        sed -i '' 's/DEVELOPMENT_TEAM = L.*/DEVELOPMENT_TEAM = /' Signing-Config-app.xcconfig
+        sed -i '' 's/DEVELOPMENT_TEAM = L.*/DEVELOPMENT_TEAM = /' Signing-Config-ext.xcconfig
+    
     - name: Build Universal Binary
       run: |
         cd MacOS/ProxyBridge
