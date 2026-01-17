@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using ProxyBridge.GUI.Services;
+using ProxyBridge.GUI.Common;
 
 namespace ProxyBridge.GUI.ViewModels;
 

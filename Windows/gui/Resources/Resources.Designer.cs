@@ -104,6 +104,12 @@ namespace ProxyBridge.GUI.Resources {
             }
         }
 
+        internal static string MenuRunAtStartup {
+            get {
+                return ResourceManager.GetString("MenuRunAtStartup", resourceCulture);
+            }
+        }
+
         /// <summary>
         ///   Looks up a localized string similar to Language.
         /// </summary>

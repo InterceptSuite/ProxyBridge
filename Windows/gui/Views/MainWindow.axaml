@@ -223,6 +223,14 @@
                                       Margin="0"/>
                         </MenuItem.Icon>
                     </MenuItem>
+                    <MenuItem Header="{Binding Loc.MenuRunAtStartup}"
+                              Command="{Binding ToggleStartWithWindowsCommand}">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding StartWithWindows}"
+                                      IsHitTestVisible="False"
+                                      Margin="0"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
                     <Separator/>
                     <MenuItem Header="{Binding Loc.MenuLanguage}">
                         <MenuItem Header="English" Click="OnChangeLanguageEnglish">

@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using System.Windows.Input;
+using ProxyBridge.GUI.Common;
 
 namespace ProxyBridge.GUI.ViewModels;
 

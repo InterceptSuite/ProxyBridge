@@ -32,6 +32,9 @@
   <data name="MenuCloseToTray" xml:space="preserve">
     <value>Close to System Tray</value>
   </data>
+  <data name="MenuRunAtStartup" xml:space="preserve">
+    <value>Run at Startup</value>
+  </data>
   <data name="MenuLanguage" xml:space="preserve">
     <value>Language</value>
   </data>

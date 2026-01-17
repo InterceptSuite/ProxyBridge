@@ -2,6 +2,7 @@ using System;
 using System.Windows.Input;
 using System.Threading.Tasks;
 using ProxyBridge.GUI.Services;
+using ProxyBridge.GUI.Common;
 
 namespace ProxyBridge.GUI.ViewModels;
 

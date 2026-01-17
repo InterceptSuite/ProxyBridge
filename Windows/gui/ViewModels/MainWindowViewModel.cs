@@ -9,6 +9,7 @@ using Avalonia.Threading;
 using Avalonia.Controls;
 using ProxyBridge.GUI.Views;
 using ProxyBridge.GUI.Services;
+using ProxyBridge.GUI.Common;
 
 namespace ProxyBridge.GUI.ViewModels;
 
@@ -27,9 +28,11 @@ public class MainWindowViewModel : ViewModelBase
     private bool _isAddRuleViewOpen;
     private string _newProcessName = "";
     private string _newProxyAction = "PROXY";
+    private bool _startWithWindows;
     private Window? _mainWindow;
     private ProxyBridgeService? _proxyService;
     private bool _isServiceInitialized = false;
+    private readonly SettingsService _settingsService = new SettingsService();
 
     private string _currentProxyType = "SOCKS5";
     private string _currentProxyIp = "";
@@ -295,6 +298,12 @@ public class MainWindowViewModel : ViewModelBase
         set => SetProperty(ref _chineseCheckmark, value);
     }
 
+    public bool StartWithWindows
+    {
+        get => _startWithWindows;
+        set => SetProperty(ref _startWithWindows, value);
+    }
+
     // Commands
     public ICommand ShowProxySettingsCommand { get; }
     public ICommand ShowProxyRulesCommand { get; }
@@ -302,6 +311,7 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand CheckForUpdatesCommand { get; }
     public ICommand ToggleDnsViaProxyCommand { get; }
     public ICommand ToggleCloseToTrayCommand { get; }
+    public ICommand ToggleStartWithWindowsCommand { get; }
     public ICommand CloseDialogCommand { get; }
     public ICommand ClearConnectionsLogCommand { get; }
     public ICommand ClearActivityLogCommand { get; }
@@ -448,6 +458,15 @@ public class MainWindowViewModel : ViewModelBase
         {
             CloseToTray = !CloseToTray;
             SaveConfigurationInternal();
+        });
+
+        ToggleStartWithWindowsCommand = new RelayCommand(() =>
+        {
+            StartWithWindows = !StartWithWindows;
+            var settings = _settingsService.LoadSettings();
+            settings.StartWithWindows = StartWithWindows;
+            _settingsService.SaveSettings(settings);
+            _settingsService.SetStartupWithWindows(StartWithWindows);
         });
 
         CloseDialogCommand = new RelayCommand(CloseDialogs);
@@ -611,6 +630,9 @@ public class MainWindowViewModel : ViewModelBase
     {
         try
         {
+            var settings = _settingsService.LoadSettings();
+            StartWithWindows = settings.StartWithWindows && _settingsService.IsStartupEnabled();
+
             var config = ConfigManager.LoadConfig();
 
             _currentProxyType = config.ProxyType;
@@ -748,25 +770,4 @@ public class ProxyRule : ViewModelBase
         get => _isSelected;
         set => SetProperty(ref _isSelected, value);
     }
-}
-
-// Simple ICommand implementation
-public class RelayCommand : ICommand
-{
-    private readonly Action _execute;
-    private readonly Func<bool>? _canExecute;
-
-    public RelayCommand(Action execute, Func<bool>? canExecute = null)
-    {
-        _execute = execute ?? throw new ArgumentNullException(nameof(execute));
-        _canExecute = canExecute;
-    }
-
-    public event EventHandler? CanExecuteChanged;
-
-    public bool CanExecute(object? parameter) => _canExecute?.Invoke() ?? true;
-
-    public void Execute(object? parameter) => _execute();
-
-    public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 }

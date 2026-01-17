@@ -12,9 +12,10 @@ namespace ProxyBridge.GUI;
 
 public class App : Application
 {
+    public static bool StartMinimized { get; set; }
     private EventWaitHandle? _showWindowEvent;
     private CancellationTokenSource? _eventListenerCts;
-    private const string EventName = "Global\\ProxyBridge_ShowWindow_Event_v3.0";
+    private const string EventName = "Global\\ProxyBridge_ShowWindow_Event_v4.0";
 
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
 
@@ -23,6 +24,12 @@ public class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             desktop.MainWindow = new MainWindow { DataContext = new MainWindowViewModel() };
+
+            if (StartMinimized)
+            {
+                desktop.MainWindow.WindowState = WindowState.Minimized;
+                desktop.MainWindow.ShowInTaskbar = false;
+            }
 
             try
             {
@@ -70,6 +77,7 @@ public class App : Application
             var mainWindow = desktop.MainWindow;
             if (mainWindow != null)
             {
+                mainWindow.ShowInTaskbar = true;
                 mainWindow.Show();
                 mainWindow.WindowState = WindowState.Normal;
                 mainWindow.Activate();
