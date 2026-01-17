@@ -3,6 +3,12 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERSION="4.0"
+
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    source "$SCRIPT_DIR/.env"
+fi
+
 APP_PATH="$SCRIPT_DIR/output/ProxyBridge.app"
 
 if [ ! -d "$APP_PATH" ]; then
@@ -20,7 +26,7 @@ echo "Creating installer package..."
 pkgbuild \
     --root build/component \
     --identifier com.interceptsuite.ProxyBridge \
-    --version 3.0.0 \
+    --version 4.0.0 \
     --install-location /Applications \
     build/temp.pkg
 
@@ -39,34 +45,41 @@ cat > build/distribution.xml << 'EOF'
     <choice id="com.interceptsuite.ProxyBridge" visible="false">
         <pkg-ref id="com.interceptsuite.ProxyBridge"/>
     </choice>
-    <pkg-ref id="com.interceptsuite.ProxyBridge" version="3.0.0" onConclusion="none">temp.pkg</pkg-ref>
+    <pkg-ref id="com.interceptsuite.ProxyBridge" version="4.0.0" onConclusion="none">temp.pkg</pkg-ref>
 </installer-gui-script>
 EOF
 
 productbuild \
     --distribution build/distribution.xml \
     --package-path build \
-    output/ProxyBridge-Installer.pkg
+    output/ProxyBridge-v$VERSION-Universal-Installer.pkg
 
-echo "Package created: output/ProxyBridge-Installer.pkg"
+echo "Package created: output/ProxyBridge-v$VERSION-Universal-Installer.pkg"
 
-if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_PASSWORD" ] && [ -n "$SIGNING_IDENTITY" ]; then
+    echo "Signing installer..."
+    productsign --sign "$SIGNING_IDENTITY" \
+        output/ProxyBridge-v$VERSION-Universal-Installer.pkg \
+        output/ProxyBridge-v$VERSION-Universal-Installer-signed.pkg
+    
+    mv output/ProxyBridge-v$VERSION-Universal-Installer-signed.pkg output/ProxyBridge-v$VERSION-Universal-Installer.pkg
+    
     echo "Notarizing installer..."
-    xcrun notarytool submit output/ProxyBridge-Installer.pkg \
+    xcrun notarytool submit output/ProxyBridge-v$VERSION-Universal-Installer.pkg \
         --apple-id "$APPLE_ID" \
-        --team-id "" \
+        --team-id "$TEAM_ID" \
         --password "$APPLE_APP_PASSWORD" \
         --wait
     
     echo "Stapling notarization ticket..."
-    xcrun stapler staple output/ProxyBridge-Installer.pkg
-    echo "Installer notarized"
+    xcrun stapler staple output/ProxyBridge-v$VERSION-Universal-Installer.pkg
+    echo "Installer signed and notarized"
 else
-    echo "Skipping notarization - set APPLE_ID and APPLE_APP_PASSWORD to notarize"
+    echo "Skipping signing/notarization - set APPLE_ID, APPLE_APP_PASSWORD, SIGNING_IDENTITY, and TEAM_ID in .env"
 fi
 
 rm -rf build
 
 echo "✓ Build complete"
 echo "  App: output/ProxyBridge.app"
-echo "  PKG: output/ProxyBridge-Installer.pkg"
+echo "  PKG: output/ProxyBridge-v$VERSION-Universal-Installer.pkg"

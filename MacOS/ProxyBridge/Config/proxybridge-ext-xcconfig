@@ -1,0 +1,25 @@
+//
+//  Signing-Config-ext.xcconfig
+//  extension
+//
+//  Created by sourav kalal on 11/01/26.
+//
+
+// Configuration settings file format documentation can be found at:
+// https://developer.apple.com/documentation/xcode/adding-a-build-configuration-file-to-your-project
+
+// MARK: - Team Configuration
+DEVELOPMENT_TEAM = L //edit it
+
+// MARK: - Extension Signing
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = Developer ID Application
+CODE_SIGN_ENTITLEMENTS = extension/extensionRelease.entitlements
+PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge.extension
+PRODUCT_MODULE_NAME = com_interceptsuite_ProxyBridge_extension
+PROVISIONING_PROFILE_SPECIFIER = ProxyBridge Extension Prod
+
+// MARK: - Additional Signing Settings
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
+ENABLE_HARDENED_RUNTIME = YES
+

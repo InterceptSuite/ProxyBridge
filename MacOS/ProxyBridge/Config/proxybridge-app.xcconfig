@@ -1,0 +1,26 @@
+//
+//  Signing-Config.xcconfig
+//  ProxyBridge
+//
+//  Created by sourav kalal on 11/01/26.
+//
+
+// Configuration settings file format documentation can be found at:
+// https://developer.apple.com/documentation/xcode/adding-a-build-configuration-file-to-your-project
+
+// MARK: - Team Configuration
+DEVELOPMENT_TEAM = L******* // update it
+
+// MARK: - Main App Signing (ProxyBridge)
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = Developer ID Application
+CODE_SIGN_ENTITLEMENTS = ProxyBridge/ProxyBridgeRelease.entitlements
+PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge
+PRODUCT_MODULE_NAME = ProxyBridge
+PRODUCT_NAME = ProxyBridge
+PROVISIONING_PROFILE_SPECIFIER = ProxyBridge Prod
+
+// MARK: - Additional Signing Settings
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
+ENABLE_HARDENED_RUNTIME = YES
+

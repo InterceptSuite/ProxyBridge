@@ -129,7 +129,7 @@ class UpdateService {
         if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
             return "v\(version)"
         }
-        return "v3.0"
+        return "v4.0"
     }
     
     private func parseVersion(_ tagName: String) -> String {
