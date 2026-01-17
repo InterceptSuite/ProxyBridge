@@ -14,7 +14,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     private(set) var proxyConfig: ProxyConfig?
     
     private let maxLogEntries = 1000
-    private let logPollingInterval = 0.1
+    private let logPollingInterval = 1.0
     private let extensionIdentifier = "com.interceptsuite.ProxyBridge.extension"
     
     struct ProxyConfig {
@@ -57,6 +57,13 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         isTrafficLoggingEnabled.toggle()
         UserDefaults.standard.set(isTrafficLoggingEnabled, forKey: "trafficLoggingEnabled")
         sendTrafficLoggingToExtension(isTrafficLoggingEnabled)
+        
+        if isTrafficLoggingEnabled {
+            startLogPollingTimer()
+        } else {
+            logTimer?.invalidate()
+            logTimer = nil
+        }
     }
     
     private func sendTrafficLoggingToExtension(_ enabled: Bool) {
@@ -200,6 +207,12 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         
         sendTrafficLoggingToExtension(isTrafficLoggingEnabled)
         
+        if isTrafficLoggingEnabled {
+            startLogPollingTimer()
+        }
+    }
+    
+    private func startLogPollingTimer() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.logTimer?.invalidate()
