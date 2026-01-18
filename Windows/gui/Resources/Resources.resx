@@ -26,6 +26,9 @@
   <data name="MenuDnsViaProxy" xml:space="preserve">
     <value>DNS via Proxy</value>
   </data>
+  <data name="MenuEnableTrafficLogging" xml:space="preserve">
+    <value>Enable Traffic Logging</value>
+  </data>
   <data name="MenuSettings" xml:space="preserve">
     <value>Settings</value>
   </data>

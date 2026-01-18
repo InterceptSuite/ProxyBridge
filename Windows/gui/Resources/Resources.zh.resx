@@ -26,6 +26,9 @@
   <data name="MenuDnsViaProxy" xml:space="preserve">
     <value>DNS通过代理</value>
   </data>
+  <data name="MenuEnableTrafficLogging" xml:space="preserve">
+    <value>启用流量日志</value>
+  </data>
   <data name="MenuSettings" xml:space="preserve">
     <value>设置</value>
   </data>

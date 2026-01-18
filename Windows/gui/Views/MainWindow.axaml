@@ -205,6 +205,14 @@
                     <MenuItem Header="{Binding Loc.MenuProxySettings}" Command="{Binding ShowProxySettingsCommand}"/>
                     <MenuItem Header="{Binding Loc.MenuProxyRules}" Command="{Binding ShowProxyRulesCommand}"/>
                     <Separator/>
+                    <MenuItem Header="{Binding Loc.MenuEnableTrafficLogging}"
+                              Command="{Binding ToggleTrafficLoggingCommand}">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding IsTrafficLoggingEnabled}"
+                                      IsHitTestVisible="False"
+                                      Margin="0"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
                     <MenuItem Header="{Binding Loc.MenuDnsViaProxy}"
                               Command="{Binding ToggleDnsViaProxyCommand}">
                         <MenuItem.Icon>

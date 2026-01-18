@@ -2527,6 +2527,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
 
     if (windivert_handle != INVALID_HANDLE_VALUE)
     {
+        WinDivertShutdown(windivert_handle, WINDIVERT_SHUTDOWN_BOTH);
         WinDivertClose(windivert_handle);
         windivert_handle = INVALID_HANDLE_VALUE;
     }

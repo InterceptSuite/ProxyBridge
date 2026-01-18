@@ -92,6 +92,12 @@ namespace ProxyBridge.GUI.Resources {
             }
         }
 
+        internal static string MenuEnableTrafficLogging {
+            get {
+                return ResourceManager.GetString("MenuEnableTrafficLogging", resourceCulture);
+            }
+        }
+
         internal static string MenuSettings {
             get {
                 return ResourceManager.GetString("MenuSettings", resourceCulture);

@@ -101,7 +101,10 @@ public class MainWindowViewModel : ViewModelBase
                 }
                 ConnectionsLog += sb.ToString();
             };
-            _connectionLogTimer.Start();
+            if (_isTrafficLoggingEnabled)
+            {
+                _connectionLogTimer.Start();
+            }
 
             // Apply config DNS setting
             _proxyService.SetDnsViaProxy(_dnsViaProxy);
@@ -272,6 +275,33 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
+    private bool _isTrafficLoggingEnabled = true;  // Default TRUE
+    public bool IsTrafficLoggingEnabled
+    {
+        get => _isTrafficLoggingEnabled;
+        set
+        {
+            if (SetProperty(ref _isTrafficLoggingEnabled, value))
+            {
+                if (value)
+                {
+                    _connectionLogTimer?.Start();
+                }
+                else
+                {
+                    _connectionLogTimer?.Stop();
+                    // Clear pending logs when disabled
+                    lock (_connectionLogLock)
+                    {
+                        _pendingConnectionLogs.Clear();
+                    }
+                }
+                SaveConfigurationInternal();
+                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Traffic Logging: {(value ? "Enabled" : "Disabled")}\n";
+            }
+        }
+    }
+
     private bool _closeToTray = true;
     public bool CloseToTray
     {
@@ -310,6 +340,7 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand ShowAboutCommand { get; }
     public ICommand CheckForUpdatesCommand { get; }
     public ICommand ToggleDnsViaProxyCommand { get; }
+    public ICommand ToggleTrafficLoggingCommand { get; }
     public ICommand ToggleCloseToTrayCommand { get; }
     public ICommand ToggleStartWithWindowsCommand { get; }
     public ICommand CloseDialogCommand { get; }
@@ -452,6 +483,11 @@ public class MainWindowViewModel : ViewModelBase
         ToggleDnsViaProxyCommand = new RelayCommand(() =>
         {
             DnsViaProxy = !DnsViaProxy;
+        });
+
+        ToggleTrafficLoggingCommand = new RelayCommand(() =>
+        {
+            IsTrafficLoggingEnabled = !IsTrafficLoggingEnabled;
         });
 
         ToggleCloseToTrayCommand = new RelayCommand(() =>
@@ -643,6 +679,7 @@ public class MainWindowViewModel : ViewModelBase
 
             DnsViaProxy = config.DnsViaProxy;
             CloseToTray = config.CloseToTray;
+            IsTrafficLoggingEnabled = config.IsTrafficLoggingEnabled;
 
             _currentLanguage = config.Language;
             _loc.CurrentCulture = new System.Globalization.CultureInfo(config.Language);
@@ -686,6 +723,7 @@ public class MainWindowViewModel : ViewModelBase
                 ProxyUsername = _currentProxyUsername,
                 ProxyPassword = _currentProxyPassword,
                 DnsViaProxy = _dnsViaProxy,
+                IsTrafficLoggingEnabled = _isTrafficLoggingEnabled,
                 Language = _currentLanguage,
                 CloseToTray = _closeToTray,
                 ProxyRules = ProxyRules.Select(r => new ProxyRuleConfig
