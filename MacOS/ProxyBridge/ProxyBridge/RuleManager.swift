@@ -203,27 +203,47 @@ struct RuleManager {
             return
         }
         
-        var successCount = 0
-        let group = DispatchGroup()
-        
-        for rule in rules {
-            group.enter()
-            addRule(
-                session: session,
-                processNames: rule["processNames"] as? String ?? "",
-                targetHosts: rule["targetHosts"] as? String ?? "",
-                targetPorts: rule["targetPorts"] as? String ?? "",
-                protocol: rule["protocol"] as? String ?? "BOTH",
-                action: rule["action"] as? String ?? "DIRECT",
-                enabled: rule["enabled"] as? Bool ?? true
-            ) { success, _, _ in
-                if success { successCount += 1 }
-                group.leave()
+        // First, get existing rules to avoid duplicates
+        listRules(session: session) { success, existingRules in
+            guard success else {
+                completion(false, 0)
+                return
             }
-        }
-        
-        group.notify(queue: .main) {
-            completion(true, successCount)
+            
+            var successCount = 0
+            let group = DispatchGroup()
+            
+            for rule in rules {
+                // Check if a rule with the same properties already exists
+                let ruleExists = existingRules.contains { existing in
+                    existing["processNames"] as? String == rule["processNames"] as? String &&
+                    existing["targetHosts"] as? String == rule["targetHosts"] as? String &&
+                    existing["targetPorts"] as? String == rule["targetPorts"] as? String &&
+                    existing["protocol"] as? String == rule["protocol"] as? String &&
+                    existing["action"] as? String == rule["action"] as? String
+                }
+                
+                // Only add if the rule doesn't already exist
+                if !ruleExists {
+                    group.enter()
+                    addRule(
+                        session: session,
+                        processNames: rule["processNames"] as? String ?? "",
+                        targetHosts: rule["targetHosts"] as? String ?? "",
+                        targetPorts: rule["targetPorts"] as? String ?? "",
+                        protocol: rule["protocol"] as? String ?? "BOTH",
+                        action: rule["action"] as? String ?? "DIRECT",
+                        enabled: rule["enabled"] as? Bool ?? true
+                    ) { success, _, _ in
+                        if success { successCount += 1 }
+                        group.leave()
+                    }
+                }
+            }
+            
+            group.notify(queue: .main) {
+                completion(true, successCount)
+            }
         }
     }
 }
