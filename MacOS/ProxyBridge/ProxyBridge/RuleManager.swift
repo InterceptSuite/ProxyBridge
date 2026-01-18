@@ -220,7 +220,8 @@ struct RuleManager {
                     existing["targetHosts"] as? String == rule["targetHosts"] as? String &&
                     existing["targetPorts"] as? String == rule["targetPorts"] as? String &&
                     existing["protocol"] as? String == rule["protocol"] as? String &&
-                    existing["action"] as? String == rule["action"] as? String
+                    existing["action"] as? String == rule["action"] as? String &&
+                    existing["enabled"] as? Bool == rule["enabled"] as? Bool
                 }
                 
                 // Only add if the rule doesn't already exist
