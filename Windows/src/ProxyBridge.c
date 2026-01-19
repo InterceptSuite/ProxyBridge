@@ -1300,7 +1300,6 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
         return -1;
     }
 
-    log_message("HTTP: Connection established");
     return 0;
 }
 
@@ -1453,6 +1452,10 @@ static BOOL establish_udp_associate(void)
         return FALSE;
     }
 
+    DWORD udp_timeout = 30000;
+    setsockopt(socks5_udp_send_socket, SOL_SOCKET, SO_RCVTIMEO, (char*)&udp_timeout, sizeof(udp_timeout));
+    setsockopt(socks5_udp_send_socket, SOL_SOCKET, SO_SNDTIMEO, (char*)&udp_timeout, sizeof(udp_timeout));
+
     udp_associate_connected = TRUE;
     log_message("UDP ASSOCIATE established with SOCKS5 proxy");
     return TRUE;
@@ -1479,6 +1482,10 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
     int on = 1;
     setsockopt(udp_relay_socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
+
+    DWORD timeout = 30000; // 30 seconds
+    setsockopt(udp_relay_socket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(udp_relay_socket, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
 
     memset(&local_addr, 0, sizeof(local_addr));
     local_addr.sin_family = AF_INET;
@@ -1839,6 +1846,12 @@ static DWORD WINAPI connection_handler(LPVOID arg)
     socks_addr.sin_addr.s_addr = socks5_ip;
     socks_addr.sin_port = htons(g_proxy_port);
 
+    DWORD timeout = 30000; // 30 seconds
+    setsockopt(socks_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(socks_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+
     if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
     {
         log_message("Failed to connect to proxy (%d)", WSAGetLastError());
@@ -1908,7 +1921,7 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
     TRANSFER_CONFIG *config = (TRANSFER_CONFIG *)arg;
     SOCKET from = config->from_socket;
     SOCKET to = config->to_socket;
-    char buf[8192];
+    char buf[16384];
     int len;
 
     free(config);
