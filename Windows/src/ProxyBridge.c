@@ -1539,11 +1539,11 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
             if (recv_len > 0)
             {
+            // Buffer overflow protection
+            if (recv_len > MAXBUF - 10) continue;
+
                 UINT32 from_ip = from_addr.sin_addr.s_addr;
                 UINT16 from_port = ntohs(from_addr.sin_port);
-
-
-                // Packet from local application - encapsulate and forward to SOCKS5 proxy
                 UINT32 dest_ip;
                 UINT16 dest_port;
                 if (get_connection(from_port, &dest_ip, &dest_port))
@@ -1648,14 +1648,14 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                 CONNECTION_INFO *conn = connection_list;
                 struct sockaddr_in target_addr;
                 BOOL found = FALSE;
+                UINT32 target_ip = 0;
+                UINT16 target_port = 0;
                 while (conn != NULL)
                 {
                     if (conn->orig_dest_ip == src_ip && conn->orig_dest_port == src_port)
                     {
-                        memset(&target_addr, 0, sizeof(target_addr));
-                        target_addr.sin_family = AF_INET;
-                        target_addr.sin_addr.s_addr = conn->src_ip;
-                        target_addr.sin_port = htons(conn->src_port);
+                        target_ip = conn->src_ip;
+                        target_port = conn->src_port;
                         found = TRUE;
                         break;
                     }
@@ -1667,8 +1667,8 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                 {
                     memset(&target_addr, 0, sizeof(target_addr));
                     target_addr.sin_family = AF_INET;
-                    target_addr.sin_addr.s_addr = conn->src_ip;
-                    target_addr.sin_port = htons(conn->src_port);
+                    target_addr.sin_addr.s_addr = target_ip;
+                    target_addr.sin_port = htons(target_port);
 
                     sendto(udp_relay_socket, (char*)&recv_buf[10], recv_len - 10, 0,
                           (struct sockaddr *)&target_addr, sizeof(target_addr));
