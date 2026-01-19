@@ -51,10 +51,10 @@
 
   <!-- Tabs -->
   <data name="TabConnections" xml:space="preserve">
-    <value>🔌 网络连接</value>
+    <value>网络连接</value>
   </data>
   <data name="TabActivity" xml:space="preserve">
-    <value>📝 活动日志</value>
+    <value>活动日志</value>
   </data>
 
   <!-- Buttons -->

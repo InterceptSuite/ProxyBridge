@@ -21,7 +21,7 @@ public class MainWindowViewModel : ViewModelBase
     private string _title = "ProxyBridge";
     private int _selectedTabIndex;
     private string _connectionsLog = "";
-    private string _activityLog = "ProxyBridge initialized successfully\n";
+    private string _activityLog = "";
     private string _connectionsSearchText = "";
     private string _activitySearchText = "";
     private string _filteredConnectionsLog = "";
@@ -76,6 +76,9 @@ public class MainWindowViewModel : ViewModelBase
                 if (!_isTrafficLoggingEnabled)
                     return;
 
+                if (_connectionLogTimer?.IsEnabled == false)
+                    _connectionLogTimer.Start();
+
                 string logEntry = $"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}\n";
                 lock (_connectionLogLock)
                 {
@@ -83,11 +86,7 @@ public class MainWindowViewModel : ViewModelBase
                 }
             };
 
-            // Timer to flush batched logs to UI every 500ms
-            _connectionLogTimer = new DispatcherTimer
-            {
-                Interval = TimeSpan.FromMilliseconds(500)
-            };
+            _connectionLogTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _connectionLogTimer.Tick += (s, e) =>
             {
                 List<string> logsToAdd;
@@ -107,15 +106,8 @@ public class MainWindowViewModel : ViewModelBase
                     ConnectionsLog = string.Join("\n", linesToKeep);
                 }
             };
-            if (_isTrafficLoggingEnabled)
-            {
-                _connectionLogTimer.Start();
-            }
 
-            _activityLogTimer = new DispatcherTimer
-            {
-                Interval = TimeSpan.FromMilliseconds(500)
-            };
+            _activityLogTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _activityLogTimer.Tick += (s, e) =>
             {
                 List<string> logsToAdd;
@@ -143,15 +135,11 @@ public class MainWindowViewModel : ViewModelBase
                     portNum,
                     _currentProxyUsername,
                     _currentProxyPassword);
-
-                QueueActivityLog($"Restored proxy settings: {_currentProxyType} {_currentProxyIp}:{_currentProxyPort}");
             }
 
             // Start the proxy bridge
             if (_proxyService.Start())
             {
-                QueueActivityLog("ProxyBridge service started successfully");
-
                 // Apply config proxy rules, Need to see if this cause UI issues/slow/freeze
                 foreach (var rule in ProxyRules)
                 {
@@ -167,11 +155,6 @@ public class MainWindowViewModel : ViewModelBase
                         rule.RuleId = ruleId;
                         rule.Index = ProxyRules.IndexOf(rule) + 1;
                     }
-                }
-
-                if (ProxyRules.Count > 0)
-                {
-                    QueueActivityLog($"Restored {ProxyRules.Count} proxy rule(s)");
                 }
             }
             else
@@ -305,7 +288,7 @@ public class MainWindowViewModel : ViewModelBase
             {
                 _proxyService?.SetDnsViaProxy(value);
                 SaveConfigurationInternal();
-                QueueActivityLog($"DNS via Proxy: {(value ? "Enabled" : "Disabled")}");
+
             }
         }
     }
@@ -424,8 +407,6 @@ public class MainWindowViewModel : ViewModelBase
                             _currentProxyPassword = password;
 
                             SaveConfigurationInternal();
-                            string authInfo = string.IsNullOrEmpty(username) ? "" : " (with auth)";
-                            QueueActivityLog($"Saved proxy settings: {type} {ip}:{port}{authInfo}");
                         }
                         else
                         {
@@ -471,7 +452,6 @@ public class MainWindowViewModel : ViewModelBase
                             rule.Index = ProxyRules.Count + 1;
                             ProxyRules.Add(rule);
                             SaveConfigurationInternal();
-                            QueueActivityLog($"Added rule: {rule.ProcessName} ({rule.TargetHosts}:{rule.TargetPorts} {rule.Protocol}) -> {rule.Action} (ID: {ruleId})");
                         }
                         else
                         {
@@ -575,17 +555,14 @@ public class MainWindowViewModel : ViewModelBase
 
         ClearActivityLogCommand = new RelayCommand(() =>
         {
-            var oldActivity = ActivityLog;
-            var oldSearch = ActivitySearchText;
-            var oldFiltered = FilteredActivityLog;
+            lock (_activityLogLock)
+            {
+                _pendingActivityLogs.Clear();
+            }
 
-            ActivityLog = "ProxyBridge initialized successfully\n";
+            ActivityLog = "";
             ActivitySearchText = "";
-            FilteredActivityLog = "ProxyBridge initialized successfully\n";
-
-            oldActivity = null!;
-            oldSearch = null!;
-            oldFiltered = null!;
+            FilteredActivityLog = "";
 
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
             GC.WaitForPendingFinalizers();
@@ -634,7 +611,6 @@ public class MainWindowViewModel : ViewModelBase
                     rule.RuleId = ruleId;
                     ProxyRules.Add(rule);
                     SaveConfigurationInternal();
-                    QueueActivityLog($"Added rule: {NewProcessName} -> {NewProxyAction}");
                     IsAddRuleViewOpen = false;
                     NewProcessName = "";
                 }
@@ -665,8 +641,6 @@ public class MainWindowViewModel : ViewModelBase
         ConfigManager.SaveConfig(config);
 
         _loc.CurrentCulture = new System.Globalization.CultureInfo(languageCode);
-
-        QueueActivityLog($"{_loc.LogLanguageChanged}: {languageCode}");
     }
 
 

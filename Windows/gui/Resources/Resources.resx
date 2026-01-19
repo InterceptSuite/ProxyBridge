@@ -53,10 +53,10 @@
 
   <!-- Tabs -->
   <data name="TabConnections" xml:space="preserve">
-    <value>🔌 Connections</value>
+    <value>Connections</value>
   </data>
   <data name="TabActivity" xml:space="preserve">
-    <value>📝 Activity Logs</value>
+    <value>Activity Logs</value>
   </data>
 
   <!-- Buttons -->
@@ -91,9 +91,6 @@
   </data>
 
   <!-- Log Messages -->
-  <data name="LogInitialized" xml:space="preserve">
-    <value>ProxyBridge initialized successfully</value>
-  </data>
   <data name="LogServiceStarted" xml:space="preserve">
     <value>ProxyBridge service started successfully</value>
   </data>
