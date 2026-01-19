@@ -1201,7 +1201,6 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
         return -1;
     }
 
-    log_message("SOCKS5: Connection established");
     return 0;
 }
 

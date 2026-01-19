@@ -43,10 +43,12 @@ public class MainWindowViewModel : ViewModelBase
     private string _currentProxyUsername = "";
     private string _currentProxyPassword = "";
 
-    // Batch connection logs - UI need to maintain connnection logs, may crash if too many connection
-    private readonly List<string> _pendingConnectionLogs = new List<string>();
-    private readonly object _connectionLogLock = new object();
+    private readonly List<string> _pendingConnectionLogs = new(128);
+    private readonly List<string> _pendingActivityLogs = new(64);
+    private readonly object _connectionLogLock = new();
+    private readonly object _activityLogLock = new();
     private DispatcherTimer? _connectionLogTimer;
+    private DispatcherTimer? _activityLogTimer;
 
     public void SetMainWindow(Window window)
     {
@@ -63,10 +65,10 @@ public class MainWindowViewModel : ViewModelBase
             _proxyService = new ProxyBridgeService();
             _proxyService.LogReceived += (msg) =>
             {
-                Dispatcher.UIThread.Post(() =>
+                lock (_activityLogLock)
                 {
-                    ActivityLog += $"[{DateTime.Now:HH:mm:ss}] {msg}\n";
-                });
+                    _pendingActivityLogs.Add($"[{DateTime.Now:HH:mm:ss}] {msg}\n");
+                }
             };
 
             _proxyService.ConnectionReceived += (processName, pid, destIp, destPort, proxyInfo) =>
@@ -91,36 +93,41 @@ public class MainWindowViewModel : ViewModelBase
                 List<string> logsToAdd;
                 lock (_connectionLogLock)
                 {
-                    if (_pendingConnectionLogs.Count == 0)
-                        return;
-
+                    if (_pendingConnectionLogs.Count == 0) return;
                     logsToAdd = new List<string>(_pendingConnectionLogs);
                     _pendingConnectionLogs.Clear();
                 }
 
-                // Batch update UI
-                var sb = new StringBuilder();
-                foreach (var log in logsToAdd)
-                {
-                    sb.Append(log);
-                }
-                ConnectionsLog += sb.ToString();
+                ConnectionsLog += string.Join("", logsToAdd);
 
                 var lines = ConnectionsLog.Split('\n');
                 if (lines.Length > MAX_CONNECTION_LOG_LINES)
                 {
-                    var oldLog = ConnectionsLog;
                     var linesToKeep = lines.Skip(lines.Length - MAX_CONNECTION_LOG_LINES).ToArray();
                     ConnectionsLog = string.Join("\n", linesToKeep);
-
-                    oldLog = null!;
-                    GC.Collect(2, GCCollectionMode.Forced, false, false);
                 }
             };
             if (_isTrafficLoggingEnabled)
             {
                 _connectionLogTimer.Start();
             }
+
+            _activityLogTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(500)
+            };
+            _activityLogTimer.Tick += (s, e) =>
+            {
+                List<string> logsToAdd;
+                lock (_activityLogLock)
+                {
+                    if (_pendingActivityLogs.Count == 0) return;
+                    logsToAdd = new List<string>(_pendingActivityLogs);
+                    _pendingActivityLogs.Clear();
+                }
+                ActivityLog += string.Join("", logsToAdd);
+            };
+            _activityLogTimer.Start();
 
             // Apply config DNS setting
             _proxyService.SetDnsViaProxy(_dnsViaProxy);
@@ -137,13 +144,13 @@ public class MainWindowViewModel : ViewModelBase
                     _currentProxyUsername,
                     _currentProxyPassword);
 
-                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Restored proxy settings: {_currentProxyType} {_currentProxyIp}:{_currentProxyPort}\n";
+                QueueActivityLog($"Restored proxy settings: {_currentProxyType} {_currentProxyIp}:{_currentProxyPort}");
             }
 
             // Start the proxy bridge
             if (_proxyService.Start())
             {
-                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] ProxyBridge service started successfully\n";
+                QueueActivityLog("ProxyBridge service started successfully");
 
                 // Apply config proxy rules, Need to see if this cause UI issues/slow/freeze
                 foreach (var rule in ProxyRules)
@@ -164,17 +171,17 @@ public class MainWindowViewModel : ViewModelBase
 
                 if (ProxyRules.Count > 0)
                 {
-                    ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Restored {ProxyRules.Count} proxy rule(s)\n";
+                    QueueActivityLog($"Restored {ProxyRules.Count} proxy rule(s)");
                 }
             }
             else
             {
-                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] ERROR: Failed to start ProxyBridge service\n";
+                QueueActivityLog("ERROR: Failed to start ProxyBridge service");
             }
         }
         catch (Exception ex)
         {
-            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] ERROR: {ex.Message}\n";
+            QueueActivityLog($"ERROR: {ex.Message}");
         }
 
         _ = CheckForUpdatesOnStartupAsync();
@@ -220,9 +227,7 @@ public class MainWindowViewModel : ViewModelBase
                         var oldLog = _activityLog;
                         var linesToKeep = lines.Skip(lines.Length - MAX_ACTIVITY_LOG_LINES).ToArray();
                         _activityLog = string.Join("\n", linesToKeep);
-
                         oldLog = null!;
-                        GC.Collect(2, GCCollectionMode.Forced, false, false);
                     }
                 }
 
@@ -300,7 +305,7 @@ public class MainWindowViewModel : ViewModelBase
             {
                 _proxyService?.SetDnsViaProxy(value);
                 SaveConfigurationInternal();
-                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] DNS via Proxy: {(value ? "Enabled" : "Disabled")}\n";
+                QueueActivityLog($"DNS via Proxy: {(value ? "Enabled" : "Disabled")}");
             }
         }
     }
@@ -420,11 +425,11 @@ public class MainWindowViewModel : ViewModelBase
 
                             SaveConfigurationInternal();
                             string authInfo = string.IsNullOrEmpty(username) ? "" : " (with auth)";
-                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Saved proxy settings: {type} {ip}:{port}{authInfo}\n";
+                            QueueActivityLog($"Saved proxy settings: {type} {ip}:{port}{authInfo}");
                         }
                         else
                         {
-                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] ERROR: Failed to set proxy config\n";
+                            QueueActivityLog("ERROR: Failed to set proxy config");
                         }
                     }
                     window.Close();
@@ -466,11 +471,11 @@ public class MainWindowViewModel : ViewModelBase
                             rule.Index = ProxyRules.Count + 1;
                             ProxyRules.Add(rule);
                             SaveConfigurationInternal();
-                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Added rule: {rule.ProcessName} ({rule.TargetHosts}:{rule.TargetPorts} {rule.Protocol}) -> {rule.Action} (ID: {ruleId})\n";
+                            QueueActivityLog($"Added rule: {rule.ProcessName} ({rule.TargetHosts}:{rule.TargetPorts} {rule.Protocol}) -> {rule.Action} (ID: {ruleId})");
                         }
                         else
                         {
-                            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] ERROR: Failed to add rule\n";
+                            QueueActivityLog("ERROR: Failed to add rule");
                         }
                     }
                 },
@@ -629,13 +634,13 @@ public class MainWindowViewModel : ViewModelBase
                     rule.RuleId = ruleId;
                     ProxyRules.Add(rule);
                     SaveConfigurationInternal();
-                    ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Added rule: {NewProcessName} -> {NewProxyAction}\n";
+                    QueueActivityLog($"Added rule: {NewProcessName} -> {NewProxyAction}");
                     IsAddRuleViewOpen = false;
                     NewProcessName = "";
                 }
                 else
                 {
-                    ActivityLog += $"[{DateTime.Now:HH:mm:ss}] ERROR: Failed to add rule\n";
+                    QueueActivityLog("ERROR: Failed to add rule");
                 }
             }
         });
@@ -661,7 +666,7 @@ public class MainWindowViewModel : ViewModelBase
 
         _loc.CurrentCulture = new System.Globalization.CultureInfo(languageCode);
 
-        ActivityLog += $"[{DateTime.Now:HH:mm:ss}] {_loc.LogLanguageChanged}: {languageCode}\n";
+        QueueActivityLog($"{_loc.LogLanguageChanged}: {languageCode}");
     }
 
 
@@ -768,7 +773,7 @@ public class MainWindowViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Failed to load configuration: {ex.Message}\n";
+            QueueActivityLog($"Failed to load configuration: {ex.Message}");
         }
     }
 
@@ -806,6 +811,14 @@ public class MainWindowViewModel : ViewModelBase
             ConfigManager.SaveConfig(config);
         }
         catch { }
+    }
+
+    private void QueueActivityLog(string message)
+    {
+        lock (_activityLogLock)
+        {
+            _pendingActivityLogs.Add($"[{DateTime.Now:HH:mm:ss}] {message}\n");
+        }
     }
 }
 
