@@ -118,6 +118,11 @@ public class ProxyBridgeService : IDisposable
         ProxyBridgeNative.ProxyBridge_SetDnsViaProxy(enable);
     }
 
+    public static void SetTrafficLoggingEnabled(bool enable)
+    {
+        ProxyBridgeNative.ProxyBridge_SetTrafficLoggingEnabled(enable);
+    }
+
     public string TestConnection(string targetHost, ushort targetPort)
     {
         var buffer = new System.Text.StringBuilder(4096);

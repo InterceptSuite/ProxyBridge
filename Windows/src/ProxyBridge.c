@@ -44,6 +44,7 @@ typedef struct CONNECTION_INFO {
     UINT32 orig_dest_ip;
     UINT16 orig_dest_port;
     BOOL is_tracked;
+    DWORD last_activity;  // GetTickCount() timestamp for cleanup
     struct CONNECTION_INFO *next;
 } CONNECTION_INFO;
 
@@ -96,6 +97,8 @@ static BOOL udp_associate_connected = FALSE;
 static DWORD last_udp_connect_attempt = 0;
 static BOOL running = FALSE;
 static DWORD g_current_process_id = 0;
+
+static BOOL g_traffic_logging_enabled = TRUE;
 
 static char g_proxy_host[256] = "";  // Can be IP address or hostname
 static UINT16 g_proxy_port = 0;
@@ -154,6 +157,7 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
 static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port);
 static BOOL is_connection_tracked(UINT16 src_port);
 static void remove_connection(UINT16 src_port);
+static void cleanup_stale_connections(void);
 static BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 static void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 static void clear_logged_connections(void);
@@ -172,9 +176,18 @@ static DWORD WINAPI packet_processor(LPVOID arg)
     PWINDIVERT_IPHDR ip_header;
     PWINDIVERT_TCPHDR tcp_header;
     PWINDIVERT_UDPHDR udp_header;
+    DWORD last_cleanup = GetTickCount();
 
     while (running)
     {
+        DWORD now = GetTickCount();
+
+        if (now - last_cleanup > 30000)
+        {
+            cleanup_stale_connections();
+            last_cleanup = now;
+        }
+
         if (!WinDivertRecv(windivert_handle, packet, sizeof(packet), &packet_len, &addr))
         {
             if (GetLastError() == ERROR_INVALID_HANDLE)
@@ -280,7 +293,11 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 
                                 const char* display_name = extract_filename(process_name);
                                 g_connection_callback(display_name, pid, dest_ip_str, dest_port, proxy_info);
-                                add_logged_connection(pid, dest_ip, dest_port, action);
+
+                                if (g_traffic_logging_enabled)
+                                {
+                                    add_logged_connection(pid, dest_ip, dest_port, action);
+                                }
                             }
                         }
                     }
@@ -413,7 +430,10 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                             const char* display_name = extract_filename(process_name);
                             g_connection_callback(display_name, pid, dest_ip_str, orig_dest_port, proxy_info);
 
-                            add_logged_connection(pid, orig_dest_ip, orig_dest_port, action);
+                            if (g_traffic_logging_enabled)
+                            {
+                                add_logged_connection(pid, orig_dest_ip, orig_dest_port, action);
+                            }
                         }
                     }
                 }
@@ -1951,6 +1971,7 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
     conn->orig_dest_ip = dest_ip;
     conn->orig_dest_port = dest_port;
     conn->is_tracked = TRUE;
+    conn->last_activity = GetTickCount();
     conn->next = connection_list;
     connection_list = conn;
     ReleaseMutex(lock);
@@ -2009,6 +2030,86 @@ static void remove_connection(UINT16 src_port)
         }
         conn_ptr = &(*conn_ptr)->next;
     }
+    ReleaseMutex(lock);
+}
+
+static void cleanup_stale_connections(void)
+{
+    WaitForSingleObject(lock, INFINITE);
+
+    DWORD now = GetTickCount();
+    int removed = 0;
+    CONNECTION_INFO **conn_ptr = &connection_list;
+
+    while (*conn_ptr != NULL)
+    {
+        if (now - (*conn_ptr)->last_activity > 60000)
+        {
+            CONNECTION_INFO *to_free = *conn_ptr;
+            *conn_ptr = (*conn_ptr)->next;
+            free(to_free);
+            removed++;
+        }
+        else
+        {
+            conn_ptr = &(*conn_ptr)->next;
+        }
+    }
+
+    DWORD now_cache = GetTickCount();
+    int cache_removed = 0;
+    for (int i = 0; i < PID_CACHE_SIZE; i++)
+    {
+        PID_CACHE_ENTRY **entry_ptr = &pid_cache[i];
+        while (*entry_ptr != NULL)
+        {
+            if (now_cache - (*entry_ptr)->timestamp > 10000) /// need to remove it in 10sec
+            {
+                PID_CACHE_ENTRY *to_free = *entry_ptr;
+                *entry_ptr = (*entry_ptr)->next;
+                free(to_free);
+                cache_removed++;
+            }
+            else
+            {
+                entry_ptr = &(*entry_ptr)->next;
+            }
+        }
+    }
+
+    int logged_count = 0;
+    LOGGED_CONNECTION *temp = logged_connections;
+    while (temp != NULL)
+    {
+        logged_count++;
+        temp = temp->next;
+    }
+
+    if (logged_count > 500)
+    {
+        int to_remove = logged_count - 500;
+        int logged_removed = 0;
+
+        for (int i = 0; i < to_remove; i++)
+        {
+            LOGGED_CONNECTION **walk = &logged_connections;
+            LOGGED_CONNECTION *prev = NULL;
+
+            while (*walk != NULL && (*walk)->next != NULL)
+            {
+                walk = &(*walk)->next;
+            }
+
+            if (*walk != NULL)
+            {
+                LOGGED_CONNECTION *to_free = *walk;
+                *walk = NULL;
+                free(to_free);
+                logged_removed++;
+            }
+        }
+    }
+
     ReleaseMutex(lock);
 }
 
@@ -2246,6 +2347,15 @@ PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback)
 PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback)
 {
     g_connection_callback = callback;
+}
+
+PROXYBRIDGE_API void ProxyBridge_SetTrafficLoggingEnabled(BOOL enable)
+{
+    g_traffic_logging_enabled = enable;
+    if (!enable)
+    {
+        clear_logged_connections();
+    }
 }
 
 // Check if connection already logged (deduplication)

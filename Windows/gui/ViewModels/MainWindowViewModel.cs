@@ -15,6 +15,9 @@ namespace ProxyBridge.GUI.ViewModels;
 
 public class MainWindowViewModel : ViewModelBase
 {
+    private const int MAX_CONNECTION_LOG_LINES = 100;
+    private const int MAX_ACTIVITY_LOG_LINES = 100;
+
     private string _title = "ProxyBridge";
     private int _selectedTabIndex;
     private string _connectionsLog = "";
@@ -66,9 +69,11 @@ public class MainWindowViewModel : ViewModelBase
                 });
             };
 
-            // Add to queue instead of updating UI immediately
             _proxyService.ConnectionReceived += (processName, pid, destIp, destPort, proxyInfo) =>
             {
+                if (!_isTrafficLoggingEnabled)
+                    return;
+
                 string logEntry = $"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}\n";
                 lock (_connectionLogLock)
                 {
@@ -100,6 +105,17 @@ public class MainWindowViewModel : ViewModelBase
                     sb.Append(log);
                 }
                 ConnectionsLog += sb.ToString();
+
+                var lines = ConnectionsLog.Split('\n');
+                if (lines.Length > MAX_CONNECTION_LOG_LINES)
+                {
+                    var oldLog = ConnectionsLog;
+                    var linesToKeep = lines.Skip(lines.Length - MAX_CONNECTION_LOG_LINES).ToArray();
+                    ConnectionsLog = string.Join("\n", linesToKeep);
+
+                    oldLog = null!;
+                    GC.Collect(2, GCCollectionMode.Forced, false, false);
+                }
             };
             if (_isTrafficLoggingEnabled)
             {
@@ -196,6 +212,20 @@ public class MainWindowViewModel : ViewModelBase
         {
             if (SetProperty(ref _activityLog, value))
             {
+                if (!string.IsNullOrEmpty(_activityLog))
+                {
+                    var lines = _activityLog.Split('\n');
+                    if (lines.Length > MAX_ACTIVITY_LOG_LINES)
+                    {
+                        var oldLog = _activityLog;
+                        var linesToKeep = lines.Skip(lines.Length - MAX_ACTIVITY_LOG_LINES).ToArray();
+                        _activityLog = string.Join("\n", linesToKeep);
+
+                        oldLog = null!;
+                        GC.Collect(2, GCCollectionMode.Forced, false, false);
+                    }
+                }
+
                 if (string.IsNullOrWhiteSpace(_activitySearchText))
                     FilteredActivityLog = _activityLog;
             }
@@ -285,6 +315,7 @@ public class MainWindowViewModel : ViewModelBase
             {
                 if (value)
                 {
+                    ProxyBridgeService.SetTrafficLoggingEnabled(true);
                     _connectionLogTimer?.Start();
                 }
                 else
@@ -295,9 +326,19 @@ public class MainWindowViewModel : ViewModelBase
                     {
                         _pendingConnectionLogs.Clear();
                     }
+
+                    ProxyBridgeService.SetTrafficLoggingEnabled(false);
+
+                    ConnectionsLog = null!;
+                    FilteredConnectionsLog = null!;
+                    ConnectionsLog = "";
+                    FilteredConnectionsLog = "";
+
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
                 }
                 SaveConfigurationInternal();
-                ActivityLog += $"[{DateTime.Now:HH:mm:ss}] Traffic Logging: {(value ? "Enabled" : "Disabled")}\n";
             }
         }
     }
@@ -509,16 +550,41 @@ public class MainWindowViewModel : ViewModelBase
 
         ClearConnectionsLogCommand = new RelayCommand(() =>
         {
+            lock (_connectionLogLock)
+            {
+                _pendingConnectionLogs.Clear();
+            }
+
+            ConnectionsLog = null!;
+            ConnectionsSearchText = null!;
+            FilteredConnectionsLog = null!;
+
             ConnectionsLog = "";
             ConnectionsSearchText = "";
             FilteredConnectionsLog = "";
+
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
         });
 
         ClearActivityLogCommand = new RelayCommand(() =>
         {
+            var oldActivity = ActivityLog;
+            var oldSearch = ActivitySearchText;
+            var oldFiltered = FilteredActivityLog;
+
             ActivityLog = "ProxyBridge initialized successfully\n";
             ActivitySearchText = "";
             FilteredActivityLog = "ProxyBridge initialized successfully\n";
+
+            oldActivity = null!;
+            oldSearch = null!;
+            oldFiltered = null!;
+
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
         });
 
         SearchConnectionsCommand = new RelayCommand(() =>
