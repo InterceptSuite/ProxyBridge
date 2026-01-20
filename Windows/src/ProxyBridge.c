@@ -1928,6 +1928,31 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
 
     while (TRUE)
     {
+        //ait for data
+        fd_set readfds;
+        struct timeval timeout;
+
+        FD_ZERO(&readfds);
+        FD_SET(from, &readfds);
+
+        timeout.tv_sec = 5;
+        timeout.tv_usec = 0;
+
+        int ready = select(0, &readfds, NULL, NULL, &timeout);
+
+        if (ready == SOCKET_ERROR)
+        {
+            shutdown(from, SD_BOTH);
+            shutdown(to, SD_BOTH);
+            return 0;
+        }
+
+        if (ready == 0)
+        {
+
+            continue;
+        }
+
         len = recv(from, buf, sizeof(buf), 0);
         if (len <= 0)
         {
