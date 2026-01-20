@@ -1,0 +1,89 @@
+name: Feature Request
+description: Suggest a new feature for ProxyBridge
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest a new feature!
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Which platform is this feature request for?
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - All platforms
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ProxyBridge Version
+      description: What version of ProxyBridge are you currently using?
+      placeholder: e.g., 1.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS and Version
+      description: What operating system and version are you using?
+      placeholder: e.g., Windows 11 23H2, macOS 14.2 Sonoma, Ubuntu 22.04
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: documentation
+    attributes:
+      label: Documentation
+      description: Have you read the documentation for your platform?
+      options:
+        - label: I have read the [Windows documentation](https://github.com/InterceptSuite/ProxyBridge/blob/master/Windows/README.md)
+          required: false
+        - label: I have read the [macOS documentation](https://github.com/InterceptSuite/ProxyBridge/blob/master/MacOS/README.md)
+          required: false
+        - label: I have read the [Linux documentation](https://github.com/InterceptSuite/ProxyBridge/blob/master/Linux/README.md)
+          required: false
+
+  - type: checkboxes
+    id: code-review
+    attributes:
+      label: Code Review
+      description: Have you reviewed the code?
+      options:
+        - label: I have gone through the code page
+          required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Feature
+      description: |
+        Please provide a clear and detailed description of the feature you'd like to see.
+
+        **Please include:**
+        - What problem does this feature solve?
+        - How should it work?
+        - Any mockups or examples (if applicable)
+      placeholder: |
+        Problem: I would like to be able to...
+
+        Proposed solution: The feature should...
+
+        Benefits: This would help with...
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Add any other context, screenshots, or examples about the feature request here
+      placeholder: Any additional information that might be helpful
