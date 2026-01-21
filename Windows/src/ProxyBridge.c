@@ -21,6 +21,10 @@
 #define PID_CACHE_TTL_MS 1000
 #define NUM_PACKET_THREADS 4
 #define CONNECTION_HASH_SIZE 256
+#define SOCKS5_BUFFER_SIZE 1024
+#define HTTP_BUFFER_SIZE 1024
+#define FILTER_BUFFER_SIZE 512
+#define LOG_BUFFER_SIZE 1024
 
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
@@ -45,7 +49,7 @@ typedef struct CONNECTION_INFO {
     UINT32 orig_dest_ip;
     UINT16 orig_dest_port;
     BOOL is_tracked;
-    DWORD last_activity;  // GetTickCount() timestamp for cleanup
+    ULONGLONG last_activity;  // GetTickCount64() timestamp for cleanup
     struct CONNECTION_INFO *next;
 } CONNECTION_INFO;
 
@@ -88,6 +92,7 @@ static HANDLE windivert_handle = INVALID_HANDLE_VALUE;
 static HANDLE packet_thread[NUM_PACKET_THREADS] = {NULL};
 static HANDLE proxy_thread = NULL;
 static HANDLE udp_relay_thread = NULL;
+static HANDLE cleanup_thread = NULL;
 static PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE] = {NULL};
 static BOOL g_has_active_rules = FALSE;
 static SOCKET udp_relay_socket = INVALID_SOCKET;
@@ -114,7 +119,7 @@ static ConnectionCallback g_connection_callback = NULL;
 static void log_message(const char *msg, ...)
 {
     if (g_log_callback == NULL) return;
-    char buffer[1024];
+    char buffer[LOG_BUFFER_SIZE];
     va_list args;
     va_start(args, msg);
     vsnprintf(buffer, sizeof(buffer), msg, args);
@@ -177,18 +182,9 @@ static DWORD WINAPI packet_processor(LPVOID arg)
     PWINDIVERT_IPHDR ip_header;
     PWINDIVERT_TCPHDR tcp_header;
     PWINDIVERT_UDPHDR udp_header;
-    DWORD last_cleanup = GetTickCount();
 
     while (running)
     {
-        DWORD now = GetTickCount();
-
-        if (now - last_cleanup > 30000)
-        {
-            cleanup_stale_connections();
-            last_cleanup = now;
-        }
-
         if (!WinDivertRecv(windivert_handle, packet, sizeof(packet), &packet_len, &addr))
         {
             if (GetLastError() == ERROR_INVALID_HANDLE)
@@ -1104,7 +1100,7 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
 
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 {
-    unsigned char buf[512];
+    unsigned char buf[SOCKS5_BUFFER_SIZE];
     int len;
     BOOL use_auth = (g_proxy_username[0] != '\0');
 
@@ -1233,7 +1229,7 @@ static void base64_encode(const char* input, char* output, size_t output_size)
 
 static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 {
-    char request[1024];
+    char request[HTTP_BUFFER_SIZE];
     char response[4096];
     int len;
     char *status_line;
@@ -1243,8 +1239,8 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
     if (use_auth)
     {
         // Create "username:password" string and encode as Base64
-        char credentials[512];
-        char encoded[1024];
+        char credentials[SOCKS5_BUFFER_SIZE];
+        char encoded[HTTP_BUFFER_SIZE];
         snprintf(credentials, sizeof(credentials), "%s:%s", g_proxy_username, g_proxy_password);
         base64_encode(credentials, encoded, sizeof(encoded));
 
@@ -1310,7 +1306,7 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 
 static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr)
 {
-    unsigned char buf[512];
+    unsigned char buf[SOCKS5_BUFFER_SIZE];
     int len;
     BOOL use_auth = (g_proxy_username[0] != '\0');
 
@@ -1393,7 +1389,7 @@ static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr)
 static BOOL establish_udp_associate(void)
 {
     // Prevent retry spam - only try every 5 seconds
-    DWORD now = GetTickCount();
+    ULONGLONG now = GetTickCount64();
     if (now - last_udp_connect_attempt < 5000)
         return FALSE;
 
@@ -1415,6 +1411,13 @@ static BOOL establish_udp_associate(void)
     SOCKET tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (tcp_sock == INVALID_SOCKET)
         return FALSE;
+
+    int nodelay = 1;
+    setsockopt(tcp_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+
+    int bufsize = 262144;  // 256KB
+    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
 
     // 3 seconds, without delay can take extra system resource CPU/Memory
     DWORD timeout = 3000;
@@ -1457,6 +1460,11 @@ static BOOL establish_udp_associate(void)
         return FALSE;
     }
 
+    // Optimize UDP socket buffers for upload performance
+    int udp_bufsize = 262144;  // 256KB
+    setsockopt(socks5_udp_send_socket, SOL_SOCKET, SO_RCVBUF, (char*)&udp_bufsize, sizeof(udp_bufsize));
+    setsockopt(socks5_udp_send_socket, SOL_SOCKET, SO_SNDBUF, (char*)&udp_bufsize, sizeof(udp_bufsize));
+
     DWORD udp_timeout = 30000;
     setsockopt(socks5_udp_send_socket, SOL_SOCKET, SO_RCVTIMEO, (char*)&udp_timeout, sizeof(udp_timeout));
     setsockopt(socks5_udp_send_socket, SOL_SOCKET, SO_SNDTIMEO, (char*)&udp_timeout, sizeof(udp_timeout));
@@ -1487,6 +1495,10 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
     int on = 1;
     setsockopt(udp_relay_socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
+
+    int udp_bufsize = 262144;  // 256KB
+    setsockopt(udp_relay_socket, SOL_SOCKET, SO_RCVBUF, (char*)&udp_bufsize, sizeof(udp_bufsize));
+    setsockopt(udp_relay_socket, SOL_SOCKET, SO_SNDBUF, (char*)&udp_bufsize, sizeof(udp_bufsize));
 
     DWORD timeout = 30000; // 30 seconds
     setsockopt(udp_relay_socket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
@@ -1747,6 +1759,9 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
 
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
 
+    int nodelay = 1;
+    setsockopt(listen_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
@@ -1760,7 +1775,7 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
         return 1;
     }
 
-    if (listen(listen_sock, 16) == SOCKET_ERROR)
+    if (listen(listen_sock, SOMAXCONN) == SOCKET_ERROR)
     {
         log_message("Listen failed (%d)", WSAGetLastError());
         closesocket(listen_sock);
@@ -1855,13 +1870,13 @@ static DWORD WINAPI connection_handler(LPVOID arg)
     setsockopt(socks_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
     setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
 
-    // 256KB buffers for high speed ///
+    // 512KB buffers for maximum upload/download speed
 
     //buffer can overload if the number of paccket are increased
     // ex = rule for whole sysyem can have too many packett
-    // 256kb can handle paceekt in relay even for 1 - 2.5gig network connection
+    // 512kb can handle paceekt in relay even for 1 - 2.5gig network connection
     // not testing in network speed for 2.5+ gig should be able to handle with mutliple threads
-    int bufsize = 262144;
+    int bufsize = 524288;  // 512KB
     setsockopt(socks_sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
     setsockopt(socks_sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
     setsockopt(client_sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
@@ -1911,6 +1926,7 @@ static DWORD WINAPI connection_handler(LPVOID arg)
 
     if (transfer_config == NULL)
     {
+        log_message("Memory allocation failed for transfer_config");
         closesocket(client_sock);
         closesocket(socks_sock);
         return 0;
@@ -1922,8 +1938,7 @@ static DWORD WINAPI connection_handler(LPVOID arg)
     // both transfer in current thread
     transfer_handler((LPVOID)transfer_config);
 
-    closesocket(client_sock);
-    closesocket(socks_sock);
+    // Sockets already closed in transfer_handler!
 
     return 0;
 }
@@ -1933,7 +1948,7 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
     TRANSFER_CONFIG *config = (TRANSFER_CONFIG *)arg;
     SOCKET sock1 = config->from_socket;  // client socket
     SOCKET sock2 = config->to_socket;     // proxy socket
-    char buf[16384];
+    char buf[131072];  // 128KB buffer for high-speed transfers
     int len;
 
     free(config);
@@ -1948,8 +1963,9 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
         FD_SET(sock1, &readfds);  // client
         FD_SET(sock2, &readfds);  // proxy
 
-        timeout.tv_sec = 30;
-        timeout.tv_usec = 0;
+        // short timeout for responsive upload/download (50ms)
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 50000;  // 50ms
 
         int ready = select(0, &readfds, NULL, NULL, &timeout);
 
@@ -1961,8 +1977,8 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
 
         if (ready == 0)
         {
-            // Timeout - connection might be stale, close it
-            break;
+            // timeotjust continue to check again
+            continue;
         }
 
         // check if  client to proxy
@@ -1971,8 +1987,7 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
             len = recv(sock1, buf, sizeof(buf), 0);
             if (len <= 0)
             {
-                shutdown(sock1, SD_RECEIVE);
-                shutdown(sock2, SD_SEND);
+                // client closed connection gracefully
                 break;
             }
 
@@ -1994,8 +2009,7 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
             len = recv(sock2, buf, sizeof(buf), 0);
             if (len <= 0)
             {
-                shutdown(sock2, SD_RECEIVE);
-                shutdown(sock1, SD_SEND);
+                // proxy closed connection gracefully
                 break;
             }
 
@@ -2013,6 +2027,9 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
     }
 
 cleanup:
+    // graceful shutdown
+    shutdown(sock1, SD_BOTH);
+    shutdown(sock2, SD_BOTH);
     closesocket(sock1);
     closesocket(sock2);
     return 0;
@@ -2050,7 +2067,7 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
     conn->orig_dest_ip = dest_ip;
     conn->orig_dest_port = dest_port;
     conn->is_tracked = TRUE;
-    conn->last_activity = GetTickCount();
+    conn->last_activity = GetTickCount64();
 
     // insert at head of hash bucket
     //reuse hash variable from lookup above
@@ -2094,6 +2111,7 @@ static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port)
         {
             *dest_ip = conn->orig_dest_ip;
             *dest_port = conn->orig_dest_port;
+            conn->last_activity = GetTickCount64();  // Update activity to prevent stale cleanup
             found = TRUE;
             break;
         }
@@ -2127,13 +2145,13 @@ static void remove_connection(UINT16 src_port)
 
 static void cleanup_stale_connections(void)
 {
-    WaitForSingleObject(lock, INFINITE);
-
-    DWORD now = GetTickCount();
+    ULONGLONG now = GetTickCount64();
     int removed = 0;
 
+    // Process each hash bucket with minimal lock time
     for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
     {
+        WaitForSingleObject(lock, INFINITE);
         CONNECTION_INFO **conn_ptr = &connection_hash_table[i];
 
         while (*conn_ptr != NULL)
@@ -2142,37 +2160,47 @@ static void cleanup_stale_connections(void)
             {
                 CONNECTION_INFO *to_free = *conn_ptr;
                 *conn_ptr = (*conn_ptr)->next;
-                free(to_free);
+                ReleaseMutex(lock);
+                free(to_free);  // Free outside lock
                 removed++;
+                WaitForSingleObject(lock, INFINITE);
             }
             else
             {
                 conn_ptr = &(*conn_ptr)->next;
             }
         }
+        ReleaseMutex(lock);
     }
 
-    DWORD now_cache = GetTickCount();
+    // Cleanup PID cache with separate lock acquisitions
+    ULONGLONG now_cache = GetTickCount64();
     int cache_removed = 0;
     for (int i = 0; i < PID_CACHE_SIZE; i++)
     {
+        WaitForSingleObject(lock, INFINITE);
         PID_CACHE_ENTRY **entry_ptr = &pid_cache[i];
         while (*entry_ptr != NULL)
         {
-            if (now_cache - (*entry_ptr)->timestamp > 10000) /// need to remove it in 10sec
+            if (now_cache - (*entry_ptr)->timestamp > 10000)
             {
                 PID_CACHE_ENTRY *to_free = *entry_ptr;
                 *entry_ptr = (*entry_ptr)->next;
-                free(to_free);
+                ReleaseMutex(lock);
+                free(to_free);  // Free outside lock
                 cache_removed++;
+                WaitForSingleObject(lock, INFINITE);
             }
             else
             {
                 entry_ptr = &(*entry_ptr)->next;
             }
         }
+        ReleaseMutex(lock);
     }
 
+    // Cleanup logged connections
+    WaitForSingleObject(lock, INFINITE);
     int logged_count = 0;
     LOGGED_CONNECTION *temp = logged_connections;
     while (temp != NULL)
@@ -2271,7 +2299,8 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
             free(rule);
             return 0;
         }
-        strcpy(rule->target_ports, "*");
+        strncpy(rule->target_ports, "*", 2);
+        rule->target_ports[1] = '\0';
     }
 
     rule->action = action;
@@ -2523,7 +2552,7 @@ static UINT32 pid_cache_hash(UINT32 src_ip, UINT16 src_port, BOOL is_udp)
 static DWORD get_cached_pid(UINT32 src_ip, UINT16 src_port, BOOL is_udp)
 {
     UINT32 hash = pid_cache_hash(src_ip, src_port, is_udp);
-    DWORD current_time = GetTickCount();
+    ULONGLONG current_time = GetTickCount64();
     DWORD pid = 0;
 
     WaitForSingleObject(lock, INFINITE);
@@ -2555,7 +2584,7 @@ static DWORD get_cached_pid(UINT32 src_ip, UINT16 src_port, BOOL is_udp)
 static void cache_pid(UINT32 src_ip, UINT16 src_port, DWORD pid, BOOL is_udp)
 {
     UINT32 hash = pid_cache_hash(src_ip, src_port, is_udp);
-    DWORD current_time = GetTickCount();
+    ULONGLONG current_time = GetTickCount64();
 
     WaitForSingleObject(lock, INFINITE);
 
@@ -2606,6 +2635,20 @@ static void clear_pid_cache(void)
     ReleaseMutex(lock);
 }
 
+// Dedicated cleanup thread - runs independently without blocking packet processing
+static DWORD WINAPI cleanup_worker(LPVOID arg)
+{
+    while (running)
+    {
+        Sleep(30000);  // 30 seconds
+        if (running)
+        {
+            cleanup_stale_connections();
+        }
+    }
+    return 0;
+}
+
 static void update_has_active_rules(void)
 {
     g_has_active_rules = FALSE;
@@ -2623,7 +2666,7 @@ static void update_has_active_rules(void)
 
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 {
-    char filter[512];
+    char filter[FILTER_BUFFER_SIZE];
     INT16 priority = 123;
 
     if (running)
@@ -2642,6 +2685,17 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     if (proxy_thread == NULL)
     {
         running = FALSE;
+        return FALSE;
+    }
+
+    // Start cleanup thread to avoid blocking packet processing
+    cleanup_thread = CreateThread(NULL, 1, cleanup_worker, NULL, 0, NULL);
+    if (cleanup_thread == NULL)
+    {
+        running = FALSE;
+        WaitForSingleObject(proxy_thread, INFINITE);
+        CloseHandle(proxy_thread);
+        proxy_thread = NULL;
         return FALSE;
     }
 
@@ -2676,7 +2730,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     }
 
     WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_LENGTH, 8192);
-    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 512);     // 512ms - relay can handle it and will imrpove the latency
+    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 8);  // 8ms for low latency
 
     for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
@@ -2756,6 +2810,13 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
         proxy_thread = NULL;
     }
 
+    if (cleanup_thread != NULL)
+    {
+        WaitForSingleObject(cleanup_thread, 5000);
+        CloseHandle(cleanup_thread);
+        cleanup_thread = NULL;
+    }
+
     if (udp_relay_thread != NULL)
     {
         WaitForSingleObject(udp_relay_thread, 5000);
@@ -2796,7 +2857,7 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
     struct hostent* host_info;
     UINT32 target_ip;
     int ret = -1;
-    char temp_buffer[512];
+    char temp_buffer[FILTER_BUFFER_SIZE];
 
     if (g_proxy_host[0] == '\0' || g_proxy_port == 0)
     {
@@ -2899,7 +2960,7 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
     }
 
 
-    char http_request[512];
+    char http_request[FILTER_BUFFER_SIZE];
     snprintf(http_request, sizeof(http_request),
         "GET / HTTP/1.1\r\n"
         "Host: %s\r\n"
