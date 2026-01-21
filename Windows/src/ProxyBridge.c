@@ -2199,7 +2199,7 @@ static void cleanup_stale_connections(void)
         ReleaseMutex(lock);
     }
 
-    // Cleanup logged connections
+    // keep only last 100 for memory efficiency // 100 will keep speed upto the mark
     WaitForSingleObject(lock, INFINITE);
     int logged_count = 0;
     LOGGED_CONNECTION *temp = logged_connections;
@@ -2209,27 +2209,24 @@ static void cleanup_stale_connections(void)
         temp = temp->next;
     }
 
-    if (logged_count > 500)
+    if (logged_count > 100)
     {
-        int to_remove = logged_count - 500;
-        int logged_removed = 0;
-
-        for (int i = 0; i < to_remove; i++)
+        temp = logged_connections;
+        for (int i = 0; i < 99 && temp != NULL; i++)
         {
-            LOGGED_CONNECTION **walk = &logged_connections;
-            LOGGED_CONNECTION *prev = NULL;
+            temp = temp->next;
+        }
 
-            while (*walk != NULL && (*walk)->next != NULL)
-            {
-                walk = &(*walk)->next;
-            }
+        if (temp != NULL)
+        {
+            LOGGED_CONNECTION *to_free_list = temp->next;
+            temp->next = NULL;  // Cut the list
 
-            if (*walk != NULL)
+            while (to_free_list != NULL)
             {
-                LOGGED_CONNECTION *to_free = *walk;
-                *walk = NULL;
-                free(to_free);
-                logged_removed++;
+                LOGGED_CONNECTION *next = to_free_list->next;
+                free(to_free_list);
+                to_free_list = next;
             }
         }
     }
@@ -2797,7 +2794,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
     {
         if (packet_thread[i] != NULL)
         {
-            WaitForSingleObject(packet_thread[i], 5000);
+            WaitForSingleObject(packet_thread[i], 1000);  // 1 second timeout
             CloseHandle(packet_thread[i]);
             packet_thread[i] = NULL;
         }
@@ -2805,21 +2802,21 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
 
     if (proxy_thread != NULL)
     {
-        WaitForSingleObject(proxy_thread, 5000);
+        WaitForSingleObject(proxy_thread, 1000);  // 1 second timeout
         CloseHandle(proxy_thread);
         proxy_thread = NULL;
     }
 
     if (cleanup_thread != NULL)
     {
-        WaitForSingleObject(cleanup_thread, 5000);
+        WaitForSingleObject(cleanup_thread, 1000);  // 1 second timeout
         CloseHandle(cleanup_thread);
         cleanup_thread = NULL;
     }
 
     if (udp_relay_thread != NULL)
     {
-        WaitForSingleObject(udp_relay_thread, 5000);
+        WaitForSingleObject(udp_relay_thread, 1000);  // 1 second timeout
         CloseHandle(udp_relay_thread);
         udp_relay_thread = NULL;
     }
