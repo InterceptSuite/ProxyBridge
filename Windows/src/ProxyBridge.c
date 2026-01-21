@@ -19,7 +19,8 @@
 #define VERSION "4.0.0"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 1000
-#define NUM_PACKET_THREADS 2
+#define NUM_PACKET_THREADS 4
+#define CONNECTION_HASH_SIZE 256
 
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
@@ -78,7 +79,7 @@ typedef struct PID_CACHE_ENTRY {
     struct PID_CACHE_ENTRY *next;
 } PID_CACHE_ENTRY;
 
-static CONNECTION_INFO *connection_list = NULL;
+static CONNECTION_INFO *connection_hash_table[CONNECTION_HASH_SIZE] = {NULL};
 static LOGGED_CONNECTION *logged_connections = NULL;
 static PROCESS_RULE *rules_list = NULL;
 static UINT32 g_next_rule_id = 1;
@@ -238,8 +239,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     // if no rule configuree all connection direct with no checks avoid unwanted memory and pocessing whcich could delay
                     if (!g_has_active_rules && g_connection_callback == NULL)
                     {
-                        // No rules and no logging - pass through immediately
-                        WinDivertHelperCalcChecksums(packet, packet_len, &addr, 0);
+                        // No rules and no logging - pass through immediately (no checksum needed for unmodified packets)
                         WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                         continue;
                     }
@@ -327,12 +327,14 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             {
                 if (udp_header->DstPort != htons(LOCAL_UDP_RELAY_PORT))
                 {
+                    // Unmodified packet no checksum needed
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
                 }
 
             }
 
+            // Modified UDP packet calculate checksums
             WinDivertHelperCalcChecksums(packet, packet_len, &addr, 0);
             WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
             continue;
@@ -440,6 +442,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 
                 if (action == RULE_ACTION_DIRECT)
                 {
+                    // Unmodified packet no checksum needed
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
                 }
@@ -464,11 +467,13 @@ static DWORD WINAPI packet_processor(LPVOID arg)
         {
             if (tcp_header->DstPort != htons(g_local_relay_port))
             {
+                // Unmodified return packet no checksum needed
                 WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                 continue;
             }
         }
 
+        // Modified TCP packet calculate checksums
         WinDivertHelperCalcChecksums(packet, packet_len, &addr, 0);
         if (!WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr))
         {
@@ -1671,21 +1676,26 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
                 // Find which local port this packet should go to
                 WaitForSingleObject(lock, INFINITE);
-                CONNECTION_INFO *conn = connection_list;
                 struct sockaddr_in target_addr;
                 BOOL found = FALSE;
                 UINT32 target_ip = 0;
                 UINT16 target_port = 0;
-                while (conn != NULL)
+
+                // search all hash for reverse lookup in bucket
+                for (int i = 0; i < CONNECTION_HASH_SIZE && !found; i++)
                 {
-                    if (conn->orig_dest_ip == src_ip && conn->orig_dest_port == src_port)
+                    CONNECTION_INFO *conn = connection_hash_table[i];
+                    while (conn != NULL)
                     {
-                        target_ip = conn->src_ip;
-                        target_port = conn->src_port;
-                        found = TRUE;
-                        break;
+                        if (conn->orig_dest_ip == src_ip && conn->orig_dest_port == src_port)
+                        {
+                            target_ip = conn->src_ip;
+                            target_port = conn->src_port;
+                            found = TRUE;
+                            break;
+                        }
+                        conn = conn->next;
                     }
-                    conn = conn->next;
                 }
                 ReleaseMutex(lock);
 
@@ -1840,6 +1850,22 @@ static DWORD WINAPI connection_handler(LPVOID arg)
         closesocket(client_sock);
         return 0;
     }
+
+    int nodelay = 1;
+    setsockopt(socks_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+    setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+
+    // 256KB buffers for high speed ///
+
+    //buffer can overload if the number of paccket are increased
+    // ex = rule for whole sysyem can have too many packett
+    // 256kb can handle paceekt in relay even for 1 - 2.5gig network connection
+    // not testing in network speed for 2.5+ gig should be able to handle with mutliple threads
+    int bufsize = 262144;
+    setsockopt(socks_sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(socks_sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(client_sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(client_sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
 
     memset(&socks_addr, 0, sizeof(socks_addr));
     socks_addr.sin_family = AF_INET;
@@ -1996,8 +2022,10 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
 {
     WaitForSingleObject(lock, INFINITE);
 
-    // Check if already exists
-    CONNECTION_INFO *existing = connection_list;
+    int hash = src_port % CONNECTION_HASH_SIZE;
+    CONNECTION_INFO *existing = connection_hash_table[hash];
+
+    // check if already exists in this hash bucket
     while (existing != NULL) {
         if (existing->src_port == src_port) {
             // Update existing entry
@@ -2023,8 +2051,11 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
     conn->orig_dest_port = dest_port;
     conn->is_tracked = TRUE;
     conn->last_activity = GetTickCount();
-    conn->next = connection_list;
-    connection_list = conn;
+
+    // insert at head of hash bucket
+    //reuse hash variable from lookup above
+    conn->next = connection_hash_table[hash];
+    connection_hash_table[hash] = conn;
     ReleaseMutex(lock);
 }
 
@@ -2032,7 +2063,11 @@ static BOOL is_connection_tracked(UINT16 src_port)
 {
     BOOL tracked = FALSE;
     WaitForSingleObject(lock, INFINITE);
-    CONNECTION_INFO *conn = connection_list;
+
+    // Hash table lookup - O(1)
+    int hash = src_port % CONNECTION_HASH_SIZE;
+    CONNECTION_INFO *conn = connection_hash_table[hash];
+
     while (conn != NULL) {
         if (conn->src_port == src_port && conn->is_tracked) {
             tracked = TRUE;
@@ -2049,7 +2084,10 @@ static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port)
     BOOL found = FALSE;
 
     WaitForSingleObject(lock, INFINITE);
-    CONNECTION_INFO *conn = connection_list;
+
+    int hash = src_port % CONNECTION_HASH_SIZE;
+    CONNECTION_INFO *conn = connection_hash_table[hash];
+
     while (conn != NULL)
     {
         if (conn->src_port == src_port)
@@ -2069,7 +2107,10 @@ static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port)
 static void remove_connection(UINT16 src_port)
 {
     WaitForSingleObject(lock, INFINITE);
-    CONNECTION_INFO **conn_ptr = &connection_list;
+
+    int hash = src_port % CONNECTION_HASH_SIZE;
+    CONNECTION_INFO **conn_ptr = &connection_hash_table[hash];
+
     while (*conn_ptr != NULL)
     {
         if ((*conn_ptr)->src_port == src_port)
@@ -2090,20 +2131,24 @@ static void cleanup_stale_connections(void)
 
     DWORD now = GetTickCount();
     int removed = 0;
-    CONNECTION_INFO **conn_ptr = &connection_list;
 
-    while (*conn_ptr != NULL)
+    for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
     {
-        if (now - (*conn_ptr)->last_activity > 60000)
+        CONNECTION_INFO **conn_ptr = &connection_hash_table[i];
+
+        while (*conn_ptr != NULL)
         {
-            CONNECTION_INFO *to_free = *conn_ptr;
-            *conn_ptr = (*conn_ptr)->next;
-            free(to_free);
-            removed++;
-        }
-        else
-        {
-            conn_ptr = &(*conn_ptr)->next;
+            if (now - (*conn_ptr)->last_activity > 60000)
+            {
+                CONNECTION_INFO *to_free = *conn_ptr;
+                *conn_ptr = (*conn_ptr)->next;
+                free(to_free);
+                removed++;
+            }
+            else
+            {
+                conn_ptr = &(*conn_ptr)->next;
+            }
         }
     }
 
@@ -2631,7 +2676,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     }
 
     WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_LENGTH, 8192);
-    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 2000);
+    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 512);     // 512ms - relay can handle it and will imrpove the latency
 
     for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
@@ -2719,11 +2764,16 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
     }
 
     WaitForSingleObject(lock, INFINITE);
-    while (connection_list != NULL)
+    // free all connections in hash table
+    // avoid unwanted data and free the memory
+    for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
     {
-        CONNECTION_INFO *to_free = connection_list;
-        connection_list = connection_list->next;
-        free(to_free);
+        while (connection_hash_table[i] != NULL)
+        {
+            CONNECTION_INFO *to_free = connection_hash_table[i];
+            connection_hash_table[i] = connection_hash_table[i]->next;
+            free(to_free);
+        }
     }
     ReleaseMutex(lock);
 
