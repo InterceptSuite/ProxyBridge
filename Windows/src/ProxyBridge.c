@@ -19,7 +19,7 @@
 #define VERSION "4.0.0"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 1000
-#define NUM_PACKET_THREADS 4  //  Added Mlutiple threads
+#define NUM_PACKET_THREADS 2
 
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
@@ -1879,36 +1879,22 @@ static DWORD WINAPI connection_handler(LPVOID arg)
         }
     }
 
-    // Create bidirectional forwarding threads
-    TRANSFER_CONFIG *config1 = (TRANSFER_CONFIG *)malloc(sizeof(TRANSFER_CONFIG));
-    TRANSFER_CONFIG *config2 = (TRANSFER_CONFIG *)malloc(sizeof(TRANSFER_CONFIG));
+    //
+    // educes thread count by 50% and CPU usage significantly
+    TRANSFER_CONFIG *transfer_config = (TRANSFER_CONFIG *)malloc(sizeof(TRANSFER_CONFIG));
 
-    if (config1 == NULL || config2 == NULL)
+    if (transfer_config == NULL)
     {
         closesocket(client_sock);
         closesocket(socks_sock);
         return 0;
     }
 
-    config1->from_socket = client_sock;
-    config1->to_socket = socks_sock;
-    config2->from_socket = socks_sock;
-    config2->to_socket = client_sock;
+    transfer_config->from_socket = client_sock;
+    transfer_config->to_socket = socks_sock;
 
-    HANDLE thread1 = CreateThread(NULL, 1, transfer_handler, (LPVOID)config1, 0, NULL);
-    if (thread1 == NULL)
-    {
-        log_message("CreateThread failed (%lu)", GetLastError());
-        closesocket(client_sock);
-        closesocket(socks_sock);
-        free(config1);
-        free(config2);
-        return 0;
-    }
-
-    transfer_handler((LPVOID)config2);
-    WaitForSingleObject(thread1, INFINITE);
-    CloseHandle(thread1);
+    // both transfer in current thread
+    transfer_handler((LPVOID)transfer_config);
 
     closesocket(client_sock);
     closesocket(socks_sock);
@@ -1919,62 +1905,90 @@ static DWORD WINAPI connection_handler(LPVOID arg)
 static DWORD WINAPI transfer_handler(LPVOID arg)
 {
     TRANSFER_CONFIG *config = (TRANSFER_CONFIG *)arg;
-    SOCKET from = config->from_socket;
-    SOCKET to = config->to_socket;
+    SOCKET sock1 = config->from_socket;  // client socket
+    SOCKET sock2 = config->to_socket;     // proxy socket
     char buf[16384];
     int len;
 
     free(config);
 
+    // monitor BOTH socket in one thread
     while (TRUE)
     {
-        //ait for data
         fd_set readfds;
         struct timeval timeout;
 
         FD_ZERO(&readfds);
-        FD_SET(from, &readfds);
+        FD_SET(sock1, &readfds);  // client
+        FD_SET(sock2, &readfds);  // proxy
 
-        timeout.tv_sec = 5;
+        timeout.tv_sec = 30;
         timeout.tv_usec = 0;
 
         int ready = select(0, &readfds, NULL, NULL, &timeout);
 
         if (ready == SOCKET_ERROR)
         {
-            shutdown(from, SD_BOTH);
-            shutdown(to, SD_BOTH);
-            return 0;
+
+            break;
         }
 
         if (ready == 0)
         {
-
-            continue;
-        }
-
-        len = recv(from, buf, sizeof(buf), 0);
-        if (len <= 0)
-        {
-            shutdown(from, SD_RECEIVE);
-            shutdown(to, SD_SEND);
+            // Timeout - connection might be stale, close it
             break;
         }
 
-        int sent = 0;
-        while (sent < len)
+        // check if  client to proxy
+        if (FD_ISSET(sock1, &readfds))
         {
-            int n = send(to, buf + sent, len - sent, 0);
-            if (n == SOCKET_ERROR)
+            len = recv(sock1, buf, sizeof(buf), 0);
+            if (len <= 0)
             {
-                shutdown(from, SD_BOTH);
-                shutdown(to, SD_BOTH);
-                return 0;
+                shutdown(sock1, SD_RECEIVE);
+                shutdown(sock2, SD_SEND);
+                break;
             }
-            sent += n;
+
+            int sent = 0;
+            while (sent < len)
+            {
+                int n = send(sock2, buf + sent, len - sent, 0);
+                if (n == SOCKET_ERROR)
+                {
+                    goto cleanup;
+                }
+                sent += n;
+            }
+        }
+
+        // check if proxyto client
+        if (FD_ISSET(sock2, &readfds))
+        {
+            len = recv(sock2, buf, sizeof(buf), 0);
+            if (len <= 0)
+            {
+                shutdown(sock2, SD_RECEIVE);
+                shutdown(sock1, SD_SEND);
+                break;
+            }
+
+            int sent = 0;
+            while (sent < len)
+            {
+                int n = send(sock1, buf + sent, len - sent, 0);
+                if (n == SOCKET_ERROR)
+                {
+                    goto cleanup;
+                }
+                sent += n;
+            }
         }
     }
 
+cleanup:
+    closesocket(sock1);
+    closesocket(sock2);
     return 0;
 }
 
