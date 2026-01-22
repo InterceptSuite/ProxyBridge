@@ -141,14 +141,12 @@ public class UpdateNotificationViewModel : ViewModelBase
             DownloadStatus = "Download complete. Starting installation...";
             DownloadProgress = 100;
 
-            // Start the installer and exit the current application
             Process.Start(new ProcessStartInfo
             {
                 FileName = filePath,
                 UseShellExecute = true
             });
 
-            // Close the current application
             Environment.Exit(0);
         }
         catch (Exception ex)

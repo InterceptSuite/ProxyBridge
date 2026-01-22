@@ -37,7 +37,6 @@ public class UpdateCheckViewModel : ViewModelBase
         DownloadNowCommand = new RelayCommand(async () => await DownloadAndInstallAsync(), () => IsUpdateAvailable && !IsDownloading);
         CloseCommand = new RelayCommand(onClose);
 
-        // Start checking immediately
         _ = CheckForUpdatesAsync();
     }
 
@@ -154,7 +153,6 @@ public class UpdateCheckViewModel : ViewModelBase
                 LatestVersionColor = "#FF007ACC";
             }
 
-            // Refresh command can execute state
             (DownloadNowCommand as RelayCommand)?.RaiseCanExecuteChanged();
         }
         catch (Exception ex)
@@ -202,9 +200,8 @@ public class UpdateCheckViewModel : ViewModelBase
             if (installerPath != null)
             {
                 DownloadStatus = "Download complete. Starting installer...";
-                await Task.Delay(1000); // Brief pause to show completion
+                await Task.Delay(1000);
 
-                // This will close the current app and start the installer
                 _updateService.InstallUpdateAndExit(installerPath);
             }
             else

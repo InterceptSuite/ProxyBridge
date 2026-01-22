@@ -139,29 +139,8 @@ public class ProxySettingsViewModel : ViewModelBase
 
         SaveCommand = new RelayCommand(() =>
         {
-            bool isValid = true;
-
-            if (string.IsNullOrWhiteSpace(ProxyIp))
-            {
-                IpError = "IP address or hostname is required";
-                isValid = false;
-            }
-            else if (!IsValidIpOrDomain(ProxyIp))
-            {
-                IpError = "Invalid IP address or hostname";
-                isValid = false;
-            }
-
-            if (string.IsNullOrWhiteSpace(ProxyPort))
-            {
-                PortError = "Port is required";
-                isValid = false;
-            }
-            else if (!int.TryParse(ProxyPort, out int port) || port < 1 || port > 65535)
-            {
-                PortError = "Port must be between 1 and 65535";
-                isValid = false;
-            }
+            bool isValid = ValidationHelper.ValidateIpOrDomain(ProxyIp, IsValidIpOrDomain, msg => IpError = msg)
+                && ValidationHelper.ValidatePort(ProxyPort, msg => PortError = msg);
 
             if (isValid)
             {
@@ -189,14 +168,13 @@ public class ProxySettingsViewModel : ViewModelBase
         {
             if (IsTesting) return;
 
-            // Validate inputs first
             if (string.IsNullOrWhiteSpace(ProxyIp))
             {
                 TestOutput = "ERROR: Please configure proxy IP address or hostname first";
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(ProxyPort) || !ushort.TryParse(ProxyPort, out ushort proxyPortNum))
+            if (!ushort.TryParse(ProxyPort, out ushort proxyPortNum))
             {
                 TestOutput = "ERROR: Please configure valid proxy port first";
                 return;
@@ -218,7 +196,7 @@ public class ProxySettingsViewModel : ViewModelBase
             TestOutput = "Testing connection...\n";
 
             try
-            {                // First apply current settings temporarily
+            {
                 if (_proxyService != null)
                 {
                     _proxyService.SetProxyConfig(ProxyType, ProxyIp, proxyPortNum, ProxyUsername ?? "", ProxyPassword ?? "");

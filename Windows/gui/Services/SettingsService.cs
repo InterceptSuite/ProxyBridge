@@ -20,39 +20,27 @@ public class SettingsService
 
     public AppSettings LoadSettings()
     {
+        var json = AtomicFileHelper.SafeReadFile(SettingsPath);
+        if (json == null)
+        {
+            return new AppSettings();
+        }
+
         try
         {
-            if (File.Exists(SettingsPath))
-            {
-                var json = File.ReadAllText(SettingsPath);
-                var settings = JsonSerializer.Deserialize(json, AppSettingsContext.Default.AppSettings);
-                return settings ?? new AppSettings();
-            }
+            var settings = JsonSerializer.Deserialize(json, AppSettingsContext.Default.AppSettings);
+            return settings ?? new AppSettings();
         }
         catch
         {
-            // If there's any error loading settings, return defaults
+            return new AppSettings();
         }
-
-        return new AppSettings();
     }
 
     public void SaveSettings(AppSettings settings)
     {
-        try
-        {
-            var directory = Path.GetDirectoryName(SettingsPath);
-            if (directory != null && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            var json = JsonSerializer.Serialize(settings, AppSettingsContext.Default.AppSettings);
-            File.WriteAllText(SettingsPath, json);
-        }
-        catch
-        {
-        }
+        var json = JsonSerializer.Serialize(settings, AppSettingsContext.Default.AppSettings);
+        AtomicFileHelper.AtomicWrite(SettingsPath, json);
     }
 
     public void SetStartupWithWindows(bool enable)

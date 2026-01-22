@@ -96,6 +96,16 @@ public class ProxyRulesViewModel : ViewModelBase
         _window = window;
     }
 
+    private void ResetRuleForm()
+    {
+        NewProcessName = "*";
+        NewTargetHosts = "*";
+        NewTargetPorts = "*";
+        NewProtocol = "TCP";
+        NewProxyAction = "PROXY";
+        ProcessNameError = "";
+    }
+
     public ProxyRulesViewModel(ObservableCollection<ProxyRule> proxyRules, Action<ProxyRule> onAddRule, Action onClose, ProxyBridgeService? proxyService = null, Action? onConfigChanged = null)
     {
         ProxyRules = proxyRules;
@@ -111,34 +121,16 @@ public class ProxyRulesViewModel : ViewModelBase
 
         AddRuleCommand = new RelayCommand(() =>
         {
-            NewProcessName = "*";
-            NewTargetHosts = "*";
-            NewTargetPorts = "*";
-            NewProtocol = "TCP";
-            NewProxyAction = "PROXY";
-            ProcessNameError = "";
+            ResetRuleForm();
             IsAddRuleViewOpen = true;
         });
 
         SaveNewRuleCommand = new RelayCommand(() =>
         {
-            // Use "*" if empty
-            if (string.IsNullOrWhiteSpace(NewProcessName))
-            {
-                NewProcessName = "*";
-            }
+            NewProcessName = ValidationHelper.DefaultIfEmpty(NewProcessName);
+            NewTargetHosts = ValidationHelper.DefaultIfEmpty(NewTargetHosts);
+            NewTargetPorts = ValidationHelper.DefaultIfEmpty(NewTargetPorts);
 
-            if (string.IsNullOrWhiteSpace(NewTargetHosts))
-            {
-                NewTargetHosts = "*";
-            }
-
-            if (string.IsNullOrWhiteSpace(NewTargetPorts))
-            {
-                NewTargetPorts = "*";
-            }
-
-            // This could be an issue if app name contain char
             if (!System.Text.RegularExpressions.Regex.IsMatch(NewProcessName, @"^[a-zA-Z0-9\s._\-*;""\\:()]+$"))
             {
                 ProcessNameError = "Invalid characters in process name. Only letters, numbers, spaces, dots, dashes, underscores, semicolons, quotes, parentheses, and * are allowed";
@@ -157,10 +149,8 @@ public class ProxyRulesViewModel : ViewModelBase
 
             if (_isEditMode && _proxyService != null)
             {
-                // Edit existing rule
                 if (_proxyService.EditRule(_currentEditingRuleId, NewProcessName, NewTargetHosts, NewTargetPorts, NewProtocol, NewProxyAction))
                 {
-                    // Update the rule in the ObservableCollection
                     var existingRule = ProxyRules.FirstOrDefault(r => r.RuleId == _currentEditingRuleId);
                     if (existingRule != null)
                     {
@@ -178,7 +168,6 @@ public class ProxyRulesViewModel : ViewModelBase
             }
             else
             {
-                // Add new rule
                 var newRule = new ProxyRule
                 {
                     ProcessName = NewProcessName,
@@ -190,27 +179,14 @@ public class ProxyRulesViewModel : ViewModelBase
                 };
 
                 newRule.PropertyChanged += Rule_PropertyChanged;
-
                 _onAddRule?.Invoke(newRule);
             }
 
             IsAddRuleViewOpen = false;
-
-            // Reset to defaults
-            NewProcessName = "*";
-            NewTargetHosts = "*";
-            NewTargetPorts = "*";
-            NewProtocol = "TCP";
-            NewProxyAction = "PROXY";
-            ProcessNameError = "";
+            ResetRuleForm();
         });        CancelAddRuleCommand = new RelayCommand(() =>
         {
-            NewProcessName = "*";
-            NewTargetHosts = "*";
-            NewTargetPorts = "*";
-            NewProtocol = "TCP";
-            NewProxyAction = "PROXY";
-            ProcessNameError = "";
+            ResetRuleForm();
             IsAddRuleViewOpen = false;
         });
 

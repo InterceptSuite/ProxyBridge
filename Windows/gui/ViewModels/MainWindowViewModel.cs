@@ -121,10 +121,7 @@ public class MainWindowViewModel : ViewModelBase
             };
             _activityLogTimer.Start();
 
-            // Apply config DNS setting
             _proxyService.SetDnsViaProxy(_dnsViaProxy);
-
-            // Apply comfig proxy settings
             if (!string.IsNullOrEmpty(_currentProxyIp) &&
                 !string.IsNullOrEmpty(_currentProxyPort) &&
                 ushort.TryParse(_currentProxyPort, out ushort portNum))
@@ -137,10 +134,8 @@ public class MainWindowViewModel : ViewModelBase
                     _currentProxyPassword);
             }
 
-            // Start the proxy bridge
             if (_proxyService.Start())
             {
-                // Apply config proxy rules, Need to see if this cause UI issues/slow/freeze
                 foreach (var rule in ProxyRules)
                 {
                     uint ruleId = _proxyService.AddRule(
@@ -278,7 +273,7 @@ public class MainWindowViewModel : ViewModelBase
 
     public ObservableCollection<ProxyRule> ProxyRules { get; } = new();
 
-    private bool _dnsViaProxy = true;  // Default TRUE
+    private bool _dnsViaProxy = true;
     public bool DnsViaProxy
     {
         get => _dnsViaProxy;
@@ -293,7 +288,7 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
-    private bool _isTrafficLoggingEnabled = true;  // Default TRUE
+    private bool _isTrafficLoggingEnabled = true;
     public bool IsTrafficLoggingEnabled
     {
         get => _isTrafficLoggingEnabled;
@@ -309,7 +304,6 @@ public class MainWindowViewModel : ViewModelBase
                 else
                 {
                     _connectionLogTimer?.Stop();
-                    // Clear pending logs when disabled
                     lock (_connectionLogLock)
                     {
                         _pendingConnectionLogs.Clear();
@@ -363,7 +357,6 @@ public class MainWindowViewModel : ViewModelBase
         set => SetProperty(ref _startWithWindows, value);
     }
 
-    // Commands
     public ICommand ShowProxySettingsCommand { get; }
     public ICommand ShowProxyRulesCommand { get; }
     public ICommand ShowAboutCommand { get; }
@@ -478,10 +471,7 @@ public class MainWindowViewModel : ViewModelBase
 
         ShowAboutCommand = new RelayCommand(async () =>
         {
-            var viewModel = new AboutViewModel(() =>
-            {
-                // Window will be closed
-            });
+            var viewModel = new AboutViewModel(() => { });
 
             var window = new Views.AboutWindow
             {
@@ -672,19 +662,13 @@ public class MainWindowViewModel : ViewModelBase
                 _ = notificationWindow.ShowDialog(_mainWindow);
             }
         }
-        catch
-        {
-            // silently fail
-        }
+        catch { }
     }
 
     public void Cleanup()
     {
-        // this something can be improved maybe config doesnt need save during cleanup
         try { SaveConfigurationInternal(); } catch { }
-
-        try { _proxyService?.Dispose(); _proxyService = null; }
-        catch { }
+        try { _proxyService?.Dispose(); _proxyService = null; } catch { }
     }
 
     private string FilterLog(string log, string searchText)
@@ -716,34 +700,45 @@ public class MainWindowViewModel : ViewModelBase
 
             var config = ConfigManager.LoadConfig();
 
-            _currentProxyType = config.ProxyType;
-            _currentProxyIp = config.ProxyIp;
-            _currentProxyPort = config.ProxyPort;
-            _currentProxyUsername = config.ProxyUsername;
-            _currentProxyPassword = config.ProxyPassword;
+            _currentProxyType = ValidationHelper.DefaultIfEmpty(config.ProxyType, "SOCKS5");
+            _currentProxyIp = ValidationHelper.DefaultIfEmpty(config.ProxyIp, "");
+            _currentProxyPort = ValidationHelper.DefaultIfEmpty(config.ProxyPort, "");
+            _currentProxyUsername = config.ProxyUsername ?? "";
+            _currentProxyPassword = config.ProxyPassword ?? "";
 
             DnsViaProxy = config.DnsViaProxy;
             CloseToTray = config.CloseToTray;
             IsTrafficLoggingEnabled = config.IsTrafficLoggingEnabled;
 
-            _currentLanguage = config.Language;
-            _loc.CurrentCulture = new System.Globalization.CultureInfo(config.Language);
-            EnglishCheckmark = config.Language == "en" ? "✓" : "";
-            ChineseCheckmark = config.Language == "zh" ? "✓" : "";
-
-            foreach (var ruleConfig in config.ProxyRules)
+            if (!string.IsNullOrWhiteSpace(config.Language))
             {
-                var rule = new ProxyRule
-                {
-                    ProcessName = ruleConfig.ProcessName,
-                    TargetHosts = ruleConfig.TargetHosts,
-                    TargetPorts = ruleConfig.TargetPorts,
-                    Protocol = ruleConfig.Protocol,
-                    Action = ruleConfig.Action,
-                    IsEnabled = ruleConfig.IsEnabled
-                };
-                ProxyRules.Add(rule);
+                _currentLanguage = config.Language;
+                _loc.CurrentCulture = new System.Globalization.CultureInfo(config.Language);
+                EnglishCheckmark = config.Language == "en" ? "✓" : "";
+                ChineseCheckmark = config.Language == "zh" ? "✓" : "";
             }
+
+            if (config.ProxyRules != null && config.ProxyRules.Count > 0)
+            {
+                foreach (var ruleConfig in config.ProxyRules)
+                {
+                    if (string.IsNullOrWhiteSpace(ruleConfig.ProcessName))
+                        continue;
+
+                    var rule = new ProxyRule
+                    {
+                        ProcessName = ruleConfig.ProcessName,
+                        TargetHosts = ValidationHelper.DefaultIfEmpty(ruleConfig.TargetHosts),
+                        TargetPorts = ValidationHelper.DefaultIfEmpty(ruleConfig.TargetPorts),
+                        Protocol = ValidationHelper.DefaultIfEmpty(ruleConfig.Protocol, "TCP"),
+                        Action = ValidationHelper.DefaultIfEmpty(ruleConfig.Action, "PROXY"),
+                        IsEnabled = ruleConfig.IsEnabled
+                    };
+                    ProxyRules.Add(rule);
+                }
+            }
+
+            QueueActivityLog("Configuration loaded successfully");
         }
         catch (Exception ex)
         {
