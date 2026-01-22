@@ -137,6 +137,49 @@ static const char* extract_filename(const char* path)
     return last_separator ? (last_separator + 1) : path;
 }
 
+static inline char* skip_whitespace(char *str)
+{
+    while (*str == ' ' || *str == '\t')
+        str++;
+    return str;
+}
+
+static void format_ip_address(UINT32 ip, char *buffer, size_t size)
+{
+    snprintf(buffer, size, "%d.%d.%d.%d",
+        (ip >> 0) & 0xFF, (ip >> 8) & 0xFF,
+        (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+}
+
+typedef BOOL (*token_match_func)(const char *token, const void *data);
+
+static BOOL parse_token_list(const char *list, const char *delimiters, token_match_func match_func, const void *match_data)
+{
+    if (list == NULL || list[0] == '\0' || strcmp(list, "*") == 0)
+        return TRUE;
+
+    size_t len = strlen(list) + 1;
+    char *list_copy = (char *)malloc(len);
+    if (list_copy == NULL)
+        return FALSE;
+
+    strncpy(list_copy, list, len);
+    BOOL matched = FALSE;
+    char *token = strtok(list_copy, delimiters);
+    while (token != NULL)
+    {
+        token = skip_whitespace(token);
+        if (match_func(token, match_data))
+        {
+            matched = TRUE;
+            break;
+        }
+        token = strtok(NULL, delimiters);
+    }
+    free(list_copy);
+    return matched;
+}
+
 static void configure_tcp_socket(SOCKET sock, int bufsize, DWORD timeout)
 {
     int nodelay = 1;
@@ -296,9 +339,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                             if (!is_connection_already_logged(pid, dest_ip, dest_port, action))
                             {
                                 char dest_ip_str[32];
-                                snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
-                                    (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-                                    (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF);
+                                format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
 
                                 char proxy_info[128];
                                 if (action == RULE_ACTION_PROXY)
@@ -791,62 +832,26 @@ static BOOL match_port_pattern(const char *pattern, UINT16 port)
     return (port == atoi(pattern));
 }
 
+static BOOL ip_match_wrapper(const char *token, const void *data)
+{
+    return match_ip_pattern(token, *(const UINT32*)data);
+}
+
 // Match IP list: "192.168.*.*;10.0.0.1"
 static BOOL match_ip_list(const char *ip_list, UINT32 ip)
 {
-    if (ip_list == NULL || ip_list[0] == '\0' || strcmp(ip_list, "*") == 0)
-        return TRUE;
+    return parse_token_list(ip_list, ";", ip_match_wrapper, &ip);
+}
 
-    size_t len = strlen(ip_list) + 1;
-    char *list_copy = (char *)malloc(len);
-    if (list_copy == NULL)
-        return FALSE;
-
-    strncpy(list_copy, ip_list, len);
-    BOOL matched = FALSE;
-    char *token = strtok(list_copy, ";");
-    while (token != NULL)
-    {
-        while (*token == ' ' || *token == '\t')
-            token++;
-        if (match_ip_pattern(token, ip))
-        {
-            matched = TRUE;
-            break;
-        }
-        token = strtok(NULL, ";");
-    }
-    free(list_copy);
-    return matched;
+static BOOL port_match_wrapper(const char *token, const void *data)
+{
+    return match_port_pattern(token, *(const UINT16*)data);
 }
 
 // Match port list: "80;443;8000-9000"
 static BOOL match_port_list(const char *port_list, UINT16 port)
 {
-    if (port_list == NULL || port_list[0] == '\0' || strcmp(port_list, "*") == 0)
-        return TRUE;
-
-    size_t len = strlen(port_list) + 1;
-    char *list_copy = (char *)malloc(len);
-    if (list_copy == NULL)
-        return FALSE;
-
-    strncpy(list_copy, port_list, len);
-    BOOL matched = FALSE;
-    char *token = strtok(list_copy, ",;");
-    while (token != NULL)
-    {
-        while (*token == ' ' || *token == '\t')
-            token++;
-        if (match_port_pattern(token, port))
-        {
-            matched = TRUE;
-            break;
-        }
-        token = strtok(NULL, ",;");
-    }
-    free(list_copy);
-    return matched;
+    return parse_token_list(port_list, ",;", port_match_wrapper, &port);
 }
 
 // Match process name with wildcard support
@@ -1272,29 +1277,26 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
         snprintf(credentials, sizeof(credentials), "%s:%s", g_proxy_username, g_proxy_password);
         base64_encode(credentials, encoded, sizeof(encoded));
 
+        char ip_str[32];
+        format_ip_address(dest_ip, ip_str, sizeof(ip_str));
         len = snprintf(request, sizeof(request),
-            "CONNECT %d.%d.%d.%d:%d HTTP/1.1\r\n"
-            "Host: %d.%d.%d.%d:%d\r\n"
+            "CONNECT %s:%d HTTP/1.1\r\n"
+            "Host: %s:%d\r\n"
             "Proxy-Authorization: Basic %s\r\n"
             "Proxy-Connection: keep-alive\r\n"
             "\r\n",
-            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
-            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
-            encoded);
+            ip_str, dest_port, ip_str, dest_port, encoded);
     }
     else
     {
+        char ip_str[32];
+        format_ip_address(dest_ip, ip_str, sizeof(ip_str));
         len = snprintf(request, sizeof(request),
-            "CONNECT %d.%d.%d.%d:%d HTTP/1.1\r\n"
-            "Host: %d.%d.%d.%d:%d\r\n"
+            "CONNECT %s:%d HTTP/1.1\r\n"
+            "Host: %s:%d\r\n"
             "Proxy-Connection: keep-alive\r\n"
             "\r\n",
-            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
-            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
+            ip_str, dest_port, ip_str, dest_port);
     }
 
     if (send(s, request, len, 0) != len)
