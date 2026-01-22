@@ -2480,6 +2480,12 @@ PROXYBRIDGE_API void ProxyBridge_SetTrafficLoggingEnabled(BOOL enable)
     }
 }
 
+PROXYBRIDGE_API void ProxyBridge_ClearConnectionLogs(void)
+{
+    clear_logged_connections();
+    log_message("Connection logs cleared");
+}
+
 // Check if connection already logged (deduplication)
 static BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action)
 {
@@ -2504,9 +2510,47 @@ static BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_
     return found;
 }
 
+
+// Memory usage and cpu usage are limitation of the ProxyBridge arch
+// Relay server takes huge amount of memory and cpu and add extra hops
+// hops can cuase slight delay in network speed
+// relay server are ippoved to process it as fast as possible with minimal impact on memory usage
+
 static void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action)
 {
     WaitForSingleObject(lock, INFINITE);
+
+    int count = 0;
+    LOGGED_CONNECTION *temp = logged_connections;
+    while (temp != NULL)
+    {
+        count++;
+        temp = temp->next;
+    }
+
+    if (count >= 100)
+    {
+        temp = logged_connections;
+        for (int i = 0; i < 98 && temp != NULL; i++)
+        {
+            temp = temp->next;
+        }
+
+        if (temp != NULL && temp->next != NULL)
+        {
+            LOGGED_CONNECTION *to_free_list = temp->next;
+            temp->next = NULL;
+
+            ReleaseMutex(lock);
+            while (to_free_list != NULL)
+            {
+                LOGGED_CONNECTION *next = to_free_list->next;
+                free(to_free_list);
+                to_free_list = next;
+            }
+            WaitForSingleObject(lock, INFINITE);
+        }
+    }
 
     LOGGED_CONNECTION *logged = (LOGGED_CONNECTION *)malloc(sizeof(LOGGED_CONNECTION));
     if (logged != NULL)

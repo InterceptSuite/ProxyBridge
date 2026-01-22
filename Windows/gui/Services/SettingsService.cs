@@ -2,7 +2,6 @@ using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.Win32;
 
 namespace ProxyBridge.GUI.Services;
 
@@ -58,36 +57,50 @@ public class SettingsService
 
     public void SetStartupWithWindows(bool enable)
     {
-        const string keyName = "ProxyBridge";
-        const string runKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        const string approvedKey = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+        const string taskName = "ProxyBridge";
 
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(runKey, true);
-            if (key == null) return;
+            var exePath = Environment.ProcessPath;
+            if (exePath == null) return;
 
             if (enable)
             {
-                var exePath = Environment.ProcessPath;
-                if (exePath != null)
-                {
-                    key.SetValue(keyName, $"\"{exePath}\" --minimized");
+                // Adding in registy in  Software\Microsoft\Windows\CurrentVersion\Run is not possible or bad idea
+                // app need admin permisison to run with registy not posible or uac at startup whicih is bad idea
+                // Possible solution - Windows Service - Have no experience developing serice and its too much work for simple startup load
+                // Solution 2 - Task schedule - implemented
+                var arguments = $"/Create /F /TN \"{taskName}\" /TR \"\\\"{exePath}\\\" --minimized\" /SC ONLOGON /RL HIGHEST";
 
-                    using var approvedKeyHandle = Registry.CurrentUser.CreateSubKey(approvedKey, true);
-                    if (approvedKeyHandle != null)
-                    {
-                        byte[] enabledData = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-                        approvedKeyHandle.SetValue(keyName, enabledData, RegistryValueKind.Binary);
-                    }
-                }
+                var startInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "schtasks.exe",
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+
+                using var process = System.Diagnostics.Process.Start(startInfo);
+                process?.WaitForExit();
             }
             else
             {
-                key.DeleteValue(keyName, false);
+                var arguments = $"/Delete /F /TN \"{taskName}\"";
 
-                using var approvedKeyHandle = Registry.CurrentUser.OpenSubKey(approvedKey, true);
-                approvedKeyHandle?.DeleteValue(keyName, false);
+                var startInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "schtasks.exe",
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+
+                using var process = System.Diagnostics.Process.Start(startInfo);
+                process?.WaitForExit();
             }
         }
         catch
@@ -97,13 +110,25 @@ public class SettingsService
 
     public bool IsStartupEnabled()
     {
-        const string keyName = "ProxyBridge";
-        const string runKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        const string taskName = "ProxyBridge";
 
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(runKey, false);
-            return key?.GetValue(keyName) != null;
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "schtasks.exe",
+                Arguments = $"/Query /TN \"{taskName}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using var process = System.Diagnostics.Process.Start(startInfo);
+            if (process == null) return false;
+
+            process.WaitForExit();
+            return process.ExitCode == 0;
         }
         catch
         {
