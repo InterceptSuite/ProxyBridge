@@ -22,6 +22,36 @@ public partial class ProxyRuleJsonContext : JsonSerializerContext
 {
 }
 
+static class ParsingHelpers
+{
+    public static ProxyBridgeNative.RuleProtocol ParseProtocol(string protocolStr)
+    {
+        return protocolStr.ToUpper() switch
+        {
+            "TCP" => ProxyBridgeNative.RuleProtocol.TCP,
+            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
+            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
+            _ => throw new ArgumentException($"Invalid protocol: {protocolStr}. Use TCP, UDP, or BOTH")
+        };
+    }
+
+    public static ProxyBridgeNative.RuleAction ParseAction(string actionStr)
+    {
+        return actionStr.ToUpper() switch
+        {
+            "PROXY" => ProxyBridgeNative.RuleAction.PROXY,
+            "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
+            "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
+            _ => throw new ArgumentException($"Invalid action: {actionStr}. Use PROXY, DIRECT, or BLOCK")
+        };
+    }
+
+    public static string DefaultIfEmpty(string value, string defaultValue = "*")
+    {
+        return string.IsNullOrWhiteSpace(value) ? defaultValue : value;
+    }
+}
+
 class Program
 {
     private static ProxyBridgeNative.LogCallback? _logCallback;
@@ -294,21 +324,8 @@ class Program
                     continue;
                 }
 
-                var protocol = rule.Protocol.ToUpper() switch
-                {
-                    "TCP" => ProxyBridgeNative.RuleProtocol.TCP,
-                    "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
-                    "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
-                    _ => throw new ArgumentException($"Invalid protocol in rule file: {rule.Protocol}")
-                };
-
-                var action = rule.Action.ToUpper() switch
-                {
-                    "PROXY" => ProxyBridgeNative.RuleAction.PROXY,
-                    "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
-                    "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
-                    _ => throw new ArgumentException($"Invalid action in rule file: {rule.Action}")
-                };
+                var protocol = ParsingHelpers.ParseProtocol(rule.Protocol);
+                var action = ParsingHelpers.ParseAction(rule.Action);
 
                 rules.Add((rule.ProcessNames, rule.TargetHosts, rule.TargetPorts, protocol, action));
             }
@@ -369,33 +386,11 @@ class Program
                 throw new ArgumentException($"Invalid rule format: {rule}\nExpected format: process:hosts:ports:protocol:action");
             }
 
-            // Don't trim semicolons - they are valid separators for multiple values
-            var processName = parts[0].Trim();
-            var targetHosts = parts[1].Trim();
-            var targetPorts = parts[2].Trim();
-            var protocolStr = parts[3].Trim().ToUpper();
-            var actionStr = parts[4].Trim().ToUpper();
-
-            // Handle empty fields - use "*" as default
-            if (string.IsNullOrWhiteSpace(processName)) processName = "*";
-            if (string.IsNullOrWhiteSpace(targetHosts)) targetHosts = "*";
-            if (string.IsNullOrWhiteSpace(targetPorts)) targetPorts = "*";
-
-            var protocol = protocolStr switch
-            {
-                "TCP" => ProxyBridgeNative.RuleProtocol.TCP,
-                "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
-                "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
-                _ => throw new ArgumentException($"Invalid protocol: {protocolStr}. Use TCP, UDP, or BOTH")
-            };
-
-            var action = actionStr switch
-            {
-                "PROXY" => ProxyBridgeNative.RuleAction.PROXY,
-                "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
-                "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
-                _ => throw new ArgumentException($"Invalid action: {actionStr}. Use PROXY, DIRECT, or BLOCK")
-            };
+            var processName = ParsingHelpers.DefaultIfEmpty(parts[0].Trim());
+            var targetHosts = ParsingHelpers.DefaultIfEmpty(parts[1].Trim());
+            var targetPorts = ParsingHelpers.DefaultIfEmpty(parts[2].Trim());
+            var protocol = ParsingHelpers.ParseProtocol(parts[3].Trim());
+            var action = ParsingHelpers.ParseAction(parts[4].Trim());
 
             parsedRules.Add((processName, targetHosts, targetPorts, protocol, action));
         }

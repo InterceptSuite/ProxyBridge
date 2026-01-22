@@ -195,7 +195,17 @@ if ($success) {
     }
 
     Write-Host "`nPublishing GUI..." -ForegroundColor Green
-    $publishResult = dotnet publish gui/ProxyBridge.GUI.csproj -c Release -r win-x64 --self-contained -o gui/bin/Release/net10.0-windows/win-x64/publish 2>&1
+    $publishResult = dotnet publish gui/ProxyBridge.GUI.csproj -c Release -r win-x64 --self-contained `
+        /p:PublishTrimmed=true `
+        /p:PublishSingleFile=false `
+        /p:EnableCompressionInSingleFile=true `
+        /p:DebugType=None `
+        /p:DebugSymbols=false `
+        /p:Optimize=true `
+        /p:TieredCompilation=true `
+        /p:TieredCompilationQuickJit=false `
+        /p:ReadyToRun=true `
+        -o gui/bin/Release/net10.0-windows/win-x64/publish 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  GUI published successfully" -ForegroundColor Gray
 
@@ -209,13 +219,27 @@ if ($success) {
             Copy-Item $_.FullName -Destination $OutputDir -Force
             Write-Host "  Copied: $($_.Name)" -ForegroundColor Gray
         }
+
+        Write-Host "`nCleaning up GUI build artifacts..." -ForegroundColor Yellow
+        Remove-Item "gui\bin" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "gui\obj" -Recurse -Force -ErrorAction SilentlyContinue
     } else {
         Write-Host "  GUI publish failed!" -ForegroundColor Red
         Write-Host $publishResult
     }
 
     Write-Host "`nPublishing CLI..." -ForegroundColor Green
-    $publishResult = dotnet publish cli/ProxyBridge.CLI.csproj -c Release -r win-x64 --self-contained -o cli/bin/Release/net10.0-windows/win-x64/publish 2>&1
+    $publishResult = dotnet publish cli/ProxyBridge.CLI.csproj -c Release -r win-x64 --self-contained `
+        /p:PublishTrimmed=true `
+        /p:PublishSingleFile=true `
+        /p:EnableCompressionInSingleFile=true `
+        /p:DebugType=None `
+        /p:DebugSymbols=false `
+        /p:Optimize=true `
+        /p:TieredCompilation=true `
+        /p:TieredCompilationQuickJit=false `
+        /p:ReadyToRun=true `
+        -o cli/bin/Release/net10.0-windows/win-x64/publish 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  CLI published successfully" -ForegroundColor Gray
 
@@ -224,6 +248,10 @@ if ($success) {
 
         Copy-Item "$cliPublishPath\ProxyBridge_CLI.exe" -Destination $OutputDir -Force
         Write-Host "  Copied: ProxyBridge_CLI.exe" -ForegroundColor Gray
+
+        Write-Host "`nCleaning up CLI build artifacts..." -ForegroundColor Yellow
+        Remove-Item "cli\bin" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "cli\obj" -Recurse -Force -ErrorAction SilentlyContinue
     } else {
         Write-Host "  CLI publish failed!" -ForegroundColor Red
         Write-Host $publishResult
