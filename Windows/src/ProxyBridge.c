@@ -163,9 +163,10 @@ static BOOL parse_token_list(const char *list, const char *delimiters, token_mat
     if (list_copy == NULL)
         return FALSE;
 
-    strncpy(list_copy, list, len);
+    strncpy_s(list_copy, len, list, _TRUNCATE);
     BOOL matched = FALSE;
-    char *token = strtok(list_copy, delimiters);
+    char *context = NULL;
+    char *token = strtok_s(list_copy, delimiters, &context);
     while (token != NULL)
     {
         token = skip_whitespace(token);
@@ -174,7 +175,7 @@ static BOOL parse_token_list(const char *list, const char *delimiters, token_mat
             matched = TRUE;
             break;
         }
-        token = strtok(NULL, delimiters);
+        token = strtok_s(NULL, delimiters, &context);
     }
     free(list_copy);
     return matched;
@@ -552,7 +553,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 static UINT32 parse_ipv4(const char *ip)
 {
     unsigned int a, b, c, d;
-    if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+    if (sscanf_s(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
         return 0;
     if (a > 255 || b > 255 || c > 255 || d > 255)
         return 0;
@@ -736,8 +737,7 @@ static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
     // SMB is managed by system process
     if (pid == 4)
     {
-        strncpy(name, "System", name_size - 1);
-        name[name_size - 1] = '\0';
+        strncpy_s(name, name_size, "System", _TRUNCATE);
         return TRUE;
     }
 
@@ -751,8 +751,7 @@ static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
     {
 
 
-        strncpy(name, full_path, name_size - 1);
-        name[name_size - 1] = '\0';
+        strncpy_s(name, name_size, full_path, _TRUNCATE);
         CloseHandle(hProcess);
         return TRUE;
     }
@@ -777,8 +776,7 @@ static BOOL match_ip_pattern(const char *pattern, UINT32 ip)
 
     // Parse pattern manually
     char pattern_copy[256];
-    strncpy(pattern_copy, pattern, sizeof(pattern_copy) - 1);
-    pattern_copy[sizeof(pattern_copy) - 1] = '\0';
+    strncpy_s(pattern_copy, sizeof(pattern_copy), pattern, _TRUNCATE);
 
     char pattern_octets[4][16];
     int octet_count = 0;
@@ -936,11 +934,12 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
     if (list_copy == NULL)
         return FALSE;
 
-    strncpy(list_copy, process_list, len);
+    strncpy_s(list_copy, len, process_list, _TRUNCATE);
     BOOL matched = FALSE;
+    char *context = NULL;
 
     // Support both semicolon and comma as separators - Need to figure complex rules in CLI parsing
-    char *token = strtok(list_copy, ",;");
+    char *token = strtok_s(list_copy, ",;", &context);
     while (token != NULL)
     {
         // Skip leading whitespace
@@ -969,7 +968,7 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
             matched = TRUE;
             break;
         }
-        token = strtok(NULL, ",;");
+        token = strtok_s(NULL, ",;", &context);
     }
     free(list_copy);
     return matched;
@@ -2208,8 +2207,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
         return 0;
 
     rule->rule_id = g_next_rule_id++;
-    strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
-    rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
+    strncpy_s(rule->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
     rule->protocol = protocol;
 
     if (target_hosts != NULL && target_hosts[0] != '\0')
@@ -2221,8 +2219,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
             free(rule);
             return 0;
         }
-        strncpy(rule->target_hosts, target_hosts, len);
-        rule->target_hosts[len - 1] = '\0';
+        strncpy_s(rule->target_hosts, len, target_hosts, _TRUNCATE);
     }
     else
     {
@@ -2233,7 +2230,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
             free(rule);
             return 0;
         }
-        strcpy(rule->target_hosts, "*");
+        strcpy_s(rule->target_hosts, 2, "*");
     }
 
     // Dynamically allocate memory for target_ports no size limit!
@@ -2247,8 +2244,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
             free(rule);
             return 0;
         }
-        strncpy(rule->target_ports, target_ports, len);
-        rule->target_ports[len - 1] = '\0';
+        strncpy_s(rule->target_ports, len, target_ports, _TRUNCATE);
     }
     else
     {
@@ -2260,8 +2256,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
             free(rule);
             return 0;
         }
-        strncpy(rule->target_ports, "*", 2);
-        rule->target_ports[1] = '\0';
+        strcpy_s(rule->target_ports, 2, "*");
     }
 
     rule->action = action;
@@ -2358,8 +2353,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_na
     {
         if (rule->rule_id == rule_id)
         {
-            strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
-            rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
+            strncpy_s(rule->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
 
             if (rule->target_hosts != NULL)
                 free(rule->target_hosts);
@@ -2390,16 +2384,14 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* prox
     if (resolve_hostname(proxy_ip) == 0)
         return FALSE;
 
-    strncpy(g_proxy_host, proxy_ip, sizeof(g_proxy_host) - 1);
-    g_proxy_host[sizeof(g_proxy_host) - 1] = '\0';
+    strncpy_s(g_proxy_host, sizeof(g_proxy_host), proxy_ip, _TRUNCATE);
     g_proxy_port = proxy_port;
     g_proxy_type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
 
     // Store credentials if there
     if (username != NULL && username[0] != '\0')
     {
-        strncpy(g_proxy_username, username, sizeof(g_proxy_username) - 1);
-        g_proxy_username[sizeof(g_proxy_username) - 1] = '\0';
+        strncpy_s(g_proxy_username, sizeof(g_proxy_username), username, _TRUNCATE);
     }
     else
     {
@@ -2408,8 +2400,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* prox
 
     if (password != NULL && password[0] != '\0')
     {
-        strncpy(g_proxy_password, password, sizeof(g_proxy_password) - 1);
-        g_proxy_password[sizeof(g_proxy_password) - 1] = '\0';
+        strncpy_s(g_proxy_password, sizeof(g_proxy_password), password, _TRUNCATE);
     }
     else
     {
@@ -2887,14 +2878,14 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
         target_host, target_port,
         g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
         g_proxy_host, g_proxy_port);
-    strncpy(result_buffer, temp_buffer, buffer_size - 1);
+    strncpy_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
 
 
     host_info = gethostbyname(target_host);
     if (host_info == NULL)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to resolve hostname %s (%d)\n", target_host, WSAGetLastError());
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         WSACleanup();
         return -1;
     }
@@ -2904,14 +2895,14 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
         target_host,
         (target_ip >> 0) & 0xFF, (target_ip >> 8) & 0xFF,
         (target_ip >> 16) & 0xFF, (target_ip >> 24) & 0xFF);
-    strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+    strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
 
     // Create socket
     test_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (test_sock == INVALID_SOCKET)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Socket creation failed (%d)\n", WSAGetLastError());
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         WSACleanup();
         return -1;
     }
@@ -2926,42 +2917,42 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
     proxy_addr.sin_port = htons(g_proxy_port);
 
     snprintf(temp_buffer, sizeof(temp_buffer), "Connecting to proxy %s:%d...\n", g_proxy_host, g_proxy_port);
-    strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+    strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
 
     if (connect(test_sock, (struct sockaddr*)&proxy_addr, sizeof(proxy_addr)) == SOCKET_ERROR)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to connect to proxy (%d)\n", WSAGetLastError());
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         closesocket(test_sock);
         WSACleanup();
         return -1;
     }
 
-    strncat(result_buffer, "Connected to proxy server\n", buffer_size - strlen(result_buffer) - 1);
+    strncat_s(result_buffer, buffer_size, "Connected to proxy server\n", _TRUNCATE);
 
     if (g_proxy_type == PROXY_TYPE_SOCKS5)
     {
         if (socks5_connect(test_sock, target_ip, target_port) != 0)
         {
             snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: SOCKS5 handshake failed\n");
-            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
             closesocket(test_sock);
             WSACleanup();
             return -1;
         }
-        strncat(result_buffer, "SOCKS5 handshake successful\n", buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, "SOCKS5 handshake successful\n", _TRUNCATE);
     }
     else
     {
         if (http_connect(test_sock, target_ip, target_port) != 0)
         {
             snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: HTTP CONNECT failed\n");
-            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
             closesocket(test_sock);
             WSACleanup();
             return -1;
         }
-        strncat(result_buffer, "HTTP CONNECT successful\n", buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, "HTTP CONNECT successful\n", _TRUNCATE);
     }
 
 
@@ -2976,13 +2967,13 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
     if (send(test_sock, http_request, strlen(http_request), 0) == SOCKET_ERROR)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to send test request (%d)\n", WSAGetLastError());
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         closesocket(test_sock);
         WSACleanup();
         return -1;
     }
 
-    strncat(result_buffer, "Sent HTTP GET request\n", buffer_size - strlen(result_buffer) - 1);
+    strncat_s(result_buffer, buffer_size, "Sent HTTP GET request\n", _TRUNCATE);
     char response[1024];
     int bytes_received = recv(test_sock, response, sizeof(response) - 1, 0);
     if (bytes_received > 0)
@@ -2995,24 +2986,24 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
             int status_code = 0;
             if (status_line != NULL)
             {
-                sscanf(status_line, "HTTP/%*s %d", &status_code);
+                sscanf_s(status_line, "HTTP/%*s %d", &status_code);
             }
 
             snprintf(temp_buffer, sizeof(temp_buffer), "SUCCESS: Received HTTP %d response (%d bytes)\n", status_code, bytes_received);
-            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
             ret = 0; // Success
         }
         else
         {
             snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Received data but not valid HTTP response\n");
-            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
             ret = -1; // Failure - not a valid HTTP response
         }
     }
     else if (bytes_received == 0)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Connection closed by remote host (no data received)\n");
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         ret = -1; // Failure
     }
     else
@@ -3026,7 +3017,7 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
         {
             snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to receive response (%d)\n", error_code);
         }
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         ret = -1; // Failure
     }
 
@@ -3035,11 +3026,11 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
 
     if (ret == 0)
     {
-        strncat(result_buffer, "\n✓ Proxy connection test PASSED\n", buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, "\n✓ Proxy connection test PASSED\n", _TRUNCATE);
     }
     else
     {
-        strncat(result_buffer, "\n✗ Proxy connection test FAILED\n", buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, "\n✗ Proxy connection test FAILED\n", _TRUNCATE);
     }
 
     return ret;

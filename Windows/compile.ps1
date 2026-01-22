@@ -195,12 +195,12 @@ if ($success) {
     }
 
     Write-Host "`nPublishing GUI..." -ForegroundColor Green
-    $publishResult = dotnet publish gui/ProxyBridge.GUI.csproj -c Release -r win-x64 --self-contained -o gui/bin/Release/net9.0-windows/win-x64/publish 2>&1
+    $publishResult = dotnet publish gui/ProxyBridge.GUI.csproj -c Release -r win-x64 --self-contained -o gui/bin/Release/net10.0-windows/win-x64/publish 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  GUI published successfully" -ForegroundColor Gray
 
         Write-Host "`nCopying GUI files to output..." -ForegroundColor Green
-        $guiPublishPath = "gui\bin\Release\net9.0-windows\win-x64\publish"
+        $guiPublishPath = "gui\bin\Release\net10.0-windows\win-x64\publish"
 
         Copy-Item "$guiPublishPath\ProxyBridge.exe" -Destination $OutputDir -Force
         Write-Host "  Copied: ProxyBridge.exe" -ForegroundColor Gray
@@ -215,12 +215,12 @@ if ($success) {
     }
 
     Write-Host "`nPublishing CLI..." -ForegroundColor Green
-    $publishResult = dotnet publish cli/ProxyBridge.CLI.csproj -c Release -r win-x64 --self-contained -o cli/bin/Release/net9.0-windows/win-x64/publish 2>&1
+    $publishResult = dotnet publish cli/ProxyBridge.CLI.csproj -c Release -r win-x64 --self-contained -o cli/bin/Release/net10.0-windows/win-x64/publish 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  CLI published successfully" -ForegroundColor Gray
 
         Write-Host "`nCopying CLI files to output..." -ForegroundColor Green
-        $cliPublishPath = "cli\bin\Release\net9.0-windows\win-x64\publish"
+        $cliPublishPath = "cli\bin\Release\net10.0-windows\win-x64\publish"
 
         Copy-Item "$cliPublishPath\ProxyBridge_CLI.exe" -Destination $OutputDir -Force
         Write-Host "  Copied: ProxyBridge_CLI.exe" -ForegroundColor Gray
