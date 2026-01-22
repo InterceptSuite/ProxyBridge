@@ -134,8 +134,36 @@ static const char* extract_filename(const char* path)
     const char* last_backslash = strrchr(path, '\\');
     const char* last_slash = strrchr(path, '/');
     const char* last_separator = (last_backslash > last_slash) ? last_backslash : last_slash;
-
     return last_separator ? (last_separator + 1) : path;
+}
+
+static void configure_tcp_socket(SOCKET sock, int bufsize, DWORD timeout)
+{
+    int nodelay = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+}
+
+static void configure_udp_socket(SOCKET sock, int bufsize, DWORD timeout)
+{
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+}
+
+static int send_all(SOCKET sock, const char *buf, int len)
+{
+    int sent = 0;
+    while (sent < len) {
+        int n = send(sock, buf + sent, len - sent, 0);
+        if (n == SOCKET_ERROR) return SOCKET_ERROR;
+        sent += n;
+    }
+    return sent;
 }
 
 static UINT32 parse_ipv4(const char *ip);
@@ -1412,17 +1440,7 @@ static BOOL establish_udp_associate(void)
     if (tcp_sock == INVALID_SOCKET)
         return FALSE;
 
-    int nodelay = 1;
-    setsockopt(tcp_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
-
-    int bufsize = 262144;  // 256KB
-    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
-    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
-
-    // 3 seconds, without delay can take extra system resource CPU/Memory
-    DWORD timeout = 3000;
-    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+    configure_tcp_socket(tcp_sock, 262144, 3000);
 
     UINT32 socks5_ip = resolve_hostname(g_proxy_host);
     if (socks5_ip == 0)
@@ -1460,14 +1478,7 @@ static BOOL establish_udp_associate(void)
         return FALSE;
     }
 
-    // Optimize UDP socket buffers for upload performance
-    int udp_bufsize = 262144;  // 256KB
-    setsockopt(socks5_udp_send_socket, SOL_SOCKET, SO_RCVBUF, (char*)&udp_bufsize, sizeof(udp_bufsize));
-    setsockopt(socks5_udp_send_socket, SOL_SOCKET, SO_SNDBUF, (char*)&udp_bufsize, sizeof(udp_bufsize));
-
-    DWORD udp_timeout = 30000;
-    setsockopt(socks5_udp_send_socket, SOL_SOCKET, SO_RCVTIMEO, (char*)&udp_timeout, sizeof(udp_timeout));
-    setsockopt(socks5_udp_send_socket, SOL_SOCKET, SO_SNDTIMEO, (char*)&udp_timeout, sizeof(udp_timeout));
+    configure_udp_socket(socks5_udp_send_socket, 262144, 30000);
 
     udp_associate_connected = TRUE;
     log_message("UDP ASSOCIATE established with SOCKS5 proxy");
@@ -1477,8 +1488,7 @@ static BOOL establish_udp_associate(void)
 static DWORD WINAPI udp_relay_server(LPVOID arg)
 {
     WSADATA wsa_data;
-    struct sockaddr_in local_addr, socks_addr, from_addr;
-    SOCKET tcp_sock;
+    struct sockaddr_in local_addr, from_addr;
     unsigned char recv_buf[MAXBUF];
     unsigned char send_buf[MAXBUF];
     int recv_len, from_len;
@@ -1495,14 +1505,7 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
     int on = 1;
     setsockopt(udp_relay_socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
-
-    int udp_bufsize = 262144;  // 256KB
-    setsockopt(udp_relay_socket, SOL_SOCKET, SO_RCVBUF, (char*)&udp_bufsize, sizeof(udp_bufsize));
-    setsockopt(udp_relay_socket, SOL_SOCKET, SO_SNDBUF, (char*)&udp_bufsize, sizeof(udp_bufsize));
-
-    DWORD timeout = 30000; // 30 seconds
-    setsockopt(udp_relay_socket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-    setsockopt(udp_relay_socket, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+    configure_udp_socket(udp_relay_socket, 262144, 30000);
 
     memset(&local_addr, 0, sizeof(local_addr));
     local_addr.sin_family = AF_INET;
@@ -1866,32 +1869,13 @@ static DWORD WINAPI connection_handler(LPVOID arg)
         return 0;
     }
 
-    int nodelay = 1;
-    setsockopt(socks_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
-    setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
-
-    // 512KB buffers for maximum upload/download speed
-
-    //buffer can overload if the number of paccket are increased
-    // ex = rule for whole sysyem can have too many packett
-    // 512kb can handle paceekt in relay even for 1 - 2.5gig network connection
-    // not testing in network speed for 2.5+ gig should be able to handle with mutliple threads
-    int bufsize = 524288;  // 512KB
-    setsockopt(socks_sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
-    setsockopt(socks_sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
-    setsockopt(client_sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
-    setsockopt(client_sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
+    configure_tcp_socket(socks_sock, 524288, 30000);
+    configure_tcp_socket(client_sock, 524288, 30000);
 
     memset(&socks_addr, 0, sizeof(socks_addr));
     socks_addr.sin_family = AF_INET;
     socks_addr.sin_addr.s_addr = socks5_ip;
     socks_addr.sin_port = htons(g_proxy_port);
-
-    DWORD timeout = 30000; // 30 seconds
-    setsockopt(socks_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-    setsockopt(socks_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
-    setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-    setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
 
     if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
     {
@@ -1986,21 +1970,10 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
         {
             len = recv(sock1, buf, sizeof(buf), 0);
             if (len <= 0)
-            {
-                // client closed connection gracefully
                 break;
-            }
 
-            int sent = 0;
-            while (sent < len)
-            {
-                int n = send(sock2, buf + sent, len - sent, 0);
-                if (n == SOCKET_ERROR)
-                {
-                    goto cleanup;
-                }
-                sent += n;
-            }
+            if (send_all(sock2, buf, len) == SOCKET_ERROR)
+                goto cleanup;
         }
 
         // check if proxyto client
@@ -2008,21 +1981,10 @@ static DWORD WINAPI transfer_handler(LPVOID arg)
         {
             len = recv(sock2, buf, sizeof(buf), 0);
             if (len <= 0)
-            {
-                // proxy closed connection gracefully
                 break;
-            }
 
-            int sent = 0;
-            while (sent < len)
-            {
-                int n = send(sock1, buf + sent, len - sent, 0);
-                if (n == SOCKET_ERROR)
-                {
-                    goto cleanup;
-                }
-                sent += n;
-            }
+            if (send_all(sock1, buf, len) == SOCKET_ERROR)
+                goto cleanup;
         }
     }
 

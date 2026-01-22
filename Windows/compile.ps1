@@ -38,25 +38,39 @@ function Compile-MSVC {
 
     $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 
-    if (Test-Path $vsWhere) {
-        $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-        if ($vsPath) {
-            $vcvarsPath = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
-            if (Test-Path $vcvarsPath) {
-                Write-Host "Found Visual Studio at: $vsPath" -ForegroundColor Cyan
-            }
-        }
+    if (-not (Test-Path $vsWhere)) {
+        Write-Host "Visual Studio not found" -ForegroundColor Yellow
+        return $false
     }
 
-    $cmd = "cl.exe /nologo /O2 /GL /W3 /D_CRT_SECURE_NO_WARNINGS /DPROXYBRIDGE_EXPORTS " +
-           "/I`"$WinDivertPath\include`" " +
-           "$SourcePath\$SourceFile " +
-           "/LD " +
-           "/link /LTCG /OPT:REF /OPT:ICF /DEBUG:NONE /LIBPATH:`"$WinDivertPath\$Arch`" " +
-           "WinDivert.lib ws2_32.lib iphlpapi.lib " +
-           "/OUT:$OutputDLL"
+    $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (-not $vsPath) {
+        Write-Host "Visual Studio C++ tools not found" -ForegroundColor Yellow
+        return $false
+    }
 
-    Write-Host "Command: $cmd" -ForegroundColor Gray
+    $vcvarsPath = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
+    if (-not (Test-Path $vcvarsPath)) {
+        Write-Host "vcvarsall.bat not found" -ForegroundColor Yellow
+        return $false
+    }
+
+    Write-Host "Found Visual Studio at: $vsPath" -ForegroundColor Cyan
+
+    $clArgs = "/nologo /O2 /Ot /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
+              "/D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS /DPROXYBRIDGE_EXPORTS /DNDEBUG " +
+              "/arch:SSE2 /fp:fast /GS /guard:cf /Qpar " +
+              "/I`"$WinDivertPath\include`" " +
+              "$SourcePath\$SourceFile " +
+              "/LD " +
+              "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /NXCOMPAT " +
+              "/LIBPATH:`"$WinDivertPath\$Arch`" " +
+              "WinDivert.lib ws2_32.lib iphlpapi.lib " +
+              "/OUT:$OutputDLL"
+
+    $cmd = "`"$vcvarsPath`" $Arch >nul && cl.exe $clArgs"
+
+    Write-Host "Command: cl.exe $clArgs" -ForegroundColor Gray
 
     $result = cmd /c $cmd '2>&1'
     $exitCode = $LASTEXITCODE
