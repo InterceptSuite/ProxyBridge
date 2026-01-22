@@ -2358,10 +2358,20 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_na
             if (rule->target_hosts != NULL)
                 free(rule->target_hosts);
             rule->target_hosts = _strdup(target_hosts);
+            if (rule->target_hosts == NULL)
+            {
+                return FALSE;
+            }
 
             if (rule->target_ports != NULL)
                 free(rule->target_ports);
             rule->target_ports = _strdup(target_ports);
+            if (rule->target_ports == NULL)
+            {
+                free(rule->target_hosts);
+                rule->target_hosts = NULL;
+                return FALSE;
+            }
 
             rule->protocol = protocol;
             rule->action = action;
@@ -2701,6 +2711,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         if (udp_relay_thread == NULL)
         {
             running = FALSE;
+            WaitForSingleObject(cleanup_thread, INFINITE);
+            CloseHandle(cleanup_thread);
+            cleanup_thread = NULL;
             WaitForSingleObject(proxy_thread, INFINITE);
             CloseHandle(proxy_thread);
             proxy_thread = NULL;
