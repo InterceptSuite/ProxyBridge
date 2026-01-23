@@ -38,25 +38,39 @@ function Compile-MSVC {
 
     $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 
-    if (Test-Path $vsWhere) {
-        $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-        if ($vsPath) {
-            $vcvarsPath = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
-            if (Test-Path $vcvarsPath) {
-                Write-Host "Found Visual Studio at: $vsPath" -ForegroundColor Cyan
-            }
-        }
+    if (-not (Test-Path $vsWhere)) {
+        Write-Host "Visual Studio not found" -ForegroundColor Yellow
+        return $false
     }
 
-    $cmd = "cl.exe /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /DPROXYBRIDGE_EXPORTS " +
-           "/I`"$WinDivertPath\include`" " +
-           "$SourcePath\$SourceFile " +
-           "/LD " +
-           "/link /LIBPATH:`"$WinDivertPath\$Arch`" " +
-           "WinDivert.lib ws2_32.lib iphlpapi.lib " +
-           "/OUT:$OutputDLL"
+    $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (-not $vsPath) {
+        Write-Host "Visual Studio C++ tools not found" -ForegroundColor Yellow
+        return $false
+    }
 
-    Write-Host "Command: $cmd" -ForegroundColor Gray
+    $vcvarsPath = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
+    if (-not (Test-Path $vcvarsPath)) {
+        Write-Host "vcvarsall.bat not found" -ForegroundColor Yellow
+        return $false
+    }
+
+    Write-Host "Found Visual Studio at: $vsPath" -ForegroundColor Cyan
+
+    $clArgs = "/nologo /O2 /Ot /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
+              "/D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS /DPROXYBRIDGE_EXPORTS /DNDEBUG " +
+              "/arch:SSE2 /fp:fast /GS /guard:cf /Qpar " +
+              "/I`"$WinDivertPath\include`" " +
+              "$SourcePath\$SourceFile " +
+              "/LD " +
+              "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /NXCOMPAT " +
+              "/LIBPATH:`"$WinDivertPath\$Arch`" " +
+              "WinDivert.lib ws2_32.lib iphlpapi.lib " +
+              "/OUT:$OutputDLL"
+
+    $cmd = "`"$vcvarsPath`" $Arch >nul && cl.exe $clArgs"
+
+    Write-Host "Command: cl.exe $clArgs" -ForegroundColor Gray
 
     $result = cmd /c $cmd '2>&1'
     $exitCode = $LASTEXITCODE
@@ -77,7 +91,7 @@ function Compile-GCC {
 
     Write-Host "GCC found: $($gccVersion[0])" -ForegroundColor Cyan
 
-    $cmd = "gcc -shared -O2 -Wall -D_WIN32_WINNT=0x0601 -DPROXYBRIDGE_EXPORTS " +
+    $cmd = "gcc -shared -O2 -flto -s -Wall -D_WIN32_WINNT=0x0601 -DPROXYBRIDGE_EXPORTS " +
            "-I`"$WinDivertPath\include`" " +
            "$SourcePath\$SourceFile " +
            "-L`"$WinDivertPath\$Arch`" " +
@@ -155,6 +169,15 @@ if ($Compiler -eq 'auto') {
 if ($success) {
     Write-Host "`nCompilation SUCCESSFUL!" -ForegroundColor Green
 
+    Write-Host "`nCleaning up intermediate files..." -ForegroundColor Yellow
+    $intermediateFiles = @("*.obj", "*.exp", "*.lib", "ProxyBridge.obj")
+    foreach ($pattern in $intermediateFiles) {
+        Get-ChildItem -Path . -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+            Remove-Item $_.FullName -Force
+            Write-Host "  Removed: $($_.Name)" -ForegroundColor Gray
+        }
+    }
+
     Write-Host "`nMoving files to output directory..." -ForegroundColor Green
     Move-Item $OutputDLL -Destination $OutputDir -Force
     Write-Host "  Moved: $OutputDLL -> $OutputDir\" -ForegroundColor Gray
@@ -172,12 +195,22 @@ if ($success) {
     }
 
     Write-Host "`nPublishing GUI..." -ForegroundColor Green
-    $publishResult = dotnet publish gui/ProxyBridge.GUI.csproj -c Release -r win-x64 --self-contained -o gui/bin/Release/net9.0-windows/win-x64/publish 2>&1
+    $publishResult = dotnet publish gui/ProxyBridge.GUI.csproj -c Release -r win-x64 --self-contained `
+        /p:PublishTrimmed=true `
+        /p:PublishSingleFile=false `
+        /p:EnableCompressionInSingleFile=true `
+        /p:DebugType=None `
+        /p:DebugSymbols=false `
+        /p:Optimize=true `
+        /p:TieredCompilation=true `
+        /p:TieredCompilationQuickJit=false `
+        /p:ReadyToRun=true `
+        -o gui/bin/Release/net10.0-windows/win-x64/publish 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  GUI published successfully" -ForegroundColor Gray
 
         Write-Host "`nCopying GUI files to output..." -ForegroundColor Green
-        $guiPublishPath = "gui\bin\Release\net9.0-windows\win-x64\publish"
+        $guiPublishPath = "gui\bin\Release\net10.0-windows\win-x64\publish"
 
         Copy-Item "$guiPublishPath\ProxyBridge.exe" -Destination $OutputDir -Force
         Write-Host "  Copied: ProxyBridge.exe" -ForegroundColor Gray
@@ -186,21 +219,39 @@ if ($success) {
             Copy-Item $_.FullName -Destination $OutputDir -Force
             Write-Host "  Copied: $($_.Name)" -ForegroundColor Gray
         }
+
+        Write-Host "`nCleaning up GUI build artifacts..." -ForegroundColor Yellow
+        Remove-Item "gui\bin" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "gui\obj" -Recurse -Force -ErrorAction SilentlyContinue
     } else {
         Write-Host "  GUI publish failed!" -ForegroundColor Red
         Write-Host $publishResult
     }
 
     Write-Host "`nPublishing CLI..." -ForegroundColor Green
-    $publishResult = dotnet publish cli/ProxyBridge.CLI.csproj -c Release -r win-x64 --self-contained -o cli/bin/Release/net9.0-windows/win-x64/publish 2>&1
+    $publishResult = dotnet publish cli/ProxyBridge.CLI.csproj -c Release -r win-x64 --self-contained `
+        /p:PublishTrimmed=true `
+        /p:PublishSingleFile=true `
+        /p:EnableCompressionInSingleFile=true `
+        /p:DebugType=None `
+        /p:DebugSymbols=false `
+        /p:Optimize=true `
+        /p:TieredCompilation=true `
+        /p:TieredCompilationQuickJit=false `
+        /p:ReadyToRun=true `
+        -o cli/bin/Release/net10.0-windows/win-x64/publish 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  CLI published successfully" -ForegroundColor Gray
 
         Write-Host "`nCopying CLI files to output..." -ForegroundColor Green
-        $cliPublishPath = "cli\bin\Release\net9.0-windows\win-x64\publish"
+        $cliPublishPath = "cli\bin\Release\net10.0-windows\win-x64\publish"
 
         Copy-Item "$cliPublishPath\ProxyBridge_CLI.exe" -Destination $OutputDir -Force
         Write-Host "  Copied: ProxyBridge_CLI.exe" -ForegroundColor Gray
+
+        Write-Host "`nCleaning up CLI build artifacts..." -ForegroundColor Yellow
+        Remove-Item "cli\bin" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "cli\obj" -Recurse -Force -ErrorAction SilentlyContinue
     } else {
         Write-Host "  CLI publish failed!" -ForegroundColor Red
         Write-Host $publishResult
@@ -245,7 +296,7 @@ if ($success) {
         Pop-Location
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  Installer created successfully" -ForegroundColor Green
-            $installerName = "ProxyBridge-Setup-3.0.0.exe"
+            $installerName = "ProxyBridge-Setup-3.1.0.exe"
             if (Test-Path "installer\$installerName") {
                 Move-Item "installer\$installerName" -Destination $OutputDir -Force
                 Write-Host "  Moved: $installerName -> $OutputDir\" -ForegroundColor Gray

@@ -27,6 +27,13 @@ struct ProxyBridgeGUIApp: App {
                     openProxyRulesWindow()
                 }
                 .keyboardShortcut("r", modifiers: .command)
+                
+                Divider()
+                
+                Toggle("Enable Traffic Logging", isOn: Binding(
+                    get: { viewModel.isTrafficLoggingEnabled },
+                    set: { _ in viewModel.toggleTrafficLogging() }
+                ))
             }
             
             CommandGroup(replacing: .help) {
@@ -50,9 +57,7 @@ struct ProxyBridgeGUIApp: App {
         
         Window("Proxy Rules", id: "proxy-rules") {
             ProxyRulesView(viewModel: viewModel)
-                .frame(width: 700, height: 500)
         }
-        .windowResizability(.contentSize)
         .defaultPosition(.center)
         
         Window("About ProxyBridge", id: "about") {
@@ -107,8 +112,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     static var viewModel: ProxyBridgeViewModel?
     static var pendingUpdateInfo: VersionInfo?
     
-    func applicationWillTerminate(_ notification: Notification) {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Clear extension memory before app quits
         AppDelegate.viewModel?.stopProxy()
+        
+        // Give time for memory clearing to complete
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        
+        return .terminateLater
     }
     
     @objc func openProxySettings() {
@@ -118,7 +131,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func openProxyRules() {
-        openWindow(title: "Proxy Rules", size: NSSize(width: 700, height: 500), resizable: true) {
+        openWindow(title: "Proxy Rules", size: NSSize(width: 1200, height: 600), resizable: true) {
             ProxyRulesView(viewModel: AppDelegate.viewModel!)
         }
     }

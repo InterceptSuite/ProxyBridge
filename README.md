@@ -1,18 +1,12 @@
 # ProxyBridge
 
 <p align="center">
-  <img src="img/logo.png" alt="ProxyBridge Logo" width="200"/>
+  <img src="img/logo.png" alt="ProxyBridge Logo" />
 </p>
 
 ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alternative) that provides transparent proxy routing for applications on **Windows** and **macOS**. It redirects TCP and UDP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. ProxyBridge fully supports both TCP and UDP proxy routing and works at the system level, making it compatible with proxy-unaware applications without requiring any configuration changes.
 
-> 🚀 **Need advanced traffic analysis?** Check out [**InterceptSuite**](https://github.com/InterceptSuite/InterceptSuite) - our comprehensive MITM proxy for analyzing TLS, TCP, UDP, DTLS traffic. Perfect for security testing, network debugging, and system administration!
-
-<p align="center">
-  <a href="https://github.com/sponsors/Anof-cyber">
-    <img src="https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86" alt="Sponsor Anof-cyber" width="230" height="50">
-  </a>
-</p>
+🚀 **Need advanced traffic analysis?** Check out [**InterceptSuite**](https://github.com/InterceptSuite/InterceptSuite) - our comprehensive MITM proxy for analyzing TLS, TCP, UDP, DTLS traffic. Perfect for security testing, network debugging, and system administration!
 
 ## Table of Contents
 
@@ -23,6 +17,14 @@ ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alte
 - [License](#license)
 - [Author](#author)
 - [Credits](#credits)
+
+<p align="center">
+  <strong>💖 Support ProxyBridge Development</strong><br/>
+  <em>If you find ProxyBridge useful, consider sponsoring to support ongoing development and new features!</em><br/><br/>
+  <a href="https://github.com/sponsors/InterceptSuite">
+    <img src="https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86" alt="Sponsor InterceptSuite" width="230" height="50">
+  </a>
+</p>
 
 ## Features
 
@@ -40,22 +42,21 @@ ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alte
 - **Process exclusion** - Prevent proxy loops by excluding proxy applications
 - **Import/Export rules** - Share rule configurations across systems with JSON-based import/export
 
-## Platform Documentation
-
-<a href="https://github.com/sponsors/Anof-cyber"><img src="https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86" alt="Sponsor Anof-cyber" width="230" height="50"></a>
 
 ## Platform Documentation
 
 ProxyBridge is available for both Windows and macOS, with platform-specific implementations:
 
-### 📘 [Windows Documentation](Windows/README.md)
+### 📘 Windows
+- **[View Full Windows Documentation](Windows/README.md)**
 - **Technology**: WinDivert for kernel-level packet interception
 - **Installer**: Available from [Releases](https://github.com/InterceptSuite/ProxyBridge/releases)
 - **Requirements**: Windows 10 or later (64-bit), Administrator privileges
 - **GUI**: Avalonia-based modern interface
 - **CLI**: Full-featured command-line tool with rule file support
 
-### 📗 [macOS Documentation](MacOS/README.md)
+### 📗 macOS
+- **[View Full macOS Documentation](MacOS/README.md)**
 - **Technology**: Network Extension framework with transparent proxy
 - **Distribution**: Direct download (.pkg installer) from [Releases](https://github.com/InterceptSuite/ProxyBridge/releases)
 - **Requirements**: macOS 13.0 (Ventura) or later, Apple Silicon (ARM) or Intel

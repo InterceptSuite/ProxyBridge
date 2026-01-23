@@ -7,13 +7,14 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     @Published var connections: [ConnectionLog] = []
     @Published var activityLogs: [ActivityLog] = []
     @Published var isProxyActive = false
+    @Published var isTrafficLoggingEnabled = true
     
     var tunnelSession: NETunnelProviderSession?
     private var logTimer: Timer?
     private(set) var proxyConfig: ProxyConfig?
     
     private let maxLogEntries = 1000
-    private let logPollingInterval = 0.1
+    private let logPollingInterval = 1.0
     private let extensionIdentifier = "com.interceptsuite.ProxyBridge.extension"
     
     struct ProxyConfig {
@@ -43,8 +44,39 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     
     override init() {
         super.init()
+        loadTrafficLoggingSetting()
         loadProxyConfig()
         installAndStartProxy()
+    }
+    
+    private func loadTrafficLoggingSetting() {
+        isTrafficLoggingEnabled = UserDefaults.standard.object(forKey: "trafficLoggingEnabled") as? Bool ?? true
+    }
+    
+    func toggleTrafficLogging() {
+        isTrafficLoggingEnabled.toggle()
+        UserDefaults.standard.set(isTrafficLoggingEnabled, forKey: "trafficLoggingEnabled")
+        sendTrafficLoggingToExtension(isTrafficLoggingEnabled)
+        
+        if isTrafficLoggingEnabled {
+            startLogPollingTimer()
+        } else {
+            logTimer?.invalidate()
+            logTimer = nil
+        }
+    }
+    
+    private func sendTrafficLoggingToExtension(_ enabled: Bool) {
+        guard let session = tunnelSession else { return }
+        
+        let message: [String: Any] = [
+            "action": "setTrafficLogging",
+            "enabled": enabled
+        ]
+        
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
+        
+        try? session.sendProviderMessage(data) { _ in }
     }
     
     private func loadProxyConfig() {
@@ -132,11 +164,15 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             
             do {
                 try (manager.connection as? NETunnelProviderSession)?.startTunnel()
-                self.isProxyActive = true
-                self.addLog("INFO", "Proxy tunnel started")
+                
+                DispatchQueue.main.async {
+                    self.isProxyActive = true
+                    self.addLog("INFO", "Proxy tunnel started")
+                }
                 
                 if let session = manager.connection as? NETunnelProviderSession {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    // Wait a moment for tunnel to be ready, then configure
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
                         self.setupLogPolling(session: session)
                         
                         if let config = self.proxyConfig {
@@ -157,15 +193,45 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     func stopProxy() {
-        NETransparentProxyManager.loadAllFromPreferences { [weak self] managers, error in
+        guard let session = tunnelSession else {
+            isProxyActive = false
+            logTimer?.invalidate()
+            logTimer = nil
+            return
+        }
+        
+        // Clear all data from extension memory before stopping
+        clearExtensionMemory(session: session) { [weak self] in
             guard let self = self else { return }
             
-            if let manager = managers?.first {
-                (manager.connection as? NETunnelProviderSession)?.stopTunnel()
-                self.isProxyActive = false
-                self.logTimer?.invalidate()
-                self.logTimer = nil
-                self.addLog("INFO", "Proxy stopped")
+            NETransparentProxyManager.loadAllFromPreferences { managers, error in
+                if let manager = managers?.first {
+                    (manager.connection as? NETunnelProviderSession)?.stopTunnel()
+                    self.isProxyActive = false
+                    self.logTimer?.invalidate()
+                    self.logTimer = nil
+                    self.tunnelSession = nil
+                    self.addLog("INFO", "Proxy stopped and extension memory cleared")
+                }
+            }
+        }
+    }
+    
+    private func clearExtensionMemory(session: NETunnelProviderSession, completion: @escaping () -> Void) {
+        // clear rules auto fix the #51 - and proxy rules become inactive after It closes
+        RuleManager.clearRules(session: session) { success, message in
+            //clear proxy config as well keep meory usage low for extesion 
+            let clearConfigMessage: [String: Any] = [
+                "action": "clearConfig"
+            ]
+            
+            guard let data = try? JSONSerialization.data(withJSONObject: clearConfigMessage) else {
+                completion()
+                return
+            }
+            
+            try? session.sendProviderMessage(data) { _ in
+                completion()
             }
         }
     }
@@ -173,6 +239,14 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     private func setupLogPolling(session: NETunnelProviderSession) {
         tunnelSession = session
         
+        sendTrafficLoggingToExtension(isTrafficLoggingEnabled)
+        
+        if isTrafficLoggingEnabled {
+            startLogPollingTimer()
+        }
+    }
+    
+    private func startLogPollingTimer() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.logTimer?.invalidate()
@@ -193,22 +267,27 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         
         try? session.sendProviderMessage(data) { [weak self] response in
             guard let self = self,
-                  let responseData = response,
-                  let log = try? JSONSerialization.jsonObject(with: responseData) as? [String: String] else {
+                  let responseData = response else {
                 return
             }
             
-            DispatchQueue.main.async {
-                if log["type"] == "connection" {
-                    self.handleConnectionLog(log)
-                } else {
-                    self.handleActivityLog(log)
-                }                
+            if let logs = try? JSONSerialization.jsonObject(with: responseData) as? [[String: String]] {
+                DispatchQueue.main.async {
+                    for log in logs {
+                        if log["type"] == "connection" {
+                            self.handleConnectionLog(log)
+                        } else {
+                            self.handleActivityLog(log)
+                        }
+                    }
+                }
             }
         }
     }
     
     private func handleConnectionLog(_ log: [String: String]) {
+        guard isTrafficLoggingEnabled else { return }
+        
         guard let proto = log["protocol"],
               let process = log["process"],
               let dest = log["destination"],

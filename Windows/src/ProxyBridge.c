@@ -16,7 +16,15 @@
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 256
-#define VERSION "3.0.0"
+#define VERSION "3.1.0"
+#define PID_CACHE_SIZE 1024
+#define PID_CACHE_TTL_MS 1000
+#define NUM_PACKET_THREADS 4
+#define CONNECTION_HASH_SIZE 256
+#define SOCKS5_BUFFER_SIZE 1024
+#define HTTP_BUFFER_SIZE 1024
+#define FILTER_BUFFER_SIZE 512
+#define LOG_BUFFER_SIZE 1024
 
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
@@ -41,6 +49,7 @@ typedef struct CONNECTION_INFO {
     UINT32 orig_dest_ip;
     UINT16 orig_dest_port;
     BOOL is_tracked;
+    ULONGLONG last_activity;  // GetTickCount64() timestamp for cleanup
     struct CONNECTION_INFO *next;
 } CONNECTION_INFO;
 
@@ -64,15 +73,28 @@ typedef struct LOGGED_CONNECTION {
     struct LOGGED_CONNECTION *next;
 } LOGGED_CONNECTION;
 
-static CONNECTION_INFO *connection_list = NULL;
+// Impoved slow speed due to PID checking // Added pid cache
+typedef struct PID_CACHE_ENTRY {
+    UINT32 src_ip;
+    UINT16 src_port;
+    DWORD pid;
+    DWORD timestamp;
+    BOOL is_udp;
+    struct PID_CACHE_ENTRY *next;
+} PID_CACHE_ENTRY;
+
+static CONNECTION_INFO *connection_hash_table[CONNECTION_HASH_SIZE] = {NULL};
 static LOGGED_CONNECTION *logged_connections = NULL;
 static PROCESS_RULE *rules_list = NULL;
 static UINT32 g_next_rule_id = 1;
 static HANDLE lock = NULL;
 static HANDLE windivert_handle = INVALID_HANDLE_VALUE;
-static HANDLE packet_thread = NULL;
+static HANDLE packet_thread[NUM_PACKET_THREADS] = {NULL};
 static HANDLE proxy_thread = NULL;
 static HANDLE udp_relay_thread = NULL;
+static HANDLE cleanup_thread = NULL;
+static PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE] = {NULL};
+static BOOL g_has_active_rules = FALSE;
 static SOCKET udp_relay_socket = INVALID_SOCKET;
 static SOCKET socks5_udp_socket = INVALID_SOCKET;
 static SOCKET socks5_udp_send_socket = INVALID_SOCKET;
@@ -81,6 +103,8 @@ static BOOL udp_associate_connected = FALSE;
 static DWORD last_udp_connect_attempt = 0;
 static BOOL running = FALSE;
 static DWORD g_current_process_id = 0;
+
+static BOOL g_traffic_logging_enabled = TRUE;
 
 static char g_proxy_host[256] = "";  // Can be IP address or hostname
 static UINT16 g_proxy_port = 0;
@@ -95,7 +119,7 @@ static ConnectionCallback g_connection_callback = NULL;
 static void log_message(const char *msg, ...)
 {
     if (g_log_callback == NULL) return;
-    char buffer[1024];
+    char buffer[LOG_BUFFER_SIZE];
     va_list args;
     va_start(args, msg);
     vsnprintf(buffer, sizeof(buffer), msg, args);
@@ -110,8 +134,80 @@ static const char* extract_filename(const char* path)
     const char* last_backslash = strrchr(path, '\\');
     const char* last_slash = strrchr(path, '/');
     const char* last_separator = (last_backslash > last_slash) ? last_backslash : last_slash;
-
     return last_separator ? (last_separator + 1) : path;
+}
+
+static inline char* skip_whitespace(char *str)
+{
+    while (*str == ' ' || *str == '\t')
+        str++;
+    return str;
+}
+
+static void format_ip_address(UINT32 ip, char *buffer, size_t size)
+{
+    snprintf(buffer, size, "%d.%d.%d.%d",
+        (ip >> 0) & 0xFF, (ip >> 8) & 0xFF,
+        (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+}
+
+typedef BOOL (*token_match_func)(const char *token, const void *data);
+
+static BOOL parse_token_list(const char *list, const char *delimiters, token_match_func match_func, const void *match_data)
+{
+    if (list == NULL || list[0] == '\0' || strcmp(list, "*") == 0)
+        return TRUE;
+
+    size_t len = strlen(list) + 1;
+    char *list_copy = (char *)malloc(len);
+    if (list_copy == NULL)
+        return FALSE;
+
+    strncpy_s(list_copy, len, list, _TRUNCATE);
+    BOOL matched = FALSE;
+    char *context = NULL;
+    char *token = strtok_s(list_copy, delimiters, &context);
+    while (token != NULL)
+    {
+        token = skip_whitespace(token);
+        if (match_func(token, match_data))
+        {
+            matched = TRUE;
+            break;
+        }
+        token = strtok_s(NULL, delimiters, &context);
+    }
+    free(list_copy);
+    return matched;
+}
+
+static void configure_tcp_socket(SOCKET sock, int bufsize, DWORD timeout)
+{
+    int nodelay = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+}
+
+static void configure_udp_socket(SOCKET sock, int bufsize, DWORD timeout)
+{
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+}
+
+static int send_all(SOCKET sock, const char *buf, int len)
+{
+    int sent = 0;
+    while (sent < len) {
+        int n = send(sock, buf + sent, len - sent, 0);
+        if (n == SOCKET_ERROR) return SOCKET_ERROR;
+        sent += n;
+    }
+    return sent;
 }
 
 static UINT32 parse_ipv4(const char *ip);
@@ -134,15 +230,20 @@ static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port);
 static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port);
 static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
 static RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp);
-static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp);
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, DWORD *out_pid);
 static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port);
 static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port);
 static BOOL is_connection_tracked(UINT16 src_port);
 static void remove_connection(UINT16 src_port);
+static void cleanup_stale_connections(void);
 static BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 static void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 static void clear_logged_connections(void);
 static BOOL is_broadcast_or_multicast(UINT32 ip);
+static DWORD get_cached_pid(UINT32 src_ip, UINT16 src_port, BOOL is_udp);
+static void cache_pid(UINT32 src_ip, UINT16 src_port, DWORD pid, BOOL is_udp);
+static void clear_pid_cache(void);
+static void update_has_active_rules(void);
 
 
 static DWORD WINAPI packet_processor(LPVOID arg)
@@ -203,11 +304,21 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     UINT32 dest_ip = ip_header->DstAddr;
                     UINT16 dest_port = ntohs(udp_header->DstPort);
 
+                    // if no rule configuree all connection direct with no checks avoid unwanted memory and pocessing whcich could delay
+                    if (!g_has_active_rules && g_connection_callback == NULL)
+                    {
+                        // No rules and no logging - pass through immediately (no checksum needed for unmodified packets)
+                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                        continue;
+                    }
+
                     RuleAction action;
+                    DWORD pid = 0;
+
                     if (dest_port == 53 && !g_dns_via_proxy)
                         action = RULE_ACTION_DIRECT;
                     else
-                        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE);
+                        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, &pid);
 
                     // Override PROXY to DIRECT for critical IPs and ports
                     if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
@@ -217,21 +328,19 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     if (action == RULE_ACTION_PROXY && (dest_port == 67 || dest_port == 68))
                         action = RULE_ACTION_DIRECT;
 
-                    if (g_connection_callback != NULL)
+                    // only log if callback is set
+                    // reuse pid from check_process_rule
+                    // CLI use no log flag
+                    if (g_connection_callback != NULL && pid > 0)
                     {
                         char process_name[MAX_PROCESS_NAME];
-                        DWORD pid = get_process_id_from_udp_connection(src_ip, src_port);
-                        if (pid == 0)
-                            pid = get_process_id_from_connection(src_ip, src_port);
 
                         if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
                         {
                             if (!is_connection_already_logged(pid, dest_ip, dest_port, action))
                             {
                                 char dest_ip_str[32];
-                                snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
-                                    (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-                                    (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF);
+                                format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
 
                                 char proxy_info[128];
                                 if (action == RULE_ACTION_PROXY)
@@ -250,7 +359,11 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 
                                 const char* display_name = extract_filename(process_name);
                                 g_connection_callback(display_name, pid, dest_ip_str, dest_port, proxy_info);
-                                add_logged_connection(pid, dest_ip, dest_port, action);
+
+                                if (g_traffic_logging_enabled)
+                                {
+                                    add_logged_connection(pid, dest_ip, dest_port, action);
+                                }
                             }
                         }
                     }
@@ -280,12 +393,14 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             {
                 if (udp_header->DstPort != htons(LOCAL_UDP_RELAY_PORT))
                 {
+                    // Unmodified packet no checksum needed
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
                 }
 
             }
 
+            // Modified UDP packet calculate checksums
             WinDivertHelperCalcChecksums(packet, packet_len, &addr, 0);
             WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
             continue;
@@ -332,21 +447,29 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT32 orig_dest_ip = ip_header->DstAddr;
                 UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
 
+                // avoid rule pocess and packet process if no rules
+                if (!g_has_active_rules && g_connection_callback == NULL)
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
+
                 RuleAction action;
+                DWORD pid = 0;
+
                 if (orig_dest_port == 53 && !g_dns_via_proxy)
                     action = RULE_ACTION_DIRECT;
                 else
-                    action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE);
+                    action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, &pid);
 
                 // Override PROXY to DIRECT for criticl ips
                 if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(orig_dest_ip))
                     action = RULE_ACTION_DIRECT;
 
-                // Log ALL connections (DIRECT, BLOCK, PROXY) - only ONCE per unique connection
-                if (g_connection_callback != NULL)
+                // only new TCP/SYN inital fist packet
+                if (g_connection_callback != NULL && tcp_header->Syn && !tcp_header->Ack && pid > 0)
                 {
                     char process_name[MAX_PROCESS_NAME];
-                    DWORD pid = get_process_id_from_connection(src_ip, src_port);
                     if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
                     {
                         if (!is_connection_already_logged(pid, orig_dest_ip, orig_dest_port, action))
@@ -375,13 +498,17 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                             const char* display_name = extract_filename(process_name);
                             g_connection_callback(display_name, pid, dest_ip_str, orig_dest_port, proxy_info);
 
-                            add_logged_connection(pid, orig_dest_ip, orig_dest_port, action);
+                            if (g_traffic_logging_enabled)
+                            {
+                                add_logged_connection(pid, orig_dest_ip, orig_dest_port, action);
+                            }
                         }
                     }
                 }
 
                 if (action == RULE_ACTION_DIRECT)
                 {
+                    // Unmodified packet no checksum needed
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
                 }
@@ -406,11 +533,13 @@ static DWORD WINAPI packet_processor(LPVOID arg)
         {
             if (tcp_header->DstPort != htons(g_local_relay_port))
             {
+                // Unmodified return packet no checksum needed
                 WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                 continue;
             }
         }
 
+        // Modified TCP packet calculate checksums
         WinDivertHelperCalcChecksums(packet, packet_len, &addr, 0);
         if (!WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr))
         {
@@ -424,7 +553,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 static UINT32 parse_ipv4(const char *ip)
 {
     unsigned int a, b, c, d;
-    if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+    if (sscanf_s(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
         return 0;
     if (a > 255 || b > 255 || c > 255 || d > 255)
         return 0;
@@ -475,6 +604,11 @@ static UINT32 resolve_hostname(const char *hostname)
 
 static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
 {
+    // check cache first
+    DWORD cached_pid = get_cached_pid(src_ip, src_port, FALSE);
+    if (cached_pid != 0)
+        return cached_pid;
+
     MIB_TCPTABLE_OWNER_PID *tcp_table = NULL;
     DWORD size = 0;
     DWORD pid = 0;
@@ -511,12 +645,21 @@ static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
     }
 
     free(tcp_table);
+
+    // store cache the result
+    if (pid != 0)
+        cache_pid(src_ip, src_port, pid, FALSE);
+
     return pid;
 }
 
 // Get process ID for UDP connection
 static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port)
 {
+    DWORD cached_pid = get_cached_pid(src_ip, src_port, TRUE);
+    if (cached_pid != 0)
+        return cached_pid;
+
     MIB_UDPTABLE_OWNER_PID *udp_table = NULL;
     DWORD size = 0;
     DWORD pid = 0;
@@ -571,6 +714,10 @@ static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port)
     }
 
     free(udp_table);
+
+    if (pid != 0)
+        cache_pid(src_ip, src_port, pid, TRUE);
+
     return pid;
 }
 
@@ -590,8 +737,7 @@ static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
     // SMB is managed by system process
     if (pid == 4)
     {
-        strncpy(name, "System", name_size - 1);
-        name[name_size - 1] = '\0';
+        strncpy_s(name, name_size, "System", _TRUNCATE);
         return TRUE;
     }
 
@@ -605,8 +751,7 @@ static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
     {
 
 
-        strncpy(name, full_path, name_size - 1);
-        name[name_size - 1] = '\0';
+        strncpy_s(name, name_size, full_path, _TRUNCATE);
         CloseHandle(hProcess);
         return TRUE;
     }
@@ -631,8 +776,7 @@ static BOOL match_ip_pattern(const char *pattern, UINT32 ip)
 
     // Parse pattern manually
     char pattern_copy[256];
-    strncpy(pattern_copy, pattern, sizeof(pattern_copy) - 1);
-    pattern_copy[sizeof(pattern_copy) - 1] = '\0';
+    strncpy_s(pattern_copy, sizeof(pattern_copy), pattern, _TRUNCATE);
 
     char pattern_octets[4][16];
     int octet_count = 0;
@@ -686,62 +830,26 @@ static BOOL match_port_pattern(const char *pattern, UINT16 port)
     return (port == atoi(pattern));
 }
 
+static BOOL ip_match_wrapper(const char *token, const void *data)
+{
+    return match_ip_pattern(token, *(const UINT32*)data);
+}
+
 // Match IP list: "192.168.*.*;10.0.0.1"
 static BOOL match_ip_list(const char *ip_list, UINT32 ip)
 {
-    if (ip_list == NULL || ip_list[0] == '\0' || strcmp(ip_list, "*") == 0)
-        return TRUE;
+    return parse_token_list(ip_list, ";", ip_match_wrapper, &ip);
+}
 
-    size_t len = strlen(ip_list) + 1;
-    char *list_copy = (char *)malloc(len);
-    if (list_copy == NULL)
-        return FALSE;
-
-    strncpy(list_copy, ip_list, len);
-    BOOL matched = FALSE;
-    char *token = strtok(list_copy, ";");
-    while (token != NULL)
-    {
-        while (*token == ' ' || *token == '\t')
-            token++;
-        if (match_ip_pattern(token, ip))
-        {
-            matched = TRUE;
-            break;
-        }
-        token = strtok(NULL, ";");
-    }
-    free(list_copy);
-    return matched;
+static BOOL port_match_wrapper(const char *token, const void *data)
+{
+    return match_port_pattern(token, *(const UINT16*)data);
 }
 
 // Match port list: "80;443;8000-9000"
 static BOOL match_port_list(const char *port_list, UINT16 port)
 {
-    if (port_list == NULL || port_list[0] == '\0' || strcmp(port_list, "*") == 0)
-        return TRUE;
-
-    size_t len = strlen(port_list) + 1;
-    char *list_copy = (char *)malloc(len);
-    if (list_copy == NULL)
-        return FALSE;
-
-    strncpy(list_copy, port_list, len);
-    BOOL matched = FALSE;
-    char *token = strtok(list_copy, ",;");
-    while (token != NULL)
-    {
-        while (*token == ' ' || *token == '\t')
-            token++;
-        if (match_port_pattern(token, port))
-        {
-            matched = TRUE;
-            break;
-        }
-        token = strtok(NULL, ",;");
-    }
-    free(list_copy);
-    return matched;
+    return parse_token_list(port_list, ",;", port_match_wrapper, &port);
 }
 
 // Match process name with wildcard support
@@ -826,11 +934,12 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
     if (list_copy == NULL)
         return FALSE;
 
-    strncpy(list_copy, process_list, len);
+    strncpy_s(list_copy, len, process_list, _TRUNCATE);
     BOOL matched = FALSE;
+    char *context = NULL;
 
     // Support both semicolon and comma as separators - Need to figure complex rules in CLI parsing
-    char *token = strtok(list_copy, ",;");
+    char *token = strtok_s(list_copy, ",;", &context);
     while (token != NULL)
     {
         // Skip leading whitespace
@@ -859,7 +968,7 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
             matched = TRUE;
             break;
         }
-        token = strtok(NULL, ",;");
+        token = strtok_s(NULL, ",;", &context);
     }
     free(list_copy);
     return matched;
@@ -981,7 +1090,7 @@ static RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 de
     return RULE_ACTION_DIRECT;
 }
 
-static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp)
+static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, DWORD *out_pid)
 {
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
@@ -989,6 +1098,11 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
     pid = is_udp ? get_process_id_from_udp_connection(src_ip, src_port) : get_process_id_from_connection(src_ip, src_port);
     if (pid == 0 && is_udp)
         pid = get_process_id_from_connection(src_ip, src_port);
+
+        // this may cause issues - need to find alternative
+    if (out_pid != NULL)
+        *out_pid = pid;
+
     if (pid == 0)
         return RULE_ACTION_DIRECT;
 
@@ -1018,7 +1132,7 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
 
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 {
-    unsigned char buf[512];
+    unsigned char buf[SOCKS5_BUFFER_SIZE];
     int len;
     BOOL use_auth = (g_proxy_username[0] != '\0');
 
@@ -1120,7 +1234,6 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
         return -1;
     }
 
-    log_message("SOCKS5: Connection established");
     return 0;
 }
 
@@ -1148,7 +1261,7 @@ static void base64_encode(const char* input, char* output, size_t output_size)
 
 static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 {
-    char request[1024];
+    char request[HTTP_BUFFER_SIZE];
     char response[4096];
     int len;
     char *status_line;
@@ -1158,34 +1271,31 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
     if (use_auth)
     {
         // Create "username:password" string and encode as Base64
-        char credentials[512];
-        char encoded[1024];
+        char credentials[SOCKS5_BUFFER_SIZE];
+        char encoded[HTTP_BUFFER_SIZE];
         snprintf(credentials, sizeof(credentials), "%s:%s", g_proxy_username, g_proxy_password);
         base64_encode(credentials, encoded, sizeof(encoded));
 
+        char ip_str[32];
+        format_ip_address(dest_ip, ip_str, sizeof(ip_str));
         len = snprintf(request, sizeof(request),
-            "CONNECT %d.%d.%d.%d:%d HTTP/1.1\r\n"
-            "Host: %d.%d.%d.%d:%d\r\n"
+            "CONNECT %s:%d HTTP/1.1\r\n"
+            "Host: %s:%d\r\n"
             "Proxy-Authorization: Basic %s\r\n"
             "Proxy-Connection: keep-alive\r\n"
             "\r\n",
-            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
-            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
-            encoded);
+            ip_str, dest_port, ip_str, dest_port, encoded);
     }
     else
     {
+        char ip_str[32];
+        format_ip_address(dest_ip, ip_str, sizeof(ip_str));
         len = snprintf(request, sizeof(request),
-            "CONNECT %d.%d.%d.%d:%d HTTP/1.1\r\n"
-            "Host: %d.%d.%d.%d:%d\r\n"
+            "CONNECT %s:%d HTTP/1.1\r\n"
+            "Host: %s:%d\r\n"
             "Proxy-Connection: keep-alive\r\n"
             "\r\n",
-            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port,
-            (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
-            (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, dest_port);
+            ip_str, dest_port, ip_str, dest_port);
     }
 
     if (send(s, request, len, 0) != len)
@@ -1220,13 +1330,12 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
         return -1;
     }
 
-    log_message("HTTP: Connection established");
     return 0;
 }
 
 static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr)
 {
-    unsigned char buf[512];
+    unsigned char buf[SOCKS5_BUFFER_SIZE];
     int len;
     BOOL use_auth = (g_proxy_username[0] != '\0');
 
@@ -1309,7 +1418,7 @@ static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr)
 static BOOL establish_udp_associate(void)
 {
     // Prevent retry spam - only try every 5 seconds
-    DWORD now = GetTickCount();
+    ULONGLONG now = GetTickCount64();
     if (now - last_udp_connect_attempt < 5000)
         return FALSE;
 
@@ -1332,10 +1441,7 @@ static BOOL establish_udp_associate(void)
     if (tcp_sock == INVALID_SOCKET)
         return FALSE;
 
-    // 3 seconds, without delay can take extra system resource CPU/Memory
-    DWORD timeout = 3000;
-    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+    configure_tcp_socket(tcp_sock, 262144, 3000);
 
     UINT32 socks5_ip = resolve_hostname(g_proxy_host);
     if (socks5_ip == 0)
@@ -1373,6 +1479,8 @@ static BOOL establish_udp_associate(void)
         return FALSE;
     }
 
+    configure_udp_socket(socks5_udp_send_socket, 262144, 30000);
+
     udp_associate_connected = TRUE;
     log_message("UDP ASSOCIATE established with SOCKS5 proxy");
     return TRUE;
@@ -1381,8 +1489,7 @@ static BOOL establish_udp_associate(void)
 static DWORD WINAPI udp_relay_server(LPVOID arg)
 {
     WSADATA wsa_data;
-    struct sockaddr_in local_addr, socks_addr, from_addr;
-    SOCKET tcp_sock;
+    struct sockaddr_in local_addr, from_addr;
     unsigned char recv_buf[MAXBUF];
     unsigned char send_buf[MAXBUF];
     int recv_len, from_len;
@@ -1399,6 +1506,7 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
     int on = 1;
     setsockopt(udp_relay_socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
+    configure_udp_socket(udp_relay_socket, 262144, 30000);
 
     memset(&local_addr, 0, sizeof(local_addr));
     local_addr.sin_family = AF_INET;
@@ -1478,11 +1586,11 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
             if (recv_len > 0)
             {
+            // Buffer overflow protection
+            if (recv_len > MAXBUF - 10) continue;
+
                 UINT32 from_ip = from_addr.sin_addr.s_addr;
                 UINT16 from_port = ntohs(from_addr.sin_port);
-
-
-                // Packet from local application - encapsulate and forward to SOCKS5 proxy
                 UINT32 dest_ip;
                 UINT16 dest_port;
                 if (get_connection(from_port, &dest_ip, &dest_port))
@@ -1584,21 +1692,26 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
                 // Find which local port this packet should go to
                 WaitForSingleObject(lock, INFINITE);
-                CONNECTION_INFO *conn = connection_list;
                 struct sockaddr_in target_addr;
                 BOOL found = FALSE;
-                while (conn != NULL)
+                UINT32 target_ip = 0;
+                UINT16 target_port = 0;
+
+                // search all hash for reverse lookup in bucket
+                for (int i = 0; i < CONNECTION_HASH_SIZE && !found; i++)
                 {
-                    if (conn->orig_dest_ip == src_ip && conn->orig_dest_port == src_port)
+                    CONNECTION_INFO *conn = connection_hash_table[i];
+                    while (conn != NULL)
                     {
-                        memset(&target_addr, 0, sizeof(target_addr));
-                        target_addr.sin_family = AF_INET;
-                        target_addr.sin_addr.s_addr = conn->src_ip;
-                        target_addr.sin_port = htons(conn->src_port);
-                        found = TRUE;
-                        break;
+                        if (conn->orig_dest_ip == src_ip && conn->orig_dest_port == src_port)
+                        {
+                            target_ip = conn->src_ip;
+                            target_port = conn->src_port;
+                            found = TRUE;
+                            break;
+                        }
+                        conn = conn->next;
                     }
-                    conn = conn->next;
                 }
                 ReleaseMutex(lock);
 
@@ -1606,8 +1719,8 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                 {
                     memset(&target_addr, 0, sizeof(target_addr));
                     target_addr.sin_family = AF_INET;
-                    target_addr.sin_addr.s_addr = conn->src_ip;
-                    target_addr.sin_port = htons(conn->src_port);
+                    target_addr.sin_addr.s_addr = target_ip;
+                    target_addr.sin_port = htons(target_port);
 
                     sendto(udp_relay_socket, (char*)&recv_buf[10], recv_len - 10, 0,
                           (struct sockaddr *)&target_addr, sizeof(target_addr));
@@ -1650,6 +1763,9 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
 
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
 
+    int nodelay = 1;
+    setsockopt(listen_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
@@ -1663,7 +1779,7 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
         return 1;
     }
 
-    if (listen(listen_sock, 16) == SOCKET_ERROR)
+    if (listen(listen_sock, SOMAXCONN) == SOCKET_ERROR)
     {
         log_message("Listen failed (%d)", WSAGetLastError());
         closesocket(listen_sock);
@@ -1754,6 +1870,9 @@ static DWORD WINAPI connection_handler(LPVOID arg)
         return 0;
     }
 
+    configure_tcp_socket(socks_sock, 524288, 30000);
+    configure_tcp_socket(client_sock, 524288, 30000);
+
     memset(&socks_addr, 0, sizeof(socks_addr));
     socks_addr.sin_family = AF_INET;
     socks_addr.sin_addr.s_addr = socks5_ip;
@@ -1786,39 +1905,25 @@ static DWORD WINAPI connection_handler(LPVOID arg)
         }
     }
 
-    // Create bidirectional forwarding threads
-    TRANSFER_CONFIG *config1 = (TRANSFER_CONFIG *)malloc(sizeof(TRANSFER_CONFIG));
-    TRANSFER_CONFIG *config2 = (TRANSFER_CONFIG *)malloc(sizeof(TRANSFER_CONFIG));
+    //
+    // educes thread count by 50% and CPU usage significantly
+    TRANSFER_CONFIG *transfer_config = (TRANSFER_CONFIG *)malloc(sizeof(TRANSFER_CONFIG));
 
-    if (config1 == NULL || config2 == NULL)
+    if (transfer_config == NULL)
     {
+        log_message("Memory allocation failed for transfer_config");
         closesocket(client_sock);
         closesocket(socks_sock);
         return 0;
     }
 
-    config1->from_socket = client_sock;
-    config1->to_socket = socks_sock;
-    config2->from_socket = socks_sock;
-    config2->to_socket = client_sock;
+    transfer_config->from_socket = client_sock;
+    transfer_config->to_socket = socks_sock;
 
-    HANDLE thread1 = CreateThread(NULL, 1, transfer_handler, (LPVOID)config1, 0, NULL);
-    if (thread1 == NULL)
-    {
-        log_message("CreateThread failed (%lu)", GetLastError());
-        closesocket(client_sock);
-        closesocket(socks_sock);
-        free(config1);
-        free(config2);
-        return 0;
-    }
+    // both transfer in current thread
+    transfer_handler((LPVOID)transfer_config);
 
-    transfer_handler((LPVOID)config2);
-    WaitForSingleObject(thread1, INFINITE);
-    CloseHandle(thread1);
-
-    closesocket(client_sock);
-    closesocket(socks_sock);
+    // Sockets already closed in transfer_handler!
 
     return 0;
 }
@@ -1826,37 +1931,70 @@ static DWORD WINAPI connection_handler(LPVOID arg)
 static DWORD WINAPI transfer_handler(LPVOID arg)
 {
     TRANSFER_CONFIG *config = (TRANSFER_CONFIG *)arg;
-    SOCKET from = config->from_socket;
-    SOCKET to = config->to_socket;
-    char buf[8192];
+    SOCKET sock1 = config->from_socket;  // client socket
+    SOCKET sock2 = config->to_socket;     // proxy socket
+    char buf[131072];  // 128KB buffer for high-speed transfers
     int len;
 
     free(config);
 
+    // monitor BOTH socket in one thread
     while (TRUE)
     {
-        len = recv(from, buf, sizeof(buf), 0);
-        if (len <= 0)
+        fd_set readfds;
+        struct timeval timeout;
+
+        FD_ZERO(&readfds);
+        FD_SET(sock1, &readfds);  // client
+        FD_SET(sock2, &readfds);  // proxy
+
+        // short timeout for responsive upload/download (50ms)
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 50000;  // 50ms
+
+        int ready = select(0, &readfds, NULL, NULL, &timeout);
+
+        if (ready == SOCKET_ERROR)
         {
-            shutdown(from, SD_RECEIVE);
-            shutdown(to, SD_SEND);
+
             break;
         }
 
-        int sent = 0;
-        while (sent < len)
+        if (ready == 0)
         {
-            int n = send(to, buf + sent, len - sent, 0);
-            if (n == SOCKET_ERROR)
-            {
-                shutdown(from, SD_BOTH);
-                shutdown(to, SD_BOTH);
-                return 0;
-            }
-            sent += n;
+            // timeotjust continue to check again
+            continue;
+        }
+
+        // check if  client to proxy
+        if (FD_ISSET(sock1, &readfds))
+        {
+            len = recv(sock1, buf, sizeof(buf), 0);
+            if (len <= 0)
+                break;
+
+            if (send_all(sock2, buf, len) == SOCKET_ERROR)
+                goto cleanup;
+        }
+
+        // check if proxyto client
+        if (FD_ISSET(sock2, &readfds))
+        {
+            len = recv(sock2, buf, sizeof(buf), 0);
+            if (len <= 0)
+                break;
+
+            if (send_all(sock1, buf, len) == SOCKET_ERROR)
+                goto cleanup;
         }
     }
 
+cleanup:
+    // graceful shutdown
+    shutdown(sock1, SD_BOTH);
+    shutdown(sock2, SD_BOTH);
+    closesocket(sock1);
+    closesocket(sock2);
     return 0;
 }
 
@@ -1864,8 +2002,10 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
 {
     WaitForSingleObject(lock, INFINITE);
 
-    // Check if already exists
-    CONNECTION_INFO *existing = connection_list;
+    int hash = src_port % CONNECTION_HASH_SIZE;
+    CONNECTION_INFO *existing = connection_hash_table[hash];
+
+    // check if already exists in this hash bucket
     while (existing != NULL) {
         if (existing->src_port == src_port) {
             // Update existing entry
@@ -1890,8 +2030,12 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
     conn->orig_dest_ip = dest_ip;
     conn->orig_dest_port = dest_port;
     conn->is_tracked = TRUE;
-    conn->next = connection_list;
-    connection_list = conn;
+    conn->last_activity = GetTickCount64();
+
+    // insert at head of hash bucket
+    //reuse hash variable from lookup above
+    conn->next = connection_hash_table[hash];
+    connection_hash_table[hash] = conn;
     ReleaseMutex(lock);
 }
 
@@ -1899,7 +2043,11 @@ static BOOL is_connection_tracked(UINT16 src_port)
 {
     BOOL tracked = FALSE;
     WaitForSingleObject(lock, INFINITE);
-    CONNECTION_INFO *conn = connection_list;
+
+    // Hash table lookup - O(1)
+    int hash = src_port % CONNECTION_HASH_SIZE;
+    CONNECTION_INFO *conn = connection_hash_table[hash];
+
     while (conn != NULL) {
         if (conn->src_port == src_port && conn->is_tracked) {
             tracked = TRUE;
@@ -1916,13 +2064,17 @@ static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port)
     BOOL found = FALSE;
 
     WaitForSingleObject(lock, INFINITE);
-    CONNECTION_INFO *conn = connection_list;
+
+    int hash = src_port % CONNECTION_HASH_SIZE;
+    CONNECTION_INFO *conn = connection_hash_table[hash];
+
     while (conn != NULL)
     {
         if (conn->src_port == src_port)
         {
             *dest_ip = conn->orig_dest_ip;
             *dest_port = conn->orig_dest_port;
+            conn->last_activity = GetTickCount64();  // Update activity to prevent stale cleanup
             found = TRUE;
             break;
         }
@@ -1936,7 +2088,10 @@ static BOOL get_connection(UINT16 src_port, UINT32 *dest_ip, UINT16 *dest_port)
 static void remove_connection(UINT16 src_port)
 {
     WaitForSingleObject(lock, INFINITE);
-    CONNECTION_INFO **conn_ptr = &connection_list;
+
+    int hash = src_port % CONNECTION_HASH_SIZE;
+    CONNECTION_INFO **conn_ptr = &connection_hash_table[hash];
+
     while (*conn_ptr != NULL)
     {
         if ((*conn_ptr)->src_port == src_port)
@@ -1951,6 +2106,97 @@ static void remove_connection(UINT16 src_port)
     ReleaseMutex(lock);
 }
 
+static void cleanup_stale_connections(void)
+{
+    ULONGLONG now = GetTickCount64();
+    int removed = 0;
+
+    // Process each hash bucket with minimal lock time
+    for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
+    {
+        WaitForSingleObject(lock, INFINITE);
+        CONNECTION_INFO **conn_ptr = &connection_hash_table[i];
+
+        while (*conn_ptr != NULL)
+        {
+            if (now - (*conn_ptr)->last_activity > 60000)
+            {
+                CONNECTION_INFO *to_free = *conn_ptr;
+                *conn_ptr = (*conn_ptr)->next;
+                ReleaseMutex(lock);
+                free(to_free);  // Free outside lock
+                removed++;
+                WaitForSingleObject(lock, INFINITE);
+            }
+            else
+            {
+                conn_ptr = &(*conn_ptr)->next;
+            }
+        }
+        ReleaseMutex(lock);
+    }
+
+    // Cleanup PID cache with separate lock acquisitions
+    ULONGLONG now_cache = GetTickCount64();
+    int cache_removed = 0;
+    for (int i = 0; i < PID_CACHE_SIZE; i++)
+    {
+        WaitForSingleObject(lock, INFINITE);
+        PID_CACHE_ENTRY **entry_ptr = &pid_cache[i];
+        while (*entry_ptr != NULL)
+        {
+            if (now_cache - (*entry_ptr)->timestamp > 10000)
+            {
+                PID_CACHE_ENTRY *to_free = *entry_ptr;
+                *entry_ptr = (*entry_ptr)->next;
+                ReleaseMutex(lock);
+                free(to_free);  // Free outside lock
+                cache_removed++;
+                WaitForSingleObject(lock, INFINITE);
+            }
+            else
+            {
+                entry_ptr = &(*entry_ptr)->next;
+            }
+        }
+        ReleaseMutex(lock);
+    }
+
+    // keep only last 100 for memory efficiency // 100 will keep speed upto the mark
+    WaitForSingleObject(lock, INFINITE);
+    int logged_count = 0;
+    LOGGED_CONNECTION *temp = logged_connections;
+    while (temp != NULL)
+    {
+        logged_count++;
+        temp = temp->next;
+    }
+
+    if (logged_count > 100)
+    {
+        temp = logged_connections;
+        for (int i = 0; i < 99 && temp != NULL; i++)
+        {
+            temp = temp->next;
+        }
+
+        if (temp != NULL)
+        {
+            LOGGED_CONNECTION *to_free_list = temp->next;
+            temp->next = NULL;  // Cut the list
+
+            while (to_free_list != NULL)
+            {
+                LOGGED_CONNECTION *next = to_free_list->next;
+                free(to_free_list);
+                to_free_list = next;
+            }
+        }
+    }
+
+    ReleaseMutex(lock);
+}
+
 PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, RuleProtocol protocol, RuleAction action)
 {
     if (process_name == NULL || process_name[0] == '\0')
@@ -1961,8 +2207,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
         return 0;
 
     rule->rule_id = g_next_rule_id++;
-    strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
-    rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
+    strncpy_s(rule->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
     rule->protocol = protocol;
 
     if (target_hosts != NULL && target_hosts[0] != '\0')
@@ -1974,8 +2219,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
             free(rule);
             return 0;
         }
-        strncpy(rule->target_hosts, target_hosts, len);
-        rule->target_hosts[len - 1] = '\0';
+        strncpy_s(rule->target_hosts, len, target_hosts, _TRUNCATE);
     }
     else
     {
@@ -1986,7 +2230,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
             free(rule);
             return 0;
         }
-        strcpy(rule->target_hosts, "*");
+        strcpy_s(rule->target_hosts, 2, "*");
     }
 
     // Dynamically allocate memory for target_ports no size limit!
@@ -2000,8 +2244,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
             free(rule);
             return 0;
         }
-        strncpy(rule->target_ports, target_ports, len);
-        rule->target_ports[len - 1] = '\0';
+        strncpy_s(rule->target_ports, len, target_ports, _TRUNCATE);
     }
     else
     {
@@ -2013,13 +2256,16 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
             free(rule);
             return 0;
         }
-        strcpy(rule->target_ports, "*");
+        strcpy_s(rule->target_ports, 2, "*");
     }
 
     rule->action = action;
     rule->enabled = TRUE;
     rule->next = rules_list;
     rules_list = rule;
+
+    update_has_active_rules();
+    log_message("Added rule ID: %u for process '%s' (Protocol: %d, Action: %d)", rule->rule_id, process_name, protocol, action);
 
     return rule->rule_id;
 }
@@ -2035,6 +2281,8 @@ PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id)
         if (rule->rule_id == rule_id)
         {
             rule->enabled = TRUE;
+            update_has_active_rules();
+            log_message("Enabled rule ID: %u", rule_id);
             return TRUE;
         }
         rule = rule->next;
@@ -2053,6 +2301,8 @@ PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id)
         if (rule->rule_id == rule_id)
         {
             rule->enabled = FALSE;
+            update_has_active_rules();  // Phase 1: Update fast-path flag
+            log_message("Disabled rule ID: %u", rule_id);
             return TRUE;
         }
         rule = rule->next;
@@ -2083,6 +2333,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_DeleteRule(UINT32 rule_id)
                 free(rule->target_ports);
             free(rule);
 
+            update_has_active_rules();
             log_message("Deleted rule ID: %u", rule_id);
             return TRUE;
         }
@@ -2102,20 +2353,30 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_na
     {
         if (rule->rule_id == rule_id)
         {
-            strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
-            rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
+            strncpy_s(rule->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
 
             if (rule->target_hosts != NULL)
                 free(rule->target_hosts);
             rule->target_hosts = _strdup(target_hosts);
+            if (rule->target_hosts == NULL)
+            {
+                return FALSE;
+            }
 
             if (rule->target_ports != NULL)
                 free(rule->target_ports);
             rule->target_ports = _strdup(target_ports);
+            if (rule->target_ports == NULL)
+            {
+                free(rule->target_hosts);
+                rule->target_hosts = NULL;
+                return FALSE;
+            }
 
             rule->protocol = protocol;
             rule->action = action;
 
+            update_has_active_rules();
             log_message("Updated rule ID: %u", rule_id);
             return TRUE;
         }
@@ -2133,16 +2394,14 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* prox
     if (resolve_hostname(proxy_ip) == 0)
         return FALSE;
 
-    strncpy(g_proxy_host, proxy_ip, sizeof(g_proxy_host) - 1);
-    g_proxy_host[sizeof(g_proxy_host) - 1] = '\0';
+    strncpy_s(g_proxy_host, sizeof(g_proxy_host), proxy_ip, _TRUNCATE);
     g_proxy_port = proxy_port;
     g_proxy_type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
 
     // Store credentials if there
     if (username != NULL && username[0] != '\0')
     {
-        strncpy(g_proxy_username, username, sizeof(g_proxy_username) - 1);
-        g_proxy_username[sizeof(g_proxy_username) - 1] = '\0';
+        strncpy_s(g_proxy_username, sizeof(g_proxy_username), username, _TRUNCATE);
     }
     else
     {
@@ -2151,8 +2410,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* prox
 
     if (password != NULL && password[0] != '\0')
     {
-        strncpy(g_proxy_password, password, sizeof(g_proxy_password) - 1);
-        g_proxy_password[sizeof(g_proxy_password) - 1] = '\0';
+        strncpy_s(g_proxy_password, sizeof(g_proxy_password), password, _TRUNCATE);
     }
     else
     {
@@ -2176,6 +2434,21 @@ PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback)
 PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback)
 {
     g_connection_callback = callback;
+}
+
+PROXYBRIDGE_API void ProxyBridge_SetTrafficLoggingEnabled(BOOL enable)
+{
+    g_traffic_logging_enabled = enable;
+    if (!enable)
+    {
+        clear_logged_connections();
+    }
+}
+
+PROXYBRIDGE_API void ProxyBridge_ClearConnectionLogs(void)
+{
+    clear_logged_connections();
+    log_message("Connection logs cleared");
 }
 
 // Check if connection already logged (deduplication)
@@ -2202,9 +2475,47 @@ static BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_
     return found;
 }
 
+
+// Memory usage and cpu usage are limitation of the ProxyBridge arch
+// Relay server takes huge amount of memory and cpu and add extra hops
+// hops can cuase slight delay in network speed
+// relay server are ippoved to process it as fast as possible with minimal impact on memory usage
+
 static void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action)
 {
     WaitForSingleObject(lock, INFINITE);
+
+    int count = 0;
+    LOGGED_CONNECTION *temp = logged_connections;
+    while (temp != NULL)
+    {
+        count++;
+        temp = temp->next;
+    }
+
+    if (count >= 100)
+    {
+        temp = logged_connections;
+        for (int i = 0; i < 98 && temp != NULL; i++)
+        {
+            temp = temp->next;
+        }
+
+        if (temp != NULL && temp->next != NULL)
+        {
+            LOGGED_CONNECTION *to_free_list = temp->next;
+            temp->next = NULL;
+
+            ReleaseMutex(lock);
+            while (to_free_list != NULL)
+            {
+                LOGGED_CONNECTION *next = to_free_list->next;
+                free(to_free_list);
+                to_free_list = next;
+            }
+            WaitForSingleObject(lock, INFINITE);
+        }
+    }
 
     LOGGED_CONNECTION *logged = (LOGGED_CONNECTION *)malloc(sizeof(LOGGED_CONNECTION));
     if (logged != NULL)
@@ -2234,9 +2545,134 @@ static void clear_logged_connections(void)
     ReleaseMutex(lock);
 }
 
+//  cache pid
+// This can be imprroved
+// Need to work on this before releease for potential collusion
+// need to remove unwanted entires from table
+static UINT32 pid_cache_hash(UINT32 src_ip, UINT16 src_port, BOOL is_udp)
+{
+    UINT32 hash = src_ip ^ ((UINT32)src_port << 16) ^ (is_udp ? 0x80000000 : 0);
+    return hash % PID_CACHE_SIZE;
+}
+
+static DWORD get_cached_pid(UINT32 src_ip, UINT16 src_port, BOOL is_udp)
+{
+    UINT32 hash = pid_cache_hash(src_ip, src_port, is_udp);
+    ULONGLONG current_time = GetTickCount64();
+    DWORD pid = 0;
+
+    WaitForSingleObject(lock, INFINITE);
+
+    PID_CACHE_ENTRY *entry = pid_cache[hash];
+    while (entry != NULL)
+    {
+        if (entry->src_ip == src_ip &&
+            entry->src_port == src_port &&
+            entry->is_udp == is_udp)
+        {
+            if (current_time - entry->timestamp < PID_CACHE_TTL_MS)
+            {
+                pid = entry->pid;
+                break;
+            }
+            else
+            {
+                break;
+            }
+        }
+        entry = entry->next;
+    }
+
+    ReleaseMutex(lock);
+    return pid;
+}
+
+static void cache_pid(UINT32 src_ip, UINT16 src_port, DWORD pid, BOOL is_udp)
+{
+    UINT32 hash = pid_cache_hash(src_ip, src_port, is_udp);
+    ULONGLONG current_time = GetTickCount64();
+
+    WaitForSingleObject(lock, INFINITE);
+
+    PID_CACHE_ENTRY *entry = pid_cache[hash];
+    while (entry != NULL)
+    {
+        if (entry->src_ip == src_ip &&
+            entry->src_port == src_port &&
+            entry->is_udp == is_udp)
+        {
+            entry->pid = pid;
+            entry->timestamp = current_time;
+            ReleaseMutex(lock);
+            return;
+        }
+        entry = entry->next;
+    }
+
+    PID_CACHE_ENTRY *new_entry = (PID_CACHE_ENTRY *)malloc(sizeof(PID_CACHE_ENTRY));
+    if (new_entry != NULL)
+    {
+        new_entry->src_ip = src_ip;
+        new_entry->src_port = src_port;
+        new_entry->pid = pid;
+        new_entry->timestamp = current_time;
+        new_entry->is_udp = is_udp;
+        new_entry->next = pid_cache[hash];
+        pid_cache[hash] = new_entry;
+    }
+
+    ReleaseMutex(lock);
+}
+
+static void clear_pid_cache(void)
+{
+    WaitForSingleObject(lock, INFINITE);
+
+    for (int i = 0; i < PID_CACHE_SIZE; i++)
+    {
+        while (pid_cache[i] != NULL)
+        {
+            PID_CACHE_ENTRY *to_free = pid_cache[i];
+            pid_cache[i] = pid_cache[i]->next;
+            free(to_free);
+        }
+    }
+
+    ReleaseMutex(lock);
+}
+
+// Dedicated cleanup thread - runs independently without blocking packet processing
+static DWORD WINAPI cleanup_worker(LPVOID arg)
+{
+    while (running)
+    {
+        Sleep(30000);  // 30 seconds
+        if (running)
+        {
+            cleanup_stale_connections();
+        }
+    }
+    return 0;
+}
+
+static void update_has_active_rules(void)
+{
+    g_has_active_rules = FALSE;
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->enabled)
+        {
+            g_has_active_rules = TRUE;
+            break;
+        }
+        rule = rule->next;
+    }
+}
+
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 {
-    char filter[512];
+    char filter[FILTER_BUFFER_SIZE];
     INT16 priority = 123;
 
     if (running)
@@ -2258,12 +2694,26 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         return FALSE;
     }
 
+    // Start cleanup thread to avoid blocking packet processing
+    cleanup_thread = CreateThread(NULL, 1, cleanup_worker, NULL, 0, NULL);
+    if (cleanup_thread == NULL)
+    {
+        running = FALSE;
+        WaitForSingleObject(proxy_thread, INFINITE);
+        CloseHandle(proxy_thread);
+        proxy_thread = NULL;
+        return FALSE;
+    }
+
     if (g_proxy_type == PROXY_TYPE_SOCKS5)
     {
         udp_relay_thread = CreateThread(NULL, 1, udp_relay_server, NULL, 0, NULL);
         if (udp_relay_thread == NULL)
         {
             running = FALSE;
+            WaitForSingleObject(cleanup_thread, INFINITE);
+            CloseHandle(cleanup_thread);
+            cleanup_thread = NULL;
             WaitForSingleObject(proxy_thread, INFINITE);
             CloseHandle(proxy_thread);
             proxy_thread = NULL;
@@ -2289,19 +2739,33 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     }
 
     WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_LENGTH, 8192);
-    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 2000);
+    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 8);  // 8ms for low latency
 
-    packet_thread = CreateThread(NULL, 1, packet_processor, NULL, 0, NULL);
-    if (packet_thread == NULL)
+    for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
-        WinDivertClose(windivert_handle);
-        windivert_handle = INVALID_HANDLE_VALUE;
-        running = FALSE;
-        WaitForSingleObject(proxy_thread, INFINITE);
-        CloseHandle(proxy_thread);
-        proxy_thread = NULL;
-        return FALSE;
+        packet_thread[i] = CreateThread(NULL, 0, packet_processor, NULL, 0, NULL);
+        if (packet_thread[i] == NULL)
+        {
+            running = FALSE;
+            for (int j = 0; j < i; j++)
+            {
+                if (packet_thread[j] != NULL)
+                {
+                    WaitForSingleObject(packet_thread[j], 5000);
+                    CloseHandle(packet_thread[j]);
+                    packet_thread[j] = NULL;
+                }
+            }
+            WinDivertClose(windivert_handle);
+            windivert_handle = INVALID_HANDLE_VALUE;
+            WaitForSingleObject(proxy_thread, INFINITE);
+            CloseHandle(proxy_thread);
+            proxy_thread = NULL;
+            return FALSE;
+        }
     }
+
+    update_has_active_rules();
 
     log_message("ProxyBridge started");
     log_message("Local relay: localhost:%d", g_local_relay_port);
@@ -2332,42 +2796,61 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
 
     if (windivert_handle != INVALID_HANDLE_VALUE)
     {
+        WinDivertShutdown(windivert_handle, WINDIVERT_SHUTDOWN_BOTH);
         WinDivertClose(windivert_handle);
         windivert_handle = INVALID_HANDLE_VALUE;
     }
 
-    if (packet_thread != NULL)
+    // process alll packets before we stop, make sure packets are not dropped
+    for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
-        WaitForSingleObject(packet_thread, 5000);
-        CloseHandle(packet_thread);
-        packet_thread = NULL;
+        if (packet_thread[i] != NULL)
+        {
+            WaitForSingleObject(packet_thread[i], 1000);  // 1 second timeout
+            CloseHandle(packet_thread[i]);
+            packet_thread[i] = NULL;
+        }
     }
 
     if (proxy_thread != NULL)
     {
-        WaitForSingleObject(proxy_thread, 5000);
+        WaitForSingleObject(proxy_thread, 1000);  // 1 second timeout
         CloseHandle(proxy_thread);
         proxy_thread = NULL;
     }
 
+    if (cleanup_thread != NULL)
+    {
+        WaitForSingleObject(cleanup_thread, 1000);  // 1 second timeout
+        CloseHandle(cleanup_thread);
+        cleanup_thread = NULL;
+    }
+
     if (udp_relay_thread != NULL)
     {
-        WaitForSingleObject(udp_relay_thread, 5000);
+        WaitForSingleObject(udp_relay_thread, 1000);  // 1 second timeout
         CloseHandle(udp_relay_thread);
         udp_relay_thread = NULL;
     }
 
     WaitForSingleObject(lock, INFINITE);
-    while (connection_list != NULL)
+    // free all connections in hash table
+    // avoid unwanted data and free the memory
+    for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
     {
-        CONNECTION_INFO *to_free = connection_list;
-        connection_list = connection_list->next;
-        free(to_free);
+        while (connection_hash_table[i] != NULL)
+        {
+            CONNECTION_INFO *to_free = connection_hash_table[i];
+            connection_hash_table[i] = connection_hash_table[i]->next;
+            free(to_free);
+        }
     }
     ReleaseMutex(lock);
 
     // Clear logged connections list
     clear_logged_connections();
+
+    clear_pid_cache();
 
     log_message("ProxyBridge stopped");
 
@@ -2383,7 +2866,7 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
     struct hostent* host_info;
     UINT32 target_ip;
     int ret = -1;
-    char temp_buffer[512];
+    char temp_buffer[FILTER_BUFFER_SIZE];
 
     if (g_proxy_host[0] == '\0' || g_proxy_port == 0)
     {
@@ -2408,14 +2891,14 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
         target_host, target_port,
         g_proxy_type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5",
         g_proxy_host, g_proxy_port);
-    strncpy(result_buffer, temp_buffer, buffer_size - 1);
+    strncpy_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
 
 
     host_info = gethostbyname(target_host);
     if (host_info == NULL)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to resolve hostname %s (%d)\n", target_host, WSAGetLastError());
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         WSACleanup();
         return -1;
     }
@@ -2425,14 +2908,14 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
         target_host,
         (target_ip >> 0) & 0xFF, (target_ip >> 8) & 0xFF,
         (target_ip >> 16) & 0xFF, (target_ip >> 24) & 0xFF);
-    strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+    strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
 
     // Create socket
     test_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (test_sock == INVALID_SOCKET)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Socket creation failed (%d)\n", WSAGetLastError());
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         WSACleanup();
         return -1;
     }
@@ -2447,46 +2930,46 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
     proxy_addr.sin_port = htons(g_proxy_port);
 
     snprintf(temp_buffer, sizeof(temp_buffer), "Connecting to proxy %s:%d...\n", g_proxy_host, g_proxy_port);
-    strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+    strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
 
     if (connect(test_sock, (struct sockaddr*)&proxy_addr, sizeof(proxy_addr)) == SOCKET_ERROR)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to connect to proxy (%d)\n", WSAGetLastError());
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         closesocket(test_sock);
         WSACleanup();
         return -1;
     }
 
-    strncat(result_buffer, "Connected to proxy server\n", buffer_size - strlen(result_buffer) - 1);
+    strncat_s(result_buffer, buffer_size, "Connected to proxy server\n", _TRUNCATE);
 
     if (g_proxy_type == PROXY_TYPE_SOCKS5)
     {
         if (socks5_connect(test_sock, target_ip, target_port) != 0)
         {
             snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: SOCKS5 handshake failed\n");
-            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
             closesocket(test_sock);
             WSACleanup();
             return -1;
         }
-        strncat(result_buffer, "SOCKS5 handshake successful\n", buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, "SOCKS5 handshake successful\n", _TRUNCATE);
     }
     else
     {
         if (http_connect(test_sock, target_ip, target_port) != 0)
         {
             snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: HTTP CONNECT failed\n");
-            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
             closesocket(test_sock);
             WSACleanup();
             return -1;
         }
-        strncat(result_buffer, "HTTP CONNECT successful\n", buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, "HTTP CONNECT successful\n", _TRUNCATE);
     }
 
 
-    char http_request[512];
+    char http_request[FILTER_BUFFER_SIZE];
     snprintf(http_request, sizeof(http_request),
         "GET / HTTP/1.1\r\n"
         "Host: %s\r\n"
@@ -2497,13 +2980,13 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
     if (send(test_sock, http_request, strlen(http_request), 0) == SOCKET_ERROR)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to send test request (%d)\n", WSAGetLastError());
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         closesocket(test_sock);
         WSACleanup();
         return -1;
     }
 
-    strncat(result_buffer, "Sent HTTP GET request\n", buffer_size - strlen(result_buffer) - 1);
+    strncat_s(result_buffer, buffer_size, "Sent HTTP GET request\n", _TRUNCATE);
     char response[1024];
     int bytes_received = recv(test_sock, response, sizeof(response) - 1, 0);
     if (bytes_received > 0)
@@ -2516,24 +2999,24 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
             int status_code = 0;
             if (status_line != NULL)
             {
-                sscanf(status_line, "HTTP/%*s %d", &status_code);
+                sscanf_s(status_line, "HTTP/%*s %d", &status_code);
             }
 
             snprintf(temp_buffer, sizeof(temp_buffer), "SUCCESS: Received HTTP %d response (%d bytes)\n", status_code, bytes_received);
-            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
             ret = 0; // Success
         }
         else
         {
             snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Received data but not valid HTTP response\n");
-            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
             ret = -1; // Failure - not a valid HTTP response
         }
     }
     else if (bytes_received == 0)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Connection closed by remote host (no data received)\n");
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         ret = -1; // Failure
     }
     else
@@ -2547,7 +3030,7 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
         {
             snprintf(temp_buffer, sizeof(temp_buffer), "ERROR: Failed to receive response (%d)\n", error_code);
         }
-        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, temp_buffer, _TRUNCATE);
         ret = -1; // Failure
     }
 
@@ -2556,11 +3039,11 @@ PROXYBRIDGE_API int ProxyBridge_TestConnection(const char* target_host, UINT16 t
 
     if (ret == 0)
     {
-        strncat(result_buffer, "\n✓ Proxy connection test PASSED\n", buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, "\n✓ Proxy connection test PASSED\n", _TRUNCATE);
     }
     else
     {
-        strncat(result_buffer, "\n✗ Proxy connection test FAILED\n", buffer_size - strlen(result_buffer) - 1);
+        strncat_s(result_buffer, buffer_size, "\n✗ Proxy connection test FAILED\n", _TRUNCATE);
     }
 
     return ret;

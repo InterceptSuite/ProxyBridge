@@ -22,19 +22,32 @@ jobs:
       with:
         xcode-version: latest-stable
     
-    - name: Build ProxyBridge
+    - name: Create xcconfig files
       run: |
         cd MacOS/ProxyBridge
-        chmod +x build.sh
-        ./build.sh
-      env:
-        SIGN_APP: ""
-        SIGN_PKG: ""
-        NOTARIZE: ""
+        cp proxybridge-app.xcconfig Signing-Config-app.xcconfig
+        cp proxybridge-ext.xcconfig Signing-Config-ext.xcconfig
+        sed -i '' 's/DEVELOPMENT_TEAM = L.*/DEVELOPMENT_TEAM = /' Signing-Config-app.xcconfig
+        sed -i '' 's/DEVELOPMENT_TEAM = L.*/DEVELOPMENT_TEAM = /' Signing-Config-ext.xcconfig
     
-    - name: Upload PKG artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ProxyBridge-macOS
-        path: MacOS/ProxyBridge/output/ProxyBridge-Installer.pkg
-        retention-days: 30
+    - name: Build Universal Binary
+      run: |
+        cd MacOS/ProxyBridge
+        xcodebuild \
+          -project ProxyBridge.xcodeproj \
+          -scheme ProxyBridge \
+          -configuration Release \
+          -derivedDataPath build/DerivedData \
+          ARCHS="arm64 x86_64" \
+          ONLY_ACTIVE_ARCH=NO \
+          CODE_SIGN_IDENTITY="-" \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO \
+          clean build
+    
+    - name: Verify Build
+      run: |
+        cd MacOS/ProxyBridge
+        ls -la build/DerivedData/Build/Products/Release/
+        file build/DerivedData/Build/Products/Release/ProxyBridge.app/Contents/MacOS/ProxyBridge
+        lipo -archs build/DerivedData/Build/Products/Release/ProxyBridge.app/Contents/MacOS/ProxyBridge

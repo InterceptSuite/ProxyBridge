@@ -4,6 +4,7 @@
              RequestedThemeVariant="Dark">
     <Application.Styles>
         <FluentTheme />
+        <StyleInclude Source="/Styles/SharedStyles.axaml"/>
     </Application.Styles>
 
     <TrayIcon.Icons>

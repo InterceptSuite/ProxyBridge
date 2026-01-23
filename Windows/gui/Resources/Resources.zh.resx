@@ -26,13 +26,17 @@
   <data name="MenuDnsViaProxy" xml:space="preserve">
     <value>DNS通过代理</value>
   </data>
+  <data name="MenuEnableTrafficLogging" xml:space="preserve">
+    <value>启用流量日志</value>
+  </data>
   <data name="MenuSettings" xml:space="preserve">
     <value>设置</value>
   </data>
   <data name="MenuCloseToTray" xml:space="preserve">
     <value>关闭到系统托盘</value>
-  </data>
-  <data name="MenuLanguage" xml:space="preserve">
+  </data>  <data name="MenuRunAtStartup" xml:space="preserve">
+    <value>开机启动</value>
+  </data>  <data name="MenuLanguage" xml:space="preserve">
     <value>语言</value>
   </data>
   <data name="MenuAbout" xml:space="preserve">
@@ -47,10 +51,10 @@
 
   <!-- Tabs -->
   <data name="TabConnections" xml:space="preserve">
-    <value>🔌 网络连接</value>
+    <value>网络连接</value>
   </data>
   <data name="TabActivity" xml:space="preserve">
-    <value>📝 活动日志</value>
+    <value>活动日志</value>
   </data>
 
   <!-- Buttons -->

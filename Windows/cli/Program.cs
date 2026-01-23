@@ -22,6 +22,36 @@ public partial class ProxyRuleJsonContext : JsonSerializerContext
 {
 }
 
+static class ParsingHelpers
+{
+    public static ProxyBridgeNative.RuleProtocol ParseProtocol(string protocolStr)
+    {
+        return protocolStr.ToUpper() switch
+        {
+            "TCP" => ProxyBridgeNative.RuleProtocol.TCP,
+            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
+            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
+            _ => throw new ArgumentException($"Invalid protocol: {protocolStr}. Use TCP, UDP, or BOTH")
+        };
+    }
+
+    public static ProxyBridgeNative.RuleAction ParseAction(string actionStr)
+    {
+        return actionStr.ToUpper() switch
+        {
+            "PROXY" => ProxyBridgeNative.RuleAction.PROXY,
+            "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
+            "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
+            _ => throw new ArgumentException($"Invalid action: {actionStr}. Use PROXY, DIRECT, or BLOCK")
+        };
+    }
+
+    public static string DefaultIfEmpty(string value, string defaultValue = "*")
+    {
+        return string.IsNullOrWhiteSpace(value) ? defaultValue : value;
+    }
+}
+
 class Program
 {
     private static ProxyBridgeNative.LogCallback? _logCallback;
@@ -143,11 +173,27 @@ class Program
                 parsedRules.AddRange(fileRules);
             }
 
-            _logCallback = OnLog;
-            _connectionCallback = OnConnection;
+            // Only register callbacks when verbose level needs them
+            // -v 0: No callbacks at all -> disable traffic logging
+            // -v 1: Only log messages
+            // -v 2: Only connection events
+            // -v 3: Both logs and connections
 
-            ProxyBridgeNative.ProxyBridge_SetLogCallback(_logCallback);
-            ProxyBridgeNative.ProxyBridge_SetConnectionCallback(_connectionCallback);
+            if (_verboseLevel == 1 || _verboseLevel == 3)
+            {
+                _logCallback = OnLog;
+                ProxyBridgeNative.ProxyBridge_SetLogCallback(_logCallback);
+            }
+
+            if (_verboseLevel == 2 || _verboseLevel == 3)
+            {
+                _connectionCallback = OnConnection;
+                ProxyBridgeNative.ProxyBridge_SetConnectionCallback(_connectionCallback);
+            }
+
+            // Disable traffic logging if no callbacks registered (prevents memory leak)
+            bool enableTrafficLogging = _verboseLevel > 0;
+            ProxyBridgeNative.ProxyBridge_SetTrafficLoggingEnabled(enableTrafficLogging);
 
             Console.WriteLine($"Proxy: {proxyInfo.Type}://{proxyInfo.Host}:{proxyInfo.Port}");
             if (!string.IsNullOrEmpty(proxyInfo.Username))
@@ -215,7 +261,7 @@ class Program
 
             while (_isRunning)
             {
-                await Task.Delay(100);
+                await Task.Delay(500);
             }
 
             return 0;
@@ -230,16 +276,17 @@ class Program
     private static void OnLog(string message)
     {
         // Verbose 1 = logs only, Verbose 3 = both
-        if (_verboseLevel == 1 || _verboseLevel == 3)
+        if (_verboseLevel is 1 or 3)
         {
-            Console.WriteLine($"[LOG] {message}");
+            Console.Write("[LOG] ");
+            Console.WriteLine(message);
         }
     }
 
     private static void OnConnection(string processName, uint pid, string destIp, ushort destPort, string proxyInfo)
     {
         // Verbose 2 = connections only, Verbose 3 = both
-        if (_verboseLevel == 2 || _verboseLevel == 3)
+        if (_verboseLevel is 2 or 3)
         {
             Console.WriteLine($"[CONN] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}");
         }
@@ -277,21 +324,8 @@ class Program
                     continue;
                 }
 
-                var protocol = rule.Protocol.ToUpper() switch
-                {
-                    "TCP" => ProxyBridgeNative.RuleProtocol.TCP,
-                    "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
-                    "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
-                    _ => throw new ArgumentException($"Invalid protocol in rule file: {rule.Protocol}")
-                };
-
-                var action = rule.Action.ToUpper() switch
-                {
-                    "PROXY" => ProxyBridgeNative.RuleAction.PROXY,
-                    "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
-                    "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
-                    _ => throw new ArgumentException($"Invalid action in rule file: {rule.Action}")
-                };
+                var protocol = ParsingHelpers.ParseProtocol(rule.Protocol);
+                var action = ParsingHelpers.ParseAction(rule.Action);
 
                 rules.Add((rule.ProcessNames, rule.TargetHosts, rule.TargetPorts, protocol, action));
             }
@@ -341,7 +375,7 @@ class Program
 
     private static List<(string ProcessName, string TargetHosts, string TargetPorts, ProxyBridgeNative.RuleProtocol Protocol, ProxyBridgeNative.RuleAction Action)> ParseRules(string[] rules)
     {
-        var parsedRules = new List<(string, string, string, ProxyBridgeNative.RuleProtocol, ProxyBridgeNative.RuleAction)>();
+        var parsedRules = new List<(string, string, string, ProxyBridgeNative.RuleProtocol, ProxyBridgeNative.RuleAction)>(rules.Length);
 
         foreach (var rule in rules)
         {
@@ -352,33 +386,11 @@ class Program
                 throw new ArgumentException($"Invalid rule format: {rule}\nExpected format: process:hosts:ports:protocol:action");
             }
 
-            // Don't trim semicolons - they are valid separators for multiple values
-            var processName = parts[0].Trim();
-            var targetHosts = parts[1].Trim();
-            var targetPorts = parts[2].Trim();
-            var protocolStr = parts[3].Trim().ToUpper();
-            var actionStr = parts[4].Trim().ToUpper();
-
-            // Handle empty fields - use "*" as default
-            if (string.IsNullOrWhiteSpace(processName)) processName = "*";
-            if (string.IsNullOrWhiteSpace(targetHosts)) targetHosts = "*";
-            if (string.IsNullOrWhiteSpace(targetPorts)) targetPorts = "*";
-
-            var protocol = protocolStr switch
-            {
-                "TCP" => ProxyBridgeNative.RuleProtocol.TCP,
-                "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
-                "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
-                _ => throw new ArgumentException($"Invalid protocol: {protocolStr}. Use TCP, UDP, or BOTH")
-            };
-
-            var action = actionStr switch
-            {
-                "PROXY" => ProxyBridgeNative.RuleAction.PROXY,
-                "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
-                "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
-                _ => throw new ArgumentException($"Invalid action: {actionStr}. Use PROXY, DIRECT, or BLOCK")
-            };
+            var processName = ParsingHelpers.DefaultIfEmpty(parts[0].Trim());
+            var targetHosts = ParsingHelpers.DefaultIfEmpty(parts[1].Trim());
+            var targetPorts = ParsingHelpers.DefaultIfEmpty(parts[2].Trim());
+            var protocol = ParsingHelpers.ParseProtocol(parts[3].Trim());
+            var action = ParsingHelpers.ParseAction(parts[4].Trim());
 
             parsedRules.Add((processName, targetHosts, targetPorts, protocol, action));
         }
@@ -409,7 +421,8 @@ class Program
         Console.WriteLine(" | |_) | '__/ _ \\ \\/ / | | | |  _ \\| '__| |/ _` |/ _` |/ _ \\");
         Console.WriteLine(" |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/");
         Console.WriteLine(" |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|");
-        Console.WriteLine("                      |___/                      |___/  V3.0.0");
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "3.1.0";
+        Console.WriteLine($"                      |___/                      |___/  V{version}");
         Console.WriteLine();
         Console.WriteLine("  Universal proxy client for Windows applications");
         Console.WriteLine();

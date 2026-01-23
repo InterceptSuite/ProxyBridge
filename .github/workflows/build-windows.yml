@@ -1,10 +1,10 @@
-name: Build ProxyBridge
+name: Build Windows
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, dev ]
   workflow_dispatch:
 
 jobs:
@@ -18,7 +18,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '10.0.x'
 
     - name: Setup MSYS2 (for GCC)
       uses: msys2/setup-msys2@v2
@@ -36,6 +36,16 @@ jobs:
     - name: Install NSIS
       run: |
         choco install nsis -y
+      shell: pwsh
+
+    - name: Install NSIS EnVar plugin
+      run: |
+        $nsisPluginDir = "C:\Program Files (x86)\NSIS\Plugins\x86-unicode"
+        $url = "https://nsis.sourceforge.io/mediawiki/images/7/7f/EnVar_plugin.zip"
+        Invoke-WebRequest -Uri $url -OutFile "EnVar.zip"
+        Expand-Archive -Path "EnVar.zip" -DestinationPath "EnVar"
+        Copy-Item "EnVar\Plugins\x86-unicode\EnVar.dll" -Destination $nsisPluginDir -Force
+        Write-Host "EnVar plugin installed successfully"
       shell: pwsh
 
     - name: Download WinDivert
@@ -57,7 +67,9 @@ jobs:
       shell: pwsh
 
     - name: Build project
-      run: .\Windows\compile.ps1 -NoSign -Compiler gcc
+      run: |
+        cd Windows
+        .\compile.ps1 -NoSign -Compiler gcc
       shell: pwsh
 
     - name: Upload artifacts

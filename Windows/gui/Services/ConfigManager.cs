@@ -15,6 +15,7 @@ public class AppConfig
     public string ProxyUsername { get; set; } = "";
     public string ProxyPassword { get; set; } = "";
     public bool DnsViaProxy { get; set; } = true;
+    public bool IsTrafficLoggingEnabled { get; set; } = true;
     public string Language { get; set; } = "en";
     public bool CloseToTray { get; set; } = true;
     public List<ProxyRuleConfig> ProxyRules { get; set; } = new();
@@ -37,52 +38,91 @@ internal partial class AppConfigJsonContext : JsonSerializerContext
 {
 }
 
+internal static class AtomicFileHelper
+{
+    public static bool AtomicWrite(string filePath, string content)
+    {
+        var tempPath = filePath + ".tmp";
+        try
+        {
+            var directory = Path.GetDirectoryName(filePath);
+            if (directory != null && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            File.WriteAllText(tempPath, content);
+            File.Move(tempPath, filePath, overwrite: true);
+            return true;
+        }
+        catch
+        {
+            try
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+            catch { }
+            return false;
+        }
+    }
+
+    public static string? SafeReadFile(string filePath)
+    {
+        try
+        {
+            if (!File.Exists(filePath))
+            {
+                return null;
+            }
+
+            var content = File.ReadAllText(filePath);
+            return string.IsNullOrWhiteSpace(content) ? null : content;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+}
+
 public static class ConfigManager
 {
     private static readonly string ConfigDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ProxyBridge"
     );
-    // C:\Users\<username>\AppData\Roaming\ProxyBridge\config.json
 
     private static readonly string ConfigFilePath = Path.Combine(ConfigDirectory, "config.json");
 
     public static bool SaveConfig(AppConfig config)
     {
-        try
-        {
-            if (!Directory.Exists(ConfigDirectory))
-            {
-                Directory.CreateDirectory(ConfigDirectory);
-            }
-
-            var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.AppConfig);
-            File.WriteAllText(ConfigFilePath, json);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
+        var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.AppConfig);
+        return AtomicFileHelper.AtomicWrite(ConfigFilePath, json);
     }
 
     public static AppConfig LoadConfig()
     {
-        try
-        {
-            if (!File.Exists(ConfigFilePath))
-            {
-                return new AppConfig();
-            }
-
-            var json = File.ReadAllText(ConfigFilePath);
-            var config = JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.AppConfig);
-            return config ?? new AppConfig();
-        }
-        catch
+        var json = AtomicFileHelper.SafeReadFile(ConfigFilePath);
+        if (json == null)
         {
             return new AppConfig();
         }
+
+        try
+        {
+            var config = JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.AppConfig);
+            if (config != null)
+            {
+                config.ProxyRules ??= new List<ProxyRuleConfig>();
+                return config;
+            }
+        }
+        catch { }
+
+        return new AppConfig();
     }
 
     public static bool ConfigExists()

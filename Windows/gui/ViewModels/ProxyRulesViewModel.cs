@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using System.Windows.Input;
 using Avalonia.Controls;
 using ProxyBridge.GUI.Services;
+using ProxyBridge.GUI.Common;
 
 namespace ProxyBridge.GUI.ViewModels;
 
@@ -24,6 +25,7 @@ public class ProxyRulesViewModel : ViewModelBase
     private string _processNameError = "";
     private Action<ProxyRule>? _onAddRule;
     private Action? _onClose;
+    private Action? _onConfigChanged;
     private ProxyBridgeService? _proxyService;
     private Window? _window;
 
@@ -94,12 +96,23 @@ public class ProxyRulesViewModel : ViewModelBase
         _window = window;
     }
 
-    public ProxyRulesViewModel(ObservableCollection<ProxyRule> proxyRules, Action<ProxyRule> onAddRule, Action onClose, ProxyBridgeService? proxyService = null)
+    private void ResetRuleForm()
+    {
+        NewProcessName = "*";
+        NewTargetHosts = "*";
+        NewTargetPorts = "*";
+        NewProtocol = "TCP";
+        NewProxyAction = "PROXY";
+        ProcessNameError = "";
+    }
+
+    public ProxyRulesViewModel(ObservableCollection<ProxyRule> proxyRules, Action<ProxyRule> onAddRule, Action onClose, ProxyBridgeService? proxyService = null, Action? onConfigChanged = null)
     {
         ProxyRules = proxyRules;
         _onAddRule = onAddRule;
         _onClose = onClose;
         _proxyService = proxyService;
+        _onConfigChanged = onConfigChanged;
 
         foreach (var rule in ProxyRules)
         {
@@ -108,37 +121,19 @@ public class ProxyRulesViewModel : ViewModelBase
 
         AddRuleCommand = new RelayCommand(() =>
         {
-            NewProcessName = "*";
-            NewTargetHosts = "*";
-            NewTargetPorts = "*";
-            NewProtocol = "TCP";
-            NewProxyAction = "PROXY";
-            ProcessNameError = "";
+            ResetRuleForm();
             IsAddRuleViewOpen = true;
         });
 
         SaveNewRuleCommand = new RelayCommand(() =>
         {
-            // Use "*" if empty
-            if (string.IsNullOrWhiteSpace(NewProcessName))
-            {
-                NewProcessName = "*";
-            }
+            NewProcessName = ValidationHelper.DefaultIfEmpty(NewProcessName);
+            NewTargetHosts = ValidationHelper.DefaultIfEmpty(NewTargetHosts);
+            NewTargetPorts = ValidationHelper.DefaultIfEmpty(NewTargetPorts);
 
-            if (string.IsNullOrWhiteSpace(NewTargetHosts))
+            if (!System.Text.RegularExpressions.Regex.IsMatch(NewProcessName, @"^[a-zA-Z0-9\s._\-*;""\\:()]+$"))
             {
-                NewTargetHosts = "*";
-            }
-
-            if (string.IsNullOrWhiteSpace(NewTargetPorts))
-            {
-                NewTargetPorts = "*";
-            }
-
-            // This could be an issue if app name contain char
-            if (!System.Text.RegularExpressions.Regex.IsMatch(NewProcessName, @"^[a-zA-Z0-9\s._\-*;""\\:]+$"))
-            {
-                ProcessNameError = "Invalid characters in process name. Only letters, numbers, spaces, dots, dashes, underscores, semicolons, quotes, and * are allowed";
+                ProcessNameError = "Invalid characters in process name. Only letters, numbers, spaces, dots, dashes, underscores, semicolons, quotes, parentheses, and * are allowed";
                 return;
             }
 
@@ -154,10 +149,8 @@ public class ProxyRulesViewModel : ViewModelBase
 
             if (_isEditMode && _proxyService != null)
             {
-                // Edit existing rule
                 if (_proxyService.EditRule(_currentEditingRuleId, NewProcessName, NewTargetHosts, NewTargetPorts, NewProtocol, NewProxyAction))
                 {
-                    // Update the rule in the ObservableCollection
                     var existingRule = ProxyRules.FirstOrDefault(r => r.RuleId == _currentEditingRuleId);
                     if (existingRule != null)
                     {
@@ -167,6 +160,7 @@ public class ProxyRulesViewModel : ViewModelBase
                         existingRule.Protocol = NewProtocol;
                         existingRule.Action = NewProxyAction;
                     }
+                    _onConfigChanged?.Invoke();
                 }
 
                 _isEditMode = false;
@@ -174,7 +168,6 @@ public class ProxyRulesViewModel : ViewModelBase
             }
             else
             {
-                // Add new rule
                 var newRule = new ProxyRule
                 {
                     ProcessName = NewProcessName,
@@ -186,27 +179,14 @@ public class ProxyRulesViewModel : ViewModelBase
                 };
 
                 newRule.PropertyChanged += Rule_PropertyChanged;
-
                 _onAddRule?.Invoke(newRule);
             }
 
             IsAddRuleViewOpen = false;
-
-            // Reset to defaults
-            NewProcessName = "*";
-            NewTargetHosts = "*";
-            NewTargetPorts = "*";
-            NewProtocol = "TCP";
-            NewProxyAction = "PROXY";
-            ProcessNameError = "";
+            ResetRuleForm();
         });        CancelAddRuleCommand = new RelayCommand(() =>
         {
-            NewProcessName = "*";
-            NewTargetHosts = "*";
-            NewTargetPorts = "*";
-            NewProtocol = "TCP";
-            NewProxyAction = "PROXY";
-            ProcessNameError = "";
+            ResetRuleForm();
             IsAddRuleViewOpen = false;
         });
 
@@ -271,6 +251,7 @@ public class ProxyRulesViewModel : ViewModelBase
                 if (_proxyService.DeleteRule(rule.RuleId))
                 {
                     ProxyRules.Remove(rule);
+                    _onConfigChanged?.Invoke();
                 }
             }
         });
@@ -406,6 +387,7 @@ public class ProxyRulesViewModel : ViewModelBase
             {
                 _proxyService.DisableRule(rule.RuleId);
             }
+            _onConfigChanged?.Invoke();
         }
         else if (e.PropertyName == nameof(ProxyRule.IsSelected))
         {
@@ -618,33 +600,4 @@ public class ProxyRuleExport
 [JsonSerializable(typeof(ProxyRuleExport))]
 internal partial class ProxyRuleJsonContext : JsonSerializerContext
 {
-}
-
-public class RelayCommandWithParameter<T> : ICommand
-{
-    private readonly Action<T> _execute;
-    private readonly Func<T, bool>? _canExecute;
-
-    public RelayCommandWithParameter(Action<T> execute, Func<T, bool>? canExecute = null)
-    {
-        _execute = execute ?? throw new ArgumentNullException(nameof(execute));
-        _canExecute = canExecute;
-    }
-
-    public event EventHandler? CanExecuteChanged;
-
-    public bool CanExecute(object? parameter)
-    {
-        if (parameter is T typedParameter)
-            return _canExecute?.Invoke(typedParameter) ?? true;
-        return false;
-    }
-
-    public void Execute(object? parameter)
-    {
-        if (parameter is T typedParameter)
-            _execute(typedParameter);
-    }
-
-    public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 }

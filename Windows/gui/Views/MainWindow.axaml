@@ -205,6 +205,14 @@
                     <MenuItem Header="{Binding Loc.MenuProxySettings}" Command="{Binding ShowProxySettingsCommand}"/>
                     <MenuItem Header="{Binding Loc.MenuProxyRules}" Command="{Binding ShowProxyRulesCommand}"/>
                     <Separator/>
+                    <MenuItem Header="{Binding Loc.MenuEnableTrafficLogging}"
+                              Command="{Binding ToggleTrafficLoggingCommand}">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding IsTrafficLoggingEnabled}"
+                                      IsHitTestVisible="False"
+                                      Margin="0"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
                     <MenuItem Header="{Binding Loc.MenuDnsViaProxy}"
                               Command="{Binding ToggleDnsViaProxyCommand}">
                         <MenuItem.Icon>
@@ -219,6 +227,14 @@
                               Command="{Binding ToggleCloseToTrayCommand}">
                         <MenuItem.Icon>
                             <CheckBox IsChecked="{Binding CloseToTray}"
+                                      IsHitTestVisible="False"
+                                      Margin="0"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                    <MenuItem Header="{Binding Loc.MenuRunAtStartup}"
+                              Command="{Binding ToggleStartWithWindowsCommand}">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding StartWithWindows}"
                                       IsHitTestVisible="False"
                                       Margin="0"/>
                         </MenuItem.Icon>
@@ -250,17 +266,20 @@
                         <DockPanel>
                             <!-- Search and Clear Bar -->
                             <Border DockPanel.Dock="Top" Background="#FF1E1E1E" Padding="8" BorderBrush="#FF3F3F46" BorderThickness="0,0,0,1">
-                                <Grid ColumnDefinitions="*,Auto,Auto">
+                                <Grid ColumnDefinitions="*,Auto">
                                     <TextBox Grid.Column="0"
                                              Text="{Binding ConnectionsSearchText}"
-                                             Watermark="{Binding Loc.SearchConnectionsPlaceholder}"
-                                             Margin="0,0,8,0"/>
+                                             Watermark="Search connections (press Enter)..."
+                                             Margin="0,0,8,0">
+                                        <TextBox.KeyBindings>
+                                            <KeyBinding Gesture="Enter" Command="{Binding SearchConnectionsCommand}"/>
+                                        </TextBox.KeyBindings>
+                                    </TextBox>
                                     <Button Grid.Column="1"
                                             Content="{Binding Loc.ButtonClear}"
                                             Classes="secondary"
                                             Command="{Binding ClearConnectionsLogCommand}"
-                                            Padding="12,6"
-                                            Margin="0,0,8,0"/>
+                                            Padding="12,6"/>
                                 </Grid>
                             </Border>
 
@@ -283,17 +302,20 @@
                         <DockPanel>
                             <!-- Search and Clear Bar -->
                             <Border DockPanel.Dock="Top" Background="#FF1E1E1E" Padding="8" BorderBrush="#FF3F3F46" BorderThickness="0,0,0,1">
-                                <Grid ColumnDefinitions="*,Auto,Auto">
+                                <Grid ColumnDefinitions="*,Auto">
                                     <TextBox Grid.Column="0"
                                              Text="{Binding ActivitySearchText}"
-                                             Watermark="{Binding Loc.SearchActivityPlaceholder}"
-                                             Margin="0,0,8,0"/>
+                                             Watermark="Search activity (press Enter)..."
+                                             Margin="0,0,8,0">
+                                        <TextBox.KeyBindings>
+                                            <KeyBinding Gesture="Enter" Command="{Binding SearchActivityCommand}"/>
+                                        </TextBox.KeyBindings>
+                                    </TextBox>
                                     <Button Grid.Column="1"
                                             Content="{Binding Loc.ButtonClear}"
                                             Classes="secondary"
                                             Command="{Binding ClearActivityLogCommand}"
-                                            Padding="12,6"
-                                            Margin="0,0,8,0"/>
+                                            Padding="12,6"/>
                                 </Grid>
                             </Border>
 
