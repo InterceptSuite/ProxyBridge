@@ -164,11 +164,15 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             
             do {
                 try (manager.connection as? NETunnelProviderSession)?.startTunnel()
-                self.isProxyActive = true
-                self.addLog("INFO", "Proxy tunnel started")
+                
+                DispatchQueue.main.async {
+                    self.isProxyActive = true
+                    self.addLog("INFO", "Proxy tunnel started")
+                }
                 
                 if let session = manager.connection as? NETunnelProviderSession {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    // Wait a moment for tunnel to be ready, then configure
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
                         self.setupLogPolling(session: session)
                         
                         if let config = self.proxyConfig {
@@ -189,15 +193,45 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     func stopProxy() {
-        NETransparentProxyManager.loadAllFromPreferences { [weak self] managers, error in
+        guard let session = tunnelSession else {
+            isProxyActive = false
+            logTimer?.invalidate()
+            logTimer = nil
+            return
+        }
+        
+        // Clear all data from extension memory before stopping
+        clearExtensionMemory(session: session) { [weak self] in
             guard let self = self else { return }
             
-            if let manager = managers?.first {
-                (manager.connection as? NETunnelProviderSession)?.stopTunnel()
-                self.isProxyActive = false
-                self.logTimer?.invalidate()
-                self.logTimer = nil
-                self.addLog("INFO", "Proxy stopped")
+            NETransparentProxyManager.loadAllFromPreferences { managers, error in
+                if let manager = managers?.first {
+                    (manager.connection as? NETunnelProviderSession)?.stopTunnel()
+                    self.isProxyActive = false
+                    self.logTimer?.invalidate()
+                    self.logTimer = nil
+                    self.tunnelSession = nil
+                    self.addLog("INFO", "Proxy stopped and extension memory cleared")
+                }
+            }
+        }
+    }
+    
+    private func clearExtensionMemory(session: NETunnelProviderSession, completion: @escaping () -> Void) {
+        // clear rules auto fix the #51 - and proxy rules become inactive after It closes
+        RuleManager.clearRules(session: session) { success, message in
+            //clear proxy config as well keep meory usage low for extesion 
+            let clearConfigMessage: [String: Any] = [
+                "action": "clearConfig"
+            ]
+            
+            guard let data = try? JSONSerialization.data(withJSONObject: clearConfigMessage) else {
+                completion()
+                return
+            }
+            
+            try? session.sendProviderMessage(data) { _ in
+                completion()
             }
         }
     }

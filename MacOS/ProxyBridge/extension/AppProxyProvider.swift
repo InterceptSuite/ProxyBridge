@@ -469,7 +469,6 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         if let rule = matchedRule {
             let action = rule.action.rawValue
-            log("Rule #\(rule.ruleId) matched: \(processPath) -> \(destination):\(portStr) -> \(action)")
             
             sendLogToApp(protocol: "TCP", process: processPath, destination: destination, port: portStr, proxy: action)
             
@@ -513,7 +512,6 @@ class AppProxyProvider: NETransparentProxyProvider {
         let matchedRule = findMatchingRule(processPath: processPath, destination: "", port: 0, connectionProtocol: .udp, checkIpPort: false)
         
         if let rule = matchedRule {
-            log("UDP Rule #\(rule.ruleId) matched: \(processPath) -> \(rule.action.rawValue)")
             // We don't have access to UDP dest ip and port when os handles it in (apple proxy API limitation), we log with unknown ip and port to know specific package is using UDP
             switch rule.action {
             case .direct:
