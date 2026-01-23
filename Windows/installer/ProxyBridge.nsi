@@ -1,5 +1,5 @@
 !define PRODUCT_NAME "ProxyBridge"
-!define PRODUCT_VERSION "4.0.0"
+!define PRODUCT_VERSION "3.1.0"
 !define PRODUCT_PUBLISHER "InterceptSuite"
 !define PRODUCT_WEB_SITE "https://github.com/InterceptSuite/ProxyBridge"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"

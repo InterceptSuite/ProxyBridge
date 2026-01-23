@@ -15,7 +15,7 @@ public class App : Application
     public static bool StartMinimized { get; set; }
     private EventWaitHandle? _showWindowEvent;
     private CancellationTokenSource? _eventListenerCts;
-    private const string EventName = "Global\\ProxyBridge_ShowWindow_Event_v4.0";
+    private const string EventName = "Global\\ProxyBridge_ShowWindow_Event_v3.1";
 
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
 

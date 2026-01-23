@@ -1,7 +1,7 @@
 # ProxyBridge
 
 <p align="center">
-  <img src="img/logo.png" alt="ProxyBridge Logo" width="200"/>
+  <img src="img/logo.png" alt="ProxyBridge Logo" />
 </p>
 
 ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alternative) that provides transparent proxy routing for applications on **Windows** and **macOS**. It redirects TCP and UDP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. ProxyBridge fully supports both TCP and UDP proxy routing and works at the system level, making it compatible with proxy-unaware applications without requiring any configuration changes.

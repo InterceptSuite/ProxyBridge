@@ -2,28 +2,28 @@ import SwiftUI
 
 struct AboutView: View {
     @Environment(\.dismiss) var dismiss
-    
+
     var body: some View {
         VStack(spacing: 20) {
             Text("ProxyBridge")
                 .font(.system(size: 28, weight: .bold))
                 .foregroundColor(.accentColor)
-            
-            Text("Version 4.0")
+
+            Text("Version 3.1")
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
-            
+
             Text("Universal proxy client for macOS applications")
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.bottom, 8)
-            
+
             Text("Author: Sourav Kalal / InterceptSuite")
                 .font(.system(size: 13))
                 .foregroundColor(.secondary)
                 .padding(.top, 4)
-            
+
             VStack(spacing: 12) {
                 HStack {
                     Text("Website:")
@@ -31,7 +31,7 @@ struct AboutView: View {
                     Link("interceptsuite.com", destination: URL(string: "https://interceptsuite.com")!)
                         .foregroundColor(.accentColor)
                 }
-                
+
                 HStack {
                     Text("GitHub:")
                         .foregroundColor(.secondary)
@@ -40,12 +40,12 @@ struct AboutView: View {
                 }
             }
             .font(.system(size: 13))
-            
+
             Text("License: MIT")
                 .font(.system(size: 13))
                 .foregroundColor(.secondary)
                 .padding(.top, 8)
-            
+
             Button("Close") {
                 dismiss()
             }

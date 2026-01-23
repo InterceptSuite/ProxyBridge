@@ -421,7 +421,7 @@ class Program
         Console.WriteLine(" | |_) | '__/ _ \\ \\/ / | | | |  _ \\| '__| |/ _` |/ _` |/ _ \\");
         Console.WriteLine(" |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/");
         Console.WriteLine(" |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|");
-        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "4.0.0";
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "3.1.0";
         Console.WriteLine($"                      |___/                      |___/  V{version}");
         Console.WriteLine();
         Console.WriteLine("  Universal proxy client for Windows applications");

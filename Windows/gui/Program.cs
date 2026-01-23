@@ -7,8 +7,8 @@ namespace ProxyBridge.GUI;
 class Program
 {
     private static Mutex? _instanceMutex;
-    private const string MutexName = "Global\\ProxyBridge_SingleInstance_Mutex_v4.0";
-    private const string EventName = "Global\\ProxyBridge_ShowWindow_Event_v4.0";
+    private const string MutexName = "Global\\ProxyBridge_SingleInstance_Mutex_v3.1";
+    private const string EventName = "Global\\ProxyBridge_ShowWindow_Event_v3.1";
 
     [STAThread]
     public static void Main(string[] args)

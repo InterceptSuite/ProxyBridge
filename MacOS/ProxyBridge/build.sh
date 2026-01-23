@@ -3,7 +3,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="4.0"
+VERSION="3.1"
 
 if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
@@ -26,7 +26,7 @@ echo "Creating installer package..."
 pkgbuild \
     --root build/component \
     --identifier com.interceptsuite.ProxyBridge \
-    --version 4.0.0 \
+    --version 3.1.0 \
     --install-location /Applications \
     build/temp.pkg
 
@@ -45,7 +45,7 @@ cat > build/distribution.xml << 'EOF'
     <choice id="com.interceptsuite.ProxyBridge" visible="false">
         <pkg-ref id="com.interceptsuite.ProxyBridge"/>
     </choice>
-    <pkg-ref id="com.interceptsuite.ProxyBridge" version="4.0.0" onConclusion="none">temp.pkg</pkg-ref>
+    <pkg-ref id="com.interceptsuite.ProxyBridge" version="3.1.0" onConclusion="none">temp.pkg</pkg-ref>
 </installer-gui-script>
 EOF
 
@@ -61,16 +61,16 @@ if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_PASSWORD" ] && [ -n "$SIGNING_IDENTITY
     productsign --sign "$SIGNING_IDENTITY" \
         output/ProxyBridge-v$VERSION-Universal-Installer.pkg \
         output/ProxyBridge-v$VERSION-Universal-Installer-signed.pkg
-    
+
     mv output/ProxyBridge-v$VERSION-Universal-Installer-signed.pkg output/ProxyBridge-v$VERSION-Universal-Installer.pkg
-    
+
     echo "Notarizing installer..."
     xcrun notarytool submit output/ProxyBridge-v$VERSION-Universal-Installer.pkg \
         --apple-id "$APPLE_ID" \
         --team-id "$TEAM_ID" \
         --password "$APPLE_APP_PASSWORD" \
         --wait
-    
+
     echo "Stapling notarization ticket..."
     xcrun stapler staple output/ProxyBridge-v$VERSION-Universal-Installer.pkg
     echo "Installer signed and notarized"
