@@ -192,56 +192,68 @@ macOS development requires a valid Apple Developer account with proper signing c
      - **ProxyBridge Extension Prod** - for the Network Extension
    - Download and install both profiles on your system (double-click to install)
 
-3. **Configure Xcode Signing:**
+3. **Configure Code Signing:**
 
-   The Xcode project uses configuration files to store signing details:
+   The project uses configuration files to manage signing credentials securely.
 
-   **File 1: `proxybridge-app.xcconfig`** (GUI app configuration)
-   ```plaintext
-   // Update these values with YOUR details:
-   DEVELOPMENT_TEAM = YOUR_TEAM_ID              // e.g., L12345ABCD
-   PROVISIONING_PROFILE_SPECIFIER = ProxyBridge Prod  // Your provisioning profile name
+   **Step 1: Create config folder**
+   ```bash
+   cd MacOS/ProxyBridge
+   mkdir config
    ```
 
-   **File 2: `proxybridge-ext.xcconfig`** (Network Extension configuration)
+   **Step 2: Copy template config files**
+   ```bash
+   # Copy template files from project root to config folder
+   cp proxybridge-app.xcconfig config/Signing-Config-app.xcconfig
+   cp proxybridge-ext.xcconfig config/Signing-Config-ext.xcconfig
+   ```
+
+   **Step 3: Edit config files with YOUR credentials**
+
+   Edit `config/Signing-Config-app.xcconfig`:
    ```plaintext
-   // Update these values with YOUR details:
-   DEVELOPMENT_TEAM = YOUR_TEAM_ID              // e.g., L12345ABCD
+   // MARK: - Team Configuration
+   DEVELOPMENT_TEAM = YOUR_TEAM_ID              // Replace with your Team ID (e.g., L4HJT32Z59)
+
+   // MARK: - Main App Signing (ProxyBridge)
+   CODE_SIGN_STYLE = Manual
+   CODE_SIGN_IDENTITY = Developer ID Application
+   CODE_SIGN_ENTITLEMENTS = ProxyBridge/ProxyBridgeRelease.entitlements
+   PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge
+   PRODUCT_MODULE_NAME = ProxyBridge
+   PRODUCT_NAME = ProxyBridge
+   PROVISIONING_PROFILE_SPECIFIER = ProxyBridge Prod  // Your provisioning profile name
+
+   // MARK: - Additional Signing Settings
+   CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
+   ENABLE_HARDENED_RUNTIME = YES
+   ```
+
+   Edit `config/Signing-Config-ext.xcconfig`:
+   ```plaintext
+   // MARK: - Team Configuration
+   DEVELOPMENT_TEAM = YOUR_TEAM_ID              // Replace with your Team ID
+
+   // MARK: - Extension Signing
+   CODE_SIGN_STYLE = Manual
+   CODE_SIGN_IDENTITY = Developer ID Application
+   CODE_SIGN_ENTITLEMENTS = extension/extensionRelease.entitlements
+   PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge.extension
+   PRODUCT_MODULE_NAME = com_interceptsuite_ProxyBridge_extension
    PROVISIONING_PROFILE_SPECIFIER = ProxyBridge Extension Prod  // Your extension profile name
+
+   // MARK: - Additional Signing Settings
+   CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
+   ENABLE_HARDENED_RUNTIME = YES
    ```
 
    **How to find your DEVELOPMENT_TEAM ID:**
-   - Open Xcode
-   - Go to Xcode → Settings → Accounts
-   - Select your Apple ID
-   - Click "Manage Certificates"
+   - Open Xcode → Settings → Accounts
+   - Select your Apple ID → Click "Manage Certificates"
    - Your Team ID is shown next to your team name
 
-4. **Apply Configuration Files in Xcode:**
-
-   After editing the `.xcconfig` files with your details:
-
-   ```
-   Step 1: Open ProxyBridge.xcodeproj in Xcode
-
-   Step 2: Select the ProxyBridge project in the navigator
-
-   Step 3: In the main editor, select "ProxyBridge" project (not target)
-
-   Step 4: Go to the "Info" tab
-
-   Step 5: Under "Configurations", expand each configuration:
-           - Debug
-           - Release
-
-   Step 6: For each configuration:
-           - For "ProxyBridge" target → Select "proxybridge-app"
-           - For "extension" target → Select "proxybridge-ext"
-
-   Step 7: Clean build folder (Product → Clean Build Folder)
-
-   Step 8: Build the project (⌘B)
-   ```
+   **Note:** The `config/` folder is in `.gitignore` to keep your credentials private.
 
 **Setup:**
 ```bash
@@ -315,10 +327,11 @@ You **MUST** create a **Release build** for the Network Extension to function pr
 **Project Structure:**
 - `MacOS/ProxyBridge/ProxyBridge/` - SwiftUI main app
 - `MacOS/ProxyBridge/extension/` - Network Extension provider
-- `MacOS/ProxyBridge/proxybridge-app.xcconfig` - App signing configuration
-- `MacOS/ProxyBridge/proxybridge-ext.xcconfig` - Extension signing configuration
+- `MacOS/ProxyBridge/config/` - Your signing configuration (NOT in git)
 - `MacOS/ProxyBridge/build.sh` - PKG installer creation script
 - `MacOS/ProxyBridge/output/` - Exported .app and PKG installer
+- `proxybridge-app.xcconfig` - Template config (in project root)
+- `proxybridge-ext.xcconfig` - Template config (in project root)
 
 ## Pull Request Process
 
