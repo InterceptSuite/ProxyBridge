@@ -164,11 +164,15 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             
             do {
                 try (manager.connection as? NETunnelProviderSession)?.startTunnel()
-                self.isProxyActive = true
-                self.addLog("INFO", "Proxy tunnel started")
+                
+                DispatchQueue.main.async {
+                    self.isProxyActive = true
+                    self.addLog("INFO", "Proxy tunnel started")
+                }
                 
                 if let session = manager.connection as? NETunnelProviderSession {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    // Wait a moment for tunnel to be ready, then configure
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
                         self.setupLogPolling(session: session)
                         
                         if let config = self.proxyConfig {
