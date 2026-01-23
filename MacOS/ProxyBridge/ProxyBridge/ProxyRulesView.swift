@@ -219,7 +219,7 @@ struct ProxyRulesView: View {
                 .padding()
             }
         }
-        .frame(width: 1200, height: 600)
+        .frame(minWidth: 1200, minHeight: 600)
         .onAppear {
             loadRules()
         }

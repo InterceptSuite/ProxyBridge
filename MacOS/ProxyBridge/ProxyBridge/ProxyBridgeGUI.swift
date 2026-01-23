@@ -57,9 +57,7 @@ struct ProxyBridgeGUIApp: App {
         
         Window("Proxy Rules", id: "proxy-rules") {
             ProxyRulesView(viewModel: viewModel)
-                .frame(width: 700, height: 500)
         }
-        .windowResizability(.contentSize)
         .defaultPosition(.center)
         
         Window("About ProxyBridge", id: "about") {
@@ -125,7 +123,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func openProxyRules() {
-        openWindow(title: "Proxy Rules", size: NSSize(width: 700, height: 500), resizable: true) {
+        openWindow(title: "Proxy Rules", size: NSSize(width: 1200, height: 600), resizable: true) {
             ProxyRulesView(viewModel: AppDelegate.viewModel!)
         }
     }
