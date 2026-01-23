@@ -112,8 +112,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     static var viewModel: ProxyBridgeViewModel?
     static var pendingUpdateInfo: VersionInfo?
     
-    func applicationWillTerminate(_ notification: Notification) {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Clear extension memory before app quits
         AppDelegate.viewModel?.stopProxy()
+        
+        // Give time for memory clearing to complete
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        
+        return .terminateLater
     }
     
     @objc func openProxySettings() {
