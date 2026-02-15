@@ -236,13 +236,28 @@ Rules determine how network traffic is handled. Multiple rules can be created, a
 
 | Component | Description | Supports TCP | Supports UDP |
 |-----------|-------------|--------------|--------------|
-| Package Name | Application bundle identifier | Yes | Yes |
+| Package Name | Application bundle identifier or executable path/name | Yes | Yes |
 | IP/Hostname | Destination IP address or domain | Yes | No* |
 | Port | Destination port number | Yes | No* |
 | Protocol | TCP, UDP, or Both | Yes | Yes |
 | Action | PROXY, DIRECT, or BLOCK | Yes | Yes |
 
 **Note:** UDP rules only match on package name due to Apple API limitations. IP and port-based filtering is not available for UDP traffic.
+
+##### Process Identification
+
+ProxyBridge can identify processes in two ways:
+
+1. **Bundle Identifier** (e.g., `com.google.Chrome`) - Available for all applications with app bundles
+2. **Executable Path/Name** - Available for standalone binaries and processes without bundle identifiers
+
+When creating rules, you can use either:
+- **Full executable paths**: `/usr/local/bin/ciadpi` or `/Applications/MyApp.app/Contents/MacOS/MyApp`
+- **Executable names**: `ciadpi` or `MyApp` (matches any process with this name)
+- **Bundle identifiers**: `com.example.app` (traditional bundle ID matching)
+- **Wildcards**: `ciadpi*`, `*proxy`, or `com.example.*`
+
+**Matching Priority**: When both bundle ID and executable path are available, ProxyBridge tries to match the rule against the executable path first, then falls back to bundle ID matching. This ensures maximum compatibility with both bundled applications and standalone binaries.
 
 #### Actions
 
@@ -298,6 +313,33 @@ Package Name: com.example.voipapp
 IP/Hostname: (ignored for UDP)
 Port: (ignored for UDP)
 Protocol: UDP
+Action: PROXY
+```
+
+**Exclude standalone binary from proxy (e.g., DPI bypass tools)**
+```
+Package Name: ciadpi
+IP/Hostname: (empty)
+Port: (empty)
+Protocol: Both
+Action: DIRECT
+```
+
+**Exclude by full executable path**
+```
+Package Name: /usr/local/bin/ciadpi
+IP/Hostname: (empty)
+Port: (empty)
+Protocol: Both
+Action: DIRECT
+```
+
+**Proxy all binaries starting with "proxy"**
+```
+Package Name: proxy*
+IP/Hostname: (empty)
+Port: (empty)
+Protocol: TCP
 Action: PROXY
 ```
 
@@ -360,10 +402,12 @@ Connection logs are available in the main window, showing:
 
 ### Apple Network Extension API Constraints
 
-1. **Package Name vs Process Name**
-   - Rules use application bundle identifier (package name), not process name
-   - Apple's Network Extension API does not provide access to process names
-   - Use `com.example.app` format instead of executable names
+1. **Process Identification**
+   - **Primary Method**: Rules primarily use application bundle identifier (e.g., `com.example.app`)
+   - **Extended Support**: ProxyBridge now supports matching by executable path/name for standalone binaries
+   - **How it works**: The extension extracts the executable path using the process audit token when available
+   - **Fallback**: If executable path cannot be determined, bundle identifier matching is still used
+   - **Note**: This is a workaround to Apple's Network Extension API limitations and may not work in all edge cases
 
 2. **UDP Traffic Limitations**
    - UDP rules can only match on package name
