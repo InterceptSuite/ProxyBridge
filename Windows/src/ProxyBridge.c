@@ -211,8 +211,18 @@ static int send_all(SOCKET sock, const char *buf, int len)
     return sent;
 }
 
+static int recv_all(SOCKET sock, char *buf, int len)
+{
+    int received = 0;
+    while (received < len) {
+        int n = recv(sock, buf + received, len - received, 0);
+        if (n <= 0) return n == 0 ? 0 : SOCKET_ERROR;
+        received += n;
+    }
+    return received;
+}
+
 static UINT32 parse_ipv4(const char *ip);
-static UINT32 resolve_hostname(const char *hostname);
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port);
 static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr);
 static DWORD WINAPI udp_relay_server(LPVOID arg);
@@ -560,6 +570,15 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 }
                 else if (action == RULE_ACTION_PROXY)
             {
+                // Only redirect new connections (SYN packets). Non-SYN packets for
+                // untracked connections belong to direct flows established before a
+                // rule matched; redirecting them would corrupt the TCP state machine.
+                if (!tcp_header->Syn)
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
+
                 add_connection(src_port, src_ip, orig_dest_ip, orig_dest_port);
 
                 tcp_header->DstPort = htons(g_local_relay_port);
@@ -678,17 +697,23 @@ static DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
         return 0;
     }
 
-    tcp_table = (MIB_TCPTABLE_OWNER_PID *)malloc(size);
-    if (tcp_table == NULL)
+    // The table can grow between the size query and the data query; retry on
+    // ERROR_INSUFFICIENT_BUFFER so we always get a complete snapshot.
+    while (1)
     {
-        return 0;
-    }
+        tcp_table = (MIB_TCPTABLE_OWNER_PID *)malloc(size);
+        if (tcp_table == NULL)
+            return 0;
 
-    if (GetExtendedTcpTable(tcp_table, &size, FALSE, AF_INET,
-                            TCP_TABLE_OWNER_PID_ALL, 0) != NO_ERROR)
-    {
+        DWORD ret = GetExtendedTcpTable(tcp_table, &size, FALSE, AF_INET,
+                                        TCP_TABLE_OWNER_PID_ALL, 0);
+        if (ret == NO_ERROR)
+            break;
         free(tcp_table);
-        return 0;
+        tcp_table = NULL;
+        if (ret != ERROR_INSUFFICIENT_BUFFER)
+            return 0;
+        // size was updated by GetExtendedTcpTable; retry with the new size
     }
 
     for (DWORD i = 0; i < tcp_table->dwNumEntries; i++)
@@ -729,17 +754,21 @@ static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port)
         return 0;
     }
 
-    udp_table = (MIB_UDPTABLE_OWNER_PID *)malloc(size);
-    if (udp_table == NULL)
+    // Retry on ERROR_INSUFFICIENT_BUFFER in case the table grows between calls.
+    while (1)
     {
-        return 0;
-    }
+        udp_table = (MIB_UDPTABLE_OWNER_PID *)malloc(size);
+        if (udp_table == NULL)
+            return 0;
 
-    if (GetExtendedUdpTable(udp_table, &size, FALSE, AF_INET,
-                            UDP_TABLE_OWNER_PID, 0) != NO_ERROR)
-    {
+        DWORD ret = GetExtendedUdpTable(udp_table, &size, FALSE, AF_INET,
+                                        UDP_TABLE_OWNER_PID, 0);
+        if (ret == NO_ERROR)
+            break;
         free(udp_table);
-        return 0;
+        udp_table = NULL;
+        if (ret != ERROR_INSUFFICIENT_BUFFER)
+            return 0;
     }
 
     // First pass: Try exact match (IP + port)
@@ -1252,7 +1281,7 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
         }
     }
 
-    len = recv(s, (char*)buf, 2, 0);
+    len = recv_all(s, (char*)buf, 2);
     if (len != 2 || buf[0] != SOCKS5_VERSION)
     {
         log_message("SOCKS5: Invalid auth response");
@@ -1289,7 +1318,7 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
             return -1;
         }
 
-        len = recv(s, (char*)buf, 2, 0);
+        len = recv_all(s, (char*)buf, 2);
         if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
         {
             log_message("SOCKS5: Authentication failed");
@@ -1320,11 +1349,34 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
         return -1;
     }
 
-    len = recv(s, (char*)buf, 10, 0);
-    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    // Read the fixed-length header: VER, REP, RSV, ATYP (4 bytes)
+    len = recv_all(s, (char*)buf, 4);
+    if (len != 4 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
     {
         log_message("SOCKS5: CONNECT failed (reply=%d)", len > 1 ? buf[1] : -1);
         return -1;
+    }
+
+    // Drain the BND.ADDR and BND.PORT based on ATYP so the socket is clean
+    // for the bidirectional relay that follows.
+    unsigned char atyp = buf[3];
+    if (atyp == 0x01)  // IPv4: 4 bytes address + 2 bytes port
+    {
+        len = recv_all(s, (char*)buf, 6);
+        if (len != 6) return -1;
+    }
+    else if (atyp == 0x04)  // IPv6: 16 bytes address + 2 bytes port
+    {
+        len = recv_all(s, (char*)buf, 18);
+        if (len != 18) return -1;
+    }
+    else if (atyp == 0x03)  // Domain: 1 byte length + N bytes domain + 2 bytes port
+    {
+        len = recv_all(s, (char*)buf, 1);
+        if (len != 1) return -1;
+        unsigned char domain_len = buf[0];
+        len = recv_all(s, (char*)buf, (int)domain_len + 2);
+        if (len != (int)domain_len + 2) return -1;
     }
 
     return 0;
@@ -1449,7 +1501,7 @@ static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr)
             return -1;
     }
 
-    len = recv(s, (char*)buf, 2, 0);
+    len = recv_all(s, (char*)buf, 2);
     if (len != 2 || buf[0] != SOCKS5_VERSION)
         return -1;
 
@@ -1472,7 +1524,7 @@ static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr)
         if (send(s, (char*)buf, 3 + user_len + pass_len, 0) != (int)(3 + user_len + pass_len))
             return -1;
 
-        len = recv(s, (char*)buf, 2, 0);
+        len = recv_all(s, (char*)buf, 2);
         if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
             return -1;
     }
@@ -1495,13 +1547,38 @@ static int socks5_udp_associate(SOCKET s, struct sockaddr_in *relay_addr)
     if (send(s, (char*)buf, 10, 0) != 10)
         return -1;
 
-    len = recv(s, (char*)buf, 10, 0);
-    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    // Read VER, REP, RSV, ATYP first
+    len = recv_all(s, (char*)buf, 4);
+    if (len != 4 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
         return -1;
 
-    relay_addr->sin_family = AF_INET;
-    relay_addr->sin_addr.s_addr = *(UINT32*)&buf[4];
-    relay_addr->sin_port = *(UINT16*)&buf[8];
+    // For UDP_ASSOCIATE we need the relay address; only handle IPv4 BND.ADDR here.
+    // Read the remaining 6 bytes (4-byte IPv4 address + 2-byte port).
+    unsigned char atyp = buf[3];
+    if (atyp == 0x01)
+    {
+        len = recv_all(s, (char*)buf, 6);
+        if (len != 6) return -1;
+        relay_addr->sin_family = AF_INET;
+        relay_addr->sin_addr.s_addr = *(UINT32*)&buf[0];
+        relay_addr->sin_port = *(UINT16*)&buf[4];
+    }
+    else if (atyp == 0x04)  // IPv6: drain 16-byte address + 2-byte port
+    {
+        recv_all(s, (char*)buf, 18);
+        return -1;
+    }
+    else if (atyp == 0x03)  // Domain: drain 1-byte length + domain + 2-byte port
+    {
+        len = recv_all(s, (char*)buf, 1);
+        if (len == 1)
+            recv_all(s, (char*)buf, (int)buf[0] + 2);
+        return -1;
+    }
+    else
+    {
+        return -1;
+    }
 
     return 0;
 }
@@ -2926,7 +3003,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     }
 
     WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_LENGTH, 8192);
-    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 8);  // 8ms for low latency
+    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 2000);  // 2s to avoid drops under load
 
     for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
