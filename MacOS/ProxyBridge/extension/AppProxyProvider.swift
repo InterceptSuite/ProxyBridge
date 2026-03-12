@@ -339,11 +339,37 @@ class AppProxyProvider: NETransparentProxyProvider {
     }
     
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        tcpConnectionsLock.lock()
+        let drainedUDPResources = udpResources
+        udpResources.removeAll()
+        tcpConnectionsLock.unlock()
+        
+        for (flow, resources) in drainedUDPResources {
+            resources.udpSession?.cancel()
+            resources.tcpConnection.cancel()
+            flow.closeReadWithError(nil)
+            flow.closeWriteWithError(nil)
+        }
+        
         completionHandler()
     }
     
-    private var udpTCPConnections: [NEAppProxyUDPFlow: NWTCPConnection] = [:]
+    private var udpResources: [NEAppProxyUDPFlow: (tcpConnection: NWTCPConnection, udpSession: NWUDPSession)] = [:]
     private let tcpConnectionsLock = NSLock()
+    private let udpRetryQueue = DispatchQueue(label: "com.interceptsuite.ProxyBridge.udp-retry", qos: .utility)
+    
+    private func cleanupUDPResources(for clientFlow: NEAppProxyUDPFlow, error: Error? = nil) {
+        tcpConnectionsLock.lock()
+        let removedResources = udpResources.removeValue(forKey: clientFlow)
+        tcpConnectionsLock.unlock()
+        
+        if let (tcpConnection, udpSession) = removedResources {
+            udpSession.cancel()
+            tcpConnection.cancel()
+        }
+        clientFlow.closeReadWithError(error)
+        clientFlow.closeWriteWithError(error)
+    }
     
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         guard let message = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any],
@@ -638,6 +664,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                     
                     if let error = error {
                         self.log("Failed to open UDP flow: \(error.localizedDescription)", level: "ERROR")
+                        self.cleanupUDPResources(for: flow, error: error)
                         return
                     }
                     
@@ -664,7 +691,7 @@ class AppProxyProvider: NETransparentProxyProvider {
             guard let self = self else { return }
             
             if let error = error {
-                self.log("SOCKS5 UDP greeting failed: \(error.localizedDescription)", level: "ERROR")
+                self.failUDPSetup(for: clientFlow, tcpConnection: tcpConnection, message: "SOCKS5 UDP greeting failed: \(error.localizedDescription)", error: error)
                 return
             }
             
@@ -672,12 +699,12 @@ class AppProxyProvider: NETransparentProxyProvider {
                 guard let self = self else { return }
                 
                 if let error = error {
-                    self.log("SOCKS5 UDP greeting response failed: \(error.localizedDescription)", level: "ERROR")
+                    self.failUDPSetup(for: clientFlow, tcpConnection: tcpConnection, message: "SOCKS5 UDP greeting response failed: \(error.localizedDescription)", error: error)
                     return
                 }
                 
                 guard let data = data, data.count == 2, data[1] == 0x00 else {
-                    self.log("SOCKS5 UDP greeting response failed", level: "ERROR")
+                    self.failUDPSetup(for: clientFlow, tcpConnection: tcpConnection, message: "SOCKS5 UDP greeting response failed")
                     return
                 }
                 
@@ -699,7 +726,7 @@ class AppProxyProvider: NETransparentProxyProvider {
             guard let self = self else { return }
             
             if let error = error {
-                self.log("SOCKS5 UDP ASSOCIATE failed: \(error.localizedDescription)", level: "ERROR")
+                self.failUDPSetup(for: clientFlow, tcpConnection: tcpConnection, message: "SOCKS5 UDP ASSOCIATE failed: \(error.localizedDescription)", error: error)
                 return
             }
             
@@ -707,12 +734,12 @@ class AppProxyProvider: NETransparentProxyProvider {
                 guard let self = self else { return }
                 
                 if let error = error {
-                    self.log("SOCKS5 UDP ASSOCIATE response error: \(error.localizedDescription)", level: "ERROR")
+                    self.failUDPSetup(for: clientFlow, tcpConnection: tcpConnection, message: "SOCKS5 UDP ASSOCIATE response error: \(error.localizedDescription)", error: error)
                     return
                 }
                 
                 guard let data = data, data.count >= 10, data[0] == 0x05, data[1] == 0x00 else {
-                    self.log("SOCKS5 UDP ASSOCIATE rejected", level: "ERROR")
+                    self.failUDPSetup(for: clientFlow, tcpConnection: tcpConnection, message: "SOCKS5 UDP ASSOCIATE rejected")
                     return
                 }
                 
@@ -720,6 +747,12 @@ class AppProxyProvider: NETransparentProxyProvider {
                 self.relayUDPThroughSOCKS5(clientFlow: clientFlow, relayHost: relayHost, relayPort: relayPort, tcpConnection: tcpConnection, processPath: processPath)
             }
         }
+    }
+    
+    private func failUDPSetup(for clientFlow: NEAppProxyUDPFlow, tcpConnection: NWTCPConnection, message: String, error: Error? = nil) {
+        log(message, level: "ERROR")
+        cleanupUDPResources(for: clientFlow, error: error)
+        tcpConnection.cancel()
     }
     
     private func parseSOCKS5Address(from data: Data, offset: Int) -> (String, UInt16) {
@@ -754,14 +787,14 @@ class AppProxyProvider: NETransparentProxyProvider {
         let udpSession = self.createUDPSession(to: relayEndpoint, from: nil)
         
         tcpConnectionsLock.lock()
-        udpTCPConnections[clientFlow] = tcpConnection
+        udpResources[clientFlow] = (tcpConnection: tcpConnection, udpSession: udpSession)
         tcpConnectionsLock.unlock()
         
         readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
         readAndForwardRelayUDP(clientFlow: clientFlow, udpSession: udpSession)
     }
     
-    private func readAndForwardClientUDP(clientFlow: NEAppProxyUDPFlow, udpSession: NWUDPSession, processPath: String) {
+    private func readAndForwardClientUDP(clientFlow: NEAppProxyUDPFlow, udpSession: NWUDPSession, processPath: String, emptyReadCount: Int = 0) {
         var isFirstPacket = true
         
         clientFlow.readDatagrams { [weak self] datagrams, endpoints, error in
@@ -769,11 +802,17 @@ class AppProxyProvider: NETransparentProxyProvider {
             
             if let error = error {
                 self.log("UDP read error: \(error.localizedDescription)", level: "ERROR")
+                self.cleanupUDPResources(for: clientFlow, error: error)
                 return
             }
             
             guard let datagrams = datagrams, let endpoints = endpoints, !datagrams.isEmpty else {
-                self.readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
+                let cappedEmptyReadCount = min(emptyReadCount + 1, 4)
+                let delayMs = 50 * (1 << min(emptyReadCount, 4))
+                
+                self.udpRetryQueue.asyncAfter(deadline: .now() + .milliseconds(delayMs)) {
+                    self.readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath, emptyReadCount: cappedEmptyReadCount)
+                }
                 return
             }
             
@@ -800,12 +839,13 @@ class AppProxyProvider: NETransparentProxyProvider {
                     udpSession.writeDatagram(encapsulated, completionHandler: { error in
                         if let error = error {
                             self.log("UDP write error: \(error)", level: "ERROR")
+                            self.cleanupUDPResources(for: clientFlow, error: error)
                         }
                     })
                 }
             }
             
-            self.readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
+            self.readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath, emptyReadCount: 0)
         }
     }
     
@@ -815,6 +855,7 @@ class AppProxyProvider: NETransparentProxyProvider {
             
             if let error = error {
                 self.log("UDP relay error: \(error.localizedDescription)", level: "ERROR")
+                self.cleanupUDPResources(for: clientFlow, error: error)
                 return
             }
             
@@ -833,6 +874,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                     clientFlow.writeDatagrams(unwrappedDatagrams, sentBy: unwrappedEndpoints) { error in
                         if let error = error {
                             self.log("UDP response write error: \(error.localizedDescription)", level: "ERROR")
+                            self.cleanupUDPResources(for: clientFlow, error: error)
                         }
                     }
                 }
@@ -1355,5 +1397,3 @@ class AppProxyProvider: NETransparentProxyProvider {
         logQueueLock.unlock()
     }
 }
-
-
