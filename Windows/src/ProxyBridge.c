@@ -21,6 +21,8 @@
 #define PID_CACHE_TTL_MS 1000
 #define NUM_PACKET_THREADS 4
 #define CONNECTION_HASH_SIZE 256
+#define IGNORE_FLOW_CACHE_SIZE 2048
+#define IGNORE_FLOW_CACHE_TTL_MS 10000
 #define SOCKS5_BUFFER_SIZE 1024
 #define HTTP_BUFFER_SIZE 1024
 #define FILTER_BUFFER_SIZE 512
@@ -83,6 +85,14 @@ typedef struct PID_CACHE_ENTRY {
     struct PID_CACHE_ENTRY *next;
 } PID_CACHE_ENTRY;
 
+typedef struct IGNORE_FLOW_ENTRY {
+    UINT32 src_ip;
+    UINT16 src_port;
+    BOOL is_udp;
+    ULONGLONG timestamp;
+    struct IGNORE_FLOW_ENTRY *next;
+} IGNORE_FLOW_ENTRY;
+
 static CONNECTION_INFO *connection_hash_table[CONNECTION_HASH_SIZE] = {NULL};
 static LOGGED_CONNECTION *logged_connections = NULL;
 static PROCESS_RULE *rules_list = NULL;
@@ -94,6 +104,7 @@ static HANDLE proxy_thread = NULL;
 static HANDLE udp_relay_thread = NULL;
 static HANDLE cleanup_thread = NULL;
 static PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE] = {NULL};
+static IGNORE_FLOW_ENTRY *ignore_flow_cache[IGNORE_FLOW_CACHE_SIZE] = {NULL};
 static BOOL g_has_active_rules = FALSE;
 static SOCKET udp_relay_socket = INVALID_SOCKET;
 static SOCKET socks5_udp_socket = INVALID_SOCKET;
@@ -244,6 +255,9 @@ static BOOL is_broadcast_or_multicast(UINT32 ip);
 static DWORD get_cached_pid(UINT32 src_ip, UINT16 src_port, BOOL is_udp);
 static void cache_pid(UINT32 src_ip, UINT16 src_port, DWORD pid, BOOL is_udp);
 static void clear_pid_cache(void);
+static BOOL is_ignored_flow(UINT32 src_ip, UINT16 src_port, BOOL is_udp);
+static void cache_ignored_flow(UINT32 src_ip, UINT16 src_port, BOOL is_udp);
+static void clear_ignored_flow_cache(void);
 static void update_has_active_rules(void);
 
 
@@ -313,6 +327,12 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     UINT32 dest_ip = ip_header->DstAddr;
                     UINT16 dest_port = ntohs(udp_header->DstPort);
 
+                    if (is_ignored_flow(src_ip, src_port, TRUE))
+                    {
+                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                        continue;
+                    }
+
                     // if no rule configuree all connection direct with no checks avoid unwanted memory and pocessing whcich could delay
                     if (!g_has_active_rules && g_connection_callback == NULL)
                     {
@@ -345,7 +365,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     // only log if callback is set
                     // reuse pid from check_process_rule
                     // CLI use no log flag
-                    if (g_connection_callback != NULL && pid > 0)
+                    if (g_connection_callback != NULL && action != RULE_ACTION_IGNORE && pid > 0)
                     {
                         char process_name[MAX_PROCESS_NAME];
 
@@ -384,6 +404,13 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 
                     if (action == RULE_ACTION_BLOCK)
                     {
+                        continue;
+                    }
+
+                    if (action == RULE_ACTION_IGNORE)
+                    {
+                        cache_ignored_flow(src_ip, src_port, TRUE);
+                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                         continue;
                     }
 
@@ -484,6 +511,12 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT32 orig_dest_ip = ip_header->DstAddr;
                 UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
 
+                if (is_ignored_flow(src_ip, src_port, FALSE))
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
+
                 // avoid rule pocess and packet process if no rules
                 if (!g_has_active_rules && g_connection_callback == NULL)
                 {
@@ -507,8 +540,15 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(orig_dest_ip))
                     action = RULE_ACTION_DIRECT;
 
+                if (action == RULE_ACTION_IGNORE)
+                {
+                    cache_ignored_flow(src_ip, src_port, FALSE);
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
+
                 // only new TCP/SYN inital fist packet
-                if (g_connection_callback != NULL && tcp_header->Syn && !tcp_header->Ack && pid > 0)
+                if (g_connection_callback != NULL && action != RULE_ACTION_IGNORE && tcp_header->Syn && !tcp_header->Ack && pid > 0)
                 {
                     char process_name[MAX_PROCESS_NAME];
                     if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
@@ -2826,6 +2866,92 @@ static void clear_pid_cache(void)
     ReleaseMutex(lock);
 }
 
+static UINT32 ignore_flow_cache_hash(UINT32 src_ip, UINT16 src_port, BOOL is_udp)
+{
+    UINT32 hash = src_ip ^ ((UINT32)src_port << 16) ^ (is_udp ? 0x40000000 : 0);
+    return hash % IGNORE_FLOW_CACHE_SIZE;
+}
+
+static BOOL is_ignored_flow(UINT32 src_ip, UINT16 src_port, BOOL is_udp)
+{
+    UINT32 hash = ignore_flow_cache_hash(src_ip, src_port, is_udp);
+    ULONGLONG current_time = GetTickCount64();
+    BOOL ignored = FALSE;
+
+    WaitForSingleObject(lock, INFINITE);
+
+    IGNORE_FLOW_ENTRY *entry = ignore_flow_cache[hash];
+    while (entry != NULL)
+    {
+        if (entry->src_ip == src_ip &&
+            entry->src_port == src_port &&
+            entry->is_udp == is_udp)
+        {
+            if (current_time - entry->timestamp < IGNORE_FLOW_CACHE_TTL_MS)
+            {
+                ignored = TRUE;
+            }
+            break;
+        }
+        entry = entry->next;
+    }
+
+    ReleaseMutex(lock);
+    return ignored;
+}
+
+static void cache_ignored_flow(UINT32 src_ip, UINT16 src_port, BOOL is_udp)
+{
+    UINT32 hash = ignore_flow_cache_hash(src_ip, src_port, is_udp);
+    ULONGLONG current_time = GetTickCount64();
+
+    WaitForSingleObject(lock, INFINITE);
+
+    IGNORE_FLOW_ENTRY *entry = ignore_flow_cache[hash];
+    while (entry != NULL)
+    {
+        if (entry->src_ip == src_ip &&
+            entry->src_port == src_port &&
+            entry->is_udp == is_udp)
+        {
+            entry->timestamp = current_time;
+            ReleaseMutex(lock);
+            return;
+        }
+        entry = entry->next;
+    }
+
+    IGNORE_FLOW_ENTRY *new_entry = (IGNORE_FLOW_ENTRY *)malloc(sizeof(IGNORE_FLOW_ENTRY));
+    if (new_entry != NULL)
+    {
+        new_entry->src_ip = src_ip;
+        new_entry->src_port = src_port;
+        new_entry->is_udp = is_udp;
+        new_entry->timestamp = current_time;
+        new_entry->next = ignore_flow_cache[hash];
+        ignore_flow_cache[hash] = new_entry;
+    }
+
+    ReleaseMutex(lock);
+}
+
+static void clear_ignored_flow_cache(void)
+{
+    WaitForSingleObject(lock, INFINITE);
+
+    for (int i = 0; i < IGNORE_FLOW_CACHE_SIZE; i++)
+    {
+        while (ignore_flow_cache[i] != NULL)
+        {
+            IGNORE_FLOW_ENTRY *to_free = ignore_flow_cache[i];
+            ignore_flow_cache[i] = ignore_flow_cache[i]->next;
+            free(to_free);
+        }
+    }
+
+    ReleaseMutex(lock);
+}
+
 // Dedicated cleanup thread - runs independently without blocking packet processing
 static DWORD WINAPI cleanup_worker(LPVOID arg)
 {
@@ -2963,7 +3089,8 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     while (rule != NULL)
     {
         const char *action_str = (rule->action == RULE_ACTION_PROXY) ? "PROXY" :
-                                 (rule->action == RULE_ACTION_BLOCK) ? "BLOCK" : "DIRECT";
+                                 (rule->action == RULE_ACTION_BLOCK) ? "BLOCK" :
+                                 (rule->action == RULE_ACTION_IGNORE) ? "IGNORE" : "DIRECT";
         log_message("Rule: %s -> %s", rule->process_name, action_str);
         rule_count++;
         rule = rule->next;
@@ -3038,6 +3165,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
     clear_logged_connections();
 
     clear_pid_cache();
+    clear_ignored_flow_cache();
 
     log_message("ProxyBridge stopped");
 

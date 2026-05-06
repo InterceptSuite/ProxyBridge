@@ -24,7 +24,8 @@ typedef enum {
 typedef enum {
     RULE_ACTION_PROXY = 0,
     RULE_ACTION_DIRECT = 1,
-    RULE_ACTION_BLOCK = 2
+    RULE_ACTION_BLOCK = 2,
+    RULE_ACTION_IGNORE = 3
 } RuleAction;
 
 typedef enum {

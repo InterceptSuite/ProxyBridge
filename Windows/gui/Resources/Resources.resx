@@ -251,6 +251,9 @@
   <data name="ActionDirect" xml:space="preserve">
     <value>DIRECT</value>
   </data>
+  <data name="ActionIgnore" xml:space="preserve">
+    <value>IGNORE</value>
+  </data>
   <data name="ActionBlock" xml:space="preserve">
     <value>BLOCK</value>
   </data>
