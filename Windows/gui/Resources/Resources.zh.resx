@@ -252,6 +252,9 @@
   <data name="ActionDirect" xml:space="preserve">
     <value>直连</value>
   </data>
+  <data name="ActionIgnore" xml:space="preserve">
+    <value>忽略</value>
+  </data>
   <data name="ActionBlock" xml:space="preserve">
     <value>阻止</value>
   </data>

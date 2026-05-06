@@ -32,7 +32,8 @@ public static class ProxyBridgeNative
     {
         PROXY = 0,
         DIRECT = 1,
-        BLOCK = 2
+        BLOCK = 2,
+        IGNORE = 3
     }
 
     public enum RuleProtocol

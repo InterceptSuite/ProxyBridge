@@ -64,6 +64,7 @@ public class ProxyBridgeService : IDisposable
         {
             "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
             "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
+            "IGNORE" => ProxyBridgeNative.RuleAction.IGNORE,
             _ => ProxyBridgeNative.RuleAction.PROXY
         };
 
@@ -99,6 +100,7 @@ public class ProxyBridgeService : IDisposable
         {
             "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
             "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
+            "IGNORE" => ProxyBridgeNative.RuleAction.IGNORE,
             _ => ProxyBridgeNative.RuleAction.PROXY
         };
 

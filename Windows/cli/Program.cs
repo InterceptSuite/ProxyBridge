@@ -41,8 +41,9 @@ static class ParsingHelpers
         {
             "PROXY" => ProxyBridgeNative.RuleAction.PROXY,
             "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
+            "IGNORE" => ProxyBridgeNative.RuleAction.IGNORE,
             "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
-            _ => throw new ArgumentException($"Invalid action: {actionStr}. Use PROXY, DIRECT, or BLOCK")
+            _ => throw new ArgumentException($"Invalid action: {actionStr}. Use PROXY, DIRECT, IGNORE, or BLOCK")
         };
     }
 
@@ -77,12 +78,13 @@ class Program
                         "  hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple separated by ; or ,\n" +
                         "  ports    - Port(s): *, 443, 80;8080, 80-100, or multiple separated by ; or ,\n" +
                         "  protocol - TCP, UDP, or BOTH\n" +
-                        "  action   - PROXY, DIRECT, or BLOCK\n" +
+                        "  action   - PROXY, DIRECT, IGNORE, or BLOCK\n" +
                         "Examples:\n" +
                         "  chrome.exe:*:*:TCP:PROXY\n" +
                         "  chrome.exe;firefox.exe:*:*:TCP:PROXY\n" +
                         "  *:*:53:UDP:PROXY\n" +
-                        "  firefox.exe:*:80;443:TCP:DIRECT")
+                        "  firefox.exe:*:80;443:TCP:DIRECT\n" +
+                        "  qbittorrent.exe:*:*:UDP:IGNORE")
         {
             AllowMultipleArgumentsPerToken = false,
             Arity = ArgumentArity.ZeroOrMore

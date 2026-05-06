@@ -440,6 +440,7 @@ namespace ProxyBridge.GUI.Resources {
         internal static string ProtocolBoth => ResourceManager.GetString("ProtocolBoth", resourceCulture);
         internal static string ActionProxy => ResourceManager.GetString("ActionProxy", resourceCulture);
         internal static string ActionDirect => ResourceManager.GetString("ActionDirect", resourceCulture);
+        internal static string ActionIgnore => ResourceManager.GetString("ActionIgnore", resourceCulture);
         internal static string ActionBlock => ResourceManager.GetString("ActionBlock", resourceCulture);
         internal static string ButtonSaveRule => ResourceManager.GetString("ButtonSaveRule", resourceCulture);
     }

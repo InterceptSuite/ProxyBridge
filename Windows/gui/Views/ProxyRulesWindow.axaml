@@ -309,6 +309,7 @@
                               SelectionChanged="ActionComboBox_SelectionChanged">
                         <ComboBoxItem Content="{Binding Loc.ActionProxy}" Tag="PROXY"/>
                         <ComboBoxItem Content="{Binding Loc.ActionDirect}" Tag="DIRECT"/>
+                        <ComboBoxItem Content="{Binding Loc.ActionIgnore}" Tag="IGNORE"/>
                         <ComboBoxItem Content="{Binding Loc.ActionBlock}" Tag="BLOCK"/>
                     </ComboBox>
                 </StackPanel>

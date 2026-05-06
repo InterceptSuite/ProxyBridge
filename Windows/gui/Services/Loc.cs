@@ -126,6 +126,7 @@ public class Loc : INotifyPropertyChanged
     public string ProtocolBoth => Resources.Resources.ProtocolBoth;
     public string ActionProxy => Resources.Resources.ActionProxy;
     public string ActionDirect => Resources.Resources.ActionDirect;
+    public string ActionIgnore => Resources.Resources.ActionIgnore;
     public string ActionBlock => Resources.Resources.ActionBlock;
     public string SaveRuleButton => Resources.Resources.ButtonSaveRule;
 }
