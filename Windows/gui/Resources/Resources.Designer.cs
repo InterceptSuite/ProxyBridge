@@ -158,6 +158,24 @@ namespace ProxyBridge.GUI.Resources {
             }
         }
 
+        internal static string MenuConfig {
+            get {
+                return ResourceManager.GetString("MenuConfig", resourceCulture);
+            }
+        }
+
+        internal static string MenuImportConfig {
+            get {
+                return ResourceManager.GetString("MenuImportConfig", resourceCulture);
+            }
+        }
+
+        internal static string MenuExportConfig {
+            get {
+                return ResourceManager.GetString("MenuExportConfig", resourceCulture);
+            }
+        }
+
         /// <summary>
         ///   Looks up a localized string similar to 🔌 Connections.
         /// </summary>

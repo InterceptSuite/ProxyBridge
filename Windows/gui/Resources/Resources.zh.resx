@@ -51,6 +51,15 @@
   <data name="MenuCheckUpdates" xml:space="preserve">
     <value>检查更新</value>
   </data>
+  <data name="MenuConfig" xml:space="preserve">
+    <value>配置</value>
+  </data>
+  <data name="MenuImportConfig" xml:space="preserve">
+    <value>导入配置</value>
+  </data>
+  <data name="MenuExportConfig" xml:space="preserve">
+    <value>导出配置</value>
+  </data>
 
   <!-- Tabs -->
   <data name="TabConnections" xml:space="preserve">

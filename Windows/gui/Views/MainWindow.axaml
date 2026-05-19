@@ -260,6 +260,11 @@
                             </MenuItem.Icon>
                         </MenuItem>
                     </MenuItem>
+                    <Separator/>
+                    <MenuItem Header="{Binding Loc.MenuConfig}">
+                        <MenuItem Header="{Binding Loc.MenuImportConfig}" Command="{Binding ImportConfigCommand}"/>
+                        <MenuItem Header="{Binding Loc.MenuExportConfig}" Command="{Binding ExportConfigCommand}"/>
+                    </MenuItem>
                 </MenuItem>
                 <MenuItem Header="{Binding Loc.MenuAbout}">
                     <MenuItem Header="{Binding Loc.MenuAboutProxyBridge}" Command="{Binding ShowAboutCommand}"/>

@@ -53,6 +53,15 @@
   <data name="MenuCheckUpdates" xml:space="preserve">
     <value>Check for Updates</value>
   </data>
+  <data name="MenuConfig" xml:space="preserve">
+    <value>Config</value>
+  </data>
+  <data name="MenuImportConfig" xml:space="preserve">
+    <value>Import Config</value>
+  </data>
+  <data name="MenuExportConfig" xml:space="preserve">
+    <value>Export Config</value>
+  </data>
 
   <!-- Tabs -->
   <data name="TabConnections" xml:space="preserve">

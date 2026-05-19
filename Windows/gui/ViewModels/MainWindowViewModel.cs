@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using Avalonia.Controls;
+using Avalonia.Platform.Storage;
 using ProxyBridge.GUI.Views;
 using ProxyBridge.GUI.Services;
 using ProxyBridge.GUI.Common;
@@ -385,6 +386,8 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand AddRuleCommand { get; }
     public ICommand SaveNewRuleCommand { get; }
     public ICommand CancelAddRuleCommand { get; }
+    public ICommand ExportConfigCommand { get; }
+    public ICommand ImportConfigCommand { get; }
 
     public MainWindowViewModel()
     {
@@ -620,6 +623,204 @@ public class MainWindowViewModel : ViewModelBase
         {
             IsAddRuleViewOpen = false;
             NewProcessName = "";
+        });
+
+        ExportConfigCommand = new RelayCommand(async () =>
+        {
+            if (_mainWindow == null) return;
+            var topLevel = TopLevel.GetTopLevel(_mainWindow);
+            if (topLevel == null) return;
+
+            var file = await topLevel.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = "Export ProxyBridge Config",
+                SuggestedFileName = $"ProxyBridge-Config-{DateTime.Now:yyyy-MM-dd}.json",
+                FileTypeChoices = new[]
+                {
+                    new FilePickerFileType("JSON Files") { Patterns = new[] { "*.json" } }
+                }
+            });
+
+            if (file == null) return;
+
+            try
+            {
+                var config = new AppConfig
+                {
+                    DnsViaProxy = _dnsViaProxy,
+                    LocalhostViaProxy = _localhostViaProxy,
+                    IsTrafficLoggingEnabled = _isTrafficLoggingEnabled,
+                    Language = _currentLanguage,
+                    CloseToTray = _closeToTray,
+                    ProxyConfigs = ProxyConfigs.Select(pc => new ProxyConfigEntry
+                    {
+                        Id = pc.Id,
+                        Type = pc.Type,
+                        Host = pc.Host,
+                        Port = pc.Port,
+                        Username = pc.Username,
+                        Password = pc.Password
+                    }).ToList(),
+                    ProxyRules = ProxyRules.Select(r => new ProxyRuleConfig
+                    {
+                        ProcessName = r.ProcessName,
+                        TargetHosts = r.TargetHosts,
+                        TargetPorts = r.TargetPorts,
+                        Protocol = r.Protocol,
+                        Action = r.Action,
+                        IsEnabled = r.IsEnabled,
+                        ProxyConfigId = r.ProxyConfigId
+                    }).ToList()
+                };
+
+                var json = System.Text.Json.JsonSerializer.Serialize(config, AppConfigJsonContext.Default.AppConfig);
+
+                await using var stream = await file.OpenWriteAsync();
+                await using var writer = new System.IO.StreamWriter(stream);
+                await writer.WriteAsync(json);
+
+                QueueActivityLog("Configuration exported successfully");
+            }
+            catch (Exception ex)
+            {
+                QueueActivityLog($"Export failed: {ex.Message}");
+            }
+        });
+
+        ImportConfigCommand = new RelayCommand(async () =>
+        {
+            if (_mainWindow == null) return;
+            var topLevel = TopLevel.GetTopLevel(_mainWindow);
+            if (topLevel == null) return;
+
+            var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Import ProxyBridge Config",
+                AllowMultiple = false,
+                FileTypeFilter = new[]
+                {
+                    new FilePickerFileType("JSON Files") { Patterns = new[] { "*.json" } }
+                }
+            });
+
+            if (files.Count == 0) return;
+
+            try
+            {
+                string json;
+                await using (var stream = await files[0].OpenReadAsync())
+                using (var reader = new System.IO.StreamReader(stream))
+                    json = await reader.ReadToEndAsync();
+
+                var importedConfig = System.Text.Json.JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.AppConfig);
+                if (importedConfig == null)
+                {
+                    QueueActivityLog("Import failed: invalid configuration file");
+                    return;
+                }
+
+                // Force current version so it won't be discarded on next load
+                importedConfig.ConfigFileVersion = "2.0";
+                importedConfig.ProxyRules ??= new List<ProxyRuleConfig>();
+                importedConfig.ProxyConfigs ??= new List<ProxyConfigEntry>();
+
+                // Apply scalar settings
+                DnsViaProxy = importedConfig.DnsViaProxy;
+                LocalhostViaProxy = importedConfig.LocalhostViaProxy;
+                IsTrafficLoggingEnabled = importedConfig.IsTrafficLoggingEnabled;
+                CloseToTray = importedConfig.CloseToTray;
+
+                if (!string.IsNullOrWhiteSpace(importedConfig.Language))
+                {
+                    _currentLanguage = importedConfig.Language;
+                    _loc.CurrentCulture = new System.Globalization.CultureInfo(importedConfig.Language);
+                    EnglishCheckmark = importedConfig.Language == "en" ? "✓" : "";
+                    ChineseCheckmark = importedConfig.Language == "zh" ? "✓" : "";
+                }
+
+                // Remove existing rules from DLL
+                foreach (var rule in ProxyRules.ToList())
+                    _proxyService?.DeleteRule(rule.RuleId);
+                ProxyRules.Clear();
+
+                // Remove existing proxy configs from DLL
+                foreach (var pc in ProxyConfigs.ToList())
+                    _proxyService?.DeleteProxyConfig(pc.Id);
+                ProxyConfigs.Clear();
+
+                // Add imported proxy configs; build old-id → new-id map for rule remapping
+                var configIdMap = new Dictionary<uint, uint>();
+                foreach (var pcEntry in importedConfig.ProxyConfigs)
+                {
+                    if (string.IsNullOrWhiteSpace(pcEntry.Host)) continue;
+                    if (!ushort.TryParse(pcEntry.Port, out ushort pcPort)) continue;
+
+                    uint newId = _proxyService != null
+                        ? _proxyService.AddProxyConfig(pcEntry.Type, pcEntry.Host, pcPort, pcEntry.Username ?? "", pcEntry.Password ?? "")
+                        : pcEntry.Id;
+
+                    if (newId > 0)
+                    {
+                        if (pcEntry.Id > 0) configIdMap[pcEntry.Id] = newId;
+                        ProxyConfigs.Add(new ProxyConfig
+                        {
+                            Id = newId,
+                            Type = pcEntry.Type,
+                            Host = pcEntry.Host,
+                            Port = pcEntry.Port,
+                            Username = pcEntry.Username ?? "",
+                            Password = pcEntry.Password ?? ""
+                        });
+                    }
+                }
+
+                // Add imported rules with remapped config IDs
+                foreach (var ruleConfig in importedConfig.ProxyRules)
+                {
+                    if (string.IsNullOrWhiteSpace(ruleConfig.ProcessName)) continue;
+
+                    uint newProxyConfigId = 0;
+                    if (ruleConfig.ProxyConfigId > 0)
+                        configIdMap.TryGetValue(ruleConfig.ProxyConfigId, out newProxyConfigId);
+
+                    if (_proxyService != null)
+                    {
+                        uint newRuleId = _proxyService.AddRule(
+                            ruleConfig.ProcessName,
+                            ValidationHelper.DefaultIfEmpty(ruleConfig.TargetHosts),
+                            ValidationHelper.DefaultIfEmpty(ruleConfig.TargetPorts),
+                            ValidationHelper.DefaultIfEmpty(ruleConfig.Protocol, "TCP"),
+                            ValidationHelper.DefaultIfEmpty(ruleConfig.Action, "PROXY"),
+                            newProxyConfigId);
+
+                        if (newRuleId > 0)
+                        {
+                            var pc = newProxyConfigId > 0 ? ProxyConfigs.FirstOrDefault(p => p.Id == newProxyConfigId) : null;
+                            ProxyRules.Add(new ProxyRule
+                            {
+                                RuleId = newRuleId,
+                                Index = ProxyRules.Count + 1,
+                                ProcessName = ruleConfig.ProcessName,
+                                TargetHosts = ValidationHelper.DefaultIfEmpty(ruleConfig.TargetHosts),
+                                TargetPorts = ValidationHelper.DefaultIfEmpty(ruleConfig.TargetPorts),
+                                Protocol = ValidationHelper.DefaultIfEmpty(ruleConfig.Protocol, "TCP"),
+                                Action = ValidationHelper.DefaultIfEmpty(ruleConfig.Action, "PROXY"),
+                                IsEnabled = ruleConfig.IsEnabled,
+                                ProxyConfigId = newProxyConfigId,
+                                ProxyConfigDisplay = pc?.DisplayName ?? ""
+                            });
+                        }
+                    }
+                }
+
+                // Persist updated config (with remapped IDs) to disk
+                SaveConfigurationInternal();
+                QueueActivityLog("Configuration imported successfully");
+            }
+            catch (Exception ex)
+            {
+                QueueActivityLog($"Import failed: {ex.Message}");
+            }
         });
     }
 
