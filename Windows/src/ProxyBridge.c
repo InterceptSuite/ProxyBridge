@@ -1769,6 +1769,14 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
             recv_len = recvfrom(udp_relay_socket, (char*)recv_buf, sizeof(recv_buf), 0,
                                (struct sockaddr *)&from_addr, &from_len);
 
+            if (recv_len == SOCKET_ERROR)
+            {
+                // take the error  unreachable so
+                // https://github.com/InterceptSuite/ProxyBridge/issues/89
+                // select() does not immediately return readable again, causing a spin.
+                continue;
+            }
+
             if (recv_len > 0)
             {
                 // Buffer overflow protection
@@ -1870,18 +1878,26 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                 BOOL found = FALSE;
                 UINT32 target_ip = 0;
                 UINT16 target_port = 0;
+                ULONGLONG best_activity = 0;
 
-                for (int b = 0; b < CONNECTION_HASH_SIZE && !found; b++)
+                // Scan all buckets and pick the recent active match so 
+                // a stale entry from a previous session does not shadow a live one
+                // sharing the same destination IP:port
+                // https://github.com/InterceptSuite/ProxyBridge/issues/133
+                for (int b = 0; b < CONNECTION_HASH_SIZE; b++)
                 {
                     CONNECTION_INFO *conn = connection_hash_table[b];
                     while (conn != NULL)
                     {
                         if (conn->orig_dest_ip == src_ip && conn->orig_dest_port == src_port)
                         {
-                            target_ip = conn->src_ip;
-                            target_port = conn->src_port;
-                            found = TRUE;
-                            break;
+                            if (!found || conn->last_activity > best_activity)
+                            {
+                                target_ip = conn->src_ip;
+                                target_port = conn->src_port;
+                                best_activity = conn->last_activity;
+                                found = TRUE;
+                            }
                         }
                         conn = conn->next;
                     }
