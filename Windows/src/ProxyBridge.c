@@ -15,7 +15,7 @@
 #define MAXBUF 0xFFFF
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
-#define MAX_PROCESS_NAME 256
+#define MAX_PROCESS_NAME 1024
 #define VERSION "3.2.0"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 1000
@@ -835,7 +835,7 @@ static DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port)
 static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
 {
     HANDLE hProcess;
-    char full_path[MAX_PATH];
+    WCHAR full_path_w[MAX_PATH];
     DWORD path_len = MAX_PATH;
 
     if (pid == 0)
@@ -857,13 +857,12 @@ static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
         return FALSE;
     }
 
-    if (QueryFullProcessImageNameA(hProcess, 0, full_path, &path_len))
+    if (QueryFullProcessImageNameW(hProcess, 0, full_path_w, &path_len))
     {
-
-
-        strncpy_s(name, name_size, full_path, _TRUNCATE);
+        // Convert wide string to UTF-8 so Chinese/non-ASCII paths are preserved
+        int converted = WideCharToMultiByte(CP_UTF8, 0, full_path_w, -1, name, (int)name_size, NULL, NULL);
         CloseHandle(hProcess);
-        return TRUE;
+        return converted > 0;
     }
 
     CloseHandle(hProcess);

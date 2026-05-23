@@ -145,7 +145,7 @@ public class ProxyRulesViewModel : ViewModelBase
             NewTargetHosts = ValidationHelper.DefaultIfEmpty(NewTargetHosts);
             NewTargetPorts = ValidationHelper.DefaultIfEmpty(NewTargetPorts);
 
-            if (!System.Text.RegularExpressions.Regex.IsMatch(NewProcessName, @"^[a-zA-Z0-9\s._\-*;""\\:()]+$"))
+            if (!System.Text.RegularExpressions.Regex.IsMatch(NewProcessName, @"^[\w\s._\-*;""\\:()\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]+$"))
             {
                 ProcessNameError = "Invalid characters in process name. Only letters, numbers, spaces, dots, dashes, underscores, semicolons, quotes, parentheses, and * are allowed";
                 return;

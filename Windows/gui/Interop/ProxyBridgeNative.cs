@@ -47,7 +47,7 @@ public static class ProxyBridgeNative
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void ConnectionCallback(
-        [MarshalAs(UnmanagedType.LPStr)] string processName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string processName,
         uint pid,
         [MarshalAs(UnmanagedType.LPStr)] string destIp,
         ushort destPort,
@@ -55,7 +55,7 @@ public static class ProxyBridgeNative
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern uint ProxyBridge_AddRule(
-        [MarshalAs(UnmanagedType.LPStr)] string processName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string processName,
         [MarshalAs(UnmanagedType.LPStr)] string targetHosts,
         [MarshalAs(UnmanagedType.LPStr)] string targetPorts,
         RuleProtocol protocol,
@@ -78,7 +78,7 @@ public static class ProxyBridgeNative
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_EditRule(
         uint ruleId,
-        [MarshalAs(UnmanagedType.LPStr)] string processName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string processName,
         [MarshalAs(UnmanagedType.LPStr)] string targetHosts,
         [MarshalAs(UnmanagedType.LPStr)] string targetPorts,
         RuleProtocol protocol,
