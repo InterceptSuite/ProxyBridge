@@ -1060,7 +1060,9 @@ public class MainWindowViewModel : ViewModelBase
 
     private void SaveCurrentProfileAsync()
     {
-        Task.Run(SaveCurrentProfile);
+        var name = _activeProfileName;
+        var profile = BuildCurrentProfile();
+        Task.Run(() => ProfileManager.SaveProfile(name, profile));
     }
 
     private ProxyProfile BuildCurrentProfile()
