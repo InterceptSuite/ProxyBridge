@@ -41,7 +41,7 @@ public class MainWindowViewModel : ViewModelBase
 
     public ObservableCollection<ProxyConfig> ProxyConfigs { get; } = new();
     public ObservableCollection<ProxyRule> ProxyRules { get; } = new();
-    public ObservableCollection<ProfileSwitchItem> SwitchProfileItems { get; } = new();
+    public ObservableCollection<string> SwitchProfileItems { get; } = new();
 
     private readonly List<string> _pendingConnectionLogs = new(128);
     private readonly List<string> _pendingActivityLogs = new(64);
@@ -400,9 +400,17 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand DeleteProfileCommand { get; }
     public ICommand ImportProfileCommand { get; }
     public ICommand ExportProfileCommand { get; }
+    public ICommand SwitchProfileCommand { get; }
 
     public MainWindowViewModel()
     {
+        SwitchProfileCommand = new RelayCommandWithParameter<string>(name =>
+        {
+            if (string.IsNullOrEmpty(name) || name == _activeProfileName) return;
+            SaveCurrentProfile();
+            SwitchToProfile(name);
+        });
+
         ShowProxySettingsCommand = new RelayCommand(async () =>
         {
             var window = new ProxySettingsWindow();
@@ -1090,20 +1098,7 @@ public class MainWindowViewModel : ViewModelBase
     {
         SwitchProfileItems.Clear();
         foreach (var name in ProfileManager.GetProfileNames())
-        {
-            var capName = name;
-            SwitchProfileItems.Add(new ProfileSwitchItem
-            {
-                Name = name,
-                IsActive = name == _activeProfileName,
-                Command = new RelayCommand(() =>
-                {
-                    if (capName == _activeProfileName) return;
-                    SaveCurrentProfile();
-                    SwitchToProfile(capName);
-                })
-            });
-        }
+            SwitchProfileItems.Add(name);
     }
 
     private void UpdateSettingsProfile(string name)

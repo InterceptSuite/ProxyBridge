@@ -266,14 +266,7 @@
                     <MenuItem Header="{Binding Loc.MenuRenameProfile}" Command="{Binding RenameProfileCommand}"/>
                     <MenuItem Header="{Binding Loc.MenuDeleteProfile}" Command="{Binding DeleteProfileCommand}"/>
                     <Separator/>
-                    <MenuItem Header="{Binding Loc.MenuSwitchProfile}" ItemsSource="{Binding SwitchProfileItems}">
-                        <MenuItem.ItemContainerTheme>
-                            <ControlTheme TargetType="MenuItem" x:DataType="vm:ProfileSwitchItem">
-                                <Setter Property="Header" Value="{Binding Name}"/>
-                                <Setter Property="Command" Value="{Binding Command}"/>
-                            </ControlTheme>
-                        </MenuItem.ItemContainerTheme>
-                    </MenuItem>
+                    <MenuItem x:Name="SwitchProfileMenuItem" Header="{Binding Loc.MenuSwitchProfile}"/>
                     <Separator/>
                     <MenuItem Header="{Binding Loc.MenuImportProfile}" Command="{Binding ImportProfileCommand}"/>
                     <MenuItem Header="{Binding Loc.MenuExportProfile}" Command="{Binding ExportProfileCommand}"/>

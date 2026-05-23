@@ -1,3 +1,5 @@
+using System.Collections.Specialized;
+using System.Linq;
 using Avalonia.Controls;
 using ProxyBridge.GUI.ViewModels;
 using System;
@@ -12,14 +14,34 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        // Set window reference in ViewModel
         this.Opened += (s, e) =>
         {
             if (DataContext is MainWindowViewModel vm)
             {
                 vm.SetMainWindow(this);
+                SetupSwitchProfileMenu(vm);
             }
         };
+    }
+
+    private void SetupSwitchProfileMenu(MainWindowViewModel vm)
+    {
+        var switchMenu = this.FindControl<MenuItem>("SwitchProfileMenuItem");
+        if (switchMenu == null) return;
+
+        void Rebuild()
+        {
+            var items = vm.SwitchProfileItems.Select(name =>
+            {
+                var item = new MenuItem { Header = name };
+                item.Click += (_, _) => vm.SwitchProfileCommand.Execute(name);
+                return item;
+            }).Cast<object>().ToList();
+            switchMenu.ItemsSource = items;
+        }
+
+        Rebuild();
+        vm.SwitchProfileItems.CollectionChanged += (_, _) => Rebuild();
     }
 
     private void OnChangeLanguageEnglish(object? sender, RoutedEventArgs e)
