@@ -50,9 +50,13 @@ public class Loc : INotifyPropertyChanged
     public string MenuAbout => Resources.Resources.MenuAbout;
     public string MenuAboutProxyBridge => Resources.Resources.MenuAboutProxyBridge;
     public string MenuCheckUpdates => Resources.Resources.MenuCheckUpdates;
-    public string MenuConfig => Resources.Resources.MenuConfig;
-    public string MenuImportConfig => Resources.Resources.MenuImportConfig;
-    public string MenuExportConfig => Resources.Resources.MenuExportConfig;
+    public string MenuProfile => Resources.Resources.MenuProfile;
+    public string MenuNewProfile => Resources.Resources.MenuNewProfile;
+    public string MenuRenameProfile => Resources.Resources.MenuRenameProfile;
+    public string MenuDeleteProfile => Resources.Resources.MenuDeleteProfile;
+    public string MenuSwitchProfile => Resources.Resources.MenuSwitchProfile;
+    public string MenuImportProfile => Resources.Resources.MenuImportProfile;
+    public string MenuExportProfile => Resources.Resources.MenuExportProfile;
 
     // Tabs
     public string TabConnections => Resources.Resources.TabConnections;

@@ -1,0 +1,87 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:ProxyBridge.GUI.ViewModels"
+        x:Class="ProxyBridge.GUI.Views.ProfileDialogWindow"
+        x:DataType="vm:ProfileDialogViewModel"
+        x:CompileBindings="True"
+        Title="Profile"
+        Width="440" Height="185"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Background="#FF1E1E1E"
+        SizeToContent="Height">
+
+    <Window.Styles>
+        <Style Selector="Button">
+            <Setter Property="Background" Value="#FF0E639C"/>
+            <Setter Property="Foreground" Value="#FFFFFFFF"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="CornerRadius" Value="3"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+        <Style Selector="Button:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FF1177BB"/>
+        </Style>
+        <Style Selector="Button.secondary">
+            <Setter Property="Background" Value="#FF3E3E42"/>
+        </Style>
+        <Style Selector="Button.secondary:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FF505050"/>
+        </Style>
+        <Style Selector="TextBox">
+            <Setter Property="Background" Value="#FF2D2D30"/>
+            <Setter Property="Foreground" Value="#FFD4D4D4"/>
+            <Setter Property="BorderBrush" Value="#FF3F3F46"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8"/>
+            <Setter Property="FontSize" Value="13"/>
+        </Style>
+        <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="#FF007ACC"/>
+        </Style>
+        <Style Selector="TextBlock">
+            <Setter Property="Foreground" Value="#FFD4D4D4"/>
+        </Style>
+    </Window.Styles>
+
+    <Grid Margin="24,20,24,20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="16"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="{Binding Message}"
+                   TextWrapping="Wrap"
+                   Foreground="#FFD4D4D4"
+                   FontSize="13"
+                   Margin="0,0,0,12"/>
+
+        <TextBox Grid.Row="1"
+                 Text="{Binding InputValue}"
+                 IsVisible="{Binding IsInputMode}"
+                 x:Name="InputBox">
+            <TextBox.KeyBindings>
+                <KeyBinding Gesture="Enter" Command="{Binding ConfirmCommand}"/>
+                <KeyBinding Gesture="Escape" Command="{Binding CancelCommand}"/>
+            </TextBox.KeyBindings>
+        </TextBox>
+
+        <StackPanel Grid.Row="3"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Spacing="8">
+            <Button Content="OK"
+                    Command="{Binding ConfirmCommand}"
+                    Width="80"/>
+            <Button Content="Cancel"
+                    Command="{Binding CancelCommand}"
+                    Classes="secondary"
+                    Width="80"/>
+        </StackPanel>
+    </Grid>
+</Window>

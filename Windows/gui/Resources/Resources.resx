@@ -53,14 +53,27 @@
   <data name="MenuCheckUpdates" xml:space="preserve">
     <value>Check for Updates</value>
   </data>
-  <data name="MenuConfig" xml:space="preserve">
-    <value>Config</value>
+  <!-- Profile Menu -->
+  <data name="MenuProfile" xml:space="preserve">
+    <value>Profile</value>
   </data>
-  <data name="MenuImportConfig" xml:space="preserve">
-    <value>Import Config</value>
+  <data name="MenuNewProfile" xml:space="preserve">
+    <value>New Profile</value>
   </data>
-  <data name="MenuExportConfig" xml:space="preserve">
-    <value>Export Config</value>
+  <data name="MenuRenameProfile" xml:space="preserve">
+    <value>Rename Profile</value>
+  </data>
+  <data name="MenuDeleteProfile" xml:space="preserve">
+    <value>Delete Profile</value>
+  </data>
+  <data name="MenuSwitchProfile" xml:space="preserve">
+    <value>Switch Profile</value>
+  </data>
+  <data name="MenuImportProfile" xml:space="preserve">
+    <value>Import Profile</value>
+  </data>
+  <data name="MenuExportProfile" xml:space="preserve">
+    <value>Export Profile</value>
   </data>
 
   <!-- Tabs -->

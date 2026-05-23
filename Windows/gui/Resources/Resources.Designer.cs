@@ -158,23 +158,13 @@ namespace ProxyBridge.GUI.Resources {
             }
         }
 
-        internal static string MenuConfig {
-            get {
-                return ResourceManager.GetString("MenuConfig", resourceCulture);
-            }
-        }
-
-        internal static string MenuImportConfig {
-            get {
-                return ResourceManager.GetString("MenuImportConfig", resourceCulture);
-            }
-        }
-
-        internal static string MenuExportConfig {
-            get {
-                return ResourceManager.GetString("MenuExportConfig", resourceCulture);
-            }
-        }
+        internal static string MenuProfile => ResourceManager.GetString("MenuProfile", resourceCulture);
+        internal static string MenuNewProfile => ResourceManager.GetString("MenuNewProfile", resourceCulture);
+        internal static string MenuRenameProfile => ResourceManager.GetString("MenuRenameProfile", resourceCulture);
+        internal static string MenuDeleteProfile => ResourceManager.GetString("MenuDeleteProfile", resourceCulture);
+        internal static string MenuSwitchProfile => ResourceManager.GetString("MenuSwitchProfile", resourceCulture);
+        internal static string MenuImportProfile => ResourceManager.GetString("MenuImportProfile", resourceCulture);
+        internal static string MenuExportProfile => ResourceManager.GetString("MenuExportProfile", resourceCulture);
 
         /// <summary>
         ///   Looks up a localized string similar to 🔌 Connections.

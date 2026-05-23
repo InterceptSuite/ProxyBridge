@@ -51,13 +51,26 @@
   <data name="MenuCheckUpdates" xml:space="preserve">
     <value>检查更新</value>
   </data>
-  <data name="MenuConfig" xml:space="preserve">
-    <value>配置</value>
+  <!-- Profile Menu -->
+  <data name="MenuProfile" xml:space="preserve">
+    <value>配置文件</value>
   </data>
-  <data name="MenuImportConfig" xml:space="preserve">
+  <data name="MenuNewProfile" xml:space="preserve">
+    <value>新建配置</value>
+  </data>
+  <data name="MenuRenameProfile" xml:space="preserve">
+    <value>重命名配置</value>
+  </data>
+  <data name="MenuDeleteProfile" xml:space="preserve">
+    <value>删除配置</value>
+  </data>
+  <data name="MenuSwitchProfile" xml:space="preserve">
+    <value>切换配置</value>
+  </data>
+  <data name="MenuImportProfile" xml:space="preserve">
     <value>导入配置</value>
   </data>
-  <data name="MenuExportConfig" xml:space="preserve">
+  <data name="MenuExportProfile" xml:space="preserve">
     <value>导出配置</value>
   </data>
 
