@@ -18,7 +18,7 @@
 #define MAX_PROCESS_NAME 1024
 #define VERSION "3.2.0"
 #define PID_CACHE_SIZE 1024
-#define PID_CACHE_TTL_MS 1000
+#define PID_CACHE_TTL_MS 30000
 // Single packet-processor thread eliminates TCP packet reordering.
 // With multiple threads each racing to WinDivertRecv+WinDivertSend, thread N+1
 // can re-inject its segment before thread N injects segment N, causing the
@@ -28,7 +28,7 @@
 // One thread is fast enough: at 200 Mbps with 1460-byte segments there are
 // ~17 000 packets/sec; a single core processes well over 200 000 packets/sec.
 #define NUM_PACKET_THREADS 1
-#define CONNECTION_HASH_SIZE 256
+#define CONNECTION_HASH_SIZE 4096
 #define SOCKS5_BUFFER_SIZE 1024
 #define HTTP_BUFFER_SIZE 1024
 #define FILTER_BUFFER_SIZE 512
@@ -145,6 +145,55 @@ static volatile BOOL running = FALSE;
 static DWORD g_current_process_id = 0;
 
 static BOOL g_traffic_logging_enabled = TRUE;
+
+// per src port decision cache.
+//
+// check_process_rule() resolves (src_port) to DIRECT, PROXY, or BLOCK,
+// every subsequent packet from that port gets the cached answer in 5 cycles
+// (one atomic read). this is needed else every outbound data/ack segment from an
+// established connection re runs the full check_process_rule() path:
+//   GetExtendedTcpTable (malloc + kernel roundtrip)
+//   + OpenProcess + QueryFullProcessImageName
+//   + rule list walk
+// On a sustained 300 Mbps download (17 000 packets/sec) that is thousands of
+// kernel calls per second, saturating a single core.
+//
+// Layout: two 2048-LONG bitmaps, 8 KB each.
+//   port_decided_bitmap : bit set = decision is cached for this port
+//   port_direct_bitmap  : bit set = decision was DIRECT (bit clear = PROXY/BLOCK)
+// Together they encode three states per port:
+//   decided=0            -> no cached decision, call check_process_rule
+//   decided=1, direct=1  -> DIRECT, pass packet unchanged
+//   decided=1, direct=0  -> already added to connection (PROXY/BLOCK handled)
+//
+// Thread safety: InterlockedOr/And for writes; plain aligned 32-bit read for
+// reads (x86/x64 aligned read is atomic; we only need visibility, not ordering).
+static volatile LONG port_decided_bitmap[2048] = {0};  // 8 KB
+static volatile LONG port_direct_bitmap[2048]  = {0};  // 8 KB
+
+static __forceinline BOOL port_is_decided(UINT16 p)
+{
+    return (port_decided_bitmap[p >> 5] >> (p & 31)) & 1;
+}
+static __forceinline BOOL port_is_direct(UINT16 p)
+{
+    return (port_direct_bitmap[p >> 5] >> (p & 31)) & 1;
+}
+static __forceinline void port_set_direct(UINT16 p)
+{
+    InterlockedOr(&port_decided_bitmap[p >> 5], (LONG)(1u << (p & 31)));
+    InterlockedOr(&port_direct_bitmap[p >> 5],  (LONG)(1u << (p & 31)));
+}
+static __forceinline void port_set_decided(UINT16 p)  // decided, but NOT direct (proxy/block)
+{
+    InterlockedOr(&port_decided_bitmap[p >> 5], (LONG)(1u << (p & 31)));
+    // leave port_direct_bitmap bit at 0
+}
+static __forceinline void port_clear(UINT16 p)
+{
+    InterlockedAnd(&port_decided_bitmap[p >> 5], (LONG)~(1u << (p & 31)));
+    InterlockedAnd(&port_direct_bitmap[p >> 5],  (LONG)~(1u << (p & 31)));
+}
 
 static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
 static BOOL g_dns_via_proxy = TRUE;
@@ -476,6 +525,29 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 
         if (addr.Outbound)
         {
+            // per port decision fast-path.
+            // Once check_process_rule() has run for a source port and decided DIRECT,
+            // every subsequent packet from that port takes this branch one bitmap
+            // read 5 cycle + WinDivertSend, with zero kernel calls
+            // FIN/RST clears the cache entry so port can be reused safely
+            // Part of this taken from Cluade to fix windivert packet error
+            {
+                UINT16 sp = ntohs(tcp_header->SrcPort);
+                if (port_is_decided(sp))
+                {
+                    if (tcp_header->Fin || tcp_header->Rst)
+                        port_clear(sp);
+                    if (port_is_direct(sp))
+                    {
+                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                        continue;
+                    }
+                    // For PROXY/BLOCK decisions the connection was already added on the
+                    // first packet; subsequent packets are handled by is_connection_tracked
+                    // below so just fall through.
+                }
+            }
+
             if (tcp_header->SrcPort == htons(g_local_relay_port))
             {
                 UINT16 dst_port = ntohs(tcp_header->DstPort);
@@ -506,7 +578,10 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT16 src_port = ntohs(tcp_header->SrcPort);
 
                 if (tcp_header->Fin || tcp_header->Rst)
+                {
                     remove_connection(src_port);
+                    port_clear(src_port);
+                }
 
                 tcp_header->DstPort = htons(g_local_relay_port);
 
@@ -600,18 +675,26 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 
                 if (action == RULE_ACTION_DIRECT)
                 {
+                    // Cache this decision so all subsequent packets from this port
+                    // fast-path at the top of the outbound branch (zero kernel calls).
+                    port_set_direct(src_port);
                     // Unmodified packet no checksum needed
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
                 }
                 else if (action == RULE_ACTION_BLOCK)
                 {
+                    port_set_decided(src_port);  // mark decided (not direct) so we don't re-run rule check
                     // Drop the packet - don't send it anywhere
                     continue;
                 }
                 else if (action == RULE_ACTION_PROXY)
             {
                 add_connection(src_port, src_ip, orig_dest_ip, orig_dest_port, proxy_config_id);
+                // Mark this port as decided (not direct) so subsequent packets from
+                // the same source port skip the rule check.  The is_connection_tracked
+                // branch above handles the actual per-packet redirect.
+                port_set_decided(src_port);
 
                 tcp_header->DstPort = htons(g_local_relay_port);
 
@@ -3344,6 +3427,11 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
     clear_logged_connections();
 
     clear_pid_cache();
+
+    // Reset per-port decision cache so stale entries don't carry over
+    // if ProxyBridge is stopped and restarted with different rules.
+    memset((void*)port_decided_bitmap, 0, sizeof(port_decided_bitmap));
+    memset((void*)port_direct_bitmap,  0, sizeof(port_direct_bitmap));
 
     log_message("ProxyBridge stopped");
 
