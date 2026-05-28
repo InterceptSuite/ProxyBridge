@@ -2566,12 +2566,29 @@ PROXYBRIDGE_API BOOL ProxyBridge_MoveRuleToPosition(UINT32 rule_id, UINT32 new_p
 
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password)
 {
+    WSADATA wsa_data;
+    BOOL winsock_initialized = FALSE;
+
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
         return FALSE;
 
+    // Hostname validation may happen before ProxyBridge_Start initializes Winsock.
+    // Initialize Winsock here so hostnames like "localhost" resolve reliably.
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) == 0)
+    {
+        winsock_initialized = TRUE;
+    }
+    else
+    {
+        return FALSE;
+    }
+
     // Validate that the hostname/IP can be resolved
     if (resolve_hostname(proxy_ip) == 0)
+    {
+        WSACleanup();
         return FALSE;
+    }
 
     strncpy_s(g_proxy_host, sizeof(g_proxy_host), proxy_ip, _TRUNCATE);
     g_proxy_port = proxy_port;
@@ -2594,6 +2611,11 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* prox
     else
     {
         g_proxy_password[0] = '\0';
+    }
+
+    if (winsock_initialized)
+    {
+        WSACleanup();
     }
 
     return TRUE;
