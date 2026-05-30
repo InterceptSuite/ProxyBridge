@@ -1083,6 +1083,36 @@ static BOOL match_port_list(const char *port_list, UINT16 port)
 // "chrome.exe" (exact), "fire*.exe" (wildcard), "*.bin" (extension wildcard)
 // added support for full paths - C:\Program Files\Google\Chrome\Application\chrome.exe
 // Nedd to Test all combination at sanme time
+// Case-insensitive wildcard match; '*' matches any sequence (including empty).
+// Handles multiple wildcards anywhere in the pattern, e.g. "*steam*", "fire*.exe".
+static BOOL wildcard_match(const char *pattern, const char *text)
+{
+    while (*text != '\0')
+    {
+        if (*pattern == '*')
+        {
+            while (*pattern == '*') pattern++;   // collapse consecutive *
+            if (*pattern == '\0') return TRUE;   // trailing * matches rest
+            while (*text != '\0')
+            {
+                if (wildcard_match(pattern, text))
+                    return TRUE;
+                text++;
+            }
+            return FALSE;
+        }
+        else
+        {
+            if (tolower((unsigned char)*pattern) != tolower((unsigned char)*text))
+                return FALSE;
+            pattern++;
+            text++;
+        }
+    }
+    while (*pattern == '*') pattern++;
+    return *pattern == '\0';
+}
+
 static BOOL match_process_pattern(const char *pattern, const char *process_full_path)
 {
     if (pattern == NULL || strcmp(pattern, "*") == 0)
@@ -1096,56 +1126,17 @@ static BOOL match_process_pattern(const char *pattern, const char *process_full_
     else
         filename = process_full_path; // No path separator, use as-is
 
-    size_t pattern_len = strlen(pattern);
-    size_t name_len = strlen(filename);
-    size_t full_path_len = strlen(process_full_path);
-
     // Check if pattern contains path separators (backslash or forward slash)
     BOOL is_full_path_pattern = (strchr(pattern, '\\') != NULL || strchr(pattern, '/') != NULL);
 
-    // check if pattern has path seperator match for full path
-    const char *match_target = is_full_path_pattern ? process_full_path : filename; // match against filename only
-    size_t target_len = is_full_path_pattern ? full_path_len : name_len;
+    // match against full path if pattern has a path separator, otherwise filename only
+    const char *match_target = is_full_path_pattern ? process_full_path : filename;
 
-    // check for * at the end: "fire*" or "C:\Program Files\*"
-    if (pattern_len > 0 && pattern[pattern_len - 1] == '*')
-    {
-        // Match prefix: "fire*" matches "firefox.exe"
-        return _strnicmp(pattern, match_target, pattern_len - 1) == 0;
-    }
+    // Wildcard pattern: use full wildcard matcher (handles *, *x*, x*y, etc.)
+    if (strchr(pattern, '*') != NULL)
+        return wildcard_match(pattern, match_target);
 
-    // Check for wildcard at the beginning: "*.exe"
-    if (pattern_len > 1 && pattern[0] == '*')
-    {
-        // Match suffix: "*.exe" matches "chrome.exe"
-        const char *pattern_suffix = pattern + 1;
-        size_t suffix_len = pattern_len - 1;
-        if (target_len >= suffix_len)
-        {
-            return _stricmp(match_target + target_len - suffix_len, pattern_suffix) == 0;
-        }
-        return FALSE;
-    }
-
-    // check for *  in the middle: "fire*.exe" or C:\Program Files\*\chrome.exe
-    const char *star = strchr(pattern, '*');
-    if (star != NULL)
-    {
-        size_t prefix_len = star - pattern;
-        const char *suffix = star + 1;
-        size_t suffix_len = strlen(suffix);
-
-        // Check prefix matches
-        if (_strnicmp(pattern, match_target, prefix_len) != 0)
-            return FALSE;
-
-        if (target_len < prefix_len + suffix_len)
-            return FALSE;
-
-        return _stricmp(match_target + target_len - suffix_len, suffix) == 0;
-    }
-
-    // No * , use case insensitive
+    // No wildcard, plain case-insensitive comparison
     return _stricmp(pattern, match_target) == 0;
 }
 
