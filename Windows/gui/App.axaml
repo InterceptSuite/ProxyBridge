@@ -10,7 +10,8 @@
     <TrayIcon.Icons>
         <TrayIcons>
             <TrayIcon Icon="/Assets/logo.ico"
-                      ToolTipText="ProxyBridge">
+                      ToolTipText="ProxyBridge"
+                      Clicked="TrayIcon_Show">
                 <TrayIcon.Menu>
                     <NativeMenu>
                         <NativeMenuItem Header="Open" Click="TrayIcon_Show" />
