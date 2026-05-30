@@ -294,7 +294,7 @@
                                         </TextBox.KeyBindings>
                                     </TextBox>
                                     <Button Grid.Column="1"
-                                            Content="{Binding Loc.ButtonClear}"
+                                            Content="{Binding Loc.ButtonClearAllConnections}"
                                             Classes="secondary"
                                             Command="{Binding ClearConnectionsLogCommand}"
                                             Padding="12,6"/>
@@ -330,7 +330,7 @@
                                         </TextBox.KeyBindings>
                                     </TextBox>
                                     <Button Grid.Column="1"
-                                            Content="{Binding Loc.ButtonClear}"
+                                            Content="{Binding Loc.ButtonClearAllLogs}"
                                             Classes="secondary"
                                             Command="{Binding ClearActivityLogCommand}"
                                             Padding="12,6"/>

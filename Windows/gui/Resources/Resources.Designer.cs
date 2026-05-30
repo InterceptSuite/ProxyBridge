@@ -185,11 +185,20 @@ namespace ProxyBridge.GUI.Resources {
         }
 
         /// <summary>
-        ///   Looks up a localized string similar to Clear.
+        ///   Looks up a localized string similar to Clear All Connections.
         /// </summary>
-        internal static string ButtonClear {
+        internal static string ButtonClearAllConnections {
             get {
-                return ResourceManager.GetString("ButtonClear", resourceCulture);
+                return ResourceManager.GetString("ButtonClearAllConnections", resourceCulture);
+            }
+        }
+
+        /// <summary>
+        ///   Looks up a localized string similar to Clear All Logs.
+        /// </summary>
+        internal static string ButtonClearAllLogs {
+            get {
+                return ResourceManager.GetString("ButtonClearAllLogs", resourceCulture);
             }
         }
 

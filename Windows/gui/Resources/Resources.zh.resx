@@ -83,8 +83,11 @@
   </data>
 
   <!-- Buttons -->
-  <data name="ButtonClear" xml:space="preserve">
-    <value>清除</value>
+  <data name="ButtonClearAllConnections" xml:space="preserve">
+    <value>清除所有连接</value>
+  </data>
+  <data name="ButtonClearAllLogs" xml:space="preserve">
+    <value>清除所有日志</value>
   </data>
   <data name="ButtonSave" xml:space="preserve">
     <value>保存</value>

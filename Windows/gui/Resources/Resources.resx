@@ -85,8 +85,11 @@
   </data>
 
   <!-- Buttons -->
-  <data name="ButtonClear" xml:space="preserve">
-    <value>Clear</value>
+  <data name="ButtonClearAllConnections" xml:space="preserve">
+    <value>Clear All Connections</value>
+  </data>
+  <data name="ButtonClearAllLogs" xml:space="preserve">
+    <value>Clear All Logs</value>
   </data>
   <data name="ButtonSave" xml:space="preserve">
     <value>Save</value>

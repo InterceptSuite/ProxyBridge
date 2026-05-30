@@ -527,11 +527,9 @@ public class MainWindowViewModel : ViewModelBase
             }
 
             ConnectionsLog = null!;
-            ConnectionsSearchText = null!;
             FilteredConnectionsLog = null!;
 
             ConnectionsLog = "";
-            ConnectionsSearchText = "";
             FilteredConnectionsLog = "";
 
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
@@ -547,7 +545,6 @@ public class MainWindowViewModel : ViewModelBase
             }
 
             ActivityLog = "";
-            ActivitySearchText = "";
             FilteredActivityLog = "";
 
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);

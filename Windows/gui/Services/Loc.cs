@@ -63,7 +63,8 @@ public class Loc : INotifyPropertyChanged
     public string TabActivity => Resources.Resources.TabActivity;
 
     // Buttons
-    public string ButtonClear => Resources.Resources.ButtonClear;
+    public string ButtonClearAllConnections => Resources.Resources.ButtonClearAllConnections;
+    public string ButtonClearAllLogs => Resources.Resources.ButtonClearAllLogs;
     public string ButtonSave => Resources.Resources.ButtonSave;
     public string ButtonCancel => Resources.Resources.ButtonCancel;
     public string ButtonClose => Resources.Resources.ButtonClose;
