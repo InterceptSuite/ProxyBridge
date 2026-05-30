@@ -43,6 +43,7 @@ public class Loc : INotifyPropertyChanged
     public string MenuDnsViaProxy => Resources.Resources.MenuDnsViaProxy;
     public string MenuLocalhostViaProxy => Resources.Resources.MenuLocalhostViaProxy;
     public string MenuEnableTrafficLogging => Resources.Resources.MenuEnableTrafficLogging;
+    public string MenuHideDirectConnections => Resources.Resources.MenuHideDirectConnections;
     public string MenuSettings => Resources.Resources.MenuSettings;
     public string MenuCloseToTray => Resources.Resources.MenuCloseToTray;
     public string MenuRunAtStartup => Resources.Resources.MenuRunAtStartup;
@@ -50,13 +51,21 @@ public class Loc : INotifyPropertyChanged
     public string MenuAbout => Resources.Resources.MenuAbout;
     public string MenuAboutProxyBridge => Resources.Resources.MenuAboutProxyBridge;
     public string MenuCheckUpdates => Resources.Resources.MenuCheckUpdates;
+    public string MenuProfile => Resources.Resources.MenuProfile;
+    public string MenuNewProfile => Resources.Resources.MenuNewProfile;
+    public string MenuRenameProfile => Resources.Resources.MenuRenameProfile;
+    public string MenuDeleteProfile => Resources.Resources.MenuDeleteProfile;
+    public string MenuSwitchProfile => Resources.Resources.MenuSwitchProfile;
+    public string MenuImportProfile => Resources.Resources.MenuImportProfile;
+    public string MenuExportProfile => Resources.Resources.MenuExportProfile;
 
     // Tabs
     public string TabConnections => Resources.Resources.TabConnections;
     public string TabActivity => Resources.Resources.TabActivity;
 
     // Buttons
-    public string ButtonClear => Resources.Resources.ButtonClear;
+    public string ButtonClearAllConnections => Resources.Resources.ButtonClearAllConnections;
+    public string ButtonClearAllLogs => Resources.Resources.ButtonClearAllLogs;
     public string ButtonSave => Resources.Resources.ButtonSave;
     public string ButtonCancel => Resources.Resources.ButtonCancel;
     public string ButtonClose => Resources.Resources.ButtonClose;
@@ -124,6 +133,7 @@ public class Loc : INotifyPropertyChanged
     public string ProtocolTCP => Resources.Resources.ProtocolTCP;
     public string ProtocolUDP => Resources.Resources.ProtocolUDP;
     public string ProtocolBoth => Resources.Resources.ProtocolBoth;
+    public string UDPProxyNote => Resources.Resources.UDPProxyNote;
     public string ActionProxy => Resources.Resources.ActionProxy;
     public string ActionDirect => Resources.Resources.ActionDirect;
     public string ActionBlock => Resources.Resources.ActionBlock;

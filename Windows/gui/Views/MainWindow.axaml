@@ -191,7 +191,7 @@
             <!-- Title Bar (Custom) -->
             <Border DockPanel.Dock="Top" Background="#FF2D2D30" Height="32" IsHitTestVisible="False">
                 <Grid>
-                    <TextBlock Text="ProxyBridge"
+                    <TextBlock Text="{Binding Title}"
                                Foreground="#FFE0E0E0"
                                FontSize="12"
                                VerticalAlignment="Center"
@@ -209,6 +209,14 @@
                               Command="{Binding ToggleTrafficLoggingCommand}">
                         <MenuItem.Icon>
                             <CheckBox IsChecked="{Binding IsTrafficLoggingEnabled}"
+                                      IsHitTestVisible="False"
+                                      Margin="0"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                    <MenuItem Header="{Binding Loc.MenuHideDirectConnections}"
+                              Command="{Binding ToggleHideDirectConnectionsCommand}">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding HideDirectConnections}"
                                       IsHitTestVisible="False"
                                       Margin="0"/>
                         </MenuItem.Icon>
@@ -261,6 +269,16 @@
                         </MenuItem>
                     </MenuItem>
                 </MenuItem>
+                <MenuItem Header="{Binding Loc.MenuProfile}">
+                    <MenuItem Header="{Binding Loc.MenuNewProfile}" Command="{Binding NewProfileCommand}"/>
+                    <MenuItem Header="{Binding Loc.MenuRenameProfile}" Command="{Binding RenameProfileCommand}"/>
+                    <MenuItem Header="{Binding Loc.MenuDeleteProfile}" Command="{Binding DeleteProfileCommand}"/>
+                    <Separator/>
+                    <MenuItem x:Name="SwitchProfileMenuItem" Header="{Binding Loc.MenuSwitchProfile}"/>
+                    <Separator/>
+                    <MenuItem Header="{Binding Loc.MenuImportProfile}" Command="{Binding ImportProfileCommand}"/>
+                    <MenuItem Header="{Binding Loc.MenuExportProfile}" Command="{Binding ExportProfileCommand}"/>
+                </MenuItem>
                 <MenuItem Header="{Binding Loc.MenuAbout}">
                     <MenuItem Header="{Binding Loc.MenuAboutProxyBridge}" Command="{Binding ShowAboutCommand}"/>
                     <MenuItem Header="{Binding Loc.MenuCheckUpdates}" Command="{Binding CheckForUpdatesCommand}"/>
@@ -284,7 +302,7 @@
                                         </TextBox.KeyBindings>
                                     </TextBox>
                                     <Button Grid.Column="1"
-                                            Content="{Binding Loc.ButtonClear}"
+                                            Content="{Binding Loc.ButtonClearAllConnections}"
                                             Classes="secondary"
                                             Command="{Binding ClearConnectionsLogCommand}"
                                             Padding="12,6"/>
@@ -320,7 +338,7 @@
                                         </TextBox.KeyBindings>
                                     </TextBox>
                                     <Button Grid.Column="1"
-                                            Content="{Binding Loc.ButtonClear}"
+                                            Content="{Binding Loc.ButtonClearAllLogs}"
                                             Classes="secondary"
                                             Command="{Binding ClearActivityLogCommand}"
                                             Padding="12,6"/>

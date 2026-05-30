@@ -104,6 +104,12 @@ namespace ProxyBridge.GUI.Resources {
             }
         }
 
+        internal static string MenuHideDirectConnections {
+            get {
+                return ResourceManager.GetString("MenuHideDirectConnections", resourceCulture);
+            }
+        }
+
         internal static string MenuSettings {
             get {
                 return ResourceManager.GetString("MenuSettings", resourceCulture);
@@ -158,6 +164,14 @@ namespace ProxyBridge.GUI.Resources {
             }
         }
 
+        internal static string MenuProfile => ResourceManager.GetString("MenuProfile", resourceCulture);
+        internal static string MenuNewProfile => ResourceManager.GetString("MenuNewProfile", resourceCulture);
+        internal static string MenuRenameProfile => ResourceManager.GetString("MenuRenameProfile", resourceCulture);
+        internal static string MenuDeleteProfile => ResourceManager.GetString("MenuDeleteProfile", resourceCulture);
+        internal static string MenuSwitchProfile => ResourceManager.GetString("MenuSwitchProfile", resourceCulture);
+        internal static string MenuImportProfile => ResourceManager.GetString("MenuImportProfile", resourceCulture);
+        internal static string MenuExportProfile => ResourceManager.GetString("MenuExportProfile", resourceCulture);
+
         /// <summary>
         ///   Looks up a localized string similar to 🔌 Connections.
         /// </summary>
@@ -177,11 +191,20 @@ namespace ProxyBridge.GUI.Resources {
         }
 
         /// <summary>
-        ///   Looks up a localized string similar to Clear.
+        ///   Looks up a localized string similar to Clear All Connections.
         /// </summary>
-        internal static string ButtonClear {
+        internal static string ButtonClearAllConnections {
             get {
-                return ResourceManager.GetString("ButtonClear", resourceCulture);
+                return ResourceManager.GetString("ButtonClearAllConnections", resourceCulture);
+            }
+        }
+
+        /// <summary>
+        ///   Looks up a localized string similar to Clear All Logs.
+        /// </summary>
+        internal static string ButtonClearAllLogs {
+            get {
+                return ResourceManager.GetString("ButtonClearAllLogs", resourceCulture);
             }
         }
 
@@ -438,6 +461,7 @@ namespace ProxyBridge.GUI.Resources {
         internal static string ProtocolTCP => ResourceManager.GetString("ProtocolTCP", resourceCulture);
         internal static string ProtocolUDP => ResourceManager.GetString("ProtocolUDP", resourceCulture);
         internal static string ProtocolBoth => ResourceManager.GetString("ProtocolBoth", resourceCulture);
+        internal static string UDPProxyNote => ResourceManager.GetString("UDPProxyNote", resourceCulture);
         internal static string ActionProxy => ResourceManager.GetString("ActionProxy", resourceCulture);
         internal static string ActionDirect => ResourceManager.GetString("ActionDirect", resourceCulture);
         internal static string ActionBlock => ResourceManager.GetString("ActionBlock", resourceCulture);

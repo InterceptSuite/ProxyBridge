@@ -4,14 +4,14 @@
         xmlns:views="using:ProxyBridge.GUI.Views"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="700" d:DesignHeight="550"
+        mc:Ignorable="d" d:DesignWidth="1100" d:DesignHeight="550"
         x:Class="ProxyBridge.GUI.Views.ProxyRulesWindow"
         x:DataType="vm:ProxyRulesViewModel"
         x:CompileBindings="True"
         Title="{Binding Loc.ProxyRulesTitle}"
         Icon="/Assets/logo.ico"
-        Width="1000" Height="550"
-        MinWidth="900" MinHeight="400"
+        Width="1100" Height="550"
+        MinWidth="980" MinHeight="400"
         Background="#FF2D2D30"
         WindowStartupLocation="CenterOwner">
 
@@ -55,23 +55,6 @@
                         <StackPanel Orientation="Horizontal" Spacing="6">
                             <TextBlock Text="🗑" FontSize="14"/>
                             <TextBlock Text="Delete Selected"/>
-                        </StackPanel>
-                    </Button>
-                    <Button Command="{Binding ExportRulesCommand}"
-                            Classes="secondary"
-                            Padding="12,8"
-                            IsEnabled="{Binding HasSelectedRules}">
-                        <StackPanel Orientation="Horizontal" Spacing="6">
-                            <TextBlock Text="↑" FontSize="14"/>
-                            <TextBlock Text="Export"/>
-                        </StackPanel>
-                    </Button>
-                    <Button Command="{Binding ImportRulesCommand}"
-                            Classes="secondary"
-                            Padding="12,8">
-                        <StackPanel Orientation="Horizontal" Spacing="6">
-                            <TextBlock Text="↓" FontSize="14"/>
-                            <TextBlock Text="Import"/>
                         </StackPanel>
                     </Button>
                     <Button Content="{Binding Loc.ButtonAdd}"
@@ -226,11 +209,12 @@
                                                VerticalAlignment="Center"
                                                Margin="0,0,10,0"/>
                                     <TextBlock Grid.Column="8"
-                                               Text="{Binding Action}"
+                                               Text="{Binding ActionDisplay}"
                                                FontSize="14"
                                                FontWeight="SemiBold"
                                                Foreground="#FF4EC9B0"
-                                               VerticalAlignment="Center"/>
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"/>
                                 </Grid>
                             </Border>
                         </DataTemplate>
@@ -299,6 +283,11 @@
                         <ComboBoxItem Content="{Binding Loc.ProtocolUDP}" Tag="UDP"/>
                         <ComboBoxItem Content="{Binding Loc.ProtocolBoth}" Tag="BOTH"/>
                     </ComboBox>
+                    <TextBlock Text="{Binding Loc.UDPProxyNote}"
+                               FontSize="11"
+                               Foreground="#FFCC9900"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0"/>
                 </StackPanel>
 
                 <!-- Action Section -->
@@ -306,10 +295,13 @@
                     <TextBlock Text="{Binding Loc.ActionLabel}" Classes="label"/>
                     <ComboBox HorizontalAlignment="Stretch"
                               x:Name="ActionComboBox"
-                              SelectionChanged="ActionComboBox_SelectionChanged">
-                        <ComboBoxItem Content="{Binding Loc.ActionProxy}" Tag="PROXY"/>
-                        <ComboBoxItem Content="{Binding Loc.ActionDirect}" Tag="DIRECT"/>
-                        <ComboBoxItem Content="{Binding Loc.ActionBlock}" Tag="BLOCK"/>
+                              ItemsSource="{Binding AvailableActions}"
+                              SelectedItem="{Binding SelectedRuleAction}">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:RuleActionItem">
+                                <TextBlock Text="{Binding Label}"/>
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
                     </ComboBox>
                 </StackPanel>
 

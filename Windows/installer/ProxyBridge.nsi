@@ -1,5 +1,5 @@
 !define PRODUCT_NAME "ProxyBridge"
-!define PRODUCT_VERSION "3.2.0"
+!define PRODUCT_VERSION "4.0.0"
 !define PRODUCT_PUBLISHER "InterceptSuite"
 !define PRODUCT_WEB_SITE "https://github.com/InterceptSuite/ProxyBridge"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
@@ -8,7 +8,7 @@
 Unicode True
 
 ; Version Information
-VIProductVersion "3.2.0.0"
+VIProductVersion "4.0.0.0"
 VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
@@ -44,11 +44,21 @@ RequestExecutionLevel admin
 !insertmacro MUI_LANGUAGE "English"
 
 Section "MainSection" SEC01
+  ; Kill any running ProxyBridge instance before overwriting files.
+  ; This prevents "file in use" errors on update/reinstall.
+  nsExec::ExecToLog 'taskkill /F /IM ProxyBridge.exe'
+  ; Stop and unload the WinDivert driver so WinDivert64.sys can be replaced.
+  nsExec::ExecToLog 'sc stop WinDivert'
+  nsExec::ExecToLog 'sc delete WinDivert'
+  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\WinDivert"
+
+  ; Brief pause to let the OS release all file handles.
+  Sleep 1000
+
   SetOutPath "$INSTDIR"
   SetOverwrite on
 
   File "..\output\ProxyBridge.exe"
-  File "..\output\ProxyBridge_CLI.exe"
   File "..\output\ProxyBridgeCore.dll"
   File "..\output\WinDivert.dll"
   File "..\output\WinDivert64.sys"
@@ -82,7 +92,6 @@ SectionEnd
 
 Section Uninstall
   Delete "$INSTDIR\ProxyBridge.exe"
-  Delete "$INSTDIR\ProxyBridge_CLI.exe"
   Delete "$INSTDIR\ProxyBridgeCore.dll"
   Delete "$INSTDIR\WinDivert.dll"
   Delete "$INSTDIR\WinDivert64.sys"
@@ -103,6 +112,12 @@ Section Uninstall
 
   ; Broadcast environment change
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+
+  ; Stop and remove the WinDivert kernel driver service so a future reinstall
+  ; doesn't inherit a stale/disabled entry (error 1058).
+  nsExec::ExecToLog 'sc stop WinDivert'
+  nsExec::ExecToLog 'sc delete WinDivert'
+  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\WinDivert"
 
   DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}"
   SetAutoClose true

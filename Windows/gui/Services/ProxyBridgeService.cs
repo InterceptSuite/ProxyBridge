@@ -49,33 +49,61 @@ public class ProxyBridgeService : IDisposable
         return !_isRunning;
     }
 
-    public bool SetProxyConfig(string type, string ip, ushort port, string username, string password)
+    public uint AddProxyConfig(string type, string ip, ushort port, string username, string password)
     {
-        var proxyType = type.ToUpper() == "HTTP"
+        var proxyType = string.Equals(type, "HTTP", StringComparison.OrdinalIgnoreCase)
             ? ProxyBridgeNative.ProxyType.HTTP
             : ProxyBridgeNative.ProxyType.SOCKS5;
 
-        return ProxyBridgeNative.ProxyBridge_SetProxyConfig(proxyType, ip, port, username, password);
+        return AddProxyConfigCore(proxyType, ip, port, username, password);
     }
 
-    public uint AddRule(string processName, string targetHosts, string targetPorts, string protocol, string action)
+    private static uint AddProxyConfigCore(ProxyBridgeNative.ProxyType proxyType, string ip, ushort port, string username, string password)
     {
-        var ruleAction = action.ToUpper() switch
-        {
-            "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
-            "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
-            _ => ProxyBridgeNative.RuleAction.PROXY
-        };
+        return ProxyBridgeNative.ProxyBridge_AddProxyConfig(proxyType, ip, port, username, password);
+    }
 
-        var ruleProtocol = protocol.ToUpper() switch
-        {
-            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
-            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
-            "TCP+UDP" => ProxyBridgeNative.RuleProtocol.BOTH,
-            _ => ProxyBridgeNative.RuleProtocol.TCP
-        };
+    public bool EditProxyConfig(uint configId, string type, string ip, ushort port, string username, string password)
+    {
+        var proxyType = string.Equals(type, "HTTP", StringComparison.OrdinalIgnoreCase)
+            ? ProxyBridgeNative.ProxyType.HTTP
+            : ProxyBridgeNative.ProxyType.SOCKS5;
 
-        return ProxyBridgeNative.ProxyBridge_AddRule(processName, targetHosts, targetPorts, ruleProtocol, ruleAction);
+        return ProxyBridgeNative.ProxyBridge_EditProxyConfig(configId, proxyType, ip, port, username, password);
+    }
+
+    public bool DeleteProxyConfig(uint configId)
+    {
+        return ProxyBridgeNative.ProxyBridge_DeleteProxyConfig(configId);
+    }
+
+    public string TestProxyConfig(uint configId, string targetHost, ushort targetPort)
+    {
+        var buffer = new System.Text.StringBuilder(4096);
+        ProxyBridgeNative.ProxyBridge_TestProxyConfig(configId, targetHost, targetPort, buffer, (UIntPtr)buffer.Capacity);
+        return buffer.ToString();
+    }
+
+    public uint AddRule(string processName, string targetHosts, string targetPorts, string protocol, string action, uint proxyConfigId = 0)
+    {
+        ProxyBridgeNative.RuleAction ruleAction;
+        if (string.Equals(action, "DIRECT", StringComparison.OrdinalIgnoreCase))
+            ruleAction = ProxyBridgeNative.RuleAction.DIRECT;
+        else if (string.Equals(action, "BLOCK", StringComparison.OrdinalIgnoreCase))
+            ruleAction = ProxyBridgeNative.RuleAction.BLOCK;
+        else
+            ruleAction = ProxyBridgeNative.RuleAction.PROXY;
+
+        ProxyBridgeNative.RuleProtocol ruleProtocol;
+        if (string.Equals(protocol, "UDP", StringComparison.OrdinalIgnoreCase))
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.UDP;
+        else if (string.Equals(protocol, "BOTH", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(protocol, "TCP+UDP", StringComparison.OrdinalIgnoreCase))
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.BOTH;
+        else
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.TCP;
+
+        return ProxyBridgeNative.ProxyBridge_AddRule(processName, targetHosts, targetPorts, ruleProtocol, ruleAction, proxyConfigId);
     }
 
     public bool EnableRule(uint ruleId)
@@ -93,24 +121,26 @@ public class ProxyBridgeService : IDisposable
         return ProxyBridgeNative.ProxyBridge_DeleteRule(ruleId);
     }
 
-    public bool EditRule(uint ruleId, string processName, string targetHosts, string targetPorts, string protocol, string action)
+    public bool EditRule(uint ruleId, string processName, string targetHosts, string targetPorts, string protocol, string action, uint proxyConfigId = 0)
     {
-        var ruleAction = action.ToUpper() switch
-        {
-            "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
-            "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
-            _ => ProxyBridgeNative.RuleAction.PROXY
-        };
+        ProxyBridgeNative.RuleAction ruleAction;
+        if (string.Equals(action, "DIRECT", StringComparison.OrdinalIgnoreCase))
+            ruleAction = ProxyBridgeNative.RuleAction.DIRECT;
+        else if (string.Equals(action, "BLOCK", StringComparison.OrdinalIgnoreCase))
+            ruleAction = ProxyBridgeNative.RuleAction.BLOCK;
+        else
+            ruleAction = ProxyBridgeNative.RuleAction.PROXY;
 
-        var ruleProtocol = protocol.ToUpper() switch
-        {
-            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
-            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
-            "TCP+UDP" => ProxyBridgeNative.RuleProtocol.BOTH,
-            _ => ProxyBridgeNative.RuleProtocol.TCP
-        };
+        ProxyBridgeNative.RuleProtocol ruleProtocol;
+        if (string.Equals(protocol, "UDP", StringComparison.OrdinalIgnoreCase))
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.UDP;
+        else if (string.Equals(protocol, "BOTH", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(protocol, "TCP+UDP", StringComparison.OrdinalIgnoreCase))
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.BOTH;
+        else
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.TCP;
 
-        return ProxyBridgeNative.ProxyBridge_EditRule(ruleId, processName, targetHosts, targetPorts, ruleProtocol, ruleAction);
+        return ProxyBridgeNative.ProxyBridge_EditRule(ruleId, processName, targetHosts, targetPorts, ruleProtocol, ruleAction, proxyConfigId);
     }
 
     public uint GetRulePosition(uint ruleId)
@@ -136,18 +166,6 @@ public class ProxyBridgeService : IDisposable
     public static void SetTrafficLoggingEnabled(bool enable)
     {
         ProxyBridgeNative.ProxyBridge_SetTrafficLoggingEnabled(enable);
-    }
-
-    public string TestConnection(string targetHost, ushort targetPort)
-    {
-        var buffer = new System.Text.StringBuilder(4096);
-        int result = ProxyBridgeNative.ProxyBridge_TestConnection(
-            targetHost,
-            targetPort,
-            buffer,
-            (UIntPtr)buffer.Capacity);
-
-        return buffer.ToString();
     }
 
     public void Dispose()

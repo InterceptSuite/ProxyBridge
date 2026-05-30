@@ -32,6 +32,9 @@
   <data name="MenuEnableTrafficLogging" xml:space="preserve">
     <value>Enable Traffic Logging</value>
   </data>
+  <data name="MenuHideDirectConnections" xml:space="preserve">
+    <value>Hide Direct Connections</value>
+  </data>
   <data name="MenuSettings" xml:space="preserve">
     <value>Settings</value>
   </data>
@@ -53,6 +56,28 @@
   <data name="MenuCheckUpdates" xml:space="preserve">
     <value>Check for Updates</value>
   </data>
+  <!-- Profile Menu -->
+  <data name="MenuProfile" xml:space="preserve">
+    <value>Profile</value>
+  </data>
+  <data name="MenuNewProfile" xml:space="preserve">
+    <value>New Profile</value>
+  </data>
+  <data name="MenuRenameProfile" xml:space="preserve">
+    <value>Rename Profile</value>
+  </data>
+  <data name="MenuDeleteProfile" xml:space="preserve">
+    <value>Delete Profile</value>
+  </data>
+  <data name="MenuSwitchProfile" xml:space="preserve">
+    <value>Switch Profile</value>
+  </data>
+  <data name="MenuImportProfile" xml:space="preserve">
+    <value>Import Profile</value>
+  </data>
+  <data name="MenuExportProfile" xml:space="preserve">
+    <value>Export Profile</value>
+  </data>
 
   <!-- Tabs -->
   <data name="TabConnections" xml:space="preserve">
@@ -63,8 +88,11 @@
   </data>
 
   <!-- Buttons -->
-  <data name="ButtonClear" xml:space="preserve">
-    <value>Clear</value>
+  <data name="ButtonClearAllConnections" xml:space="preserve">
+    <value>Clear All Connections</value>
+  </data>
+  <data name="ButtonClearAllLogs" xml:space="preserve">
+    <value>Clear All Logs</value>
   </data>
   <data name="ButtonSave" xml:space="preserve">
     <value>Save</value>
@@ -231,7 +259,7 @@
     <value>Example: iexplore.exe; "C:\some app.exe"; fire*.exe; *.bin</value>
   </data>
   <data name="ExampleTargetHosts" xml:space="preserve">
-    <value>Example: 127.0.0.1; 192.168.1.*; 10.1.0.0-10.5.255.255</value>
+    <value>Example: 127.0.0.1; 192.168.1.*; 10.1.0.0-10.5.255.255; ::1; 2001:db8::/32; fe80::1-fe80::ff</value>
   </data>
   <data name="ExampleTargetPorts" xml:space="preserve">
     <value>Example: 80; 8000-9000; 3128</value>
@@ -244,6 +272,9 @@
   </data>
   <data name="ProtocolBoth" xml:space="preserve">
     <value>Both (TCP + UDP)</value>
+  </data>
+  <data name="UDPProxyNote" xml:space="preserve">
+    <value>⚠ UDP only works with SOCKS5 proxy. Not all SOCKS5 proxies support UDP by default. SOCKS5 UDP support does not guarantee QUIC or HTTP/3 support, verify your proxy supports these protocols separately.</value>
   </data>
   <data name="ActionProxy" xml:space="preserve">
     <value>PROXY</value>

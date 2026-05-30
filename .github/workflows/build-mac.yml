@@ -12,13 +12,16 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-    
+    permissions:
+      contents: read
+      actions: read
+
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     
     - name: Set up Xcode
-      uses: maxim-lobanov/setup-xcode@v1
+      uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
       with:
         xcode-version: latest-stable
     
@@ -203,7 +206,7 @@ jobs:
         echo "PKG signed, notarized and stapled successfully"
 
     - name: Upload PKG Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: ProxyBridge-macOS-Installer
         path: MacOS/ProxyBridge/output/ProxyBridge-*.pkg

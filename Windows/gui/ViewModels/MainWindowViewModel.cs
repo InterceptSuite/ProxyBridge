@@ -4,9 +4,11 @@ using System.Collections.ObjectModel;
 using System.Windows.Input;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using Avalonia.Controls;
+using Avalonia.Platform.Storage;
 using ProxyBridge.GUI.Views;
 using ProxyBridge.GUI.Services;
 using ProxyBridge.GUI.Common;
@@ -35,13 +37,12 @@ public class MainWindowViewModel : ViewModelBase
     private Window? _mainWindow;
     private ProxyBridgeService? _proxyService;
     private bool _isServiceInitialized = false;
-    private readonly SettingsService _settingsService = new SettingsService();
+    private readonly SettingsService _settingsService = new();
+    private string _activeProfileName = ProfileManager.DefaultProfileName;
 
-    private string _currentProxyType = "SOCKS5";
-    private string _currentProxyIp = "";
-    private string _currentProxyPort = "";
-    private string _currentProxyUsername = "";
-    private string _currentProxyPassword = "";
+    public ObservableCollection<ProxyConfig> ProxyConfigs { get; } = new();
+    public ObservableCollection<ProxyRule> ProxyRules { get; } = new();
+    public ObservableCollection<string> SwitchProfileItems { get; } = new();
 
     private readonly List<string> _pendingConnectionLogs = new(128);
     private readonly List<string> _pendingActivityLogs = new(64);
@@ -49,6 +50,9 @@ public class MainWindowViewModel : ViewModelBase
     private readonly object _activityLogLock = new();
     private DispatcherTimer? _connectionLogTimer;
     private DispatcherTimer? _activityLogTimer;
+    private int _connectionLogLineCount = 0;
+    private int _activityLogLineCount = 0;
+    private CancellationTokenSource? _saveCts;
 
     public void SetMainWindow(Window window)
     {
@@ -66,9 +70,7 @@ public class MainWindowViewModel : ViewModelBase
             _proxyService.LogReceived += (msg) =>
             {
                 lock (_activityLogLock)
-                {
                     _pendingActivityLogs.Add($"[{DateTime.Now:HH:mm:ss}] {msg}\n");
-                }
             };
 
             _proxyService.ConnectionReceived += (processName, pid, destIp, destPort, proxyInfo) =>
@@ -76,13 +78,13 @@ public class MainWindowViewModel : ViewModelBase
                 if (!_isTrafficLoggingEnabled)
                     return;
 
-                if (_connectionLogTimer?.IsEnabled == false)
-                    _connectionLogTimer.Start();
+                if (_hideDirectConnections && proxyInfo.StartsWith("Direct"))
+                    return;
 
-                string logEntry = $"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}\n";
                 lock (_connectionLogLock)
                 {
-                    _pendingConnectionLogs.Add(logEntry);
+                    var addr = destIp.Contains(':') ? $"[{destIp}]" : destIp;
+                    _pendingConnectionLogs.Add($"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {addr}:{destPort} via {proxyInfo}\n");
                 }
             };
 
@@ -97,15 +99,13 @@ public class MainWindowViewModel : ViewModelBase
                     _pendingConnectionLogs.Clear();
                 }
 
-                ConnectionsLog += string.Join("", logsToAdd);
-
-                var lines = ConnectionsLog.Split('\n');
-                if (lines.Length > MAX_CONNECTION_LOG_LINES)
-                {
-                    var linesToKeep = lines.Skip(lines.Length - MAX_CONNECTION_LOG_LINES).ToArray();
-                    ConnectionsLog = string.Join("\n", linesToKeep);
-                }
+                var newConnLog = _connectionsLog + string.Concat(logsToAdd);
+                _connectionLogLineCount += logsToAdd.Count;
+                if (_connectionLogLineCount > MAX_CONNECTION_LOG_LINES)
+                    newConnLog = TrimToLastNLines(newConnLog, MAX_CONNECTION_LOG_LINES, out _connectionLogLineCount);
+                ConnectionsLog = newConnLog;
             };
+            _connectionLogTimer.Start();
 
             _activityLogTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _activityLogTimer.Tick += (s, e) =>
@@ -117,40 +117,54 @@ public class MainWindowViewModel : ViewModelBase
                     logsToAdd = new List<string>(_pendingActivityLogs);
                     _pendingActivityLogs.Clear();
                 }
-                ActivityLog += string.Join("", logsToAdd);
+                var newActLog = _activityLog + string.Concat(logsToAdd);
+                _activityLogLineCount += logsToAdd.Count;
+                if (_activityLogLineCount > MAX_ACTIVITY_LOG_LINES)
+                    newActLog = TrimToLastNLines(newActLog, MAX_ACTIVITY_LOG_LINES, out _activityLogLineCount);
+                ActivityLog = newActLog;
             };
             _activityLogTimer.Start();
 
             _proxyService.SetDnsViaProxy(_dnsViaProxy);
             _proxyService.SetLocalhostViaProxy(_localhostViaProxy);
-            if (!string.IsNullOrEmpty(_currentProxyIp) &&
-                !string.IsNullOrEmpty(_currentProxyPort) &&
-                ushort.TryParse(_currentProxyPort, out ushort portNum))
+
+            // Build stored-ID to native-ID map while registering proxy configs
+            var configIdMap = new Dictionary<uint, uint>();
+            foreach (var pc in ProxyConfigs)
             {
-                _proxyService.SetProxyConfig(
-                    _currentProxyType,
-                    _currentProxyIp,
-                    portNum,
-                    _currentProxyUsername,
-                    _currentProxyPassword);
+                if (string.IsNullOrWhiteSpace(pc.Host) || !ushort.TryParse(pc.Port, out ushort port)) continue;
+                uint nativeId = _proxyService.AddProxyConfig(pc.Type, pc.Host, port, pc.Username, pc.Password);
+                if (nativeId > 0)
+                {
+                    if (pc.Id > 0) configIdMap[pc.Id] = nativeId;
+                    pc.Id = nativeId;
+                }
             }
 
             if (_proxyService.Start())
             {
                 foreach (var rule in ProxyRules)
                 {
+                    uint nativeProxyId = 0;
+                    if (rule.ProxyConfigId > 0)
+                        configIdMap.TryGetValue(rule.ProxyConfigId, out nativeProxyId);
+                    rule.ProxyConfigId = nativeProxyId;
+
                     uint ruleId = _proxyService.AddRule(
-                        rule.ProcessName,
-                        rule.TargetHosts,
-                        rule.TargetPorts,
-                        rule.Protocol,
-                        rule.Action);
+                        rule.ProcessName, rule.TargetHosts, rule.TargetPorts,
+                        rule.Protocol, rule.Action, nativeProxyId);
 
                     if (ruleId > 0)
                     {
                         rule.RuleId = ruleId;
                         rule.Index = ProxyRules.IndexOf(rule) + 1;
                     }
+                }
+
+                foreach (var rule in ProxyRules.Where(r => r.Action == "PROXY" && r.ProxyConfigId > 0))
+                {
+                    var pc = ProxyConfigs.FirstOrDefault(p => p.Id == rule.ProxyConfigId);
+                    rule.ProxyConfigDisplay = pc?.DisplayName ?? "";
                 }
             }
             else
@@ -170,6 +184,12 @@ public class MainWindowViewModel : ViewModelBase
     {
         get => _title;
         set => SetProperty(ref _title, value);
+    }
+
+    public string ActiveProfileName
+    {
+        get => _activeProfileName;
+        private set => SetProperty(ref _activeProfileName, value);
     }
 
     public int SelectedTabIndex
@@ -198,25 +218,11 @@ public class MainWindowViewModel : ViewModelBase
         {
             if (SetProperty(ref _activityLog, value))
             {
-                if (!string.IsNullOrEmpty(_activityLog))
-                {
-                    var lines = _activityLog.Split('\n');
-                    if (lines.Length > MAX_ACTIVITY_LOG_LINES)
-                    {
-                        var oldLog = _activityLog;
-                        var linesToKeep = lines.Skip(lines.Length - MAX_ACTIVITY_LOG_LINES).ToArray();
-                        _activityLog = string.Join("\n", linesToKeep);
-                        oldLog = null!;
-                    }
-                }
-
                 if (string.IsNullOrWhiteSpace(_activitySearchText))
                     FilteredActivityLog = _activityLog;
             }
         }
     }
-
-
 
     public bool IsProxyRulesDialogOpen
     {
@@ -272,8 +278,6 @@ public class MainWindowViewModel : ViewModelBase
         set => SetProperty(ref _newProxyAction, value);
     }
 
-    public ObservableCollection<ProxyRule> ProxyRules { get; } = new();
-
     private bool _dnsViaProxy = true;
     public bool DnsViaProxy
     {
@@ -283,13 +287,12 @@ public class MainWindowViewModel : ViewModelBase
             if (SetProperty(ref _dnsViaProxy, value))
             {
                 _proxyService?.SetDnsViaProxy(value);
-                SaveConfigurationInternal();
-
+                SaveCurrentProfileAsync();
             }
         }
     }
 
-    private bool _localhostViaProxy = false;  // Default: disabled for security
+    private bool _localhostViaProxy = false;
     public bool LocalhostViaProxy
     {
         get => _localhostViaProxy;
@@ -298,7 +301,29 @@ public class MainWindowViewModel : ViewModelBase
             if (SetProperty(ref _localhostViaProxy, value))
             {
                 _proxyService?.SetLocalhostViaProxy(value);
-                SaveConfigurationInternal();
+                SaveCurrentProfileAsync();
+            }
+        }
+    }
+
+    private bool _hideDirectConnections = false;
+    public bool HideDirectConnections
+    {
+        get => _hideDirectConnections;
+        set
+        {
+            if (SetProperty(ref _hideDirectConnections, value))
+            {
+                // refilter the existing log immediately
+                if (value)
+                {
+                    _connectionsLog = StripDirectLines(_connectionsLog);
+                    _connectionLogLineCount = CountNewlines(_connectionsLog);
+                    FilteredConnectionsLog = string.IsNullOrWhiteSpace(_connectionsSearchText)
+                        ? _connectionsLog
+                        : FilterLog(_connectionsLog, _connectionsSearchText);
+                }
+                SaveCurrentProfileAsync();
             }
         }
     }
@@ -326,16 +351,11 @@ public class MainWindowViewModel : ViewModelBase
 
                     ProxyBridgeService.SetTrafficLoggingEnabled(false);
 
-                    ConnectionsLog = null!;
-                    FilteredConnectionsLog = null!;
+                    _connectionLogLineCount = 0;
                     ConnectionsLog = "";
                     FilteredConnectionsLog = "";
-
-                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
-                    GC.WaitForPendingFinalizers();
-                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
                 }
-                SaveConfigurationInternal();
+                SaveCurrentProfileAsync();
             }
         }
     }
@@ -379,6 +399,7 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand ToggleDnsViaProxyCommand { get; }
     public ICommand ToggleLocalhostViaProxyCommand { get; }
     public ICommand ToggleTrafficLoggingCommand { get; }
+    public ICommand ToggleHideDirectConnectionsCommand { get; }
     public ICommand ToggleCloseToTrayCommand { get; }
     public ICommand ToggleStartWithWindowsCommand { get; }
     public ICommand CloseDialogCommand { get; }
@@ -389,54 +410,51 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand AddRuleCommand { get; }
     public ICommand SaveNewRuleCommand { get; }
     public ICommand CancelAddRuleCommand { get; }
+    public ICommand NewProfileCommand { get; }
+    public ICommand RenameProfileCommand { get; }
+    public ICommand DeleteProfileCommand { get; }
+    public ICommand ImportProfileCommand { get; }
+    public ICommand ExportProfileCommand { get; }
+    public ICommand SwitchProfileCommand { get; }
 
     public MainWindowViewModel()
     {
+        SwitchProfileCommand = new RelayCommandWithParameter<string>(name =>
+        {
+            if (string.IsNullOrEmpty(name) || name == _activeProfileName) return;
+            SaveCurrentProfile();
+            SwitchToProfile(name);
+        });
+
         ShowProxySettingsCommand = new RelayCommand(async () =>
         {
             var window = new ProxySettingsWindow();
 
             var viewModel = new ProxySettingsViewModel(
-                initialType: _currentProxyType,
-                initialIp: _currentProxyIp,
-                initialPort: _currentProxyPort,
-                initialUsername: _currentProxyUsername,
-                initialPassword: _currentProxyPassword,
-                onSave: (type, ip, port, username, password) =>
+                proxyConfigs: ProxyConfigs,
+                proxyService: _proxyService,
+                onConfigsChanged: SaveCurrentProfileAsync,
+                onClose: () => window.Close(),
+                countRulesUsingConfig: (id) =>
+                    ProxyRules.Count(r => r.Action == "PROXY" && r.ProxyConfigId == id),
+                deleteRulesForConfig: (id) =>
                 {
-                    if (_proxyService != null && ushort.TryParse(port, out ushort portNum))
+                    var toDelete = ProxyRules.Where(r => r.Action == "PROXY" && r.ProxyConfigId == id).ToList();
+                    foreach (var rule in toDelete)
                     {
-                        if (_proxyService.SetProxyConfig(type, ip, portNum, username, password))
-                        {
-
-                            _currentProxyType = type;
-                            _currentProxyIp = ip;
-                            _currentProxyPort = port;
-                            _currentProxyUsername = username;
-                            _currentProxyPassword = password;
-
-                            SaveConfigurationInternal();
-                        }
-                        else
-                        {
-                            QueueActivityLog("ERROR: Failed to set proxy config");
-                        }
+                        _proxyService?.DeleteRule(rule.RuleId);
+                        ProxyRules.Remove(rule);
                     }
-                    window.Close();
-                },
-                onClose: () =>
-                {
-                    window.Close();
-                },
-                proxyService: _proxyService
+                    if (toDelete.Count > 0)
+                        SaveCurrentProfileAsync();
+                }
             );
 
             window.DataContext = viewModel;
+            viewModel.SetWindow(window);
 
             if (_mainWindow != null)
-            {
                 await window.ShowDialog(_mainWindow);
-            }
         });
 
         ShowProxyRulesCommand = new RelayCommand(async () =>
@@ -445,22 +463,20 @@ public class MainWindowViewModel : ViewModelBase
 
             var viewModel = new ProxyRulesViewModel(
                 proxyRules: ProxyRules,
+                availableProxyConfigs: ProxyConfigs,
                 onAddRule: (rule) =>
                 {
                     if (_proxyService != null)
                     {
                         uint ruleId = _proxyService.AddRule(
-                            rule.ProcessName,
-                            rule.TargetHosts,
-                            rule.TargetPorts,
-                            rule.Protocol,
-                            rule.Action);
+                            rule.ProcessName, rule.TargetHosts, rule.TargetPorts,
+                            rule.Protocol, rule.Action, rule.ProxyConfigId);
                         if (ruleId > 0)
                         {
                             rule.RuleId = ruleId;
                             rule.Index = ProxyRules.Count + 1;
                             ProxyRules.Add(rule);
-                            SaveConfigurationInternal();
+                            SaveCurrentProfileAsync();
                         }
                         else
                         {
@@ -468,36 +484,24 @@ public class MainWindowViewModel : ViewModelBase
                         }
                     }
                 },
-                onClose: () =>
-                {
-                    window.Close();
-                },
+                onClose: () => window.Close(),
                 proxyService: _proxyService,
-                onConfigChanged: SaveConfigurationInternal
+                onConfigChanged: SaveCurrentProfileAsync
             );
 
             window.DataContext = viewModel;
             viewModel.SetWindow(window);
 
             if (_mainWindow != null)
-            {
                 await window.ShowDialog(_mainWindow);
-            }
         });
 
         ShowAboutCommand = new RelayCommand(async () =>
         {
             var viewModel = new AboutViewModel(() => { });
-
-            var window = new Views.AboutWindow
-            {
-                DataContext = viewModel
-            };
-
+            var window = new AboutWindow { DataContext = viewModel };
             if (_mainWindow != null)
-            {
                 await window.ShowDialog(_mainWindow);
-            }
         });
 
         CheckForUpdatesCommand = new RelayCommand(async () =>
@@ -505,32 +509,19 @@ public class MainWindowViewModel : ViewModelBase
             var updateWindow = new UpdateCheckWindow();
             var viewModel = new UpdateCheckViewModel(() => updateWindow.Close());
             updateWindow.DataContext = viewModel;
-
             if (_mainWindow != null)
-            {
                 await updateWindow.ShowDialog(_mainWindow);
-            }
         });
 
-        ToggleDnsViaProxyCommand = new RelayCommand(() =>
-        {
-            DnsViaProxy = !DnsViaProxy;
-        });
-
-        ToggleLocalhostViaProxyCommand = new RelayCommand(() =>
-        {
-            LocalhostViaProxy = !LocalhostViaProxy;
-        });
-
-        ToggleTrafficLoggingCommand = new RelayCommand(() =>
-        {
-            IsTrafficLoggingEnabled = !IsTrafficLoggingEnabled;
-        });
+        ToggleDnsViaProxyCommand = new RelayCommand(() => { DnsViaProxy = !DnsViaProxy; });
+        ToggleLocalhostViaProxyCommand = new RelayCommand(() => { LocalhostViaProxy = !LocalhostViaProxy; });
+        ToggleTrafficLoggingCommand = new RelayCommand(() => { IsTrafficLoggingEnabled = !IsTrafficLoggingEnabled; });
+        ToggleHideDirectConnectionsCommand = new RelayCommand(() => { HideDirectConnections = !HideDirectConnections; });
 
         ToggleCloseToTrayCommand = new RelayCommand(() =>
         {
             CloseToTray = !CloseToTray;
-            SaveConfigurationInternal();
+            SaveCurrentProfileAsync();
         });
 
         ToggleStartWithWindowsCommand = new RelayCommand(() =>
@@ -551,17 +542,9 @@ public class MainWindowViewModel : ViewModelBase
                 _pendingConnectionLogs.Clear();
             }
 
-            ConnectionsLog = null!;
-            ConnectionsSearchText = null!;
-            FilteredConnectionsLog = null!;
-
+            _connectionLogLineCount = 0;
             ConnectionsLog = "";
-            ConnectionsSearchText = "";
             FilteredConnectionsLog = "";
-
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
         });
 
         ClearActivityLogCommand = new RelayCommand(() =>
@@ -571,13 +554,9 @@ public class MainWindowViewModel : ViewModelBase
                 _pendingActivityLogs.Clear();
             }
 
+            _activityLogLineCount = 0;
             ActivityLog = "";
-            ActivitySearchText = "";
             FilteredActivityLog = "";
-
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
         });
 
         SearchConnectionsCommand = new RelayCommand(() =>
@@ -600,9 +579,7 @@ public class MainWindowViewModel : ViewModelBase
         SaveNewRuleCommand = new RelayCommand(() =>
         {
             if (string.IsNullOrWhiteSpace(NewProcessName))
-            {
                 return;
-            }
 
             var rule = new ProxyRule
             {
@@ -621,7 +598,7 @@ public class MainWindowViewModel : ViewModelBase
                 {
                     rule.RuleId = ruleId;
                     ProxyRules.Add(rule);
-                    SaveConfigurationInternal();
+                    SaveCurrentProfileAsync();
                     IsAddRuleViewOpen = false;
                     NewProcessName = "";
                 }
@@ -637,6 +614,193 @@ public class MainWindowViewModel : ViewModelBase
             IsAddRuleViewOpen = false;
             NewProcessName = "";
         });
+
+        NewProfileCommand = new RelayCommand(async () =>
+        {
+            if (_mainWindow == null) return;
+
+            var dialog = new ProfileDialogWindow(
+                "New Profile",
+                "Enter a name for the new profile:",
+                isInputMode: true,
+                "New Profile");
+
+            await dialog.ShowDialog(_mainWindow);
+
+            if (!dialog.Confirmed) return;
+
+            var name = dialog.InputValue;
+            if (!ProfileManager.IsValidProfileName(name))
+            {
+                QueueActivityLog("Invalid profile name");
+                return;
+            }
+            if (ProfileManager.ProfileExists(name))
+            {
+                QueueActivityLog($"Profile '{name}' already exists");
+                return;
+            }
+
+            SaveCurrentProfile();
+            ProfileManager.SaveProfile(name, new ProxyProfile { Name = name });
+            SwitchToProfile(name);
+            QueueActivityLog($"Profile created: {name}");
+        });
+
+        RenameProfileCommand = new RelayCommand(async () =>
+        {
+            if (_mainWindow == null) return;
+
+            var dialog = new ProfileDialogWindow(
+                "Rename Profile",
+                "Enter a new name for the current profile:",
+                isInputMode: true,
+                _activeProfileName);
+
+            await dialog.ShowDialog(_mainWindow);
+
+            if (!dialog.Confirmed) return;
+
+            var newName = dialog.InputValue;
+            if (newName == _activeProfileName) return;
+
+            if (!ProfileManager.IsValidProfileName(newName))
+            {
+                QueueActivityLog("Invalid profile name");
+                return;
+            }
+            if (ProfileManager.ProfileExists(newName))
+            {
+                QueueActivityLog($"Profile '{newName}' already exists");
+                return;
+            }
+
+            SaveCurrentProfile();
+
+            if (ProfileManager.RenameProfile(_activeProfileName, newName))
+            {
+                _activeProfileName = newName;
+                ActiveProfileName = newName;
+                Title = $"ProxyBridge - {newName}";
+                UpdateSettingsProfile(newName);
+                RefreshProfileList();
+                QueueActivityLog($"Profile renamed to: {newName}");
+            }
+        });
+
+        DeleteProfileCommand = new RelayCommand(async () =>
+        {
+            if (_mainWindow == null) return;
+
+            var profiles = ProfileManager.GetProfileNames();
+            if (profiles.Length <= 1)
+            {
+                QueueActivityLog("Cannot delete the only profile");
+                return;
+            }
+
+            var dialog = new ProfileDialogWindow(
+                "Delete Profile",
+                $"Delete profile '{_activeProfileName}'? This cannot be undone.",
+                isInputMode: false);
+
+            await dialog.ShowDialog(_mainWindow);
+
+            if (!dialog.Confirmed) return;
+
+            var nameToDelete = _activeProfileName;
+            var nextProfile = profiles.FirstOrDefault(p => p != nameToDelete)
+                ?? ProfileManager.DefaultProfileName;
+
+            SwitchToProfile(nextProfile);
+            ProfileManager.DeleteProfile(nameToDelete);
+            RefreshProfileList();
+            QueueActivityLog($"Profile deleted: {nameToDelete}");
+        });
+
+        ImportProfileCommand = new RelayCommand(async () =>
+        {
+            if (_mainWindow == null) return;
+            var topLevel = TopLevel.GetTopLevel(_mainWindow);
+            if (topLevel == null) return;
+
+            var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Import Profile",
+                AllowMultiple = false,
+                FileTypeFilter = new[]
+                {
+                    new FilePickerFileType("ProxyBridge Profile") { Patterns = new[] { "*.pbprofile" } },
+                    new FilePickerFileType("All Files") { Patterns = new[] { "*.*" } }
+                }
+            });
+
+            if (files.Count == 0) return;
+
+            try
+            {
+                var localPath = files[0].TryGetLocalPath();
+                if (string.IsNullOrEmpty(localPath))
+                {
+                    QueueActivityLog("Import failed: cannot access file");
+                    return;
+                }
+
+                var importedName = ProfileManager.ImportProfile(localPath);
+                if (importedName == null)
+                {
+                    QueueActivityLog("Import failed: invalid profile file");
+                    return;
+                }
+
+                RefreshProfileList();
+                QueueActivityLog($"Profile imported as: {importedName}");
+            }
+            catch (Exception ex)
+            {
+                QueueActivityLog($"Import failed: {ex.Message}");
+            }
+        });
+
+        ExportProfileCommand = new RelayCommand(async () =>
+        {
+            if (_mainWindow == null) return;
+            var topLevel = TopLevel.GetTopLevel(_mainWindow);
+            if (topLevel == null) return;
+
+            SaveCurrentProfile();
+
+            var file = await topLevel.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = "Export Profile",
+                SuggestedFileName = $"{_activeProfileName}.pbprofile",
+                FileTypeChoices = new[]
+                {
+                    new FilePickerFileType("ProxyBridge Profile") { Patterns = new[] { "*.pbprofile" } }
+                }
+            });
+
+            if (file == null) return;
+
+            try
+            {
+                var localPath = file.TryGetLocalPath();
+                if (string.IsNullOrEmpty(localPath))
+                {
+                    QueueActivityLog("Export failed: cannot access path");
+                    return;
+                }
+
+                if (ProfileManager.ExportProfile(_activeProfileName, localPath))
+                    QueueActivityLog($"Profile exported: {_activeProfileName}");
+                else
+                    QueueActivityLog("Export failed");
+            }
+            catch (Exception ex)
+            {
+                QueueActivityLog($"Export failed: {ex.Message}");
+            }
+        });
     }
 
     public void ChangeLanguage(string languageCode)
@@ -646,15 +810,9 @@ public class MainWindowViewModel : ViewModelBase
         _currentLanguage = languageCode;
         EnglishCheckmark = languageCode == "en" ? "✓" : "";
         ChineseCheckmark = languageCode == "zh" ? "✓" : "";
-
-        var config = ConfigManager.LoadConfig();
-        config.Language = languageCode;
-        ConfigManager.SaveConfig(config);
-
         _loc.CurrentCulture = new System.Globalization.CultureInfo(languageCode);
+        SaveCurrentProfileAsync();
     }
-
-
 
     private void CloseDialogs()
     {
@@ -666,8 +824,7 @@ public class MainWindowViewModel : ViewModelBase
     {
         try
         {
-            var settingsService = new SettingsService();
-            var settings = settingsService.LoadSettings();
+            var settings = _settingsService.LoadSettings();
             if (!settings.CheckForUpdatesOnStartup)
                 return;
 
@@ -679,7 +836,6 @@ public class MainWindowViewModel : ViewModelBase
                 var notificationWindow = new UpdateNotificationWindow();
                 var viewModel = new UpdateNotificationViewModel(() => notificationWindow.Close(), versionInfo);
                 notificationWindow.DataContext = viewModel;
-
                 _ = notificationWindow.ShowDialog(_mainWindow);
             }
         }
@@ -688,7 +844,8 @@ public class MainWindowViewModel : ViewModelBase
 
     public void Cleanup()
     {
-        try { SaveConfigurationInternal(); } catch { }
+        try { _saveCts?.Cancel(); _saveCts?.Dispose(); _saveCts = null; } catch { }
+        try { SaveCurrentProfile(); } catch { }
         try { _proxyService?.Dispose(); _proxyService = null; } catch { }
     }
 
@@ -712,6 +869,44 @@ public class MainWindowViewModel : ViewModelBase
         return sb.ToString();
     }
 
+    private string StripDirectLines(string log)
+    {
+        if (string.IsNullOrEmpty(log))
+            return log;
+
+        var sb = new StringBuilder(log.Length);
+        foreach (var line in log.Split('\n').Where(l => !l.Contains(" via Direct", StringComparison.OrdinalIgnoreCase)))
+        {
+            sb.Append(line);
+            sb.Append('\n');
+        }
+        return sb.ToString();
+    }
+
+    private static string TrimToLastNLines(string log, int maxLines, out int actualLines)
+    {
+        int newlines = 0;
+        for (int i = log.Length - 1; i >= 0; i--)
+        {
+            if (log[i] == '\n')
+            {
+                newlines++;
+                if (newlines > maxLines)
+                {
+                    actualLines = maxLines;
+                    return log.Substring(i + 1);
+                }
+            }
+        }
+        actualLines = newlines;
+        return log;
+    }
+
+    private static int CountNewlines(string log)
+    {
+        return log.Count(c => c == '\n');
+    }
+
     private void LoadConfiguration()
     {
         try
@@ -719,48 +914,79 @@ public class MainWindowViewModel : ViewModelBase
             var settings = _settingsService.LoadSettings();
             StartWithWindows = settings.StartWithWindows && _settingsService.IsStartupEnabled();
 
-            var config = ConfigManager.LoadConfig();
+            var profileName = settings.ActiveProfileName;
+            if (!ProfileManager.ProfileExists(profileName))
+                profileName = ProfileManager.DefaultProfileName;
 
-            _currentProxyType = ValidationHelper.DefaultIfEmpty(config.ProxyType, "SOCKS5");
-            _currentProxyIp = ValidationHelper.DefaultIfEmpty(config.ProxyIp, "");
-            _currentProxyPort = ValidationHelper.DefaultIfEmpty(config.ProxyPort, "");
-            _currentProxyUsername = config.ProxyUsername ?? "";
-            _currentProxyPassword = config.ProxyPassword ?? "";
+            _activeProfileName = profileName;
+            ActiveProfileName = profileName;
+            Title = $"ProxyBridge - {profileName}";
 
-            DnsViaProxy = config.DnsViaProxy;
-            LocalhostViaProxy = config.LocalhostViaProxy;
-            CloseToTray = config.CloseToTray;
-            IsTrafficLoggingEnabled = config.IsTrafficLoggingEnabled;
+            var profile = ProfileManager.LoadProfile(profileName);
 
-            if (!string.IsNullOrWhiteSpace(config.Language))
+            _dnsViaProxy = profile.DnsViaProxy;
+            OnPropertyChanged(nameof(DnsViaProxy));
+
+            _localhostViaProxy = profile.LocalhostViaProxy;
+            OnPropertyChanged(nameof(LocalhostViaProxy));
+
+            _closeToTray = profile.CloseToTray;
+            OnPropertyChanged(nameof(CloseToTray));
+
+            _isTrafficLoggingEnabled = profile.IsTrafficLoggingEnabled;
+            OnPropertyChanged(nameof(IsTrafficLoggingEnabled));
+
+            _hideDirectConnections = profile.HideDirectConnections;
+            OnPropertyChanged(nameof(HideDirectConnections));
+
+            if (!string.IsNullOrWhiteSpace(profile.Language))
             {
-                _currentLanguage = config.Language;
-                _loc.CurrentCulture = new System.Globalization.CultureInfo(config.Language);
-                EnglishCheckmark = config.Language == "en" ? "✓" : "";
-                ChineseCheckmark = config.Language == "zh" ? "✓" : "";
+                _currentLanguage = profile.Language;
+                _loc.CurrentCulture = new System.Globalization.CultureInfo(profile.Language);
+                EnglishCheckmark = profile.Language == "en" ? "✓" : "";
+                ChineseCheckmark = profile.Language == "zh" ? "✓" : "";
             }
 
-            if (config.ProxyRules != null && config.ProxyRules.Count > 0)
+            if (profile.ProxyConfigs != null)
             {
-                foreach (var ruleConfig in config.ProxyRules)
+                foreach (var pc in profile.ProxyConfigs.Where(pc => !string.IsNullOrWhiteSpace(pc.Host)))
                 {
-                    if (string.IsNullOrWhiteSpace(ruleConfig.ProcessName))
-                        continue;
-
-                    var rule = new ProxyRule
+                    ProxyConfigs.Add(new ProxyConfig
                     {
-                        ProcessName = ruleConfig.ProcessName,
-                        TargetHosts = ValidationHelper.DefaultIfEmpty(ruleConfig.TargetHosts),
-                        TargetPorts = ValidationHelper.DefaultIfEmpty(ruleConfig.TargetPorts),
-                        Protocol = ValidationHelper.DefaultIfEmpty(ruleConfig.Protocol, "TCP"),
-                        Action = ValidationHelper.DefaultIfEmpty(ruleConfig.Action, "PROXY"),
-                        IsEnabled = ruleConfig.IsEnabled
-                    };
-                    ProxyRules.Add(rule);
+                        Id = pc.Id,
+                        Type = pc.Type,
+                        Host = pc.Host,
+                        Port = pc.Port,
+                        Username = pc.Username ?? "",
+                        Password = pc.Password ?? ""
+                    });
                 }
             }
 
-            QueueActivityLog("Configuration loaded successfully");
+            if (profile.ProxyRules != null)
+            {
+                foreach (var rc in profile.ProxyRules)
+                {
+                    if (string.IsNullOrWhiteSpace(rc.ProcessName)) continue;
+                    var pc = rc.ProxyConfigId > 0
+                        ? ProxyConfigs.FirstOrDefault(p => p.Id == rc.ProxyConfigId)
+                        : null;
+                    ProxyRules.Add(new ProxyRule
+                    {
+                        ProcessName = rc.ProcessName,
+                        TargetHosts = ValidationHelper.DefaultIfEmpty(rc.TargetHosts),
+                        TargetPorts = ValidationHelper.DefaultIfEmpty(rc.TargetPorts),
+                        Protocol = ValidationHelper.DefaultIfEmpty(rc.Protocol, "TCP"),
+                        Action = ValidationHelper.DefaultIfEmpty(rc.Action, "PROXY"),
+                        IsEnabled = rc.IsEnabled,
+                        ProxyConfigId = rc.ProxyConfigId,
+                        ProxyConfigDisplay = pc?.DisplayName ?? ""
+                    });
+                }
+            }
+
+            RefreshProfileList();
+            QueueActivityLog("Configuration loaded");
         }
         catch (Exception ex)
         {
@@ -768,49 +994,188 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
-    private void SaveConfigurationInternal()
+    private void SwitchToProfile(string name)
     {
-        Task.Run(() => SaveConfigurationInternalAsync());
-    }
+        foreach (var rule in ProxyRules.ToList())
+            _proxyService?.DeleteRule(rule.RuleId);
+        ProxyRules.Clear();
 
-    private void SaveConfigurationInternalAsync()
-    {
-        try
+        foreach (var pc in ProxyConfigs.ToList())
+            _proxyService?.DeleteProxyConfig(pc.Id);
+        ProxyConfigs.Clear();
+
+        var profile = ProfileManager.LoadProfile(name);
+        _activeProfileName = name;
+        ActiveProfileName = name;
+        Title = $"ProxyBridge - {name}";
+
+        _dnsViaProxy = profile.DnsViaProxy;
+        OnPropertyChanged(nameof(DnsViaProxy));
+        _proxyService?.SetDnsViaProxy(profile.DnsViaProxy);
+
+        _localhostViaProxy = profile.LocalhostViaProxy;
+        OnPropertyChanged(nameof(LocalhostViaProxy));
+        _proxyService?.SetLocalhostViaProxy(profile.LocalhostViaProxy);
+
+        _closeToTray = profile.CloseToTray;
+        OnPropertyChanged(nameof(CloseToTray));
+
+        if (profile.IsTrafficLoggingEnabled != _isTrafficLoggingEnabled)
         {
-            var config = new AppConfig
+            _isTrafficLoggingEnabled = profile.IsTrafficLoggingEnabled;
+            OnPropertyChanged(nameof(IsTrafficLoggingEnabled));
+            ProxyBridgeService.SetTrafficLoggingEnabled(profile.IsTrafficLoggingEnabled);
+        }
+
+        _hideDirectConnections = profile.HideDirectConnections;
+        OnPropertyChanged(nameof(HideDirectConnections));
+
+        if (!string.IsNullOrWhiteSpace(profile.Language))
+        {
+            _currentLanguage = profile.Language;
+            _loc.CurrentCulture = new System.Globalization.CultureInfo(profile.Language);
+            EnglishCheckmark = profile.Language == "en" ? "✓" : "";
+            ChineseCheckmark = profile.Language == "zh" ? "✓" : "";
+        }
+
+        var configIdMap = new Dictionary<uint, uint>();
+        foreach (var pc in (profile.ProxyConfigs ?? Enumerable.Empty<ProxyConfigEntry>()).Where(pc => !string.IsNullOrWhiteSpace(pc.Host) && ushort.TryParse(pc.Port, out _)))
+        {
+            ushort.TryParse(pc.Port, out ushort port);
+
+            uint nativeId = _proxyService != null
+                ? _proxyService.AddProxyConfig(pc.Type, pc.Host, port, pc.Username ?? "", pc.Password ?? "")
+                : 0;
+
+            uint assignedId = nativeId > 0 ? nativeId : pc.Id;
+            if (pc.Id > 0) configIdMap[pc.Id] = assignedId;
+
+            ProxyConfigs.Add(new ProxyConfig
             {
-                ProxyType = _currentProxyType,
-                ProxyIp = _currentProxyIp,
-                ProxyPort = _currentProxyPort,
-                ProxyUsername = _currentProxyUsername,
-                ProxyPassword = _currentProxyPassword,
-                DnsViaProxy = _dnsViaProxy,
-                LocalhostViaProxy = _localhostViaProxy,
-                IsTrafficLoggingEnabled = _isTrafficLoggingEnabled,
-                Language = _currentLanguage,
-                CloseToTray = _closeToTray,
-                ProxyRules = ProxyRules.Select(r => new ProxyRuleConfig
-                {
-                    ProcessName = r.ProcessName,
-                    TargetHosts = r.TargetHosts,
-                    TargetPorts = r.TargetPorts,
-                    Protocol = r.Protocol,
-                    Action = r.Action,
-                    IsEnabled = r.IsEnabled
-                }).ToList()
+                Id = assignedId,
+                Type = pc.Type,
+                Host = pc.Host,
+                Port = pc.Port,
+                Username = pc.Username ?? "",
+                Password = pc.Password ?? ""
+            });
+        }
+
+        foreach (var rc in profile.ProxyRules ?? new List<ProxyRuleConfig>())
+        {
+            if (string.IsNullOrWhiteSpace(rc.ProcessName)) continue;
+
+            uint nativeProxyId = 0;
+            if (rc.ProxyConfigId > 0)
+                configIdMap.TryGetValue(rc.ProxyConfigId, out nativeProxyId);
+
+            var pcVm = nativeProxyId > 0 ? ProxyConfigs.FirstOrDefault(p => p.Id == nativeProxyId) : null;
+            var rule = new ProxyRule
+            {
+                ProcessName = rc.ProcessName,
+                TargetHosts = ValidationHelper.DefaultIfEmpty(rc.TargetHosts),
+                TargetPorts = ValidationHelper.DefaultIfEmpty(rc.TargetPorts),
+                Protocol = ValidationHelper.DefaultIfEmpty(rc.Protocol, "TCP"),
+                Action = ValidationHelper.DefaultIfEmpty(rc.Action, "PROXY"),
+                IsEnabled = rc.IsEnabled,
+                ProxyConfigId = nativeProxyId,
+                ProxyConfigDisplay = pcVm?.DisplayName ?? ""
             };
 
-            ConfigManager.SaveConfig(config);
+            if (_proxyService != null)
+            {
+                uint ruleId = _proxyService.AddRule(
+                    rule.ProcessName, rule.TargetHosts, rule.TargetPorts,
+                    rule.Protocol, rule.Action, nativeProxyId);
+                if (ruleId > 0)
+                {
+                    rule.RuleId = ruleId;
+                    rule.Index = ProxyRules.Count + 1;
+                }
+            }
+
+            ProxyRules.Add(rule);
         }
-        catch { }
+
+        UpdateSettingsProfile(name);
+        RefreshProfileList();
+    }
+
+    private void SaveCurrentProfile()
+    {
+        ProfileManager.SaveProfile(_activeProfileName, BuildCurrentProfile());
+    }
+
+    private void SaveCurrentProfileAsync()
+    {
+        var oldCts = _saveCts;
+        _saveCts = new CancellationTokenSource();
+        oldCts?.Cancel();
+        oldCts?.Dispose();
+        var token = _saveCts.Token;
+        var name = _activeProfileName;
+        var profile = BuildCurrentProfile();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(150, token);
+                ProfileManager.SaveProfile(name, profile);
+            }
+            catch (OperationCanceledException) { }
+        });
+    }
+
+    private ProxyProfile BuildCurrentProfile()
+    {
+        return new ProxyProfile
+        {
+            DnsViaProxy = _dnsViaProxy,
+            LocalhostViaProxy = _localhostViaProxy,
+            IsTrafficLoggingEnabled = _isTrafficLoggingEnabled,
+            HideDirectConnections = _hideDirectConnections,
+            Language = _currentLanguage,
+            CloseToTray = _closeToTray,
+            ProxyConfigs = ProxyConfigs.Select(pc => new ProxyConfigEntry
+            {
+                Id = pc.Id,
+                Type = pc.Type,
+                Host = pc.Host,
+                Port = pc.Port,
+                Username = pc.Username,
+                Password = pc.Password
+            }).ToList(),
+            ProxyRules = ProxyRules.Select(r => new ProxyRuleConfig
+            {
+                ProcessName = r.ProcessName,
+                TargetHosts = r.TargetHosts,
+                TargetPorts = r.TargetPorts,
+                Protocol = r.Protocol,
+                Action = r.Action,
+                IsEnabled = r.IsEnabled,
+                ProxyConfigId = r.ProxyConfigId
+            }).ToList()
+        };
+    }
+
+    private void RefreshProfileList()
+    {
+        SwitchProfileItems.Clear();
+        foreach (var name in ProfileManager.GetProfileNames())
+            SwitchProfileItems.Add(name);
+    }
+
+    private void UpdateSettingsProfile(string name)
+    {
+        var settings = _settingsService.LoadSettings();
+        settings.ActiveProfileName = name;
+        _settingsService.SaveSettings(settings);
     }
 
     private void QueueActivityLog(string message)
     {
         lock (_activityLogLock)
-        {
             _pendingActivityLogs.Add($"[{DateTime.Now:HH:mm:ss}] {message}\n");
-        }
     }
 }
 
@@ -865,8 +1230,34 @@ public class ProxyRule : ViewModelBase
     public string Action
     {
         get => _action;
-        set => SetProperty(ref _action, value);
+        set
+        {
+            if (SetProperty(ref _action, value))
+                OnPropertyChanged(nameof(ActionDisplay));
+        }
     }
+
+    private uint _proxyConfigId;
+    public uint ProxyConfigId
+    {
+        get => _proxyConfigId;
+        set => SetProperty(ref _proxyConfigId, value);
+    }
+
+    private string _proxyConfigDisplay = "";
+    public string ProxyConfigDisplay
+    {
+        get => _proxyConfigDisplay;
+        set
+        {
+            if (SetProperty(ref _proxyConfigDisplay, value))
+                OnPropertyChanged(nameof(ActionDisplay));
+        }
+    }
+
+    public string ActionDisplay => Action == "PROXY"
+        ? (string.IsNullOrEmpty(_proxyConfigDisplay) ? "PROXY" : _proxyConfigDisplay)
+        : Action;
 
     public bool IsEnabled
     {
@@ -879,4 +1270,64 @@ public class ProxyRule : ViewModelBase
         get => _isSelected;
         set => SetProperty(ref _isSelected, value);
     }
+}
+
+public class ProxyConfig : ViewModelBase
+{
+    private uint _id;
+    private string _type = "SOCKS5";
+    private string _host = "";
+    private string _port = "";
+    private string _username = "";
+    private string _password = "";
+
+    public uint Id
+    {
+        get => _id;
+        set => SetProperty(ref _id, value);
+    }
+
+    public string Type
+    {
+        get => _type;
+        set
+        {
+            if (SetProperty(ref _type, value))
+                OnPropertyChanged(nameof(DisplayName));
+        }
+    }
+
+    public string Host
+    {
+        get => _host;
+        set
+        {
+            if (SetProperty(ref _host, value))
+                OnPropertyChanged(nameof(DisplayName));
+        }
+    }
+
+    public string Port
+    {
+        get => _port;
+        set
+        {
+            if (SetProperty(ref _port, value))
+                OnPropertyChanged(nameof(DisplayName));
+        }
+    }
+
+    public string Username
+    {
+        get => _username;
+        set => SetProperty(ref _username, value);
+    }
+
+    public string Password
+    {
+        get => _password;
+        set => SetProperty(ref _password, value);
+    }
+
+    public string DisplayName => $"{_type} {_host}:{_port}";
 }

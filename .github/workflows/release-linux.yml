@@ -11,11 +11,14 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
     if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner)
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Install build dependencies
       run: |
@@ -120,12 +123,14 @@ jobs:
 
     - name: Upload archive to release
       if: github.event_name == 'release'
-      uses: softprops/action-gh-release@v1
-      with:
-        files: ProxyBridge-Linux-v*.tar.gz
+      run: |
+        gh release upload "${{ github.event.release.tag_name }}" ProxyBridge-Linux-v*.tar.gz --clobber
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
 
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: ProxyBridge-Linux-Release-${{ steps.version.outputs.version }}
         path: ProxyBridge-Linux-*.tar.gz

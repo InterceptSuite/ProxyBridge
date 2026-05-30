@@ -32,6 +32,9 @@
   <data name="MenuEnableTrafficLogging" xml:space="preserve">
     <value>启用流量日志</value>
   </data>
+  <data name="MenuHideDirectConnections" xml:space="preserve">
+    <value>隐藏直连连接</value>
+  </data>
   <data name="MenuSettings" xml:space="preserve">
     <value>设置</value>
   </data>
@@ -51,6 +54,28 @@
   <data name="MenuCheckUpdates" xml:space="preserve">
     <value>检查更新</value>
   </data>
+  <!-- Profile Menu -->
+  <data name="MenuProfile" xml:space="preserve">
+    <value>配置文件</value>
+  </data>
+  <data name="MenuNewProfile" xml:space="preserve">
+    <value>新建配置</value>
+  </data>
+  <data name="MenuRenameProfile" xml:space="preserve">
+    <value>重命名配置</value>
+  </data>
+  <data name="MenuDeleteProfile" xml:space="preserve">
+    <value>删除配置</value>
+  </data>
+  <data name="MenuSwitchProfile" xml:space="preserve">
+    <value>切换配置</value>
+  </data>
+  <data name="MenuImportProfile" xml:space="preserve">
+    <value>导入配置</value>
+  </data>
+  <data name="MenuExportProfile" xml:space="preserve">
+    <value>导出配置</value>
+  </data>
 
   <!-- Tabs -->
   <data name="TabConnections" xml:space="preserve">
@@ -61,8 +86,11 @@
   </data>
 
   <!-- Buttons -->
-  <data name="ButtonClear" xml:space="preserve">
-    <value>清除</value>
+  <data name="ButtonClearAllConnections" xml:space="preserve">
+    <value>清除所有连接</value>
+  </data>
+  <data name="ButtonClearAllLogs" xml:space="preserve">
+    <value>清除所有日志</value>
   </data>
   <data name="ButtonSave" xml:space="preserve">
     <value>保存</value>
@@ -232,7 +260,7 @@
     <value>示例: iexplore.exe; "C:\某个应用.exe"; fire*.exe; *.bin</value>
   </data>
   <data name="ExampleTargetHosts" xml:space="preserve">
-    <value>示例: 127.0.0.1; 192.168.1.*; 10.1.0.0-10.5.255.255</value>
+    <value>示例: 127.0.0.1; 192.168.1.*; 10.1.0.0-10.5.255.255; ::1; 2001:db8::/32; fe80::1-fe80::ff</value>
   </data>
   <data name="ExampleTargetPorts" xml:space="preserve">
     <value>示例: 80; 8000-9000; 3128</value>
@@ -245,6 +273,9 @@
   </data>
   <data name="ProtocolBoth" xml:space="preserve">
     <value>两者 (TCP + UDP)</value>
+  </data>
+  <data name="UDPProxyNote" xml:space="preserve">
+    <value>⚠ UDP 仅支持 SOCKS5 代理。并非所有 SOCKS5 代理默认支持 UDP。SOCKS5 UDP 支持并不保证支持 QUIC 或 HTTP/3 —— 请单独确认您的代理是否支持这些协议。</value>
   </data>
   <data name="ActionProxy" xml:space="preserve">
     <value>代理</value>

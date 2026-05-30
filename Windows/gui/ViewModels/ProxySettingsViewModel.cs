@@ -1,7 +1,10 @@
 using System;
+using System.Collections.ObjectModel;
+using System.Linq;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Windows.Input;
+using Avalonia.Controls;
 using ProxyBridge.GUI.Services;
 using ProxyBridge.GUI.Common;
 
@@ -9,67 +12,86 @@ namespace ProxyBridge.GUI.ViewModels;
 
 public class ProxySettingsViewModel : ViewModelBase
 {
+    private static readonly Regex _domainRegex =
+        new(@"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$",
+            RegexOptions.Compiled,
+            TimeSpan.FromSeconds(1));
+
     private readonly Loc _loc = Loc.Instance;
     public Loc Loc => _loc;
 
-    private string _proxyIp = "";
-    private string _proxyPort = "";
-    private string _proxyType = "SOCKS5";
-    private string _proxyUsername = "";
-    private string _proxyPassword = "";
-    private string _ipError = "";
+    private readonly ObservableCollection<ProxyConfig> _proxyConfigs;
+    private readonly ProxyBridgeService? _proxyService;
+    private readonly Action? _onConfigsChanged;
+    private readonly Action? _onClose;
+
+    // edit panel state
+    private bool _isEditPanelOpen;
+    private uint _editingConfigId;
+    private Window? _window;
+    private readonly Func<uint, int>? _countRulesUsingConfig;
+    private readonly Action<uint>? _deleteRulesForConfig;
+
+    private string _newType = "SOCKS5";
+    private string _newHost = "";
+    private string _newPort = "";
+    private string _newUsername = "";
+    private string _newPassword = "";
+    private string _hostError = "";
     private string _portError = "";
-    private bool _isTestViewOpen = false;
+
+    // test panel state
+    private bool _isTestViewOpen;
     private string _testTargetHost = "google.com";
     private string _testTargetPort = "80";
     private string _testOutput = "";
-    private bool _isTesting = false;
-    private Action<string, string, string, string, string>? _onSave;
-    private Action? _onClose;
-    private Services.ProxyBridgeService? _proxyService;
+    private bool _isTesting;
+    private uint _testingConfigId;
 
-    public string ProxyIp
+    public ObservableCollection<ProxyConfig> ProxyConfigs => _proxyConfigs;
+
+    public bool IsEditPanelOpen
     {
-        get => _proxyIp;
-        set
-        {
-            SetProperty(ref _proxyIp, value);
-            IpError = "";
-        }
+        get => _isEditPanelOpen;
+        set => SetProperty(ref _isEditPanelOpen, value);
     }
 
-    public string ProxyPort
+    public string EditPanelTitle => _editingConfigId > 0 ? "Edit Proxy Config" : "Add Proxy Config";
+
+    public string NewType
     {
-        get => _proxyPort;
-        set
-        {
-            SetProperty(ref _proxyPort, value);
-            PortError = "";
-        }
+        get => _newType;
+        set => SetProperty(ref _newType, value);
     }
 
-    public string ProxyType
+    public string NewHost
     {
-        get => _proxyType;
-        set => SetProperty(ref _proxyType, value);
+        get => _newHost;
+        set { SetProperty(ref _newHost, value); HostError = ""; }
     }
 
-    public string ProxyUsername
+    public string NewPort
     {
-        get => _proxyUsername;
-        set => SetProperty(ref _proxyUsername, value);
+        get => _newPort;
+        set { SetProperty(ref _newPort, value); PortError = ""; }
     }
 
-    public string ProxyPassword
+    public string NewUsername
     {
-        get => _proxyPassword;
-        set => SetProperty(ref _proxyPassword, value);
+        get => _newUsername;
+        set => SetProperty(ref _newUsername, value);
     }
 
-    public string IpError
+    public string NewPassword
     {
-        get => _ipError;
-        set => SetProperty(ref _ipError, value);
+        get => _newPassword;
+        set => SetProperty(ref _newPassword, value);
+    }
+
+    public string HostError
+    {
+        get => _hostError;
+        set => SetProperty(ref _hostError, value);
     }
 
     public string PortError
@@ -108,58 +130,131 @@ public class ProxySettingsViewModel : ViewModelBase
         set => SetProperty(ref _isTesting, value);
     }
 
-    public ICommand SaveCommand { get; }
-    public ICommand CancelCommand { get; }
-    public ICommand OpenTestCommand { get; }
-    public ICommand CloseTestCommand { get; }
+    public ICommand OpenAddPanelCommand { get; }
+    public ICommand SaveConfigCommand { get; }
+    public ICommand CancelEditCommand { get; }
+    public ICommand EditConfigCommand { get; }
+    public ICommand DeleteConfigCommand { get; }
+    public ICommand OpenTestPanelCommand { get; }
+    public ICommand CloseTestPanelCommand { get; }
     public ICommand StartTestCommand { get; }
+    public ICommand CloseCommand { get; }
 
-    private bool IsValidIpOrDomain(string input)
+    public void SetWindow(Window window) => _window = window;
+
+    public ProxySettingsViewModel(
+        ObservableCollection<ProxyConfig> proxyConfigs,
+        ProxyBridgeService? proxyService,
+        Action? onConfigsChanged,
+        Action? onClose,
+        Func<uint, int>? countRulesUsingConfig = null,
+        Action<uint>? deleteRulesForConfig = null)
     {
-        if (IPAddress.TryParse(input, out _))
-        {
-            return true;
-        }
-
-        var domainRegex = new Regex(@"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$");
-        return domainRegex.IsMatch(input);
-    }
-
-    public ProxySettingsViewModel(string initialType, string initialIp, string initialPort, string initialUsername, string initialPassword, Action<string, string, string, string, string> onSave, Action onClose, Services.ProxyBridgeService? proxyService)
-    {
-        _onSave = onSave;
-        _onClose = onClose;
+        _proxyConfigs = proxyConfigs;
         _proxyService = proxyService;
+        _onConfigsChanged = onConfigsChanged;
+        _onClose = onClose;
+        _countRulesUsingConfig = countRulesUsingConfig;
+        _deleteRulesForConfig = deleteRulesForConfig;
 
-        ProxyType = initialType;
-        ProxyIp = initialIp;
-        ProxyPort = initialPort;
-        ProxyUsername = initialUsername;
-        ProxyPassword = initialPassword;
-
-        SaveCommand = new RelayCommand(() =>
+        OpenAddPanelCommand = new RelayCommand(() =>
         {
-            bool isValid = ValidationHelper.ValidateIpOrDomain(ProxyIp, IsValidIpOrDomain, msg => IpError = msg)
-                && ValidationHelper.ValidatePort(ProxyPort, msg => PortError = msg);
+            _editingConfigId = 0;
+            OnPropertyChanged(nameof(EditPanelTitle));
+            NewType = "SOCKS5";
+            NewHost = "";
+            NewPort = "";
+            NewUsername = "";
+            NewPassword = "";
+            HostError = "";
+            PortError = "";
+            IsEditPanelOpen = true;
+        });
 
-            if (isValid)
+        SaveConfigCommand = new RelayCommand(() =>
+        {
+            bool valid = ValidationHelper.ValidateIpOrDomain(NewHost, IsValidIpOrDomain, msg => HostError = msg)
+                      && ValidationHelper.ValidatePort(NewPort, msg => PortError = msg);
+            if (!valid) return;
+
+            if (!ushort.TryParse(NewPort, out ushort portNum)) return;
+
+            if (_editingConfigId > 0)
             {
-                _onSave?.Invoke(ProxyType, ProxyIp, ProxyPort, ProxyUsername ?? "", ProxyPassword ?? "");
+                if (_proxyService != null)
+                    _proxyService.EditProxyConfig(_editingConfigId, NewType, NewHost, portNum, NewUsername, NewPassword);
+
+                var existing = FindConfig(_editingConfigId);
+                if (existing != null)
+                {
+                    existing.Type = NewType;
+                    existing.Host = NewHost;
+                    existing.Port = NewPort;
+                    existing.Username = NewUsername;
+                    existing.Password = NewPassword;
+                }
             }
+            else
+            {
+                uint newId = 0;
+                if (_proxyService != null)
+                    newId = _proxyService.AddProxyConfig(NewType, NewHost, portNum, NewUsername, NewPassword);
+
+                if (newId == 0) newId = (uint)(DateTime.Now.Ticks & 0xFFFFFFFF);
+
+                _proxyConfigs.Add(new ProxyConfig
+                {
+                    Id = newId,
+                    Type = NewType,
+                    Host = NewHost,
+                    Port = NewPort,
+                    Username = NewUsername,
+                    Password = NewPassword
+                });
+            }
+
+            IsEditPanelOpen = false;
+            _onConfigsChanged?.Invoke();
         });
 
-        CancelCommand = new RelayCommand(() =>
+        CancelEditCommand = new RelayCommand(() =>
         {
-            _onClose?.Invoke();
+            IsEditPanelOpen = false;
         });
 
-        OpenTestCommand = new RelayCommand(() =>
+        EditConfigCommand = new RelayCommandWithParameter<ProxyConfig>(config =>
         {
-            IsTestViewOpen = true;
+            if (config == null) return;
+            _editingConfigId = config.Id;
+            OnPropertyChanged(nameof(EditPanelTitle));
+            NewType = config.Type;
+            NewHost = config.Host;
+            NewPort = config.Port;
+            NewUsername = config.Username;
+            NewPassword = config.Password;
+            HostError = "";
+            PortError = "";
+            IsEditPanelOpen = true;
+        });
+
+        DeleteConfigCommand = new RelayCommandWithParameter<ProxyConfig>(config =>
+        {
+            if (config == null) return;
+            _ = DeleteConfigAsync(config);
+        });
+
+        // ---------------------------------------------------------------
+        // Helpers
+        // ---------------------------------------------------------------
+        OpenTestPanelCommand = new RelayCommandWithParameter<ProxyConfig>(config =>
+        {
+            if (config == null) return;
+            _testingConfigId = config.Id;
             TestOutput = "";
+            IsTestViewOpen = true;
         });
 
-        CloseTestCommand = new RelayCommand(() =>
+        CloseTestPanelCommand = new RelayCommand(() =>
         {
             IsTestViewOpen = false;
         });
@@ -167,44 +262,18 @@ public class ProxySettingsViewModel : ViewModelBase
         StartTestCommand = new RelayCommand(async () =>
         {
             if (IsTesting) return;
-
-            if (string.IsNullOrWhiteSpace(ProxyIp))
-            {
-                TestOutput = "ERROR: Please configure proxy IP address or hostname first";
-                return;
-            }
-
-            if (!ushort.TryParse(ProxyPort, out ushort proxyPortNum))
-            {
-                TestOutput = "ERROR: Please configure valid proxy port first";
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(TestTargetHost))
-            {
-                TestOutput = "ERROR: Please enter target host";
-                return;
-            }
-
-            if (!ushort.TryParse(TestTargetPort, out ushort targetPortNum))
-            {
-                TestOutput = "ERROR: Invalid target port";
-                return;
-            }
+            if (string.IsNullOrWhiteSpace(TestTargetHost)) { TestOutput = "ERROR: Enter target host"; return; }
+            if (!ushort.TryParse(TestTargetPort, out ushort targetPortNum)) { TestOutput = "ERROR: Invalid target port"; return; }
 
             IsTesting = true;
-            TestOutput = "Testing connection...\n";
-
+            TestOutput = "Testing...\n";
             try
             {
                 if (_proxyService != null)
                 {
-                    _proxyService.SetProxyConfig(ProxyType, ProxyIp, proxyPortNum, ProxyUsername ?? "", ProxyPassword ?? "");
-
                     await System.Threading.Tasks.Task.Run(() =>
                     {
-                        var result = _proxyService.TestConnection(TestTargetHost, targetPortNum);
-                        TestOutput = result;
+                        TestOutput = _proxyService.TestProxyConfig(_testingConfigId, TestTargetHost, targetPortNum);
                     });
                 }
                 else
@@ -221,5 +290,102 @@ public class ProxySettingsViewModel : ViewModelBase
                 IsTesting = false;
             }
         });
+
+        CloseCommand = new RelayCommand(() => _onClose?.Invoke());
+    }
+
+    private ProxyConfig? FindConfig(uint configId)
+    {
+        return _proxyConfigs.FirstOrDefault(c => c.Id == configId);
+    }
+
+    private async System.Threading.Tasks.Task DeleteConfigAsync(ProxyConfig config)
+    {
+        int affectedCount = _countRulesUsingConfig?.Invoke(config.Id) ?? 0;
+
+        if (affectedCount > 0)
+        {
+            string ruleWord = affectedCount == 1 ? "rule" : "rules";
+            bool confirmed = await ShowConfirmAsync(
+                "Delete Proxy Config",
+                $"{affectedCount} {ruleWord} using this proxy config will also be deleted.\n\nContinue?");
+            if (!confirmed)
+                return;
+        }
+
+        _deleteRulesForConfig?.Invoke(config.Id);
+
+        if (_proxyService != null)
+            _proxyService.DeleteProxyConfig(config.Id);
+
+        _proxyConfigs.Remove(config);
+        _onConfigsChanged?.Invoke();
+    }
+
+    private async System.Threading.Tasks.Task<bool> ShowConfirmAsync(string title, string message)
+    {
+        if (_window == null)
+            return true;
+
+        bool result = false;
+
+        var dialog = new Window
+        {
+            Title = title,
+            Width = 420,
+            Height = 190,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            CanResize = false,
+            Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#FF2D2D30"))
+        };
+
+        var stack = new StackPanel { Margin = new Avalonia.Thickness(20), Spacing = 16 };
+
+        stack.Children.Add(new Avalonia.Controls.TextBlock
+        {
+            Text = message,
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+            Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Colors.White),
+            FontSize = 13
+        });
+
+        var buttons = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+            Spacing = 10
+        };
+
+        var deleteBtn = new Button
+        {
+            Content = "Delete",
+            Width = 80,
+            Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#FFCC3333")),
+            Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Colors.White)
+        };
+        deleteBtn.Click += (s, e) => { result = true; dialog.Close(); };
+
+        var cancelBtn = new Button
+        {
+            Content = "Cancel",
+            Width = 80,
+            Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#FF3C3C3C")),
+            Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Colors.White)
+        };
+        cancelBtn.Click += (s, e) => dialog.Close();
+
+        buttons.Children.Add(deleteBtn);
+        buttons.Children.Add(cancelBtn);
+        stack.Children.Add(buttons);
+        dialog.Content = stack;
+
+        await dialog.ShowDialog(_window);
+        return result;
+    }
+
+    private static bool IsValidIpOrDomain(string input)
+    {
+        if (IPAddress.TryParse(input, out _)) return true;
+        return _domainRegex.IsMatch(input);
     }
 }
