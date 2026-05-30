@@ -3279,7 +3279,28 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     windivert_handle = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, priority, 0);
     if (windivert_handle == INVALID_HANDLE_VALUE)
     {
-        log_message("Failed to open WinDivert (%lu)", GetLastError());
+        DWORD wd_err = GetLastError();
+        switch (wd_err)
+        {
+            case 2:    // ERROR_FILE_NOT_FOUND
+                log_message("Failed to open WinDivert (%lu): WinDivert64.sys not found - it may have been quarantined or deleted by antivirus. Whitelist WinDivert64.sys and ProxyBridgeCore.dll in your AV and reinstall.", wd_err);
+                break;
+            case 5:    // ERROR_ACCESS_DENIED
+                log_message("Failed to open WinDivert (%lu): Access denied - make sure ProxyBridge is running as Administrator.", wd_err);
+                break;
+            case 577:  // ERROR_INVALID_IMAGE_HASH - driver signature check failed
+                log_message("Failed to open WinDivert (%lu): Driver signature verification failed - WinDivert64.sys may have been modified or blocked by security software. Reinstall ProxyBridge.", wd_err);
+                break;
+            case 1058: // ERROR_SERVICE_DISABLED
+                log_message("Failed to open WinDivert (%lu): A stale WinDivert driver entry from a previous install is marked disabled. Reinstall ProxyBridge to fix it, or manually delete the registry key: HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDivert", wd_err);
+                break;
+            case 1275: // ERROR_DRIVER_BLOCKED
+                log_message("Failed to open WinDivert (%lu): WinDivert64.sys is blocked by Windows security policy or antivirus (BYOVD protection). Whitelist WinDivert64.sys in your security software.", wd_err);
+                break;
+            default:
+                log_message("Failed to open WinDivert (%lu): Ensure ProxyBridge is installed correctly and running as Administrator.", wd_err);
+                break;
+        }
         running = FALSE;
         WaitForSingleObject(proxy_thread, INFINITE);
         CloseHandle(proxy_thread);

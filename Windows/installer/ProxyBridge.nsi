@@ -104,6 +104,12 @@ Section Uninstall
   ; Broadcast environment change
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
 
+  ; Stop and remove the WinDivert kernel driver service so a future reinstall
+  ; doesn't inherit a stale/disabled entry (error 1058).
+  nsExec::ExecToLog 'sc stop WinDivert'
+  nsExec::ExecToLog 'sc delete WinDivert'
+  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\WinDivert"
+
   DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}"
   SetAutoClose true
 SectionEnd
