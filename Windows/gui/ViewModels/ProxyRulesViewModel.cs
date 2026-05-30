@@ -12,7 +12,8 @@ public class ProxyRulesViewModel : ViewModelBase
 {
     private static readonly System.Text.RegularExpressions.Regex _processNameRegex =
         new(@"^[\w\s._\-*;""\\:()\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]+$",
-            System.Text.RegularExpressions.RegexOptions.Compiled);
+            System.Text.RegularExpressions.RegexOptions.Compiled,
+            TimeSpan.FromSeconds(1));
 
     private readonly Loc _loc = Loc.Instance;
     public Loc Loc => _loc;

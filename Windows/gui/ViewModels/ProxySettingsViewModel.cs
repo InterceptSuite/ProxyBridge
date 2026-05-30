@@ -13,7 +13,8 @@ public class ProxySettingsViewModel : ViewModelBase
 {
     private static readonly Regex _domainRegex =
         new(@"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$",
-            RegexOptions.Compiled);
+            RegexOptions.Compiled,
+            TimeSpan.FromSeconds(1));
 
     private readonly Loc _loc = Loc.Instance;
     public Loc Loc => _loc;

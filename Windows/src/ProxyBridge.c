@@ -1995,8 +1995,8 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROX
         }
 
         // Send username/password (RFC 1929)
-        size_t user_len = strlen(cfg->username);
-        size_t pass_len = strlen(cfg->password);
+        size_t user_len = strnlen_s(cfg->username, sizeof(cfg->username));
+        size_t pass_len = strnlen_s(cfg->password, sizeof(cfg->password));
         if (user_len > 255 || pass_len > 255)
         {
             log_message("SOCKS5: Username or password too long");
@@ -2072,7 +2072,8 @@ static int socks5_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_por
     if (buf[1] == 0x02)
     {
         if (!use_auth) return -1;
-        size_t ul = strlen(cfg->username), pl = strlen(cfg->password);
+        size_t ul = strnlen_s(cfg->username, sizeof(cfg->username));
+        size_t pl = strnlen_s(cfg->password, sizeof(cfg->password));
         if (ul > 255 || pl > 255) return -1;
         buf[0] = 0x01; buf[1] = (unsigned char)ul;
         memcpy(&buf[2], cfg->username, ul);
@@ -2271,8 +2272,8 @@ static int socks5_udp_associate_with_config(SOCKET s, struct sockaddr_in *relay_
         if (!use_auth)
             return -1;
 
-        size_t user_len = strlen(cfg->username);
-        size_t pass_len = strlen(cfg->password);
+        size_t user_len = strnlen_s(cfg->username, sizeof(cfg->username));
+        size_t pass_len = strnlen_s(cfg->password, sizeof(cfg->password));
         if (user_len > 255 || pass_len > 255)
             return -1;
 
