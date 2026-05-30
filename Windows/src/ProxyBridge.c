@@ -3499,8 +3499,21 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
 
     rule->action = action;
     rule->enabled = TRUE;
-    rule->next = rules_list;
-    rules_list = rule;
+    rule->next = NULL;
+
+    // Append to tail so rules are evaluated in the order they were added,
+    // matching the visual top-to-bottom order in the GUI (fixes issue #93).
+    if (rules_list == NULL)
+    {
+        rules_list = rule;
+    }
+    else
+    {
+        PROCESS_RULE *tail = rules_list;
+        while (tail->next != NULL)
+            tail = tail->next;
+        tail->next = rule;
+    }
 
     update_has_active_rules();
     log_message("Added rule ID: %u for process '%s' (Protocol: %d, Action: %d, ProxyConfigId: %u)", rule->rule_id, process_name, protocol, action, proxy_config_id);
