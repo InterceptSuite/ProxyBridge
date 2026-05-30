@@ -319,7 +319,18 @@ public class MainWindowViewModel : ViewModelBase
         set
         {
             if (SetProperty(ref _hideDirectConnections, value))
+            {
+                // refilter the existing log immediately
+                if (value)
+                {
+                    _connectionsLog = StripDirectLines(_connectionsLog);
+                    FilteredConnectionsLog = null!;
+                    FilteredConnectionsLog = string.IsNullOrWhiteSpace(_connectionsSearchText)
+                        ? _connectionsLog
+                        : FilterLog(_connectionsLog, _connectionsSearchText);
+                }
                 SaveCurrentProfileAsync();
+            }
         }
     }
 
@@ -874,6 +885,23 @@ public class MainWindowViewModel : ViewModelBase
             }
         }
 
+        return sb.ToString();
+    }
+
+    private string StripDirectLines(string log)
+    {
+        if (string.IsNullOrEmpty(log))
+            return log;
+
+        var sb = new StringBuilder(log.Length);
+        foreach (var line in log.Split('\n'))
+        {
+            if (!line.Contains(" via Direct", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.Append(line);
+                sb.Append('\n');
+            }
+        }
         return sb.ToString();
     }
 
