@@ -24,9 +24,9 @@
 // can re-inject its segment before thread N injects segment N, causing the
 // relay's TCP stack to send DUPACKs back to the browser.  The browser
 // interprets 3+ DUPACKs as loss, halves its congestion window, and upload
-// throughput collapses ~50%.  A single ordered thread prevents this entirely.
-// One thread is fast enough: at 200 Mbps with 1460-byte segments there are
-// ~17 000 packets/sec; a single core processes well over 200 000 packets/sec.
+// throughput collapses 50% A single ordered thread prevents this entirely.
+// One thread is fast enough at 200 Mbps with 1460-byte segments there are
+// 17 000 packets/sec a single core processes well over 200000 packets/sec.
 #define NUM_PACKET_THREADS 1
 #define CONNECTION_HASH_SIZE 4096
 #define SOCKS5_BUFFER_SIZE 1024
@@ -3444,10 +3444,17 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
     switch (fdwReason)
     {
         case DLL_PROCESS_ATTACH:
+        {
             // Store the PID of the process that loaded this DLL
             g_current_process_id = GetCurrentProcessId();
+            // Initialize Winsock here so that resolve_hostname() / getaddrinfo()
+            // work correctly when AddProxyConfig is called before any thread
+            WSADATA wsa;
+            WSAStartup(MAKEWORD(2, 2), &wsa);
             break;
+        }
         case DLL_PROCESS_DETACH:
+            WSACleanup();
             if (running)
                 ProxyBridge_Stop();
             // Close all proxy config UDP sockets
