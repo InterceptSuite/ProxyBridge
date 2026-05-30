@@ -47,8 +47,6 @@ Section "MainSection" SEC01
   ; Kill any running ProxyBridge instance before overwriting files.
   ; This prevents "file in use" errors on update/reinstall.
   nsExec::ExecToLog 'taskkill /F /IM ProxyBridge.exe'
-  nsExec::ExecToLog 'taskkill /F /IM ProxyBridge_CLI.exe'
-
   ; Stop and unload the WinDivert driver so WinDivert64.sys can be replaced.
   nsExec::ExecToLog 'sc stop WinDivert'
   nsExec::ExecToLog 'sc delete WinDivert'
@@ -61,7 +59,6 @@ Section "MainSection" SEC01
   SetOverwrite on
 
   File "..\output\ProxyBridge.exe"
-  File "..\output\ProxyBridge_CLI.exe"
   File "..\output\ProxyBridgeCore.dll"
   File "..\output\WinDivert.dll"
   File "..\output\WinDivert64.sys"
@@ -95,7 +92,6 @@ SectionEnd
 
 Section Uninstall
   Delete "$INSTDIR\ProxyBridge.exe"
-  Delete "$INSTDIR\ProxyBridge_CLI.exe"
   Delete "$INSTDIR\ProxyBridgeCore.dll"
   Delete "$INSTDIR\WinDivert.dll"
   Delete "$INSTDIR\WinDivert64.sys"

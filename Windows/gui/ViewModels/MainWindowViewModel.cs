@@ -49,6 +49,8 @@ public class MainWindowViewModel : ViewModelBase
     private readonly object _activityLogLock = new();
     private DispatcherTimer? _connectionLogTimer;
     private DispatcherTimer? _activityLogTimer;
+    private int _connectionLogLineCount = 0;
+    private int _activityLogLineCount = 0;
 
     public void SetMainWindow(Window window)
     {
@@ -77,9 +79,6 @@ public class MainWindowViewModel : ViewModelBase
                 if (_hideDirectConnections && proxyInfo.StartsWith("Direct"))
                     return;
 
-                if (_connectionLogTimer?.IsEnabled == false)
-                    _connectionLogTimer.Start();
-
                 lock (_connectionLogLock)
                     _pendingConnectionLogs.Add($"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}\n");
             };
@@ -95,12 +94,13 @@ public class MainWindowViewModel : ViewModelBase
                     _pendingConnectionLogs.Clear();
                 }
 
-                ConnectionsLog += string.Join("", logsToAdd);
-
-                var lines = ConnectionsLog.Split('\n');
-                if (lines.Length > MAX_CONNECTION_LOG_LINES)
-                    ConnectionsLog = string.Join("\n", lines.Skip(lines.Length - MAX_CONNECTION_LOG_LINES));
+                var newConnLog = _connectionsLog + string.Concat(logsToAdd);
+                _connectionLogLineCount += logsToAdd.Count;
+                if (_connectionLogLineCount > MAX_CONNECTION_LOG_LINES)
+                    newConnLog = TrimToLastNLines(newConnLog, MAX_CONNECTION_LOG_LINES, out _connectionLogLineCount);
+                ConnectionsLog = newConnLog;
             };
+            _connectionLogTimer.Start();
 
             _activityLogTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _activityLogTimer.Tick += (s, e) =>
@@ -112,7 +112,11 @@ public class MainWindowViewModel : ViewModelBase
                     logsToAdd = new List<string>(_pendingActivityLogs);
                     _pendingActivityLogs.Clear();
                 }
-                ActivityLog += string.Join("", logsToAdd);
+                var newActLog = _activityLog + string.Concat(logsToAdd);
+                _activityLogLineCount += logsToAdd.Count;
+                if (_activityLogLineCount > MAX_ACTIVITY_LOG_LINES)
+                    newActLog = TrimToLastNLines(newActLog, MAX_ACTIVITY_LOG_LINES, out _activityLogLineCount);
+                ActivityLog = newActLog;
             };
             _activityLogTimer.Start();
 
@@ -212,18 +216,6 @@ public class MainWindowViewModel : ViewModelBase
         {
             if (SetProperty(ref _activityLog, value))
             {
-                if (!string.IsNullOrEmpty(_activityLog))
-                {
-                    var lines = _activityLog.Split('\n');
-                    if (lines.Length > MAX_ACTIVITY_LOG_LINES)
-                    {
-                        var oldLog = _activityLog;
-                        var linesToKeep = lines.Skip(lines.Length - MAX_ACTIVITY_LOG_LINES).ToArray();
-                        _activityLog = string.Join("\n", linesToKeep);
-                        oldLog = null!;
-                    }
-                }
-
                 if (string.IsNullOrWhiteSpace(_activitySearchText))
                     FilteredActivityLog = _activityLog;
             }
@@ -324,7 +316,7 @@ public class MainWindowViewModel : ViewModelBase
                 if (value)
                 {
                     _connectionsLog = StripDirectLines(_connectionsLog);
-                    FilteredConnectionsLog = null!;
+                    _connectionLogLineCount = CountNewlines(_connectionsLog);
                     FilteredConnectionsLog = string.IsNullOrWhiteSpace(_connectionsSearchText)
                         ? _connectionsLog
                         : FilterLog(_connectionsLog, _connectionsSearchText);
@@ -357,14 +349,9 @@ public class MainWindowViewModel : ViewModelBase
 
                     ProxyBridgeService.SetTrafficLoggingEnabled(false);
 
-                    ConnectionsLog = null!;
-                    FilteredConnectionsLog = null!;
+                    _connectionLogLineCount = 0;
                     ConnectionsLog = "";
                     FilteredConnectionsLog = "";
-
-                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
-                    GC.WaitForPendingFinalizers();
-                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
                 }
                 SaveCurrentProfileAsync();
             }
@@ -553,15 +540,9 @@ public class MainWindowViewModel : ViewModelBase
                 _pendingConnectionLogs.Clear();
             }
 
-            ConnectionsLog = null!;
-            FilteredConnectionsLog = null!;
-
+            _connectionLogLineCount = 0;
             ConnectionsLog = "";
             FilteredConnectionsLog = "";
-
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
         });
 
         ClearActivityLogCommand = new RelayCommand(() =>
@@ -571,12 +552,9 @@ public class MainWindowViewModel : ViewModelBase
                 _pendingActivityLogs.Clear();
             }
 
+            _activityLogLineCount = 0;
             ActivityLog = "";
             FilteredActivityLog = "";
-
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true);
         });
 
         SearchConnectionsCommand = new RelayCommand(() =>
@@ -903,6 +881,33 @@ public class MainWindowViewModel : ViewModelBase
             }
         }
         return sb.ToString();
+    }
+
+    private static string TrimToLastNLines(string log, int maxLines, out int actualLines)
+    {
+        int newlines = 0;
+        for (int i = log.Length - 1; i >= 0; i--)
+        {
+            if (log[i] == '\n')
+            {
+                newlines++;
+                if (newlines > maxLines)
+                {
+                    actualLines = maxLines;
+                    return log.Substring(i + 1);
+                }
+            }
+        }
+        actualLines = newlines;
+        return log;
+    }
+
+    private static int CountNewlines(string log)
+    {
+        int count = 0;
+        foreach (char c in log)
+            if (c == '\n') count++;
+        return count;
     }
 
     private void LoadConfiguration()
