@@ -82,7 +82,10 @@ public class MainWindowViewModel : ViewModelBase
                     return;
 
                 lock (_connectionLogLock)
-                    _pendingConnectionLogs.Add($"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}\n");
+                {
+                    var addr = destIp.Contains(':') ? $"[{destIp}]" : destIp;
+                    _pendingConnectionLogs.Add($"[{DateTime.Now:HH:mm:ss}] {processName} (PID:{pid}) -> {addr}:{destPort} via {proxyInfo}\n");
+                }
             };
 
             _connectionLogTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
