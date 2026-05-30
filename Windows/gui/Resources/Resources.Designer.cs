@@ -455,6 +455,7 @@ namespace ProxyBridge.GUI.Resources {
         internal static string ProtocolTCP => ResourceManager.GetString("ProtocolTCP", resourceCulture);
         internal static string ProtocolUDP => ResourceManager.GetString("ProtocolUDP", resourceCulture);
         internal static string ProtocolBoth => ResourceManager.GetString("ProtocolBoth", resourceCulture);
+        internal static string UDPProxyNote => ResourceManager.GetString("UDPProxyNote", resourceCulture);
         internal static string ActionProxy => ResourceManager.GetString("ActionProxy", resourceCulture);
         internal static string ActionDirect => ResourceManager.GetString("ActionDirect", resourceCulture);
         internal static string ActionBlock => ResourceManager.GetString("ActionBlock", resourceCulture);

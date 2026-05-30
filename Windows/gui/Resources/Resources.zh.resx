@@ -271,6 +271,9 @@
   <data name="ProtocolBoth" xml:space="preserve">
     <value>两者 (TCP + UDP)</value>
   </data>
+  <data name="UDPProxyNote" xml:space="preserve">
+    <value>⚠ UDP 仅支持 SOCKS5 代理。并非所有 SOCKS5 代理默认支持 UDP。SOCKS5 UDP 支持并不保证支持 QUIC 或 HTTP/3 —— 请单独确认您的代理是否支持这些协议。</value>
+  </data>
   <data name="ActionProxy" xml:space="preserve">
     <value>代理</value>
   </data>

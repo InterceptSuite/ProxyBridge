@@ -132,6 +132,7 @@ public class Loc : INotifyPropertyChanged
     public string ProtocolTCP => Resources.Resources.ProtocolTCP;
     public string ProtocolUDP => Resources.Resources.ProtocolUDP;
     public string ProtocolBoth => Resources.Resources.ProtocolBoth;
+    public string UDPProxyNote => Resources.Resources.UDPProxyNote;
     public string ActionProxy => Resources.Resources.ActionProxy;
     public string ActionDirect => Resources.Resources.ActionDirect;
     public string ActionBlock => Resources.Resources.ActionBlock;

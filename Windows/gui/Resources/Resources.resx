@@ -270,6 +270,9 @@
   <data name="ProtocolBoth" xml:space="preserve">
     <value>Both (TCP + UDP)</value>
   </data>
+  <data name="UDPProxyNote" xml:space="preserve">
+    <value>⚠ UDP only works with SOCKS5 proxy. Not all SOCKS5 proxies support UDP by default. SOCKS5 UDP support does not guarantee QUIC or HTTP/3 support, verify your proxy supports these protocols separately.</value>
+  </data>
   <data name="ActionProxy" xml:space="preserve">
     <value>PROXY</value>
   </data>

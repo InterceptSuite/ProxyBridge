@@ -177,6 +177,11 @@
                         <ComboBoxItem Content="SOCKS5" Tag="SOCKS5"/>
                         <ComboBoxItem Content="HTTP" Tag="HTTP"/>
                     </ComboBox>
+                    <TextBlock Text="{Binding Loc.UDPProxyNote}"
+                               FontSize="11"
+                               Foreground="#FFCC9900"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0"/>
                 </StackPanel>
 
                 <StackPanel Spacing="6">
