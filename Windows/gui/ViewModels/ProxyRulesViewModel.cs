@@ -97,6 +97,13 @@ public class ProxyRulesViewModel : ViewModelBase
     public void SetWindow(Window window)
     {
         _window = window;
+        window.Closed += (_, _) => Cleanup();
+    }
+
+    public void Cleanup()
+    {
+        foreach (var rule in ProxyRules)
+            rule.PropertyChanged -= Rule_PropertyChanged;
     }
 
     public bool MoveRuleToPosition(uint ruleId, uint newPosition)

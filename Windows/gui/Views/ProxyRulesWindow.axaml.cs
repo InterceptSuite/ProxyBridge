@@ -57,13 +57,19 @@ public partial class ProxyRulesWindow : Window
         }
     }
 
+    private ProxyRulesViewModel? _boundViewModel;
+
     private void ProxyRulesWindow_DataContextChanged(object? sender, EventArgs e)
     {
-        if (DataContext is ProxyRulesViewModel vm)
-        {
-            vm.PropertyChanged += ViewModel_PropertyChanged;
+        if (_boundViewModel != null)
+            _boundViewModel.PropertyChanged -= ViewModel_PropertyChanged;
 
-            UpdateComboBoxSelections(vm);
+        _boundViewModel = DataContext as ProxyRulesViewModel;
+
+        if (_boundViewModel != null)
+        {
+            _boundViewModel.PropertyChanged += ViewModel_PropertyChanged;
+            UpdateComboBoxSelections(_boundViewModel);
         }
     }
 

@@ -8,12 +8,18 @@ namespace ProxyBridge.GUI.Views;
 public partial class ProxySettingsWindow : Window
 {
     private bool _isUpdatingFromViewModel = false;
+    private ProxySettingsViewModel? _boundViewModel;
 
     public ProxySettingsWindow()
     {
         InitializeComponent();
 
         this.DataContextChanged += OnDataContextChanged;
+        this.Closed += (_, _) =>
+        {
+            if (_boundViewModel != null)
+                _boundViewModel.PropertyChanged -= ViewModel_PropertyChanged;
+        };
 
         this.Opened += (s, e) =>
         {
@@ -24,9 +30,14 @@ public partial class ProxySettingsWindow : Window
 
     private void OnDataContextChanged(object? sender, System.EventArgs e)
     {
-        if (DataContext is ProxySettingsViewModel vm)
+        if (_boundViewModel != null)
+            _boundViewModel.PropertyChanged -= ViewModel_PropertyChanged;
+
+        _boundViewModel = DataContext as ProxySettingsViewModel;
+
+        if (_boundViewModel != null)
         {
-            vm.PropertyChanged += ViewModel_PropertyChanged;
+            _boundViewModel.PropertyChanged += ViewModel_PropertyChanged;
 
             var editComboBox = this.FindControl<ComboBox>("EditTypeComboBox");
             if (editComboBox != null)
