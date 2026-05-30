@@ -260,7 +260,7 @@
     <value>示例: iexplore.exe; "C:\某个应用.exe"; fire*.exe; *.bin</value>
   </data>
   <data name="ExampleTargetHosts" xml:space="preserve">
-    <value>示例: 127.0.0.1; 192.168.1.*; 10.1.0.0-10.5.255.255</value>
+    <value>示例: 127.0.0.1; 192.168.1.*; 10.1.0.0-10.5.255.255; ::1; 2001:db8::/32; fe80::1-fe80::ff</value>
   </data>
   <data name="ExampleTargetPorts" xml:space="preserve">
     <value>示例: 80; 8000-9000; 3128</value>

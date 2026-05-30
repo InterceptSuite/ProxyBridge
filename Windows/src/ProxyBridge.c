@@ -330,7 +330,8 @@ static DWORD get_process_id_from_udp_connection_v6(const UINT8 src_ip6[16], UINT
 static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
 static RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
 static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id);
-static RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id);
+static RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id);
+static RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
 static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id);
 static void add_connection_v6(UINT16 src_port, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id);
 static BOOL get_connection_full_v6(UINT16 src_port, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id);
@@ -441,7 +442,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     RuleAction action6u;
                     DWORD pid6u = 0;
                     UINT32 pcid6u = 0;
-                    action6u = check_process_rule_v6((const UINT8*)ipv6_header->SrcAddr, sp, dp, TRUE, &pid6u, &pcid6u);
+                    action6u = check_process_rule_v6((const UINT8*)ipv6_header->SrcAddr, sp, (const UINT8*)ipv6_header->DstAddr, dp, TRUE, &pid6u, &pcid6u);
 
                     if (action6u == RULE_ACTION_PROXY && !g_localhost_via_proxy)
                     {
@@ -593,7 +594,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 RuleAction action6;
                 DWORD pid6 = 0;
                 UINT32 proxy_config_id6 = 0;
-                action6 = check_process_rule_v6((const UINT8*)ipv6_header->SrcAddr, sp, dp, FALSE, &pid6, &proxy_config_id6);
+                action6 = check_process_rule_v6((const UINT8*)ipv6_header->SrcAddr, sp, (const UINT8*)ipv6_header->DstAddr, dp, FALSE, &pid6, &proxy_config_id6);
 
                 // ::1 IPv6 loopback — use  same "Localhost via Proxy" toggle as IPv4 127.
                 if (action6 == RULE_ACTION_PROXY && !g_localhost_via_proxy)
@@ -1298,7 +1299,7 @@ static BOOL is_ipv6_multicast_or_linklocal(const UINT8 ip6[16])
     return FALSE;
 }
 
-static RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id)
+static RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id)
 {
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
@@ -1311,11 +1312,8 @@ static RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port
     if (!get_process_name_from_pid(pid, process_name, sizeof(process_name)))
         return RULE_ACTION_DIRECT;
 
-    // For IPv6 rule matching we pass dest_ip=0 so wildcard rules fire;
-    // specific IPv4 IP filters won't match IPv6 traffic, which is correct
-    // since users would configure separate rules for IPv6 if needed.
     UINT32 proxy_config_id = 0;
-    RuleAction action = match_rule(process_name, 0, dest_port, is_udp, &proxy_config_id);
+    RuleAction action = match_rule_v6(process_name, dest_ip6, dest_port, is_udp, &proxy_config_id);
 
     if (action == RULE_ACTION_PROXY)
     {
@@ -1480,6 +1478,88 @@ static BOOL ip_match_wrapper(const char *token, const void *data)
 static BOOL match_ip_list(const char *ip_list, UINT32 ip)
 {
     return parse_token_list(ip_list, ";", ip_match_wrapper, &ip);
+}
+
+// Match IPv6 pattern against a 16-byte address.
+// Supports: "*" (all), exact ("::1", "2001:db8::1"),
+//           CIDR  ("2001:db8::/32", "fe80::/10"),
+//           range ("2001:db8::1-2001:db8::ff").
+// IPv4 patterns (no ':') never match an IPv6 address.
+static BOOL match_ip_pattern_v6(const char *pattern, const UINT8 ip6[16])
+{
+    if (pattern == NULL || strcmp(pattern, "*") == 0)
+        return TRUE;
+
+    // IPv4-only pattern: cannot match IPv6
+    if (strchr(pattern, ':') == NULL)
+        return FALSE;
+
+    char pat_copy[128];
+    strncpy_s(pat_copy, sizeof(pat_copy), pattern, _TRUNCATE);
+
+    // CIDR notation, e.g. "2001:db8::/32"
+    char *slash = strchr(pat_copy, '/');
+    if (slash != NULL)
+    {
+        *slash = '\0';
+        int prefix_len = atoi(slash + 1);
+        if (prefix_len < 0 || prefix_len > 128)
+            return FALSE;
+
+        UINT8 network[16];
+        if (inet_pton(AF_INET6, pat_copy, network) != 1)
+            return FALSE;
+
+        int full_bytes = prefix_len / 8;
+        int rem_bits   = prefix_len % 8;
+
+        if (full_bytes > 0 && memcmp(ip6, network, full_bytes) != 0)
+            return FALSE;
+
+        if (rem_bits > 0)
+        {
+            UINT8 mask = (UINT8)(0xFF << (8 - rem_bits));
+            if ((ip6[full_bytes] & mask) != (network[full_bytes] & mask))
+                return FALSE;
+        }
+        return TRUE;
+    }
+
+    // Range notation: "2001:db8::1-2001:db8::ff"
+    // IPv6 addresses contain no '-', so the first '-' is unambiguously the separator.
+    char *dash = strchr(pat_copy, '-');
+    if (dash != NULL)
+    {
+        *dash = '\0';
+        const char *end_str = dash + 1;
+
+        UINT8 start6[16], end6[16];
+        if (inet_pton(AF_INET6, pat_copy, start6) != 1 ||
+            inet_pton(AF_INET6, end_str,   end6)   != 1)
+            return FALSE;
+
+        // inet_pton produces network byte order (big-endian), so memcmp
+        // gives correct numeric ordering for IPv6 addresses.
+        return (memcmp(ip6, start6, 16) >= 0 &&
+                memcmp(ip6, end6,   16) <= 0);
+    }
+
+    // Exact IPv6 address match
+    UINT8 addr6[16];
+    if (inet_pton(AF_INET6, pattern, addr6) != 1)
+        return FALSE;
+    return memcmp(ip6, addr6, 16) == 0;
+}
+
+static BOOL ip_match_wrapper_v6(const char *token, const void *data)
+{
+    return match_ip_pattern_v6(token, (const UINT8*)data);
+}
+
+// Match IPv6 address against a semicolon-separated host list
+static BOOL match_ip_list_v6(const char *ip_list, const UINT8 ip6[16])
+{
+    return parse_token_list(ip_list, ";", ip_match_wrapper_v6, ip6);
 }
 
 static BOOL port_match_wrapper(const char *token, const void *data)
@@ -1722,6 +1802,76 @@ static RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 de
     }
 
     // No rule matched at all
+    if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
+    return RULE_ACTION_DIRECT;
+}
+
+// IPv6 variant of match_rule — uses match_ip_list_v6 for host patterns.
+// Supports exact addresses ("::1"), CIDR ("2001:db8::/32"), and wildcards ("*").
+// IPv4-format patterns in target_hosts are silently skipped for IPv6 traffic.
+static RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
+{
+    PROCESS_RULE *rule = rules_list;
+    PROCESS_RULE *wildcard_rule = NULL;
+
+    while (rule != NULL)
+    {
+        if (!rule->enabled)
+        {
+            rule = rule->next;
+            continue;
+        }
+
+        if (rule->protocol != RULE_PROTOCOL_BOTH)
+        {
+            if (rule->protocol == RULE_PROTOCOL_TCP && is_udp) { rule = rule->next; continue; }
+            if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp) { rule = rule->next; continue; }
+        }
+
+        BOOL is_wildcard_process = (strcmp(rule->process_name, "*") == 0 || strcmp(rule->process_name, "ANY") == 0);
+
+        if (is_wildcard_process)
+        {
+            BOOL has_ip_filter   = (strcmp(rule->target_hosts, "*") != 0);
+            BOOL has_port_filter = (strcmp(rule->target_ports, "*") != 0);
+
+            if (has_ip_filter || has_port_filter)
+            {
+                if (match_ip_list_v6(rule->target_hosts, dest_ip6) &&
+                    match_port_list(rule->target_ports, dest_port))
+                {
+                    if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
+                    return rule->action;
+                }
+                rule = rule->next;
+                continue;
+            }
+
+            if (wildcard_rule == NULL)
+                wildcard_rule = rule;
+            rule = rule->next;
+            continue;
+        }
+
+        if (match_process_list(rule->process_name, process_name))
+        {
+            if (match_ip_list_v6(rule->target_hosts, dest_ip6) &&
+                match_port_list(rule->target_ports, dest_port))
+            {
+                if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
+                return rule->action;
+            }
+        }
+
+        rule = rule->next;
+    }
+
+    if (wildcard_rule != NULL)
+    {
+        if (out_proxy_config_id != NULL) *out_proxy_config_id = wildcard_rule->proxy_config_id;
+        return wildcard_rule->action;
+    }
+
     if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
     return RULE_ACTION_DIRECT;
 }

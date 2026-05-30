@@ -259,7 +259,7 @@
     <value>Example: iexplore.exe; "C:\some app.exe"; fire*.exe; *.bin</value>
   </data>
   <data name="ExampleTargetHosts" xml:space="preserve">
-    <value>Example: 127.0.0.1; 192.168.1.*; 10.1.0.0-10.5.255.255</value>
+    <value>Example: 127.0.0.1; 192.168.1.*; 10.1.0.0-10.5.255.255; ::1; 2001:db8::/32; fe80::1-fe80::ff</value>
   </data>
   <data name="ExampleTargetPorts" xml:space="preserve">
     <value>Example: 80; 8000-9000; 3128</value>
