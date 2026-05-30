@@ -7,9 +7,15 @@ on:
     branches: [ main, dev ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
 
     steps:
     - name: Checkout code
