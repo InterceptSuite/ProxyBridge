@@ -92,35 +92,75 @@ public static class ProxyBridgeNative
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_MoveRuleToPosition(uint ruleId, uint newPosition);
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    public static extern uint ProxyBridge_AddProxyConfig(
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ProxyBridge_AddProxyConfig")]
+    private static extern uint ProxyBridge_AddProxyConfig_Native(
         ProxyType type,
         [MarshalAs(UnmanagedType.LPStr)] string proxyIp,
         ushort proxyPort,
         [MarshalAs(UnmanagedType.LPStr)] string username,
         [MarshalAs(UnmanagedType.LPStr)] string password);
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static uint ProxyBridge_AddProxyConfig(
+        ProxyType type,
+        string proxyIp,
+        ushort proxyPort,
+        string username,
+        string password)
+    {
+        if (string.IsNullOrWhiteSpace(proxyIp))
+            throw new ArgumentException("Proxy IP must not be null or empty.", nameof(proxyIp));
+        username ??= string.Empty;
+        password ??= string.Empty;
+        return ProxyBridge_AddProxyConfig_Native(type, proxyIp, proxyPort, username, password);
+    }
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ProxyBridge_EditProxyConfig")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool ProxyBridge_EditProxyConfig(
+    private static extern bool ProxyBridge_EditProxyConfig_Native(
         uint configId,
         ProxyType type,
         [MarshalAs(UnmanagedType.LPStr)] string proxyIp,
         ushort proxyPort,
         [MarshalAs(UnmanagedType.LPStr)] string username,
         [MarshalAs(UnmanagedType.LPStr)] string password);
+
+    public static bool ProxyBridge_EditProxyConfig(
+        uint configId,
+        ProxyType type,
+        string proxyIp,
+        ushort proxyPort,
+        string username,
+        string password)
+    {
+        username ??= string.Empty;
+        password ??= string.Empty;
+        return ProxyBridge_EditProxyConfig_Native(configId, type, proxyIp, proxyPort, username, password);
+    }
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_DeleteProxyConfig(uint configId);
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-    public static extern int ProxyBridge_TestProxyConfig(
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, EntryPoint = "ProxyBridge_TestProxyConfig")]
+    private static extern int ProxyBridge_TestProxyConfig_Native(
         uint configId,
         [MarshalAs(UnmanagedType.LPStr)] string targetHost,
         ushort targetPort,
         [MarshalAs(UnmanagedType.LPStr)] System.Text.StringBuilder resultBuffer,
         UIntPtr bufferSize);
+
+    public static int ProxyBridge_TestProxyConfig(
+        uint configId,
+        string targetHost,
+        ushort targetPort,
+        System.Text.StringBuilder resultBuffer,
+        UIntPtr bufferSize)
+    {
+        ArgumentNullException.ThrowIfNull(targetHost);
+        ArgumentNullException.ThrowIfNull(resultBuffer);
+        var effectiveSize = bufferSize == UIntPtr.Zero ? (UIntPtr)resultBuffer.Capacity : bufferSize;
+        return ProxyBridge_TestProxyConfig_Native(configId, targetHost, targetPort, resultBuffer, effectiveSize);
+    }
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern void ProxyBridge_SetLogCallback(LogCallback callback);

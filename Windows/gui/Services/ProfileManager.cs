@@ -95,8 +95,8 @@ public static class ProfileManager
 
     private static readonly string ProfilesDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "ProxyBridge",
-        "profiles"
+        "ProxyBridge".TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+        "profiles".TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
     );
 
     public static string[] GetProfileNames()
@@ -208,7 +208,7 @@ public static class ProfileManager
     }
 
     private static string GetProfilePath(string name)
-        => Path.Combine(ProfilesDirectory, name + ProfileExtension);
+        => Path.Combine(ProfilesDirectory, Path.GetFileName(name) + ProfileExtension);
 
     private static void EnsureDirectory()
     {

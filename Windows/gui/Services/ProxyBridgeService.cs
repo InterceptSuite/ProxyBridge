@@ -55,6 +55,11 @@ public class ProxyBridgeService : IDisposable
             ? ProxyBridgeNative.ProxyType.HTTP
             : ProxyBridgeNative.ProxyType.SOCKS5;
 
+        return AddProxyConfigCore(proxyType, ip, port, username, password);
+    }
+
+    private static uint AddProxyConfigCore(ProxyBridgeNative.ProxyType proxyType, string ip, ushort port, string username, string password)
+    {
         return ProxyBridgeNative.ProxyBridge_AddProxyConfig(proxyType, ip, port, username, password);
     }
 
