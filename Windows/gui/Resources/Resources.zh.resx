@@ -32,6 +32,9 @@
   <data name="MenuEnableTrafficLogging" xml:space="preserve">
     <value>启用流量日志</value>
   </data>
+  <data name="MenuHideDirectConnections" xml:space="preserve">
+    <value>隐藏直连连接</value>
+  </data>
   <data name="MenuSettings" xml:space="preserve">
     <value>设置</value>
   </data>

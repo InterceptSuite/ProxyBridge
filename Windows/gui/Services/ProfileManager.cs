@@ -35,6 +35,7 @@ public class ProxyProfile
     public bool DnsViaProxy { get; set; } = true;
     public bool LocalhostViaProxy { get; set; } = false;
     public bool IsTrafficLoggingEnabled { get; set; } = true;
+    public bool HideDirectConnections { get; set; } = false;
     public string Language { get; set; } = "en";
     public bool CloseToTray { get; set; } = true;
     public List<ProxyConfigEntry> ProxyConfigs { get; set; } = new();

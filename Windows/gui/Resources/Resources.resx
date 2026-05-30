@@ -32,6 +32,9 @@
   <data name="MenuEnableTrafficLogging" xml:space="preserve">
     <value>Enable Traffic Logging</value>
   </data>
+  <data name="MenuHideDirectConnections" xml:space="preserve">
+    <value>Hide Direct Connections</value>
+  </data>
   <data name="MenuSettings" xml:space="preserve">
     <value>Settings</value>
   </data>

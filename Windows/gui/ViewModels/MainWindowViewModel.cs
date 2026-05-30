@@ -74,6 +74,9 @@ public class MainWindowViewModel : ViewModelBase
                 if (!_isTrafficLoggingEnabled)
                     return;
 
+                if (_hideDirectConnections && proxyInfo.StartsWith("Direct"))
+                    return;
+
                 if (_connectionLogTimer?.IsEnabled == false)
                     _connectionLogTimer.Start();
 
@@ -309,6 +312,17 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
+    private bool _hideDirectConnections = false;
+    public bool HideDirectConnections
+    {
+        get => _hideDirectConnections;
+        set
+        {
+            if (SetProperty(ref _hideDirectConnections, value))
+                SaveCurrentProfileAsync();
+        }
+    }
+
     private bool _isTrafficLoggingEnabled = true;
     public bool IsTrafficLoggingEnabled
     {
@@ -385,6 +399,7 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand ToggleDnsViaProxyCommand { get; }
     public ICommand ToggleLocalhostViaProxyCommand { get; }
     public ICommand ToggleTrafficLoggingCommand { get; }
+    public ICommand ToggleHideDirectConnectionsCommand { get; }
     public ICommand ToggleCloseToTrayCommand { get; }
     public ICommand ToggleStartWithWindowsCommand { get; }
     public ICommand CloseDialogCommand { get; }
@@ -501,6 +516,7 @@ public class MainWindowViewModel : ViewModelBase
         ToggleDnsViaProxyCommand = new RelayCommand(() => { DnsViaProxy = !DnsViaProxy; });
         ToggleLocalhostViaProxyCommand = new RelayCommand(() => { LocalhostViaProxy = !LocalhostViaProxy; });
         ToggleTrafficLoggingCommand = new RelayCommand(() => { IsTrafficLoggingEnabled = !IsTrafficLoggingEnabled; });
+        ToggleHideDirectConnectionsCommand = new RelayCommand(() => { HideDirectConnections = !HideDirectConnections; });
 
         ToggleCloseToTrayCommand = new RelayCommand(() =>
         {
@@ -890,6 +906,9 @@ public class MainWindowViewModel : ViewModelBase
             _isTrafficLoggingEnabled = profile.IsTrafficLoggingEnabled;
             OnPropertyChanged(nameof(IsTrafficLoggingEnabled));
 
+            _hideDirectConnections = profile.HideDirectConnections;
+            OnPropertyChanged(nameof(HideDirectConnections));
+
             if (!string.IsNullOrWhiteSpace(profile.Language))
             {
                 _currentLanguage = profile.Language;
@@ -978,6 +997,9 @@ public class MainWindowViewModel : ViewModelBase
             OnPropertyChanged(nameof(IsTrafficLoggingEnabled));
             ProxyBridgeService.SetTrafficLoggingEnabled(profile.IsTrafficLoggingEnabled);
         }
+
+        _hideDirectConnections = profile.HideDirectConnections;
+        OnPropertyChanged(nameof(HideDirectConnections));
 
         if (!string.IsNullOrWhiteSpace(profile.Language))
         {
@@ -1069,6 +1091,7 @@ public class MainWindowViewModel : ViewModelBase
             DnsViaProxy = _dnsViaProxy,
             LocalhostViaProxy = _localhostViaProxy,
             IsTrafficLoggingEnabled = _isTrafficLoggingEnabled,
+            HideDirectConnections = _hideDirectConnections,
             Language = _currentLanguage,
             CloseToTray = _closeToTray,
             ProxyConfigs = ProxyConfigs.Select(pc => new ProxyConfigEntry
