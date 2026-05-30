@@ -11,6 +11,10 @@ namespace ProxyBridge.GUI.ViewModels;
 
 public class ProxySettingsViewModel : ViewModelBase
 {
+    private static readonly Regex _domainRegex =
+        new(@"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$",
+            RegexOptions.Compiled);
+
     private readonly Loc _loc = Loc.Instance;
     public Loc Loc => _loc;
 
@@ -382,7 +386,6 @@ public class ProxySettingsViewModel : ViewModelBase
     private static bool IsValidIpOrDomain(string input)
     {
         if (IPAddress.TryParse(input, out _)) return true;
-        var domainRegex = new Regex(@"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$");
-        return domainRegex.IsMatch(input);
+        return _domainRegex.IsMatch(input);
     }
 }

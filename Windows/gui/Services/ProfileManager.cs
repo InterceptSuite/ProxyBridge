@@ -90,6 +90,9 @@ public static class ProfileManager
     public const string ProfileExtension = ".pbprofile";
     public const string DefaultProfileName = "Default";
 
+    private static readonly HashSet<char> _invalidFileNameChars =
+        new(Path.GetInvalidFileNameChars());
+
     private static readonly string ProfilesDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ProxyBridge",
@@ -201,8 +204,7 @@ public static class ProfileManager
     public static bool IsValidProfileName(string name)
     {
         if (string.IsNullOrWhiteSpace(name) || name.Length > 64) return false;
-        var invalid = Path.GetInvalidFileNameChars();
-        return !name.Any(c => invalid.Contains(c));
+        return !name.Any(c => _invalidFileNameChars.Contains(c));
     }
 
     private static string GetProfilePath(string name)
@@ -218,8 +220,7 @@ public static class ProfileManager
 
     private static string SanitizeProfileName(string name)
     {
-        var invalid = Path.GetInvalidFileNameChars();
-        var sanitized = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim();
+        var sanitized = new string(name.Select(c => _invalidFileNameChars.Contains(c) ? '_' : c).ToArray()).Trim();
         if (string.IsNullOrWhiteSpace(sanitized)) return "Imported";
         return sanitized.Length <= 64 ? sanitized : sanitized[..64];
     }

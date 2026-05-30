@@ -19,13 +19,15 @@ internal partial class SourceGenerationContext : JsonSerializerContext
 
 public class UpdateService
 {
-    private readonly HttpClient _httpClient;
+    private static readonly HttpClient _httpClient;
+    private static readonly Version _currentVersion;
     private const string GitHubApiUrl = "https://api.github.com/repos/InterceptSuite/ProxyBridge/releases/latest";
 
-    public UpdateService()
+    static UpdateService()
     {
         _httpClient = new HttpClient();
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "ProxyBridge-UpdateChecker");
+        _currentVersion = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 0, 0);
     }
 
     public async Task<VersionInfo> CheckForUpdatesAsync()
@@ -76,11 +78,7 @@ public class UpdateService
         }
     }
 
-    private Version GetCurrentVersion()
-    {
-        var version = Assembly.GetExecutingAssembly().GetName().Version;
-        return version ?? new Version(1, 0, 0);
-    }
+    private Version GetCurrentVersion() => _currentVersion;
 
     private Version ParseVersion(string? tagName)
     {
@@ -167,10 +165,7 @@ public class UpdateService
         }
     }
 
-    public void Dispose()
-    {
-        _httpClient?.Dispose();
-    }
+    public void Dispose() { }
 }
 
 public class VersionInfo

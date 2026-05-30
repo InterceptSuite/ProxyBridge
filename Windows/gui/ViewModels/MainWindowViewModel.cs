@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Windows.Input;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using Avalonia.Controls;
@@ -51,6 +52,7 @@ public class MainWindowViewModel : ViewModelBase
     private DispatcherTimer? _activityLogTimer;
     private int _connectionLogLineCount = 0;
     private int _activityLogLineCount = 0;
+    private CancellationTokenSource? _saveCts;
 
     public void SetMainWindow(Window window)
     {
@@ -842,6 +844,7 @@ public class MainWindowViewModel : ViewModelBase
 
     public void Cleanup()
     {
+        try { _saveCts?.Cancel(); _saveCts?.Dispose(); _saveCts = null; } catch { }
         try { SaveCurrentProfile(); } catch { }
         try { _proxyService?.Dispose(); _proxyService = null; } catch { }
     }
@@ -1112,9 +1115,22 @@ public class MainWindowViewModel : ViewModelBase
 
     private void SaveCurrentProfileAsync()
     {
+        var oldCts = _saveCts;
+        _saveCts = new CancellationTokenSource();
+        oldCts?.Cancel();
+        oldCts?.Dispose();
+        var token = _saveCts.Token;
         var name = _activeProfileName;
         var profile = BuildCurrentProfile();
-        Task.Run(() => ProfileManager.SaveProfile(name, profile));
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(150, token);
+                ProfileManager.SaveProfile(name, profile);
+            }
+            catch (OperationCanceledException) { }
+        });
     }
 
     private ProxyProfile BuildCurrentProfile()
@@ -1239,7 +1255,11 @@ public class ProxyRule : ViewModelBase
     public string ProxyConfigDisplay
     {
         get => _proxyConfigDisplay;
-        set => SetProperty(ref _proxyConfigDisplay, value);
+        set
+        {
+            if (SetProperty(ref _proxyConfigDisplay, value))
+                OnPropertyChanged(nameof(ActionDisplay));
+        }
     }
 
     public string ActionDisplay => Action == "PROXY"

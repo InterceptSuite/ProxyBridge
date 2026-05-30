@@ -3,14 +3,16 @@
         xmlns:vm="using:ProxyBridge.GUI.ViewModels"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="700" d:DesignHeight="550"
+        mc:Ignorable="d" d:DesignWidth="560" d:DesignHeight="600"
         x:Class="ProxyBridge.GUI.Views.ProxySettingsWindow"
         x:DataType="vm:ProxySettingsViewModel"
         x:CompileBindings="True"
         Title="{Binding Loc.ProxySettingsTitle}"
         Icon="/Assets/logo.ico"
-        Width="680" Height="420"
-        MinWidth="520" MinHeight="300"
+        Width="560" Height="520"
+        MinWidth="440" MinHeight="300"
+        MaxHeight="700"
+        SizeToContent="Height"
         CanResize="True"
         Background="#FF2D2D30"
         WindowStartupLocation="CenterOwner">
@@ -117,45 +119,67 @@
 
             <!-- Test Panel at bottom (shared) -->
             <Border Grid.Row="2"
-                    Background="#FF252526"
-                    BorderBrush="#FF3F3F46"
-                    BorderThickness="0,1,0,0"
-                    Padding="20,16"
+                    Background="#FF1E1E1E"
+                    BorderBrush="#FF007ACC"
+                    BorderThickness="0,2,0,0"
                     IsVisible="{Binding IsTestViewOpen}">
-                <StackPanel Spacing="10">
-                    <Grid ColumnDefinitions="*,Auto">
-                        <TextBlock Text="{Binding Loc.TestConnectionTitle}"
+                <!-- Header bar -->
+                <StackPanel>
+                    <Grid ColumnDefinitions="Auto,*,Auto"
+                          Background="#FF252526"
+                          Margin="0">
+                        <TextBlock Grid.Column="0"
+                                   Text="🔗"
                                    FontSize="14"
+                                   VerticalAlignment="Center"
+                                   Margin="16,10,8,10"/>
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding Loc.TestConnectionTitle}"
+                                   FontSize="13"
                                    FontWeight="SemiBold"
                                    Foreground="#FFE0E0E0"
                                    VerticalAlignment="Center"/>
-                        <Button Grid.Column="1"
-                                Content="✕"
+                        <Button Grid.Column="2"
+                                Content="✕  Close"
                                 Classes="secondary"
                                 Command="{Binding CloseTestPanelCommand}"
-                                Width="32" Height="32" Padding="0"/>
+                                FontSize="12"
+                                Padding="10,6"
+                                Margin="8,6"/>
                     </Grid>
-                    <Grid ColumnDefinitions="3*,2*,Auto">
-                        <TextBox Grid.Column="0" Text="{Binding TestTargetHost}" Watermark="Target host" Margin="0,0,8,0"/>
-                        <TextBox Grid.Column="1" Text="{Binding TestTargetPort}" Watermark="Port" Margin="0,0,8,0"/>
-                        <Button Grid.Column="2" Content="{Binding Loc.StartTestButton}"
-                                Command="{Binding StartTestCommand}"
-                                IsEnabled="{Binding !IsTesting}"/>
-                    </Grid>
-                    <Border Background="#FF1E1E1E"
-                            BorderBrush="#FF3F3F46"
-                            BorderThickness="1"
-                            Padding="10"
-                            MinHeight="80"
-                            MaxHeight="150">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
-                            <TextBlock Text="{Binding TestOutput}"
-                                       FontFamily="Consolas,monospace"
-                                       FontSize="12"
-                                       Foreground="#FFE0E0E0"
-                                       TextWrapping="Wrap"/>
-                        </ScrollViewer>
-                    </Border>
+                    <StackPanel Spacing="8" Margin="16,10,16,14">
+                        <Grid ColumnDefinitions="3*,120,Auto">
+                            <TextBox Grid.Column="0"
+                                     Text="{Binding TestTargetHost}"
+                                     Watermark="Target host (e.g. google.com)"
+                                     Margin="0,0,8,0"/>
+                            <TextBox Grid.Column="1"
+                                     Text="{Binding TestTargetPort}"
+                                     Watermark="Port"
+                                     Margin="0,0,8,0"/>
+                            <Button Grid.Column="2"
+                                    Content="{Binding Loc.StartTestButton}"
+                                    Command="{Binding StartTestCommand}"
+                                    IsEnabled="{Binding !IsTesting}"
+                                    MinWidth="100"/>
+                        </Grid>
+                        <Border Background="#FF2D2D30"
+                                BorderBrush="#FF3F3F46"
+                                BorderThickness="1"
+                                CornerRadius="3"
+                                Padding="10,8"
+                                MinHeight="60"
+                                MaxHeight="130"
+                                IsVisible="{Binding TestOutput, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <TextBlock Text="{Binding TestOutput}"
+                                           FontFamily="Consolas,monospace"
+                                           FontSize="12"
+                                           Foreground="#FFD4D4D4"
+                                           TextWrapping="Wrap"/>
+                            </ScrollViewer>
+                        </Border>
+                    </StackPanel>
                 </StackPanel>
             </Border>
         </Grid>

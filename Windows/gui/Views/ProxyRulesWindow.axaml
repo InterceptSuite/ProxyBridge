@@ -4,14 +4,14 @@
         xmlns:views="using:ProxyBridge.GUI.Views"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="700" d:DesignHeight="550"
+        mc:Ignorable="d" d:DesignWidth="1100" d:DesignHeight="550"
         x:Class="ProxyBridge.GUI.Views.ProxyRulesWindow"
         x:DataType="vm:ProxyRulesViewModel"
         x:CompileBindings="True"
         Title="{Binding Loc.ProxyRulesTitle}"
         Icon="/Assets/logo.ico"
-        Width="1000" Height="550"
-        MinWidth="900" MinHeight="400"
+        Width="1100" Height="550"
+        MinWidth="980" MinHeight="400"
         Background="#FF2D2D30"
         WindowStartupLocation="CenterOwner">
 

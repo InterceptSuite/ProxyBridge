@@ -13,25 +13,15 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Setup .NET
-      uses: actions/setup-dotnet@v4
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
       with:
         dotnet-version: '10.0.x'
 
-    - name: Setup MSYS2 (for GCC)
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: MINGW64
-        update: true
-        install: >-
-          mingw-w64-x86_64-gcc
-          mingw-w64-x86_64-toolchain
-
-    - name: Add MSYS2 to PATH
-      run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      shell: pwsh
+    # No MSVC setup action needed — compile.ps1 auto-detects cl.exe via vswhere.exe,
+    # which is pre-installed on every windows-latest runner.
 
     - name: Install NSIS
       run: |
@@ -42,7 +32,13 @@ jobs:
       run: |
         $nsisPluginDir = "C:\Program Files (x86)\NSIS\Plugins\x86-unicode"
         $url = "https://nsis.sourceforge.io/mediawiki/images/7/7f/EnVar_plugin.zip"
-        Invoke-WebRequest -Uri $url -OutFile "EnVar.zip"
+        $expectedHash = "E9AA92DE351345ED82795251D838F1AE9041BA35AF9D381A5780C7843B01F56A"
+        Invoke-WebRequest -Uri $url -OutFile "EnVar.zip" -UseBasicParsing
+        $actualHash = (Get-FileHash "EnVar.zip" -Algorithm SHA256).Hash
+        if ($actualHash -ne $expectedHash) {
+          Write-Error "EnVar.zip SHA256 mismatch! Expected: $expectedHash  Got: $actualHash"
+          exit 1
+        }
         Expand-Archive -Path "EnVar.zip" -DestinationPath "EnVar"
         Copy-Item "EnVar\Plugins\x86-unicode\EnVar.dll" -Destination $nsisPluginDir -Force
         Write-Host "EnVar plugin installed successfully"
@@ -50,8 +46,14 @@ jobs:
 
     - name: Download WinDivert
       run: |
-        $url = "https://github.com/basil00/Divert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip"
-        Invoke-WebRequest -Uri $url -OutFile "WinDivert.zip"
+        $url = "https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip"
+        $expectedHash = "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15"
+        Invoke-WebRequest -Uri $url -OutFile "WinDivert.zip" -UseBasicParsing
+        $actualHash = (Get-FileHash "WinDivert.zip" -Algorithm SHA256).Hash
+        if ($actualHash -ne $expectedHash) {
+          Write-Error "WinDivert.zip SHA256 mismatch! Expected: $expectedHash  Got: $actualHash"
+          exit 1
+        }
         Expand-Archive -Path "WinDivert.zip" -DestinationPath "C:\"
       shell: pwsh
 
@@ -69,11 +71,11 @@ jobs:
     - name: Build project
       run: |
         cd Windows
-        .\compile.ps1 -NoSign -Compiler gcc
+        .\compile.ps1 -NoSign
       shell: pwsh
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: ProxyBridge-Build-${{ github.sha }}
         path: Windows/output/

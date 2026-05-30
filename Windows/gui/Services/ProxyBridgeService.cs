@@ -51,7 +51,7 @@ public class ProxyBridgeService : IDisposable
 
     public uint AddProxyConfig(string type, string ip, ushort port, string username, string password)
     {
-        var proxyType = type.ToUpper() == "HTTP"
+        var proxyType = string.Equals(type, "HTTP", StringComparison.OrdinalIgnoreCase)
             ? ProxyBridgeNative.ProxyType.HTTP
             : ProxyBridgeNative.ProxyType.SOCKS5;
 
@@ -60,7 +60,7 @@ public class ProxyBridgeService : IDisposable
 
     public bool EditProxyConfig(uint configId, string type, string ip, ushort port, string username, string password)
     {
-        var proxyType = type.ToUpper() == "HTTP"
+        var proxyType = string.Equals(type, "HTTP", StringComparison.OrdinalIgnoreCase)
             ? ProxyBridgeNative.ProxyType.HTTP
             : ProxyBridgeNative.ProxyType.SOCKS5;
 
@@ -81,20 +81,22 @@ public class ProxyBridgeService : IDisposable
 
     public uint AddRule(string processName, string targetHosts, string targetPorts, string protocol, string action, uint proxyConfigId = 0)
     {
-        var ruleAction = action.ToUpper() switch
-        {
-            "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
-            "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
-            _ => ProxyBridgeNative.RuleAction.PROXY
-        };
+        ProxyBridgeNative.RuleAction ruleAction;
+        if (string.Equals(action, "DIRECT", StringComparison.OrdinalIgnoreCase))
+            ruleAction = ProxyBridgeNative.RuleAction.DIRECT;
+        else if (string.Equals(action, "BLOCK", StringComparison.OrdinalIgnoreCase))
+            ruleAction = ProxyBridgeNative.RuleAction.BLOCK;
+        else
+            ruleAction = ProxyBridgeNative.RuleAction.PROXY;
 
-        var ruleProtocol = protocol.ToUpper() switch
-        {
-            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
-            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
-            "TCP+UDP" => ProxyBridgeNative.RuleProtocol.BOTH,
-            _ => ProxyBridgeNative.RuleProtocol.TCP
-        };
+        ProxyBridgeNative.RuleProtocol ruleProtocol;
+        if (string.Equals(protocol, "UDP", StringComparison.OrdinalIgnoreCase))
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.UDP;
+        else if (string.Equals(protocol, "BOTH", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(protocol, "TCP+UDP", StringComparison.OrdinalIgnoreCase))
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.BOTH;
+        else
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.TCP;
 
         return ProxyBridgeNative.ProxyBridge_AddRule(processName, targetHosts, targetPorts, ruleProtocol, ruleAction, proxyConfigId);
     }
@@ -116,20 +118,22 @@ public class ProxyBridgeService : IDisposable
 
     public bool EditRule(uint ruleId, string processName, string targetHosts, string targetPorts, string protocol, string action, uint proxyConfigId = 0)
     {
-        var ruleAction = action.ToUpper() switch
-        {
-            "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
-            "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
-            _ => ProxyBridgeNative.RuleAction.PROXY
-        };
+        ProxyBridgeNative.RuleAction ruleAction;
+        if (string.Equals(action, "DIRECT", StringComparison.OrdinalIgnoreCase))
+            ruleAction = ProxyBridgeNative.RuleAction.DIRECT;
+        else if (string.Equals(action, "BLOCK", StringComparison.OrdinalIgnoreCase))
+            ruleAction = ProxyBridgeNative.RuleAction.BLOCK;
+        else
+            ruleAction = ProxyBridgeNative.RuleAction.PROXY;
 
-        var ruleProtocol = protocol.ToUpper() switch
-        {
-            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
-            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
-            "TCP+UDP" => ProxyBridgeNative.RuleProtocol.BOTH,
-            _ => ProxyBridgeNative.RuleProtocol.TCP
-        };
+        ProxyBridgeNative.RuleProtocol ruleProtocol;
+        if (string.Equals(protocol, "UDP", StringComparison.OrdinalIgnoreCase))
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.UDP;
+        else if (string.Equals(protocol, "BOTH", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(protocol, "TCP+UDP", StringComparison.OrdinalIgnoreCase))
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.BOTH;
+        else
+            ruleProtocol = ProxyBridgeNative.RuleProtocol.TCP;
 
         return ProxyBridgeNative.ProxyBridge_EditRule(ruleId, processName, targetHosts, targetPorts, ruleProtocol, ruleAction, proxyConfigId);
     }
