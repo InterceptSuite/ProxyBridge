@@ -161,13 +161,10 @@ public class MainWindowViewModel : ViewModelBase
                     }
                 }
 
-                foreach (var rule in ProxyRules)
+                foreach (var rule in ProxyRules.Where(r => r.Action == "PROXY" && r.ProxyConfigId > 0))
                 {
-                    if (rule.Action == "PROXY" && rule.ProxyConfigId > 0)
-                    {
-                        var pc = ProxyConfigs.FirstOrDefault(p => p.Id == rule.ProxyConfigId);
-                        rule.ProxyConfigDisplay = pc?.DisplayName ?? "";
-                    }
+                    var pc = ProxyConfigs.FirstOrDefault(p => p.Id == rule.ProxyConfigId);
+                    rule.ProxyConfigDisplay = pc?.DisplayName ?? "";
                 }
             }
             else
@@ -878,13 +875,10 @@ public class MainWindowViewModel : ViewModelBase
             return log;
 
         var sb = new StringBuilder(log.Length);
-        foreach (var line in log.Split('\n'))
+        foreach (var line in log.Split('\n').Where(l => !l.Contains(" via Direct", StringComparison.OrdinalIgnoreCase)))
         {
-            if (!line.Contains(" via Direct", StringComparison.OrdinalIgnoreCase))
-            {
-                sb.Append(line);
-                sb.Append('\n');
-            }
+            sb.Append(line);
+            sb.Append('\n');
         }
         return sb.ToString();
     }
@@ -910,10 +904,7 @@ public class MainWindowViewModel : ViewModelBase
 
     private static int CountNewlines(string log)
     {
-        int count = 0;
-        foreach (char c in log)
-            if (c == '\n') count++;
-        return count;
+        return log.Count(c => c == '\n');
     }
 
     private void LoadConfiguration()
@@ -958,9 +949,8 @@ public class MainWindowViewModel : ViewModelBase
 
             if (profile.ProxyConfigs != null)
             {
-                foreach (var pc in profile.ProxyConfigs)
+                foreach (var pc in profile.ProxyConfigs.Where(pc => !string.IsNullOrWhiteSpace(pc.Host)))
                 {
-                    if (string.IsNullOrWhiteSpace(pc.Host)) continue;
                     ProxyConfigs.Add(new ProxyConfig
                     {
                         Id = pc.Id,
@@ -1049,9 +1039,9 @@ public class MainWindowViewModel : ViewModelBase
         }
 
         var configIdMap = new Dictionary<uint, uint>();
-        foreach (var pc in profile.ProxyConfigs ?? new List<ProxyConfigEntry>())
+        foreach (var pc in (profile.ProxyConfigs ?? Enumerable.Empty<ProxyConfigEntry>()).Where(pc => !string.IsNullOrWhiteSpace(pc.Host) && ushort.TryParse(pc.Port, out _)))
         {
-            if (string.IsNullOrWhiteSpace(pc.Host) || !ushort.TryParse(pc.Port, out ushort port)) continue;
+            ushort.TryParse(pc.Port, out ushort port);
 
             uint nativeId = _proxyService != null
                 ? _proxyService.AddProxyConfig(pc.Type, pc.Host, port, pc.Username ?? "", pc.Password ?? "")

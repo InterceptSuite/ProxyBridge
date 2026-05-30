@@ -2135,10 +2135,8 @@ static int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port,
     if (send(s, request, len, 0) != len) return -1;
 
     len = recv(s, response, sizeof(response) - 1, 0);
-    if (len <= 0) return -1;
+    if (len <= 0 || len >= (int)sizeof(response)) return -1;
     response[len] = '\0';
-
-    if (strncmp(response, "HTTP/1.", 7) != 0) return -1;
     char *code_start = strchr(response, ' ');
     if (!code_start || atoi(code_start + 1) != 200) return -1;
     return 0;
@@ -2212,7 +2210,7 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_
     }
 
     len = recv(s, response, sizeof(response) - 1, 0);
-    if (len <= 0)
+    if (len <= 0 || len >= (int)sizeof(response))
     {
         log_message("HTTP: Failed to receive response");
         return -1;
@@ -2401,10 +2399,10 @@ static BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg)
 static DWORD WINAPI udp_relay_server(LPVOID arg)
 {
     WSADATA wsa_data;
-    struct sockaddr_in local_addr, from_addr;
+    struct sockaddr_in local_addr = {0}, from_addr = {0};
     unsigned char recv_buf[MAXBUF];
     unsigned char send_buf[MAXBUF];
-    int recv_len, from_len;
+    int recv_len, from_len = 0;
 
     if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0)
         return 1;
@@ -2682,7 +2680,7 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
         // IPv6 UDP packets from application
         if (udp_relay_socket6 != INVALID_SOCKET && FD_ISSET(udp_relay_socket6, &read_fds))
         {
-            struct sockaddr_in6 from_addr6;
+            struct sockaddr_in6 from_addr6 = {0};
             int fl = sizeof(from_addr6);
             recv_len = recvfrom(udp_relay_socket6, (char*)recv_buf, sizeof(recv_buf), 0,
                                 (struct sockaddr*)&from_addr6, &fl);

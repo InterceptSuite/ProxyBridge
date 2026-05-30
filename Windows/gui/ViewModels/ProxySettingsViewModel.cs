@@ -1,5 +1,6 @@
 using System;
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Windows.Input;
@@ -295,9 +296,7 @@ public class ProxySettingsViewModel : ViewModelBase
 
     private ProxyConfig? FindConfig(uint configId)
     {
-        foreach (var c in _proxyConfigs)
-            if (c.Id == configId) return c;
-        return null;
+        return _proxyConfigs.FirstOrDefault(c => c.Id == configId);
     }
 
     private async System.Threading.Tasks.Task DeleteConfigAsync(ProxyConfig config)

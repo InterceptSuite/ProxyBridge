@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Linq;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using ProxyBridge.GUI.ViewModels;
@@ -62,15 +63,10 @@ public partial class ProxySettingsWindow : Window
         if (comboBox == null) return;
 
         _isUpdatingFromViewModel = true;
-        foreach (var obj in comboBox.Items)
-        {
-            if (obj is ComboBoxItem item && item.Tag is string tag &&
-                tag.Equals(typeTag, System.StringComparison.OrdinalIgnoreCase))
-            {
-                comboBox.SelectedItem = item;
-                break;
-            }
-        }
+        comboBox.SelectedItem = comboBox.Items
+            .OfType<ComboBoxItem>()
+            .FirstOrDefault(item => item.Tag is string tag &&
+                tag.Equals(typeTag, System.StringComparison.OrdinalIgnoreCase));
         _isUpdatingFromViewModel = false;
     }
 
