@@ -1,0 +1,138 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:ProxyBridge.GUI.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="700" d:DesignHeight="480"
+        x:Class="ProxyBridge.GUI.Views.LogFiltersWindow"
+        x:DataType="vm:LogFiltersViewModel"
+        x:CompileBindings="True"
+        Title="Log Filters"
+        Icon="/Assets/logo.ico"
+        Width="700" Height="460"
+        MinWidth="560" MinHeight="300"
+        Background="#FF2D2D30"
+        WindowStartupLocation="CenterOwner">
+
+    <DockPanel>
+        <!-- Header -->
+        <Border DockPanel.Dock="Top" Background="#FF1E1E1E" Padding="20,16"
+                BorderBrush="#FF3F3F46" BorderThickness="0,0,0,1">
+            <StackPanel Spacing="6">
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                    <TextBlock Text="🔽" FontSize="20" VerticalAlignment="Center"/>
+                    <TextBlock Text="Log Filters"
+                               FontSize="18"
+                               FontWeight="SemiBold"
+                               Foreground="#FFE0E0E0"
+                               VerticalAlignment="Center"/>
+                </StackPanel>
+                <TextBlock Text="{Binding Loc.LogFiltersDesc1}"
+                           FontSize="12"
+                           Foreground="#FF9E9E9E"
+                           TextWrapping="Wrap"/>
+                <TextBlock Text="{Binding Loc.LogFiltersDesc2}"
+                           FontSize="12"
+                           Foreground="#FF9E9E9E"
+                           TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Footer -->
+        <Border DockPanel.Dock="Bottom" Background="#FF1E1E1E" Padding="16,12"
+                BorderBrush="#FF3F3F46" BorderThickness="0,1,0,0">
+            <Grid ColumnDefinitions="*,Auto,8,Auto,8,Auto">
+                <Button Grid.Column="1"
+                        Content="Clear All"
+                        Command="{Binding ClearAllCommand}"
+                        Classes="secondary"
+                        Padding="12,8"/>
+                <Button Grid.Column="3"
+                        Content="Cancel"
+                        Command="{Binding CloseCommand}"
+                        Classes="secondary"
+                        Padding="12,8"/>
+                <Button Grid.Column="5"
+                        Content="Save"
+                        Command="{Binding SaveCommand}"
+                        Padding="24,8"/>
+            </Grid>
+        </Border>
+
+        <!-- Body -->
+        <DockPanel>
+            <!-- Add Filter + column headers -->
+            <Border DockPanel.Dock="Top" Background="#FF252526" Padding="16,10"
+                    BorderBrush="#FF3F3F46" BorderThickness="0,0,0,1">
+                <Button Content="+ Add Filter"
+                        Command="{Binding AddFilterCommand}"
+                        Classes="secondary"
+                        Padding="12,6"
+                        HorizontalAlignment="Left"/>
+            </Border>
+
+            <Border DockPanel.Dock="Top" Background="#FF1E1E1E" Padding="16,8"
+                    BorderBrush="#FF3F3F46" BorderThickness="0,0,0,1">
+                <Grid ColumnDefinitions="180,160,*,40">
+                    <TextBlock Grid.Column="0" Text="Field"
+                               FontSize="12" FontWeight="SemiBold" Foreground="#FFB0B0B0"/>
+                    <TextBlock Grid.Column="1" Text="Operator"
+                               FontSize="12" FontWeight="SemiBold" Foreground="#FFB0B0B0"/>
+                    <TextBlock Grid.Column="2" Text="Value"
+                               FontSize="12" FontWeight="SemiBold" Foreground="#FFB0B0B0"
+                               Margin="8,0,0,0"/>
+                </Grid>
+            </Border>
+
+            <!-- Filter rows -->
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding FilterRows}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:LogFilterRowViewModel">
+                            <Border Background="#FF252526"
+                                    BorderBrush="#FF3F3F46"
+                                    BorderThickness="0,0,0,1"
+                                    Padding="16,10">
+                                <Grid ColumnDefinitions="180,160,*,40">
+                                    <ComboBox Grid.Column="0"
+                                              ItemsSource="{Binding Fields}"
+                                              SelectedItem="{Binding Field}"
+                                              Margin="0,0,8,0"
+                                              HorizontalAlignment="Stretch"
+                                              Padding="8,6"/>
+                                    <ComboBox Grid.Column="1"
+                                              ItemsSource="{Binding AvailableOperators}"
+                                              SelectedItem="{Binding Operator}"
+                                              Margin="0,0,8,0"
+                                              HorizontalAlignment="Stretch"
+                                              Padding="8,6"/>
+                                    <!-- Value: free-text for Process Name/IP/Port, dropdown for Action/Protocol -->
+                                    <Panel Grid.Column="2" Margin="0,0,8,0">
+                                        <TextBox Text="{Binding Value}"
+                                                 Watermark="{Binding ValuePlaceholder}"
+                                                 IsVisible="{Binding !IsValueDropdown}"
+                                                 Padding="8,6"/>
+                                        <ComboBox ItemsSource="{Binding ValueOptions}"
+                                                  SelectedItem="{Binding Value}"
+                                                  IsVisible="{Binding IsValueDropdown}"
+                                                  HorizontalAlignment="Stretch"
+                                                  Padding="8,6"/>
+                                    </Panel>
+                                    <Button Grid.Column="3"
+                                            Content="🗑"
+                                            Command="{Binding $parent[ItemsControl].((vm:LogFiltersViewModel)DataContext).RemoveFilterRowCommand}"
+                                            CommandParameter="{Binding}"
+                                            Classes="secondary"
+                                            Padding="4"
+                                            Width="32"
+                                            Height="32"
+                                            VerticalAlignment="Center"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </DockPanel>
+    </DockPanel>
+</Window>

@@ -32,8 +32,17 @@
   <data name="MenuEnableTrafficLogging" xml:space="preserve">
     <value>Enable Traffic Logging</value>
   </data>
-  <data name="MenuHideDirectConnections" xml:space="preserve">
-    <value>Hide Direct Connections</value>
+  <data name="MenuLogFilters" xml:space="preserve">
+    <value>Log Filters...</value>
+  </data>
+  <data name="LogFiltersDesc1" xml:space="preserve">
+    <value>Only connections matching all your filters will appear in the log. Connections that don't match are silently ignored and never stored.</value>
+  </data>
+  <data name="LogFiltersDesc2" xml:space="preserve">
+    <value>Use * as a wildcard anywhere in text fields: chrome* = starts with,  *.exe = ends with,  *ch* = contains anywhere. Action and Protocol use a dropdown choose "All" to ignore that field.</value>
+  </data>
+  <data name="MenuAutoClearLogs" xml:space="preserve">
+    <value>Auto Clear Logs</value>
   </data>
   <data name="MenuSettings" xml:space="preserve">
     <value>Settings</value>

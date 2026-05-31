@@ -43,7 +43,10 @@ public class Loc : INotifyPropertyChanged
     public string MenuDnsViaProxy => Resources.Resources.MenuDnsViaProxy;
     public string MenuLocalhostViaProxy => Resources.Resources.MenuLocalhostViaProxy;
     public string MenuEnableTrafficLogging => Resources.Resources.MenuEnableTrafficLogging;
-    public string MenuHideDirectConnections => Resources.Resources.MenuHideDirectConnections;
+    public string MenuLogFilters => Resources.Resources.MenuLogFilters;
+    public string LogFiltersDesc1 => Resources.Resources.LogFiltersDesc1;
+    public string LogFiltersDesc2 => Resources.Resources.LogFiltersDesc2;
+    public string MenuAutoClearLogs => Resources.Resources.MenuAutoClearLogs;
     public string MenuSettings => Resources.Resources.MenuSettings;
     public string MenuCloseToTray => Resources.Resources.MenuCloseToTray;
     public string MenuRunAtStartup => Resources.Resources.MenuRunAtStartup;

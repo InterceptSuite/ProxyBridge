@@ -104,9 +104,21 @@ namespace ProxyBridge.GUI.Resources {
             }
         }
 
-        internal static string MenuHideDirectConnections {
+        internal static string MenuLogFilters {
             get {
-                return ResourceManager.GetString("MenuHideDirectConnections", resourceCulture);
+                return ResourceManager.GetString("MenuLogFilters", resourceCulture);
+            }
+        }
+
+        internal static string LogFiltersDesc1 =>
+            ResourceManager.GetString("LogFiltersDesc1", resourceCulture);
+
+        internal static string LogFiltersDesc2 =>
+            ResourceManager.GetString("LogFiltersDesc2", resourceCulture);
+
+        internal static string MenuAutoClearLogs {
+            get {
+                return ResourceManager.GetString("MenuAutoClearLogs", resourceCulture);
             }
         }
 
