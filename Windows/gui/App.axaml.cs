@@ -23,11 +23,24 @@ public class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            desktop.MainWindow = new MainWindow { DataContext = new MainWindowViewModel() };
+            var mainWindow = new MainWindow { DataContext = new MainWindowViewModel() };
+            desktop.MainWindow = mainWindow;
 
             if (StartMinimized)
             {
-                desktop.MainWindow.Hide();
+                // surpress the window before avalonia shows it for the first time.
+                // Setting these before opened fires prevents any visible window.
+                mainWindow.ShowInTaskbar = false;
+                mainWindow.WindowState = WindowState.Minimized;
+                // usin a oone handler and unsubscribe immediately so subsequent
+                // Show() calls from the tray "Open" menu are not swallowed.
+                EventHandler? onOpened = null;
+                onOpened = (_, _) =>
+                {
+                    mainWindow.Opened -= onOpened;
+                    mainWindow.Hide();
+                };
+                mainWindow.Opened += onOpened;
             }
 
             try
