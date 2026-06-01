@@ -1,5 +1,6 @@
 using System;
 using Avalonia.Controls;
+using Avalonia.Input;
 
 namespace ProxyBridge.GUI.Views;
 
@@ -22,6 +23,7 @@ public partial class ProfileDialogWindow : Window
             value => { Confirmed = true; InputValue = value?.Trim() ?? ""; Close(); },
             () => { Confirmed = false; Close(); }
         );
+        KeyDown += (_, e) => { if (e.Key == Key.Escape) { Confirmed = false; Close(); } };
     }
 
     protected override void OnOpened(EventArgs e)
