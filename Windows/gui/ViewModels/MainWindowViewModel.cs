@@ -902,13 +902,17 @@ public class MainWindowViewModel : ViewModelBase
 
     private static bool ApplyFilterOperator(string fieldValue, string op, string filterValue)
     {
+        bool hasWildcard = filterValue.Contains('*');
         return op switch
         {
-            "Contains"     =>  fieldValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
-            "Not Contains" => !fieldValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
+            "Contains"     => hasWildcard ?  WildcardMatch(fieldValue, filterValue)
+                                          :  fieldValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
+            "Not Contains" => hasWildcard ? !WildcardMatch(fieldValue, filterValue)
+                                          : !fieldValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
             "Equals"       =>  WildcardMatch(fieldValue, filterValue),
             "Not Equals"   => !WildcardMatch(fieldValue, filterValue),
-            "Starts With"  =>  fieldValue.StartsWith(filterValue, StringComparison.OrdinalIgnoreCase),
+            "Starts With"  => hasWildcard ?  WildcardMatch(fieldValue, filterValue)
+                                          :  fieldValue.StartsWith(filterValue, StringComparison.OrdinalIgnoreCase),
             _              => true
         };
     }
