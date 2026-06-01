@@ -32,8 +32,17 @@
   <data name="MenuEnableTrafficLogging" xml:space="preserve">
     <value>启用流量日志</value>
   </data>
-  <data name="MenuHideDirectConnections" xml:space="preserve">
-    <value>隐藏直连连接</value>
+  <data name="MenuLogFilters" xml:space="preserve">
+    <value>日志过滤...</value>
+  </data>
+  <data name="LogFiltersDesc1" xml:space="preserve">
+    <value>只有符合所有过滤条件的连接才会显示在日志中。不符合的连接将被忽略，不会被记录。</value>
+  </data>
+  <data name="LogFiltersDesc2" xml:space="preserve">
+    <value>文本字段支持 * 通配符：chrome* = 以此开头，*.exe = 以此结尾，*ch* = 包含此内容。操作和协议使用下拉菜单 选择"全部"可忽略该字段。</value>
+  </data>
+  <data name="MenuAutoClearLogs" xml:space="preserve">
+    <value>自动清除日志</value>
   </data>
   <data name="MenuSettings" xml:space="preserve">
     <value>设置</value>

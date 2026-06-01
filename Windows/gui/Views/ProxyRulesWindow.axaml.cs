@@ -43,6 +43,8 @@ public partial class ProxyRulesWindow : Window
     {
         InitializeComponent();
 
+        KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
+
         if (this.FindControl<ComboBox>("ProtocolComboBox") is ComboBox protocolComboBox)
         {
             protocolComboBox.SelectionChanged += ProtocolComboBox_SelectionChanged;

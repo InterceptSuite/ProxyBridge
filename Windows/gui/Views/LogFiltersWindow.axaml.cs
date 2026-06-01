@@ -3,9 +3,9 @@ using Avalonia.Input;
 
 namespace ProxyBridge.GUI.Views;
 
-public partial class UpdateNotificationWindow : Window
+public partial class LogFiltersWindow : Window
 {
-    public UpdateNotificationWindow()
+    public LogFiltersWindow()
     {
         InitializeComponent();
         KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };

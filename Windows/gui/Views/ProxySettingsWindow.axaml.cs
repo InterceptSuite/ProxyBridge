@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Linq;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using ProxyBridge.GUI.ViewModels;
 
@@ -14,6 +15,8 @@ public partial class ProxySettingsWindow : Window
     public ProxySettingsWindow()
     {
         InitializeComponent();
+
+        KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
 
         this.DataContextChanged += OnDataContextChanged;
         this.Closed += (_, _) =>

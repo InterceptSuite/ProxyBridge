@@ -53,6 +53,8 @@ public class MainWindowViewModel : ViewModelBase
     private int _connectionLogLineCount = 0;
     private int _activityLogLineCount = 0;
     private CancellationTokenSource? _saveCts;
+    private volatile LogFilterEntry[] _activeFilters = Array.Empty<LogFilterEntry>();
+    private List<LogFilterEntry> _currentLogFilters = new();
 
     public void SetMainWindow(Window window)
     {
@@ -78,7 +80,7 @@ public class MainWindowViewModel : ViewModelBase
                 if (!_isTrafficLoggingEnabled)
                     return;
 
-                if (_hideDirectConnections && proxyInfo.StartsWith("Direct"))
+                if (!PassesLogFilters(processName, destIp, destPort, proxyInfo))
                     return;
 
                 lock (_connectionLogLock)
@@ -101,7 +103,7 @@ public class MainWindowViewModel : ViewModelBase
 
                 var newConnLog = _connectionsLog + string.Concat(logsToAdd);
                 _connectionLogLineCount += logsToAdd.Count;
-                if (_connectionLogLineCount > MAX_CONNECTION_LOG_LINES)
+                if (_autoClearConnectionLogs && _connectionLogLineCount > MAX_CONNECTION_LOG_LINES)
                     newConnLog = TrimToLastNLines(newConnLog, MAX_CONNECTION_LOG_LINES, out _connectionLogLineCount);
                 ConnectionsLog = newConnLog;
             };
@@ -306,25 +308,14 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
-    private bool _hideDirectConnections = false;
-    public bool HideDirectConnections
+    private bool _autoClearConnectionLogs = true;
+    public bool AutoClearConnectionLogs
     {
-        get => _hideDirectConnections;
+        get => _autoClearConnectionLogs;
         set
         {
-            if (SetProperty(ref _hideDirectConnections, value))
-            {
-                // refilter the existing log immediately
-                if (value)
-                {
-                    _connectionsLog = StripDirectLines(_connectionsLog);
-                    _connectionLogLineCount = CountNewlines(_connectionsLog);
-                    FilteredConnectionsLog = string.IsNullOrWhiteSpace(_connectionsSearchText)
-                        ? _connectionsLog
-                        : FilterLog(_connectionsLog, _connectionsSearchText);
-                }
+            if (SetProperty(ref _autoClearConnectionLogs, value))
                 SaveCurrentProfileAsync();
-            }
         }
     }
 
@@ -394,12 +385,13 @@ public class MainWindowViewModel : ViewModelBase
 
     public ICommand ShowProxySettingsCommand { get; }
     public ICommand ShowProxyRulesCommand { get; }
+    public ICommand ShowLogFiltersCommand { get; }
     public ICommand ShowAboutCommand { get; }
     public ICommand CheckForUpdatesCommand { get; }
     public ICommand ToggleDnsViaProxyCommand { get; }
     public ICommand ToggleLocalhostViaProxyCommand { get; }
     public ICommand ToggleTrafficLoggingCommand { get; }
-    public ICommand ToggleHideDirectConnectionsCommand { get; }
+    public ICommand ToggleAutoClearConnectionLogsCommand { get; }
     public ICommand ToggleCloseToTrayCommand { get; }
     public ICommand ToggleStartWithWindowsCommand { get; }
     public ICommand CloseDialogCommand { get; }
@@ -516,7 +508,20 @@ public class MainWindowViewModel : ViewModelBase
         ToggleDnsViaProxyCommand = new RelayCommand(() => { DnsViaProxy = !DnsViaProxy; });
         ToggleLocalhostViaProxyCommand = new RelayCommand(() => { LocalhostViaProxy = !LocalhostViaProxy; });
         ToggleTrafficLoggingCommand = new RelayCommand(() => { IsTrafficLoggingEnabled = !IsTrafficLoggingEnabled; });
-        ToggleHideDirectConnectionsCommand = new RelayCommand(() => { HideDirectConnections = !HideDirectConnections; });
+        ToggleAutoClearConnectionLogsCommand = new RelayCommand(() => { AutoClearConnectionLogs = !AutoClearConnectionLogs; });
+
+        ShowLogFiltersCommand = new RelayCommand(async () =>
+        {
+            var window = new LogFiltersWindow();
+            var viewModel = new LogFiltersViewModel(
+                existingFilters: new List<LogFilterEntry>(_currentLogFilters),
+                onSave: filters => UpdateLogFilters(filters),
+                onClose: () => window.Close()
+            );
+            window.DataContext = viewModel;
+            if (_mainWindow != null)
+                await window.ShowDialog(_mainWindow);
+        });
 
         ToggleCloseToTrayCommand = new RelayCommand(() =>
         {
@@ -849,6 +854,95 @@ public class MainWindowViewModel : ViewModelBase
         try { _proxyService?.Dispose(); _proxyService = null; } catch { }
     }
 
+    private void UpdateLogFilters(List<LogFilterEntry> filters)
+    {
+        _currentLogFilters = filters;
+        _activeFilters = filters.ToArray();
+
+        // Clear the connection log so the display starts fresh with the new filters
+        lock (_connectionLogLock)
+            _pendingConnectionLogs.Clear();
+
+        _connectionLogLineCount = 0;
+        ConnectionsLog = "";
+        FilteredConnectionsLog = "";
+
+        SaveCurrentProfileAsync();
+    }
+
+    private bool PassesLogFilters(string processName, string destIp, ushort destPort, string proxyInfo)
+    {
+        var filters = _activeFilters; // single volatile read → local snapshot
+        if (filters.Length == 0) return true;
+
+        foreach (var f in filters)
+        {
+            // skip no-op rows: empty value, wildcard-all, or "All" dropdown selection
+            if (string.IsNullOrEmpty(f.Value) || f.Value is "*" or "All") continue;
+
+            string fieldValue = f.Field switch
+            {
+                "Process Name" => processName,
+                "IP"           => destIp,
+                "Port"         => destPort.ToString(),
+                "Protocol"     => proxyInfo.Contains("(UDP)", StringComparison.OrdinalIgnoreCase) ? "UDP" : "TCP",
+                "Action"       => proxyInfo.StartsWith("Direct",  StringComparison.OrdinalIgnoreCase) ? "Direct"
+                                 : proxyInfo.StartsWith("Proxy",   StringComparison.OrdinalIgnoreCase) ? "Proxy"
+                                 : proxyInfo.StartsWith("Block",   StringComparison.OrdinalIgnoreCase) ? "Blocked"
+                                 : proxyInfo,
+                _              => ""
+            };
+
+            if (!ApplyFilterOperator(fieldValue, f.Operator, f.Value))
+                return false; // AND logic — one failure = entry rejected
+        }
+
+        return true;
+    }
+
+    private static bool ApplyFilterOperator(string fieldValue, string op, string filterValue)
+    {
+        bool hasWildcard = filterValue.Contains('*');
+        return op switch
+        {
+            "Contains"     => hasWildcard ?  WildcardMatch(fieldValue, filterValue)
+                                          :  fieldValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
+            "Not Contains" => hasWildcard ? !WildcardMatch(fieldValue, filterValue)
+                                          : !fieldValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
+            "Equals"       =>  WildcardMatch(fieldValue, filterValue),
+            "Not Equals"   => !WildcardMatch(fieldValue, filterValue),
+            "Starts With"  => hasWildcard ?  WildcardMatch(fieldValue, filterValue)
+                                          :  fieldValue.StartsWith(filterValue, StringComparison.OrdinalIgnoreCase),
+            _              => true
+        };
+    }
+
+    private static bool WildcardMatch(string text, string pattern)
+    {
+        if (pattern == "*") return true;
+
+        if (!pattern.Contains('*'))
+            return text.Equals(pattern, StringComparison.OrdinalIgnoreCase);
+
+        // simple glob: split on * and require ordered subsequence
+        var parts = pattern.Split('*');
+        int pos = 0;
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (parts[i].Length == 0) continue;
+            int idx = text.IndexOf(parts[i], pos, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return false;
+            if (i == 0 && idx != 0) return false; // no leading * → must start with first part
+            pos = idx + parts[i].Length;
+        }
+        // no trailing * → text must end with last non-empty part
+        var lastPart = parts[^1];
+        if (lastPart.Length > 0 && !text.EndsWith(lastPart, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return true;
+    }
+
     private string FilterLog(string log, string searchText)
     {
         if (string.IsNullOrWhiteSpace(searchText))
@@ -866,20 +960,6 @@ public class MainWindowViewModel : ViewModelBase
             }
         }
 
-        return sb.ToString();
-    }
-
-    private string StripDirectLines(string log)
-    {
-        if (string.IsNullOrEmpty(log))
-            return log;
-
-        var sb = new StringBuilder(log.Length);
-        foreach (var line in log.Split('\n').Where(l => !l.Contains(" via Direct", StringComparison.OrdinalIgnoreCase)))
-        {
-            sb.Append(line);
-            sb.Append('\n');
-        }
         return sb.ToString();
     }
 
@@ -936,8 +1016,11 @@ public class MainWindowViewModel : ViewModelBase
             _isTrafficLoggingEnabled = profile.IsTrafficLoggingEnabled;
             OnPropertyChanged(nameof(IsTrafficLoggingEnabled));
 
-            _hideDirectConnections = profile.HideDirectConnections;
-            OnPropertyChanged(nameof(HideDirectConnections));
+            _autoClearConnectionLogs = profile.AutoClearConnectionLogs;
+            OnPropertyChanged(nameof(AutoClearConnectionLogs));
+
+            _currentLogFilters = profile.LogFilters ?? new List<LogFilterEntry>();
+            _activeFilters = _currentLogFilters.ToArray();
 
             if (!string.IsNullOrWhiteSpace(profile.Language))
             {
@@ -1027,8 +1110,11 @@ public class MainWindowViewModel : ViewModelBase
             ProxyBridgeService.SetTrafficLoggingEnabled(profile.IsTrafficLoggingEnabled);
         }
 
-        _hideDirectConnections = profile.HideDirectConnections;
-        OnPropertyChanged(nameof(HideDirectConnections));
+        _autoClearConnectionLogs = profile.AutoClearConnectionLogs;
+        OnPropertyChanged(nameof(AutoClearConnectionLogs));
+
+        _currentLogFilters = profile.LogFilters ?? new List<LogFilterEntry>();
+        _activeFilters = _currentLogFilters.ToArray();
 
         if (!string.IsNullOrWhiteSpace(profile.Language))
         {
@@ -1133,9 +1219,10 @@ public class MainWindowViewModel : ViewModelBase
             DnsViaProxy = _dnsViaProxy,
             LocalhostViaProxy = _localhostViaProxy,
             IsTrafficLoggingEnabled = _isTrafficLoggingEnabled,
-            HideDirectConnections = _hideDirectConnections,
+            AutoClearConnectionLogs = _autoClearConnectionLogs,
             Language = _currentLanguage,
             CloseToTray = _closeToTray,
+            LogFilters = new List<LogFilterEntry>(_currentLogFilters),
             ProxyConfigs = ProxyConfigs.Select(pc => new ProxyConfigEntry
             {
                 Id = pc.Id,

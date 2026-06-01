@@ -9,6 +9,7 @@ public partial class AboutWindow : Window
     public AboutWindow()
     {
         InitializeComponent();
+        KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
     }
 
     private void OnWebsiteClick(object? sender, PointerPressedEventArgs e)

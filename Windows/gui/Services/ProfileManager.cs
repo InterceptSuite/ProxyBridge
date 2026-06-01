@@ -7,6 +7,13 @@ using System.Text.Json.Serialization;
 
 namespace ProxyBridge.GUI.Services;
 
+public class LogFilterEntry
+{
+    public string Field { get; set; } = "Process Name";   // Process Name, IP, Port, Protocol, Action
+    public string Operator { get; set; } = "Contains";    // Contains, Not Contains, Equals, Not Equals, Starts With
+    public string Value { get; set; } = "";
+}
+
 public class ProxyConfigEntry
 {
     public uint Id { get; set; }
@@ -35,11 +42,12 @@ public class ProxyProfile
     public bool DnsViaProxy { get; set; } = true;
     public bool LocalhostViaProxy { get; set; } = false;
     public bool IsTrafficLoggingEnabled { get; set; } = true;
-    public bool HideDirectConnections { get; set; } = false;
+    public bool AutoClearConnectionLogs { get; set; } = true;
     public string Language { get; set; } = "en";
     public bool CloseToTray { get; set; } = true;
     public List<ProxyConfigEntry> ProxyConfigs { get; set; } = new();
     public List<ProxyRuleConfig> ProxyRules { get; set; } = new();
+    public List<LogFilterEntry> LogFilters { get; set; } = new();
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true)]
@@ -48,6 +56,8 @@ public class ProxyProfile
 [JsonSerializable(typeof(List<ProxyConfigEntry>))]
 [JsonSerializable(typeof(ProxyRuleConfig))]
 [JsonSerializable(typeof(List<ProxyRuleConfig>))]
+[JsonSerializable(typeof(LogFilterEntry))]
+[JsonSerializable(typeof(List<LogFilterEntry>))]
 internal partial class ProxyProfileJsonContext : JsonSerializerContext { }
 
 internal static class AtomicFileHelper
