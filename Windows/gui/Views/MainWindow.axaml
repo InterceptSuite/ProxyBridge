@@ -200,7 +200,13 @@
             </Border>
 
             <!-- Menu Bar -->
-            <Menu DockPanel.Dock="Top" Background="#FF2D2D30">
+            <Grid DockPanel.Dock="Top" Background="#FF2D2D30" Height="30">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Menu Grid.Column="0" Background="Transparent" VerticalAlignment="Center">
                 <MenuItem Header="{Binding Loc.MenuProxy}">
                     <MenuItem Header="{Binding Loc.MenuProxySettings}" Command="{Binding ShowProxySettingsCommand}"/>
                     <MenuItem Header="{Binding Loc.MenuProxyRules}" Command="{Binding ShowProxyRulesCommand}"/>
@@ -287,6 +293,21 @@
                     <MenuItem Header="{Binding Loc.MenuCheckUpdates}" Command="{Binding CheckForUpdatesCommand}"/>
                 </MenuItem>
             </Menu>
+                <!-- Quick-access buttons: right next to menu items -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2"
+                            VerticalAlignment="Center" Margin="4,0">
+                    <Button Command="{Binding ShowProxySettingsCommand}"
+                            Classes="secondary"
+                            ToolTip.Tip="{Binding Loc.MenuProxySettings}"
+                            Padding="6,2" FontSize="16" Height="26"
+                            Content="⚙"/>
+                    <Button Command="{Binding ShowProxyRulesCommand}"
+                            Classes="secondary"
+                            ToolTip.Tip="{Binding Loc.MenuProxyRules}"
+                            Padding="6,2" FontSize="16" Height="26"
+                            Content="📋"/>
+                </StackPanel>
+            </Grid>
 
             <!-- Tab Control -->
             <TabControl SelectedIndex="{Binding SelectedTabIndex}" Background="#FF1E1E1E" Padding="0">
