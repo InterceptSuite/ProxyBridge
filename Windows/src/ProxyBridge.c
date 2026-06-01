@@ -33,6 +33,7 @@
 #define HTTP_BUFFER_SIZE 1024
 #define FILTER_BUFFER_SIZE 512
 #define LOG_BUFFER_SIZE 1024
+#define MAX_LIST_SIZE 65536  // max byte length for semicolon-delimited host/port/process lists
 
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
@@ -250,7 +251,7 @@ static BOOL parse_token_list(const char *list, const char *delimiters, token_mat
     if (list == NULL || list[0] == '\0' || strcmp(list, "*") == 0)
         return TRUE;
 
-    size_t len = strlen(list) + 1;
+    size_t len = strnlen_s(list, MAX_LIST_SIZE) + 1;
     char *list_copy = (char *)malloc(len);
     if (list_copy == NULL)
         return FALSE;
@@ -1421,7 +1422,8 @@ static BOOL match_ip_pattern(const char *pattern, UINT32 ip)
     int octet_count = 0;
     int char_idx = 0;
 
-    for (int i = 0; i <= (int)strlen(pattern_copy) && octet_count < 4; i++)
+    size_t pat_len = strnlen_s(pattern_copy, sizeof(pattern_copy));
+    for (int i = 0; i <= (int)pat_len && octet_count < 4; i++)
     {
         if (pattern_copy[i] == '.' || pattern_copy[i] == '\0')
         {
@@ -1641,7 +1643,7 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
     if (process_list == NULL || process_list[0] == '\0' || strcmp(process_list, "*") == 0)
         return TRUE;
 
-    size_t len = strlen(process_list) + 1;
+    size_t len = strnlen_s(process_list, MAX_LIST_SIZE) + 1;
     char *list_copy = (char *)malloc(len);
     if (list_copy == NULL)
         return FALSE;
@@ -1659,7 +1661,7 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
             token++;
 
         // Remove trailing whitespace   // this shit cause error in CLI parsing
-        char *end = token + strlen(token) - 1;
+        char *end = token + strnlen_s(token, MAX_LIST_SIZE) - 1;
         while (end > token && (*end == ' ' || *end == '\t'))
         {
             *end = '\0';
@@ -1667,7 +1669,7 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
         }
 
         // Remove quotes if present: "C:\some app.exe"  - Need to carefully handle this in CLI app
-        if (*token == '"' && strlen(token) > 1)
+        if (*token == '"' && strnlen_s(token, MAX_LIST_SIZE) > 1)
         {
             token++;
             char *quote = strchr(token, '"');
@@ -2147,7 +2149,7 @@ static int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port,
 static void base64_encode(const char* input, char* output, size_t output_size)
 {
     static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t input_len = strlen(input);
+    size_t input_len = strnlen_s(input, output_size * 2);
     size_t output_len = 0;
 
     for (size_t i = 0; i < input_len && output_len < output_size - 4; i += 3)
@@ -3449,7 +3451,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
 
     if (target_hosts != NULL && target_hosts[0] != '\0')
     {
-        size_t len = strlen(target_hosts) + 1;
+        size_t len = strnlen_s(target_hosts, MAX_LIST_SIZE) + 1;
         rule->target_hosts = (char *)malloc(len);
         if (rule->target_hosts == NULL)
         {
@@ -3473,7 +3475,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
     // Dynamically allocate memory for target_ports no size limit!
     if (target_ports != NULL && target_ports[0] != '\0')
     {
-        size_t len = strlen(target_ports) + 1;
+        size_t len = strnlen_s(target_ports, MAX_LIST_SIZE) + 1;
         rule->target_ports = (char *)malloc(len);
         if (rule->target_ports == NULL)
         {
