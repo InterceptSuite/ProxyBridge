@@ -61,73 +61,104 @@
 
         <!-- Body -->
         <DockPanel>
-            <!-- Add Filter + column headers -->
+            <!-- Add Rule button -->
             <Border DockPanel.Dock="Top" Background="#FF252526" Padding="16,10"
                     BorderBrush="#FF3F3F46" BorderThickness="0,0,0,1">
-                <Button Content="+ Add Filter"
-                        Command="{Binding AddFilterCommand}"
+                <Button Content="+ Add Rule"
+                        Command="{Binding AddRuleCommand}"
                         Classes="secondary"
                         Padding="12,6"
                         HorizontalAlignment="Left"/>
             </Border>
 
-            <Border DockPanel.Dock="Top" Background="#FF1E1E1E" Padding="16,8"
-                    BorderBrush="#FF3F3F46" BorderThickness="0,0,0,1">
-                <Grid ColumnDefinitions="180,160,*,40">
-                    <TextBlock Grid.Column="0" Text="Field"
-                               FontSize="12" FontWeight="SemiBold" Foreground="#FFB0B0B0"/>
-                    <TextBlock Grid.Column="1" Text="Operator"
-                               FontSize="12" FontWeight="SemiBold" Foreground="#FFB0B0B0"/>
-                    <TextBlock Grid.Column="2" Text="Value"
-                               FontSize="12" FontWeight="SemiBold" Foreground="#FFB0B0B0"
-                               Margin="8,0,0,0"/>
-                </Grid>
-            </Border>
-
-            <!-- Filter rows -->
+            <!-- Rule cards -->
             <ScrollViewer VerticalScrollBarVisibility="Auto">
-                <ItemsControl ItemsSource="{Binding FilterRows}">
+                <ItemsControl ItemsSource="{Binding Rules}" Margin="12,8">
                     <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:LogFilterRowViewModel">
-                            <Border Background="#FF252526"
-                                    BorderBrush="#FF3F3F46"
-                                    BorderThickness="0,0,0,1"
-                                    Padding="16,10">
-                                <Grid ColumnDefinitions="180,160,*,40">
-                                    <ComboBox Grid.Column="0"
-                                              ItemsSource="{Binding Fields}"
-                                              SelectedItem="{Binding Field}"
-                                              Margin="0,0,8,0"
-                                              HorizontalAlignment="Stretch"
-                                              Padding="8,6"/>
-                                    <ComboBox Grid.Column="1"
-                                              ItemsSource="{Binding AvailableOperators}"
-                                              SelectedItem="{Binding Operator}"
-                                              Margin="0,0,8,0"
-                                              HorizontalAlignment="Stretch"
-                                              Padding="8,6"/>
-                                    <!-- Value: free-text for Process Name/IP/Port, dropdown for Action/Protocol -->
-                                    <Panel Grid.Column="2" Margin="0,0,8,0">
-                                        <TextBox Text="{Binding Value}"
-                                                 Watermark="{Binding ValuePlaceholder}"
-                                                 IsVisible="{Binding !IsValueDropdown}"
-                                                 Padding="8,6"/>
-                                        <ComboBox ItemsSource="{Binding ValueOptions}"
-                                                  SelectedItem="{Binding Value}"
-                                                  IsVisible="{Binding IsValueDropdown}"
-                                                  HorizontalAlignment="Stretch"
-                                                  Padding="8,6"/>
-                                    </Panel>
-                                    <Button Grid.Column="3"
-                                            Content="🗑"
-                                            Command="{Binding $parent[ItemsControl].((vm:LogFiltersViewModel)DataContext).RemoveFilterRowCommand}"
-                                            CommandParameter="{Binding}"
-                                            Classes="secondary"
-                                            Padding="4"
-                                            Width="32"
-                                            Height="32"
-                                            VerticalAlignment="Center"/>
-                                </Grid>
+                        <DataTemplate x:DataType="vm:LogFilterRuleViewModel">
+                            <Border Background="#FF1E1E1E"
+                                    BorderBrush="#FF4A4A50"
+                                    BorderThickness="1"
+                                    CornerRadius="4"
+                                    Margin="0,0,0,8">
+                                <StackPanel>
+
+                                    <!-- Rule header: Mode + remove button -->
+                                    <Border Background="#FF252526" Padding="12,8">
+                                        <Grid ColumnDefinitions="Auto,*,Auto">
+                                            <ComboBox Grid.Column="0"
+                                                      ItemsSource="{Binding ModeList}"
+                                                      SelectedItem="{Binding Mode}"
+                                                      MinWidth="110"
+                                                      Padding="8,5"/>
+                                            <Button Grid.Column="2"
+                                                    Content="🗑"
+                                                    Command="{Binding $parent[ItemsControl].((vm:LogFiltersViewModel)DataContext).RemoveRuleCommand}"
+                                                    CommandParameter="{Binding}"
+                                                    Classes="secondary"
+                                                    Padding="4"
+                                                    Width="32" Height="32"
+                                                    VerticalAlignment="Center"/>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Fields -->
+                                    <Border Padding="12,10">
+                                        <Grid ColumnDefinitions="80,*,20,80,*"
+                                              RowDefinitions="Auto,Auto,Auto">
+
+                                            <!-- Row 0: Process | Action -->
+                                            <TextBlock Grid.Row="0" Grid.Column="0"
+                                                       Text="Process"
+                                                       Foreground="#FF9E9E9E" FontSize="12"
+                                                       VerticalAlignment="Center" Margin="0,0,8,6"/>
+                                            <TextBox Grid.Row="0" Grid.Column="1"
+                                                     Text="{Binding ProcessName}"
+                                                     Watermark="any  (e.g. curl, chrome*, *.exe)"
+                                                     Padding="8,5" Margin="0,0,0,6"/>
+                                            <TextBlock Grid.Row="0" Grid.Column="3"
+                                                       Text="Action"
+                                                       Foreground="#FF9E9E9E" FontSize="12"
+                                                       VerticalAlignment="Center" Margin="0,0,8,6"/>
+                                            <ComboBox Grid.Row="0" Grid.Column="4"
+                                                      ItemsSource="{Binding ActionList}"
+                                                      SelectedItem="{Binding Action}"
+                                                      HorizontalAlignment="Stretch"
+                                                      Padding="8,5" Margin="0,0,0,6"/>
+
+                                            <!-- Row 1: IP | Protocol -->
+                                            <TextBlock Grid.Row="1" Grid.Column="0"
+                                                       Text="IP"
+                                                       Foreground="#FF9E9E9E" FontSize="12"
+                                                       VerticalAlignment="Center" Margin="0,0,8,6"/>
+                                            <TextBox Grid.Row="1" Grid.Column="1"
+                                                     Text="{Binding Ip}"
+                                                     Watermark="any  (e.g. 8.8.*, 192.168.*)"
+                                                     Padding="8,5" Margin="0,0,0,6"/>
+                                            <TextBlock Grid.Row="1" Grid.Column="3"
+                                                       Text="Protocol"
+                                                       Foreground="#FF9E9E9E" FontSize="12"
+                                                       VerticalAlignment="Center" Margin="0,0,8,6"/>
+                                            <ComboBox Grid.Row="1" Grid.Column="4"
+                                                      ItemsSource="{Binding ProtocolList}"
+                                                      SelectedItem="{Binding Protocol}"
+                                                      HorizontalAlignment="Stretch"
+                                                      Padding="8,5" Margin="0,0,0,6"/>
+
+                                            <!-- Row 2: Port -->
+                                            <TextBlock Grid.Row="2" Grid.Column="0"
+                                                       Text="Port"
+                                                       Foreground="#FF9E9E9E" FontSize="12"
+                                                       VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                            <TextBox Grid.Row="2" Grid.Column="1"
+                                                     Text="{Binding Port}"
+                                                     Watermark="any  (e.g. 443, 8080)"
+                                                     Padding="8,5"/>
+
+                                        </Grid>
+                                    </Border>
+
+                                </StackPanel>
                             </Border>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>

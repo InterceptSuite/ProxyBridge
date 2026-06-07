@@ -858,46 +858,40 @@ public class MainWindowViewModel : ViewModelBase
         var filters = _activeFilters; // single volatile read → local snapshot
         if (filters.Length == 0) return true;
 
-        foreach (var f in filters)
+        string protocol = proxyInfo.Contains("(UDP)", StringComparison.OrdinalIgnoreCase) ? "UDP" : "TCP";
+        string action   = proxyInfo.StartsWith("Direct", StringComparison.OrdinalIgnoreCase) ? "Direct"
+                        : proxyInfo.StartsWith("Proxy",  StringComparison.OrdinalIgnoreCase) ? "Proxy"
+                        : proxyInfo.StartsWith("Block",  StringComparison.OrdinalIgnoreCase) ? "Blocked"
+                        : "";
+
+        bool TextMatch(string actual, string pattern)
         {
-            // skip no-op rows: empty value, wildcard-all, or "All" dropdown selection
-            if (string.IsNullOrEmpty(f.Value) || f.Value is "*" or "All") continue;
-
-            string fieldValue = f.Field switch
-            {
-                "Process Name" => processName,
-                "IP"           => destIp,
-                "Port"         => destPort.ToString(),
-                "Protocol"     => proxyInfo.Contains("(UDP)", StringComparison.OrdinalIgnoreCase) ? "UDP" : "TCP",
-                "Action"       => proxyInfo.StartsWith("Direct",  StringComparison.OrdinalIgnoreCase) ? "Direct"
-                                 : proxyInfo.StartsWith("Proxy",   StringComparison.OrdinalIgnoreCase) ? "Proxy"
-                                 : proxyInfo.StartsWith("Block",   StringComparison.OrdinalIgnoreCase) ? "Blocked"
-                                 : proxyInfo,
-                _              => ""
-            };
-
-            if (!ApplyFilterOperator(fieldValue, f.Operator, f.Value))
-                return false; // AND logic — one failure = entry rejected
+            if (string.IsNullOrEmpty(pattern) || pattern == "*") return true;
+            return pattern.Contains('*')
+                ? WildcardMatch(actual, pattern)
+                : actual.Contains(pattern, StringComparison.OrdinalIgnoreCase);
         }
 
-        return true;
-    }
-
-    private static bool ApplyFilterOperator(string fieldValue, string op, string filterValue)
-    {
-        bool hasWildcard = filterValue.Contains('*');
-        return op switch
+        bool RuleMatches(LogFilterEntry r)
         {
-            "Contains"     => hasWildcard ?  WildcardMatch(fieldValue, filterValue)
-                                          :  fieldValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
-            "Not Contains" => hasWildcard ? !WildcardMatch(fieldValue, filterValue)
-                                          : !fieldValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
-            "Equals"       =>  WildcardMatch(fieldValue, filterValue),
-            "Not Equals"   => !WildcardMatch(fieldValue, filterValue),
-            "Starts With"  => hasWildcard ?  WildcardMatch(fieldValue, filterValue)
-                                          :  fieldValue.StartsWith(filterValue, StringComparison.OrdinalIgnoreCase),
-            _              => true
-        };
+            if (!TextMatch(processName,         r.ProcessName)) return false;
+            if (!TextMatch(destIp,              r.Ip))          return false;
+            if (!TextMatch(destPort.ToString(), r.Port))        return false;
+            if (r.Protocol is not ("" or "All") && !r.Protocol.Equals(protocol, StringComparison.OrdinalIgnoreCase)) return false;
+            if (r.Action   is not ("" or "All") && !r.Action.Equals(action,    StringComparison.OrdinalIgnoreCase)) return false;
+            return true;
+        }
+
+        // Exclude rules run first — any match hides the entry
+        foreach (var f in filters)
+            if (f.Mode == "Exclude" && RuleMatches(f)) return false;
+
+        // Include rules — at least one must match if any exist
+        bool hasInclude = false;
+        foreach (var f in filters)
+            if (f.Mode == "Include") { hasInclude = true; if (RuleMatches(f)) return true; }
+
+        return !hasInclude;
     }
 
     private static bool WildcardMatch(string text, string pattern)

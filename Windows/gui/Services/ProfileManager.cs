@@ -9,9 +9,12 @@ namespace ProxyBridge.GUI.Services;
 
 public class LogFilterEntry
 {
-    public string Field { get; set; } = "Process Name";   // Process Name, IP, Port, Protocol, Action
-    public string Operator { get; set; } = "Contains";    // Contains, Not Contains, Equals, Not Equals, Starts With
-    public string Value { get; set; } = "";
+    public string Mode        { get; set; } = "Include"; // Include or Exclude
+    public string ProcessName { get; set; } = "";        // empty = any
+    public string Ip          { get; set; } = "";        // empty = any
+    public string Port        { get; set; } = "";        // empty = any
+    public string Protocol    { get; set; } = "All";     // All, TCP, UDP
+    public string Action      { get; set; } = "All";     // All, Proxy, Direct, Blocked
 }
 
 public class ProxyConfigEntry

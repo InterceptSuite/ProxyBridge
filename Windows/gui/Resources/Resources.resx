@@ -33,10 +33,10 @@
     <value>Log Filters...</value>
   </data>
   <data name="LogFiltersDesc1" xml:space="preserve">
-    <value>Only connections matching all your filters will appear in the log. Connections that don't match are silently ignored and never stored.</value>
+    <value>Each rule can match on any combination of fields leave a field empty or set to "All" to ignore it. Include rules show only matching connections. Exclude rules hide matching connections. Excludes run first.</value>
   </data>
   <data name="LogFiltersDesc2" xml:space="preserve">
-    <value>Use * as a wildcard anywhere in text fields: chrome* = starts with,  *.exe = ends with,  *ch* = contains anywhere. Action and Protocol use a dropdown choose "All" to ignore that field.</value>
+    <value>Use * as a wildcard in text fields: chrome* = starts with,  *.exe = ends with,  *ch* = contains anywhere.</value>
   </data>
   <data name="MenuAutoClearLogs" xml:space="preserve">
     <value>Auto Clear Logs</value>
