@@ -10,32 +10,76 @@ on:
 
 jobs:
 
-  analyze-c-csharp:
-    name: Analyze (${{ matrix.language }})
+  analyze-cpp:
+    name: Analyze (c-cpp)
     runs-on: windows-latest
     permissions:
       security-events: write
 
-    strategy:
-      matrix:
-        language: [ 'c-cpp', 'csharp' ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          languages: c-cpp
+
+      - name: Download WinDivert
+        run: |
+          $url = "https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip"
+          $expectedHash = "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15"
+          Invoke-WebRequest -Uri $url -OutFile "WinDivert.zip" -UseBasicParsing
+          $actualHash = (Get-FileHash "WinDivert.zip" -Algorithm SHA256).Hash
+          if ($actualHash -ne $expectedHash) {
+            Write-Error "WinDivert.zip SHA256 mismatch! Expected: $expectedHash  Got: $actualHash"
+            exit 1
+          }
+          Expand-Archive -Path "WinDivert.zip" -DestinationPath "C:\"
+        shell: pwsh
+
+      - name: Build (MSVC)
+        shell: pwsh
+        run: |
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+          cmd /c "`"$vcvars`" && cl.exe /nologo /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS /DPROXYBRIDGE_EXPORTS /GS /guard:cf /I`"C:\WinDivert-2.2.2-A\include`" Windows\src\ProxyBridge.c /LD /link /DYNAMICBASE /NXCOMPAT /LIBPATH:`"C:\WinDivert-2.2.2-A\x64`" WinDivert.lib ws2_32.lib iphlpapi.lib /OUT:ProxyBridgeCore.dll"
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          category: "/language:c-cpp"
+
+  analyze-csharp:
+    name: Analyze (csharp)
+    runs-on: windows-latest
+    permissions:
+      security-events: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
-          languages: ${{ matrix.language }}
+          languages: csharp
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        run: dotnet build Windows/gui/ProxyBridge.GUI.csproj
+        shell: pwsh
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
-          category: "/language:${{ matrix.language }}"
+          category: "/language:csharp"
 
   analyze-swift:
     name: Analyze (swift)
@@ -45,12 +89,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           languages: swift
+
+      - name: Create stub xcconfig files
+        run: |
+          echo "// CI stub" > MacOS/ProxyBridge/Signing-Config-app.xcconfig
+          echo "// CI stub" > MacOS/ProxyBridge/Signing-Config-ext.xcconfig
 
       - name: Build (no signing)
         working-directory: MacOS/ProxyBridge
@@ -65,6 +114,6 @@ jobs:
             clean build
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           category: "/language:swift"
