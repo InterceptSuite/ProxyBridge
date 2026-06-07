@@ -103,8 +103,20 @@ jobs:
 
       - name: Create stub xcconfig files
         run: |
-          echo "// CI stub" > MacOS/ProxyBridge/Signing-Config-app.xcconfig
-          echo "// CI stub" > MacOS/ProxyBridge/Signing-Config-ext.xcconfig
+          cat > MacOS/ProxyBridge/Signing-Config-app.xcconfig << 'EOF'
+          PRODUCT_MODULE_NAME = ProxyBridge
+          PRODUCT_NAME = ProxyBridge
+          PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge
+          ARCHS = arm64 x86_64
+          ONLY_ACTIVE_ARCH = NO
+          EOF
+          cat > MacOS/ProxyBridge/Signing-Config-ext.xcconfig << 'EOF'
+          PRODUCT_MODULE_NAME = com_interceptsuite_ProxyBridge_extension
+          PRODUCT_NAME = extension
+          PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge.extension
+          ARCHS = arm64 x86_64
+          ONLY_ACTIVE_ARCH = NO
+          EOF
 
       - name: Build (no signing)
         run: |
