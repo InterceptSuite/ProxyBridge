@@ -104,14 +104,30 @@ jobs:
       - name: Build (no signing)
         working-directory: MacOS/ProxyBridge
         run: |
+          # Build each target separately with its own derived data path to avoid
+          # swiftmodule output collisions between ProxyBridge and extension targets.
           xcodebuild \
             -project ProxyBridge.xcodeproj \
-            -scheme ProxyBridge \
-            -destination 'generic/platform=macOS' \
+            -target extension \
+            -configuration Release \
+            -derivedDataPath /tmp/dd-extension \
+            ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
-            clean build
+            build
+
+          xcodebuild \
+            -project ProxyBridge.xcodeproj \
+            -target ProxyBridge \
+            -configuration Release \
+            -derivedDataPath /tmp/dd-app \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            EXCLUDED_RECURSIVE_SEARCH_PATH_SUBDIRECTORIES="extension" \
+            build
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
