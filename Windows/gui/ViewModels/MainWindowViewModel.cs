@@ -127,7 +127,6 @@ public class MainWindowViewModel : ViewModelBase
             };
             _activityLogTimer.Start();
 
-            _proxyService.SetDnsViaProxy(_dnsViaProxy);
             _proxyService.SetLocalhostViaProxy(_localhostViaProxy);
 
             // Build stored-ID to native-ID map while registering proxy configs
@@ -160,6 +159,8 @@ public class MainWindowViewModel : ViewModelBase
                     {
                         rule.RuleId = ruleId;
                         rule.Index = ProxyRules.IndexOf(rule) + 1;
+                        if (!rule.IsEnabled)
+                            _proxyService.DisableRule(ruleId);
                     }
                 }
 
@@ -280,20 +281,6 @@ public class MainWindowViewModel : ViewModelBase
         set => SetProperty(ref _newProxyAction, value);
     }
 
-    private bool _dnsViaProxy = true;
-    public bool DnsViaProxy
-    {
-        get => _dnsViaProxy;
-        set
-        {
-            if (SetProperty(ref _dnsViaProxy, value))
-            {
-                _proxyService?.SetDnsViaProxy(value);
-                SaveCurrentProfileAsync();
-            }
-        }
-    }
-
     private bool _localhostViaProxy = false;
     public bool LocalhostViaProxy
     {
@@ -388,7 +375,6 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand ShowLogFiltersCommand { get; }
     public ICommand ShowAboutCommand { get; }
     public ICommand CheckForUpdatesCommand { get; }
-    public ICommand ToggleDnsViaProxyCommand { get; }
     public ICommand ToggleLocalhostViaProxyCommand { get; }
     public ICommand ToggleTrafficLoggingCommand { get; }
     public ICommand ToggleAutoClearConnectionLogsCommand { get; }
@@ -505,7 +491,6 @@ public class MainWindowViewModel : ViewModelBase
                 await updateWindow.ShowDialog(_mainWindow);
         });
 
-        ToggleDnsViaProxyCommand = new RelayCommand(() => { DnsViaProxy = !DnsViaProxy; });
         ToggleLocalhostViaProxyCommand = new RelayCommand(() => { LocalhostViaProxy = !LocalhostViaProxy; });
         ToggleTrafficLoggingCommand = new RelayCommand(() => { IsTrafficLoggingEnabled = !IsTrafficLoggingEnabled; });
         ToggleAutoClearConnectionLogsCommand = new RelayCommand(() => { AutoClearConnectionLogs = !AutoClearConnectionLogs; });
@@ -859,15 +844,89 @@ public class MainWindowViewModel : ViewModelBase
         _currentLogFilters = filters;
         _activeFilters = filters.ToArray();
 
-        // Clear the connection log so the display starts fresh with the new filters
+        // Re-filter the existing connection log keep lines that still pass the new rules,
+        // remove lines that don't, without discarding the whole history.
         lock (_connectionLogLock)
             _pendingConnectionLogs.Clear();
 
-        _connectionLogLineCount = 0;
-        ConnectionsLog = "";
-        FilteredConnectionsLog = "";
+        if (filters.Count == 0)
+        {
+            // No filters → keep everything as-is
+        }
+        else
+        {
+            // parse each existing line and drop ones that no longer pass
+            var lines = _connectionsLog.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var kept = new System.Text.StringBuilder(_connectionsLog.Length);
+            int keptCount = 0;
+            foreach (var line in lines)
+            {
+                if (LinePassesLogFilters(line))
+                {
+                    kept.Append(line);
+                    kept.Append('\n');
+                    keptCount++;
+                }
+            }
+            _connectionLogLineCount = keptCount;
+            ConnectionsLog = kept.ToString();
+        }
 
         SaveCurrentProfileAsync();
+    }
+
+    // parse a rendered connection log line and run it through PassesLogFilters.
+    // format: [HH:mm:ss] processName (PID:pid) -> ip:port via proxyInfo
+    private bool LinePassesLogFilters(string line)
+    {
+        // quick path no filters active
+        if (_activeFilters.Length == 0) return true;
+
+        try
+        {
+            // Extract process name between "] " and " (PID:"
+            int procStart = line.IndexOf("] ", StringComparison.Ordinal);
+            if (procStart < 0) return true;
+            procStart += 2;
+            int pidStart = line.IndexOf(" (PID:", procStart, StringComparison.Ordinal);
+            if (pidStart < 0) return true;
+            string processName = line[procStart..pidStart];
+
+            // extract destination after " -> " and before last " via "
+            int arrowIdx = line.IndexOf(" -> ", pidStart, StringComparison.Ordinal);
+            if (arrowIdx < 0) return true;
+            int viaIdx = line.LastIndexOf(" via ", StringComparison.Ordinal);
+            if (viaIdx < 0 || viaIdx <= arrowIdx) return true;
+            string dest = line[(arrowIdx + 4)..viaIdx];
+
+            // exract proxyInfo after last " via "
+            string proxyInfo = line[(viaIdx + 5)..];
+
+            // Parse ip:port handle IPv6 [addr]:port
+            string destIp;
+            ushort destPort = 0;
+            if (dest.StartsWith('['))
+            {
+                int closeBracket = dest.IndexOf(']');
+                if (closeBracket < 0) return true;
+                destIp = dest[1..closeBracket];
+                if (closeBracket + 2 < dest.Length)
+                    ushort.TryParse(dest[(closeBracket + 2)..], out destPort);
+            }
+            else
+            {
+                int lastColon = dest.LastIndexOf(':');
+                if (lastColon < 0) return true;
+                destIp = dest[..lastColon];
+                ushort.TryParse(dest[(lastColon + 1)..], out destPort);
+            }
+
+            return PassesLogFilters(processName, destIp, destPort, proxyInfo);
+        }
+        catch
+        {
+            return true; // keep lines we cant parse
+        }
     }
 
     private bool PassesLogFilters(string processName, string destIp, ushort destPort, string proxyInfo)
@@ -875,46 +934,40 @@ public class MainWindowViewModel : ViewModelBase
         var filters = _activeFilters; // single volatile read → local snapshot
         if (filters.Length == 0) return true;
 
-        foreach (var f in filters)
+        string protocol = proxyInfo.Contains("(UDP)", StringComparison.OrdinalIgnoreCase) ? "UDP" : "TCP";
+        string action   = proxyInfo.StartsWith("Direct", StringComparison.OrdinalIgnoreCase) ? "Direct"
+                        : proxyInfo.StartsWith("Proxy",  StringComparison.OrdinalIgnoreCase) ? "Proxy"
+                        : proxyInfo.StartsWith("Block",  StringComparison.OrdinalIgnoreCase) ? "Blocked"
+                        : "";
+
+        bool TextMatch(string actual, string pattern)
         {
-            // skip no-op rows: empty value, wildcard-all, or "All" dropdown selection
-            if (string.IsNullOrEmpty(f.Value) || f.Value is "*" or "All") continue;
-
-            string fieldValue = f.Field switch
-            {
-                "Process Name" => processName,
-                "IP"           => destIp,
-                "Port"         => destPort.ToString(),
-                "Protocol"     => proxyInfo.Contains("(UDP)", StringComparison.OrdinalIgnoreCase) ? "UDP" : "TCP",
-                "Action"       => proxyInfo.StartsWith("Direct",  StringComparison.OrdinalIgnoreCase) ? "Direct"
-                                 : proxyInfo.StartsWith("Proxy",   StringComparison.OrdinalIgnoreCase) ? "Proxy"
-                                 : proxyInfo.StartsWith("Block",   StringComparison.OrdinalIgnoreCase) ? "Blocked"
-                                 : proxyInfo,
-                _              => ""
-            };
-
-            if (!ApplyFilterOperator(fieldValue, f.Operator, f.Value))
-                return false; // AND logic — one failure = entry rejected
+            if (string.IsNullOrEmpty(pattern) || pattern == "*") return true;
+            return pattern.Contains('*')
+                ? WildcardMatch(actual, pattern)
+                : actual.Contains(pattern, StringComparison.OrdinalIgnoreCase);
         }
 
-        return true;
-    }
-
-    private static bool ApplyFilterOperator(string fieldValue, string op, string filterValue)
-    {
-        bool hasWildcard = filterValue.Contains('*');
-        return op switch
+        bool RuleMatches(LogFilterEntry r)
         {
-            "Contains"     => hasWildcard ?  WildcardMatch(fieldValue, filterValue)
-                                          :  fieldValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
-            "Not Contains" => hasWildcard ? !WildcardMatch(fieldValue, filterValue)
-                                          : !fieldValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
-            "Equals"       =>  WildcardMatch(fieldValue, filterValue),
-            "Not Equals"   => !WildcardMatch(fieldValue, filterValue),
-            "Starts With"  => hasWildcard ?  WildcardMatch(fieldValue, filterValue)
-                                          :  fieldValue.StartsWith(filterValue, StringComparison.OrdinalIgnoreCase),
-            _              => true
-        };
+            if (!TextMatch(processName,         r.ProcessName)) return false;
+            if (!TextMatch(destIp,              r.Ip))          return false;
+            if (!TextMatch(destPort.ToString(), r.Port))        return false;
+            if (r.Protocol is not ("" or "All") && !r.Protocol.Equals(protocol, StringComparison.OrdinalIgnoreCase)) return false;
+            if (r.Action   is not ("" or "All") && !r.Action.Equals(action,    StringComparison.OrdinalIgnoreCase)) return false;
+            return true;
+        }
+
+        // Exclude rules run first — any match hides the entry
+        foreach (var f in filters)
+            if (f.Mode == "Exclude" && RuleMatches(f)) return false;
+
+        // Include rules — at least one must match if any exist
+        bool hasInclude = false;
+        foreach (var f in filters)
+            if (f.Mode == "Include") { hasInclude = true; if (RuleMatches(f)) return true; }
+
+        return !hasInclude;
     }
 
     private static bool WildcardMatch(string text, string pattern)
@@ -1004,9 +1057,6 @@ public class MainWindowViewModel : ViewModelBase
 
             var profile = ProfileManager.LoadProfile(profileName);
 
-            _dnsViaProxy = profile.DnsViaProxy;
-            OnPropertyChanged(nameof(DnsViaProxy));
-
             _localhostViaProxy = profile.LocalhostViaProxy;
             OnPropertyChanged(nameof(LocalhostViaProxy));
 
@@ -1092,10 +1142,6 @@ public class MainWindowViewModel : ViewModelBase
         ActiveProfileName = name;
         Title = $"ProxyBridge - {name}";
 
-        _dnsViaProxy = profile.DnsViaProxy;
-        OnPropertyChanged(nameof(DnsViaProxy));
-        _proxyService?.SetDnsViaProxy(profile.DnsViaProxy);
-
         _localhostViaProxy = profile.LocalhostViaProxy;
         OnPropertyChanged(nameof(LocalhostViaProxy));
         _proxyService?.SetLocalhostViaProxy(profile.LocalhostViaProxy);
@@ -1177,6 +1223,8 @@ public class MainWindowViewModel : ViewModelBase
                 {
                     rule.RuleId = ruleId;
                     rule.Index = ProxyRules.Count + 1;
+                    if (!rule.IsEnabled)
+                        _proxyService.DisableRule(ruleId);
                 }
             }
 
@@ -1216,7 +1264,6 @@ public class MainWindowViewModel : ViewModelBase
     {
         return new ProxyProfile
         {
-            DnsViaProxy = _dnsViaProxy,
             LocalhostViaProxy = _localhostViaProxy,
             IsTrafficLoggingEnabled = _isTrafficLoggingEnabled,
             AutoClearConnectionLogs = _autoClearConnectionLogs,

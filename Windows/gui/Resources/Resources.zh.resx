@@ -23,9 +23,6 @@
   <data name="MenuProxyRules" xml:space="preserve">
     <value>代理规则</value>
   </data>
-  <data name="MenuDnsViaProxy" xml:space="preserve">
-    <value>DNS通过代理</value>
-  </data>
   <data name="MenuLocalhostViaProxy" xml:space="preserve">
     <value>本地主机通过代理</value>
   </data>
@@ -36,10 +33,10 @@
     <value>日志过滤...</value>
   </data>
   <data name="LogFiltersDesc1" xml:space="preserve">
-    <value>只有符合所有过滤条件的连接才会显示在日志中。不符合的连接将被忽略，不会被记录。</value>
+    <value>每条规则可同时匹配多个字段 留空或选"全部"表示忽略该字段。Include规则只显示匹配的连接，Exclude规则隐藏匹配的连接，排除优先执行。</value>
   </data>
   <data name="LogFiltersDesc2" xml:space="preserve">
-    <value>文本字段支持 * 通配符：chrome* = 以此开头，*.exe = 以此结尾，*ch* = 包含此内容。操作和协议使用下拉菜单 选择"全部"可忽略该字段。</value>
+    <value>文本字段支持 * 通配符：chrome* = 以此开头，*.exe = 以此结尾，*ch* = 包含此内容。</value>
   </data>
   <data name="MenuAutoClearLogs" xml:space="preserve">
     <value>自动清除日志</value>
@@ -164,12 +161,6 @@
   </data>
   <data name="LogRuleAddFailed" xml:space="preserve">
     <value>错误: 添加规则失败</value>
-  </data>
-  <data name="LogDnsViaProxyEnabled" xml:space="preserve">
-    <value>DNS通过代理: 已启用</value>
-  </data>
-  <data name="LogDnsViaProxyDisabled" xml:space="preserve">
-    <value>DNS通过代理: 已禁用</value>
   </data>
   <data name="LogLanguageChanged" xml:space="preserve">
     <value>语言已更改为</value>

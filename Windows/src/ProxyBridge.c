@@ -31,7 +31,7 @@
 #define CONNECTION_HASH_SIZE 4096
 #define SOCKS5_BUFFER_SIZE 1024
 #define HTTP_BUFFER_SIZE 1024
-#define FILTER_BUFFER_SIZE 512
+#define FILTER_BUFFER_SIZE 1024
 #define LOG_BUFFER_SIZE 1024
 #define MAX_LIST_SIZE 65536  // max byte length for semicolon-delimited host/port/process lists
 
@@ -50,9 +50,31 @@ typedef struct PROCESS_RULE {
 #define SOCKS5_VERSION 0x05
 #define SOCKS5_CMD_CONNECT 0x01
 #define SOCKS5_CMD_UDP_ASSOCIATE 0x03
-#define SOCKS5_ATYP_IPV4 0x01
-#define SOCKS5_ATYP_IPV6 0x04
-#define SOCKS5_AUTH_NONE 0x00
+#define SOCKS5_ATYP_IPV4   0x01
+#define SOCKS5_ATYP_IPV6   0x04
+#define SOCKS5_ATYP_DOMAIN 0x03  // send hostname to proxy rfc 1928
+#define SOCKS5_AUTH_NONE   0x00
+
+// DNS snooping cache: maps intercepted A-record answers to their hostnames so
+// that SOCKS5 conect can forward ATYP_DOMAIN instead of ATYP_IPV4, letting
+// proxy servers that do their own name-resolution (e.g. mihomo) see the
+// original hostname rather than a bare IP.  (Resolves issue #138.)
+#define DNS_CACHE_BUCKETS 1024
+#define DNS_CACHE_TTL_MS  300000  // 5 minutes
+
+typedef struct DNS_CACHE_ENTRY {
+    UINT32 ip;              // network-byte-order IPv4 
+    char   domain[256];
+    ULONGLONG expire_tick;
+    struct DNS_CACHE_ENTRY *next;
+} DNS_CACHE_ENTRY;
+
+typedef struct DNS_CACHE_ENTRY_V6 {
+    UINT8  ip6[16];         // raw IPv6 address
+    char   domain[256];
+    ULONGLONG expire_tick;
+    struct DNS_CACHE_ENTRY_V6 *next;
+} DNS_CACHE_ENTRY_V6;
 
 typedef struct CONNECTION_INFO {
     UINT16 src_port;
@@ -154,6 +176,10 @@ static DWORD g_current_process_id = 0;
 
 static BOOL g_traffic_logging_enabled = TRUE;
 
+static DNS_CACHE_ENTRY    *g_dns_cache[DNS_CACHE_BUCKETS];
+static DNS_CACHE_ENTRY_V6 *g_dns_cache_v6[DNS_CACHE_BUCKETS];
+static SRWLOCK             g_dns_cache_lock;
+
 // per src port decision cache.
 //
 // check_process_rule() resolves (src_port) to DIRECT, PROXY, or BLOCK,
@@ -204,7 +230,6 @@ static __forceinline void port_clear(UINT16 p)
 }
 
 static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
-static BOOL g_dns_via_proxy = TRUE;
 static BOOL g_localhost_via_proxy = FALSE;  // default disabled for security - most proxy server block localhost for ssrf and also many app might not work if localhost trafic goes to remote server if proxy server is on diffrent machine
 static LogCallback g_log_callback = NULL;
 static ConnectionCallback g_connection_callback = NULL;
@@ -309,7 +334,11 @@ static PROXY_CONFIG* find_proxy_config(UINT32 config_id);
 static BOOL any_socks5_config(void);
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg);
 static int socks5_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg);
+static int socks5_connect_domain(SOCKET s, const char *hostname, UINT16 dest_port, const PROXY_CONFIG *cfg);
 static int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg);
+static BOOL dns_cache_lookup(UINT32 ip, char *out_domain, size_t out_size);
+static BOOL dns_cache_lookup_v6(const UINT8 ip6[16], char *out_domain, size_t out_size);
+static void snoop_dns_response(const UINT8 *payload, int payload_len);
 static int socks5_udp_associate_with_config(SOCKET s, struct sockaddr_in *relay_addr, const PROXY_CONFIG *cfg);
 static BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg);
 static DWORD WINAPI udp_relay_server(LPVOID arg);
@@ -502,6 +531,14 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 {
                     if (udp_header->DstPort != htons(LOCAL_UDP_RELAY_PORT))
                     {
+                        // Snoop IPv6 DNS responses (AAAA records) for the domain cache.
+                        if (ntohs(udp_header->SrcPort) == 53)
+                        {
+                            const UINT8 *udp_payload6 = (const UINT8 *)udp_header + sizeof(WINDIVERT_UDPHDR);
+                            int udp_payload6_len = (int)(ntohs(udp_header->Length) - sizeof(WINDIVERT_UDPHDR));
+                            if (udp_payload6_len > 0)
+                                snoop_dns_response(udp_payload6, udp_payload6_len);
+                        }
                         WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                         continue;
                     }
@@ -738,10 +775,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     DWORD pid = 0;
                     UINT32 proxy_config_id = 0;
 
-                    if (dest_port == 53 && !g_dns_via_proxy)
-                        action = RULE_ACTION_DIRECT;
-                    else
-                        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, &pid, &proxy_config_id);
+                    action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, &pid, &proxy_config_id);
 
                     // override PROXY to DIRECT if localhost proxy is disabled and destination is localhost
                     BYTE dest_first_octet = (dest_ip >> 0) & 0xFF;
@@ -832,6 +866,16 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             {
                 if (udp_header->DstPort != htons(LOCAL_UDP_RELAY_PORT))
                 {
+                    // Snoop DNS responses to build the IP→hostname cache used by
+                    // socks5_connect_domain() so that SOCKS5 proxies receive the
+                    // original hostname instead of a bare IP (issue #138).
+                    if (ntohs(udp_header->SrcPort) == 53)
+                    {
+                        const UINT8 *udp_payload = (const UINT8 *)udp_header + sizeof(WINDIVERT_UDPHDR);
+                        int udp_payload_len = (int)(ntohs(udp_header->Length) - sizeof(WINDIVERT_UDPHDR));
+                        if (udp_payload_len > 0)
+                            snoop_dns_response(udp_payload, udp_payload_len);
+                    }
                     // Unmodified packet no checksum needed
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
@@ -940,10 +984,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 DWORD pid = 0;
                 UINT32 proxy_config_id = 0;
 
-                if (orig_dest_port == 53 && !g_dns_via_proxy)
-                    action = RULE_ACTION_DIRECT;
-                else
-                    action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, &pid, &proxy_config_id);
+                action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, &pid, &proxy_config_id);
 
                 BYTE orig_dest_first_octet = (orig_dest_ip >> 0) & 0xFF;
                 if (action == RULE_ACTION_PROXY && !g_localhost_via_proxy && orig_dest_first_octet == 127)
@@ -1951,6 +1992,311 @@ static BOOL any_socks5_config(void)
     return FALSE;
 }
 
+// dns cache
+static void dns_cache_init(void)
+{
+    InitializeSRWLock(&g_dns_cache_lock);
+    memset(g_dns_cache,    0, sizeof(g_dns_cache));
+    memset(g_dns_cache_v6, 0, sizeof(g_dns_cache_v6));
+}
+
+static UINT32 dns_bucket(UINT32 ip)
+{
+    return (ip * 2654435761u) >> (32 - 10);  // Knuth multiplicative hash 1024 buckets
+}
+
+static void dns_cache_store(UINT32 ip, const char *domain)
+{
+    if (!domain || domain[0] == '\0') return;
+    UINT32 bucket = dns_bucket(ip);
+    ULONGLONG now = GetTickCount64();
+
+    AcquireSRWLockExclusive(&g_dns_cache_lock);
+    DNS_CACHE_ENTRY *e = g_dns_cache[bucket];
+    while (e)
+    {
+        if (e->ip == ip)
+        {
+            strncpy_s(e->domain, sizeof(e->domain), domain, _TRUNCATE);
+            e->expire_tick = now + DNS_CACHE_TTL_MS;
+            ReleaseSRWLockExclusive(&g_dns_cache_lock);
+            return;
+        }
+        e = e->next;
+    }
+    DNS_CACHE_ENTRY *ne = (DNS_CACHE_ENTRY *)malloc(sizeof(DNS_CACHE_ENTRY));
+    if (ne)
+    {
+        ne->ip         = ip;
+        ne->expire_tick = now + DNS_CACHE_TTL_MS;
+        strncpy_s(ne->domain, sizeof(ne->domain), domain, _TRUNCATE);
+        ne->next           = g_dns_cache[bucket];
+        g_dns_cache[bucket] = ne;
+    }
+    ReleaseSRWLockExclusive(&g_dns_cache_lock);
+}
+
+static BOOL dns_cache_lookup(UINT32 ip, char *out_domain, size_t out_size)
+{
+    UINT32 bucket = dns_bucket(ip);
+    ULONGLONG now = GetTickCount64();
+    BOOL found = FALSE;
+
+    AcquireSRWLockShared(&g_dns_cache_lock);
+    DNS_CACHE_ENTRY *e = g_dns_cache[bucket];
+    while (e)
+    {
+        if (e->ip == ip && e->expire_tick > now)
+        {
+            strncpy_s(out_domain, out_size, e->domain, _TRUNCATE);
+            found = TRUE;
+            break;
+        }
+        e = e->next;
+    }
+    ReleaseSRWLockShared(&g_dns_cache_lock);
+    return found;
+}
+
+static UINT32 dns_bucket_v6(const UINT8 ip6[16])
+{
+    // FNV-1a over 16 bytes, folded to DNS_CACHE_BUCKETS
+    UINT32 h = 2166136261u;
+    for (int i = 0; i < 16; i++)
+        h = (h ^ ip6[i]) * 16777619u;
+    return h & (DNS_CACHE_BUCKETS - 1);
+}
+
+static void dns_cache_store_v6(const UINT8 ip6[16], const char *domain)
+{
+    if (!domain || domain[0] == '\0') return;
+    UINT32 bucket = dns_bucket_v6(ip6);
+    ULONGLONG now = GetTickCount64();
+
+    AcquireSRWLockExclusive(&g_dns_cache_lock);
+    DNS_CACHE_ENTRY_V6 *e = g_dns_cache_v6[bucket];
+    while (e)
+    {
+        if (memcmp(e->ip6, ip6, 16) == 0)
+        {
+            strncpy_s(e->domain, sizeof(e->domain), domain, _TRUNCATE);
+            e->expire_tick = now + DNS_CACHE_TTL_MS;
+            ReleaseSRWLockExclusive(&g_dns_cache_lock);
+            return;
+        }
+        e = e->next;
+    }
+    DNS_CACHE_ENTRY_V6 *ne = (DNS_CACHE_ENTRY_V6 *)malloc(sizeof(DNS_CACHE_ENTRY_V6));
+    if (ne)
+    {
+        memcpy(ne->ip6, ip6, 16);
+        ne->expire_tick = now + DNS_CACHE_TTL_MS;
+        strncpy_s(ne->domain, sizeof(ne->domain), domain, _TRUNCATE);
+        ne->next = g_dns_cache_v6[bucket];
+        g_dns_cache_v6[bucket] = ne;
+    }
+    ReleaseSRWLockExclusive(&g_dns_cache_lock);
+}
+
+static BOOL dns_cache_lookup_v6(const UINT8 ip6[16], char *out_domain, size_t out_size)
+{
+    UINT32 bucket = dns_bucket_v6(ip6);
+    ULONGLONG now = GetTickCount64();
+    BOOL found = FALSE;
+
+    AcquireSRWLockShared(&g_dns_cache_lock);
+    DNS_CACHE_ENTRY_V6 *e = g_dns_cache_v6[bucket];
+    while (e)
+    {
+        if (memcmp(e->ip6, ip6, 16) == 0 && e->expire_tick > now)
+        {
+            strncpy_s(out_domain, out_size, e->domain, _TRUNCATE);
+            found = TRUE;
+            break;
+        }
+        e = e->next;
+    }
+    ReleaseSRWLockShared(&g_dns_cache_lock);
+    return found;
+}
+
+// Parse a DNS name (with pointer compression) at msg[*offset] into dst.
+// Advances *offset past the name on success.
+static BOOL dns_parse_name(const UINT8 *msg, int msg_len, int *offset, char *dst, int dst_len)
+{
+    int pos    = *offset;
+    int out    = 0;
+    int jumps  = 0;
+    BOOL jumped      = FALSE;
+    int  jumped_end  = -1;
+
+    while (pos < msg_len)
+    {
+        UINT8 b = msg[pos];
+        if (b == 0x00)
+        {
+            dst[out] = '\0';
+            if (!jumped) *offset = pos + 1;
+            else         *offset = jumped_end;
+            return TRUE;
+        }
+        if ((b & 0xC0) == 0xC0)
+        {
+            if (pos + 1 >= msg_len) return FALSE;
+            if (!jumped) jumped_end = pos + 2;
+            jumped = TRUE;
+            pos = ((b & 0x3F) << 8) | msg[pos + 1];
+            if (++jumps > 10) return FALSE;
+            continue;
+        }
+        int label_len = (int)b;
+        pos++;
+        if (pos + label_len > msg_len)       return FALSE;
+        if (out + label_len + 2 >= dst_len)  return FALSE;
+        if (out > 0) dst[out++] = '.';
+        memcpy(&dst[out], &msg[pos], label_len);
+        out  += label_len;
+        pos  += label_len;
+    }
+    return FALSE;
+}
+
+// Snoop an inbound DNS response (UDP payload starting at the DNS header).
+// For every A-record answer, store ip → qname in the DNS cache.
+static void snoop_dns_response(const UINT8 *payload, int payload_len)
+{
+    if (payload_len < 12) return;
+
+    UINT16 flags   = ((UINT16)payload[2] << 8) | payload[3];
+    if (!(flags & 0x8000)) return;   // not a response
+    if  (flags & 0x000F)   return;   // RCODE != NOERROR
+
+    UINT16 qdcount = ((UINT16)payload[4] << 8) | payload[5];
+    UINT16 ancount = ((UINT16)payload[6] << 8) | payload[7];
+    if (ancount == 0) return;
+
+    int offset = 12;
+
+    // Extract the first question's name as the canonical hostname for this answer.
+    char qname[256];
+    if (!dns_parse_name(payload, payload_len, &offset, qname, sizeof(qname))) return;
+    offset += 4;  // QTYPE + QCLASS
+
+    // Skip any remaining questions
+    for (int q = 1; q < qdcount && offset < payload_len; q++)
+    {
+        char tmp[256];
+        if (!dns_parse_name(payload, payload_len, &offset, tmp, sizeof(tmp))) return;
+        offset += 4;
+    }
+
+    // Parse answer RRs
+    for (int i = 0; i < ancount && offset < payload_len; i++)
+    {
+        char rname[256];
+        if (!dns_parse_name(payload, payload_len, &offset, rname, sizeof(rname))) return;
+        if (offset + 10 > payload_len) return;
+
+        UINT16 rtype  = ((UINT16)payload[offset + 0] << 8) | payload[offset + 1];
+        UINT16 rclass = ((UINT16)payload[offset + 2] << 8) | payload[offset + 3];
+        UINT16 rdlen  = ((UINT16)payload[offset + 8] << 8) | payload[offset + 9];
+        offset += 10;
+        if (offset + rdlen > payload_len) return;
+
+        if (rtype == 1 /* A */ && rclass == 1 /* IN */ && rdlen == 4)
+        {
+            UINT32 ip;
+            memcpy(&ip, &payload[offset], 4);  // network-byte-order, matches ip_header->DstAddr
+            dns_cache_store(ip, qname);
+        }
+        else if (rtype == 28 /* AAAA */ && rclass == 1 /* IN */ && rdlen == 16)
+        {
+            dns_cache_store_v6(&payload[offset], qname);
+        }
+        offset += rdlen;
+    }
+}
+
+// ── SOCKS5 CONNECT with ATYP_DOMAIN ──────────────────────────────────────────
+
+static int socks5_connect_domain(SOCKET s, const char *hostname, UINT16 dest_port, const PROXY_CONFIG *cfg)
+{
+    unsigned char buf[SOCKS5_BUFFER_SIZE];
+    int len;
+    BOOL use_auth = (cfg != NULL && cfg->username[0] != '\0');
+
+    buf[0] = SOCKS5_VERSION;
+    if (use_auth) { buf[1] = 0x02; buf[2] = SOCKS5_AUTH_NONE; buf[3] = 0x02; if (send(s, (char*)buf, 4, 0) != 4) return -1; }
+    else          { buf[1] = 0x01; buf[2] = SOCKS5_AUTH_NONE;                 if (send(s, (char*)buf, 3, 0) != 3) return -1; }
+
+    len = recv(s, (char*)buf, 2, 0);
+    if (len != 2 || buf[0] != SOCKS5_VERSION) return -1;
+
+    if (buf[1] == 0x02)
+    {
+        if (!use_auth) return -1;
+        size_t user_len = strnlen_s(cfg->username, sizeof(cfg->username));
+        size_t pass_len = strnlen_s(cfg->password, sizeof(cfg->password));
+        if (user_len > 255 || pass_len > 255) return -1;
+        buf[0] = 0x01; buf[1] = (unsigned char)user_len;
+        memcpy(&buf[2], cfg->username, user_len);
+        buf[2 + user_len] = (unsigned char)pass_len;
+        memcpy(&buf[3 + user_len], cfg->password, pass_len);
+        if (send(s, (char*)buf, (int)(3 + user_len + pass_len), 0) != (int)(3 + user_len + pass_len)) return -1;
+        len = recv(s, (char*)buf, 2, 0);
+        if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00) return -1;
+    }
+    else if (buf[1] != SOCKS5_AUTH_NONE) return -1;
+
+    // Build CONNECT request with ATYP_DOMAIN
+    size_t hlen = strnlen_s(hostname, 255);
+    if (hlen == 0 || hlen > 255) return -1;
+
+    buf[0] = SOCKS5_VERSION;
+    buf[1] = SOCKS5_CMD_CONNECT;
+    buf[2] = 0x00;
+    buf[3] = SOCKS5_ATYP_DOMAIN;
+    buf[4] = (unsigned char)hlen;
+    memcpy(&buf[5], hostname, hlen);
+    buf[5 + hlen] = (dest_port >> 8) & 0xFF;
+    buf[6 + hlen] = (dest_port >> 0) & 0xFF;
+    int req_len = (int)(7 + hlen);
+
+    if (send(s, (char*)buf, req_len, 0) != req_len) return -1;
+
+    // Read the 4-byte response header: VER REP RSV ATYP
+    len = recv(s, (char*)buf, 4, 0);
+    if (len < 4 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    {
+        log_message("SOCKS5 domain: CONNECT failed (reply=%d)", len > 1 ? buf[1] : -1);
+        return -1;
+    }
+
+    // Drain BND.ADDR + BND.PORT (we don't use them)
+    int drain = 0;
+    if      (buf[3] == SOCKS5_ATYP_IPV4)   drain = 4 + 2;
+    else if (buf[3] == SOCKS5_ATYP_IPV6)   drain = 16 + 2;
+    else if (buf[3] == SOCKS5_ATYP_DOMAIN)
+    {
+        unsigned char dlen_buf[1];
+        if (recv(s, (char*)dlen_buf, 1, 0) != 1) return -1;
+        drain = (int)dlen_buf[0] + 2;
+    }
+    if (drain > 0)
+    {
+        unsigned char scratch[270];
+        int total = 0;
+        while (total < drain)
+        {
+            int n = recv(s, (char*)(scratch + total), drain - total, 0);
+            if (n <= 0) return -1;
+            total += n;
+        }
+    }
+    return 0;
+}
+
+
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg)
 {
     unsigned char buf[SOCKS5_BUFFER_SIZE];
@@ -2118,20 +2464,35 @@ static int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port,
     char addr_str[64];
     inet_ntop(AF_INET6, dest_ip6, addr_str, sizeof(addr_str));
 
+    // Use cached domain name if available so the proxy sees the hostname
+    char cached_domain[256];
+    const char *host_part;
+    char host_buf[270];  // big enough for [ipv6]:port or domain
+    if (dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
+    {
+        host_part = cached_domain;
+        strncpy_s(host_buf, sizeof(host_buf), cached_domain, _TRUNCATE);
+    }
+    else
+    {
+        snprintf(host_buf, sizeof(host_buf), "[%s]", addr_str);
+        host_part = host_buf;
+    }
+
     if (use_auth)
     {
         char credentials[SOCKS5_BUFFER_SIZE], encoded[HTTP_BUFFER_SIZE];
         snprintf(credentials, sizeof(credentials), "%s:%s", cfg->username, cfg->password);
         base64_encode(credentials, encoded, sizeof(encoded));
         len = snprintf(request, sizeof(request),
-            "CONNECT [%s]:%d HTTP/1.1\r\nHost: [%s]:%d\r\nProxy-Authorization: Basic %s\r\nProxy-Connection: keep-alive\r\n\r\n",
-            addr_str, dest_port, addr_str, dest_port, encoded);
+            "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\nProxy-Authorization: Basic %s\r\nProxy-Connection: keep-alive\r\n\r\n",
+            host_part, dest_port, host_part, dest_port, encoded);
     }
     else
     {
         len = snprintf(request, sizeof(request),
-            "CONNECT [%s]:%d HTTP/1.1\r\nHost: [%s]:%d\r\nProxy-Connection: keep-alive\r\n\r\n",
-            addr_str, dest_port, addr_str, dest_port);
+            "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\nProxy-Connection: keep-alive\r\n\r\n",
+            host_part, dest_port, host_part, dest_port);
     }
 
     if (send(s, request, len, 0) != len) return -1;
@@ -2175,6 +2536,20 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_
     int status_code;
     BOOL use_auth = (cfg != NULL && cfg->username[0] != '\0');
 
+    // Use cached domain name if available so the proxy sees the hostname
+    char cached_domain[256];
+    char ip_str[32];
+    const char *host_part;
+    if (dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
+    {
+        host_part = cached_domain;
+    }
+    else
+    {
+        format_ip_address(dest_ip, ip_str, sizeof(ip_str));
+        host_part = ip_str;
+    }
+
     if (use_auth)
     {
         // Create "username:password" string and encode as Base64
@@ -2183,26 +2558,22 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_
         snprintf(credentials, sizeof(credentials), "%s:%s", cfg->username, cfg->password);
         base64_encode(credentials, encoded, sizeof(encoded));
 
-        char ip_str[32];
-        format_ip_address(dest_ip, ip_str, sizeof(ip_str));
         len = snprintf(request, sizeof(request),
             "CONNECT %s:%d HTTP/1.1\r\n"
             "Host: %s:%d\r\n"
             "Proxy-Authorization: Basic %s\r\n"
             "Proxy-Connection: keep-alive\r\n"
             "\r\n",
-            ip_str, dest_port, ip_str, dest_port, encoded);
+            host_part, dest_port, host_part, dest_port, encoded);
     }
     else
     {
-        char ip_str[32];
-        format_ip_address(dest_ip, ip_str, sizeof(ip_str));
         len = snprintf(request, sizeof(request),
             "CONNECT %s:%d HTTP/1.1\r\n"
             "Host: %s:%d\r\n"
             "Proxy-Connection: keep-alive\r\n"
             "\r\n",
-            ip_str, dest_port, ip_str, dest_port);
+            host_part, dest_port, host_part, dest_port);
     }
 
     if (send(s, request, len, 0) != len)
@@ -2379,6 +2750,13 @@ static BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg)
         return FALSE;
     }
 
+    // Many SOCKS5 servers return 0.0.0.0 as BND.ADDR in
+    // the UDP ASSOCIATE reply as per RFC 1928 says "use the same address
+    // as the TCP control connection".  sendto(0.0.0.0:PORT) fails with
+    // WSAEADDRNOTAVAIL (10049), so replace it with the proxy's resolved IP.
+    if (cfg->udp_relay_addr.sin_addr.s_addr == INADDR_ANY)
+        cfg->udp_relay_addr.sin_addr.s_addr = socks5_ip;
+
     cfg->udp_tcp_ctrl = tcp_sock;
 
     // create UDP socket for sending to SOCKS5 proxy
@@ -2394,7 +2772,9 @@ static BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg)
     configure_udp_socket(cfg->udp_send_sock, 262144, 30000);
 
     cfg->udp_connected = TRUE;
-    log_message("UDP ASSOCIATE established with SOCKS5 proxy %s:%d", cfg->host, cfg->port);
+    log_message("UDP ASSOCIATE established with SOCKS5 proxy %s:%d (UDP relay at %s:%d)",
+        cfg->host, cfg->port,
+        inet_ntoa(cfg->udp_relay_addr.sin_addr), ntohs(cfg->udp_relay_addr.sin_port));
     return TRUE;
 }
 
@@ -2422,8 +2802,9 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
     memset(&local_addr, 0, sizeof(local_addr));
     local_addr.sin_family = AF_INET;
-    local_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    local_addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);
+    local_addr.sin_addr.s_addr = htonl(INADDR_ANY);  // must be any WinDivert swaps src/dst IPs for
+    local_addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);// tracked connections so packets arrive at the
+                                                      // machines real ip and not 127.0.0.1
 
     if (bind(udp_relay_socket, (struct sockaddr *)&local_addr, sizeof(local_addr)) == SOCKET_ERROR)
     {
@@ -2444,7 +2825,7 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
         struct sockaddr_in6 a6;
         memset(&a6, 0, sizeof(a6));
         a6.sin6_family = AF_INET6;
-        a6.sin6_addr = in6addr_loopback;
+        a6.sin6_addr = in6addr_any;   // same tracked packets arrive at machines real IPv6
         a6.sin6_port = htons(LOCAL_UDP_RELAY_PORT);
         if (bind(udp_relay_socket6, (struct sockaddr*)&a6, sizeof(a6)) == SOCKET_ERROR)
         {
@@ -2580,10 +2961,6 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                         cfg->udp_connected = FALSE;
                     }
                 }
-                else
-                {
-                    log_message("[UDP RELAY] No connection found for port %d", from_port);
-                }
             }
         }
 
@@ -2622,11 +2999,11 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                     UINT32 src_ip = (recv_buf[4]<<0)|(recv_buf[5]<<8)|(recv_buf[6]<<16)|(recv_buf[7]<<24);
                     UINT16 src_port = (recv_buf[8]<<8)|recv_buf[9];
 
-                    AcquireSRWLockShared(&lock);
-                    struct sockaddr_in target_addr;
                     BOOL found = FALSE;
                     UINT32 target_ip = 0;
                     UINT16 target_port = 0;
+
+                    AcquireSRWLockShared(&lock);
                     ULONGLONG best_activity = 0;
                     for (int b = 0; b < CONNECTION_HASH_SIZE; b++)
                     {
@@ -2637,7 +3014,7 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                             {
                                 if (!found || conn->last_activity > best_activity)
                                 {
-                                    target_ip = conn->src_ip;
+                                    target_ip   = conn->src_ip;
                                     target_port = conn->src_port;
                                     best_activity = conn->last_activity;
                                     found = TRUE;
@@ -2647,8 +3024,10 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                         }
                     }
                     ReleaseSRWLockShared(&lock);
+
                     if (found)
                     {
+                        struct sockaddr_in target_addr;
                         memset(&target_addr, 0, sizeof(target_addr));
                         target_addr.sin_family = AF_INET;
                         target_addr.sin_addr.s_addr = target_ip;
@@ -2760,8 +3139,9 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(g_local_relay_port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);  // must be ANY: WinDivert swaps src/dst IPs for
+    addr.sin_port = htons(g_local_relay_port); // non-loopback traffic, so redirected SYNs arrive
+                                               // at the machine's real IP, not 127.0.0.1
 
     if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR)
     {
@@ -2790,7 +3170,7 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
         struct sockaddr_in6 addr6;
         memset(&addr6, 0, sizeof(addr6));
         addr6.sin6_family = AF_INET6;
-        addr6.sin6_addr = in6addr_loopback;
+        addr6.sin6_addr = in6addr_any;   // same reason as IPv4: accept on any local address
         addr6.sin6_port = htons(g_local_relay_port);
         if (bind(listen_sock6, (struct sockaddr*)&addr6, sizeof(addr6)) == SOCKET_ERROR ||
             listen(listen_sock6, SOMAXCONN) == SOCKET_ERROR)
@@ -2801,7 +3181,7 @@ static DWORD WINAPI local_proxy_server(LPVOID arg)
         }
         else
         {
-            log_message("Local proxy IPv6 listening on [::1]:%d", g_local_relay_port);
+            log_message("Local proxy IPv6 listening on [::]:%d", g_local_relay_port);
         }
     }
 
@@ -2965,9 +3345,22 @@ static DWORD WINAPI connection_handler(LPVOID arg)
 
     if (proxy->type == PROXY_TYPE_SOCKS5)
     {
-        int rc = is_ipv6
-            ? socks5_connect_v6(socks_sock, dest_ip6, dest_port, proxy)
-            : socks5_connect(socks_sock, dest_ip, dest_port, proxy);
+        int rc;
+        char cached_domain[256];
+        if (is_ipv6)
+        {
+            if (dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
+                rc = socks5_connect_domain(socks_sock, cached_domain, dest_port, proxy);
+            else
+                rc = socks5_connect_v6(socks_sock, dest_ip6, dest_port, proxy);
+        }
+        else
+        {
+            if (dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
+                rc = socks5_connect_domain(socks_sock, cached_domain, dest_port, proxy);
+            else
+                rc = socks5_connect(socks_sock, dest_ip, dest_port, proxy);
+        }
         if (rc != 0)
         {
             closesocket(client_sock);
@@ -3887,12 +4280,6 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char* ta
     }
 }
 
-PROXYBRIDGE_API void ProxyBridge_SetDnsViaProxy(BOOL enable)
-{
-    g_dns_via_proxy = enable;
-    log_message("DNS routing: %s", enable ? "via proxy" : "direct");
-}
-
 PROXYBRIDGE_API void ProxyBridge_SetLocalhostViaProxy(BOOL enable)
 {
     g_localhost_via_proxy = enable;
@@ -4134,6 +4521,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         return FALSE;
 
     InitializeSRWLock(&lock);
+    dns_cache_init();
 
     running = TRUE;
 
@@ -4174,7 +4562,12 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     Sleep(500);
 
     snprintf(filter, sizeof(filter),
-        "(tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or (udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d))) or (ipv6 and tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or (ipv6 and udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)))",
+        "(tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
+        "(udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d))) or "
+        "(udp and not outbound and udp.SrcPort == 53) or "
+        "(ipv6 and udp and not outbound and udp.SrcPort == 53) or "
+        "(ipv6 and tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
+        "(ipv6 and udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)))",
         g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT,
         g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT);
 

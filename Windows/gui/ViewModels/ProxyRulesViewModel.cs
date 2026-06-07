@@ -11,7 +11,7 @@ namespace ProxyBridge.GUI.ViewModels;
 public class ProxyRulesViewModel : ViewModelBase
 {
     private static readonly System.Text.RegularExpressions.Regex _processNameRegex =
-        new(@"^[\w\s._\-*;""\\:()\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]+$",
+        new(@"^[\w\s._\-*;""\\:()+\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]+$",
             System.Text.RegularExpressions.RegexOptions.Compiled,
             TimeSpan.FromSeconds(1));
 
@@ -159,7 +159,7 @@ public class ProxyRulesViewModel : ViewModelBase
 
             if (!_processNameRegex.IsMatch(NewProcessName))
             {
-                ProcessNameError = "Invalid characters in process name. Only letters, numbers, spaces, dots, dashes, underscores, semicolons, quotes, parentheses, and * are allowed";
+                ProcessNameError = "Invalid characters in process name. Only letters, numbers, spaces, dots, dashes, underscores, semicolons, quotes, parentheses, plus signs, and * are allowed";
                 return;
             }
 

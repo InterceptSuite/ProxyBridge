@@ -83,15 +83,6 @@ namespace ProxyBridge.GUI.Resources {
             }
         }
 
-        /// <summary>
-        ///   Looks up a localized string similar to DNS via Proxy.
-        /// </summary>
-        internal static string MenuDnsViaProxy {
-            get {
-                return ResourceManager.GetString("MenuDnsViaProxy", resourceCulture);
-            }
-        }
-
         internal static string MenuLocalhostViaProxy {
             get {
                 return ResourceManager.GetString("MenuLocalhostViaProxy", resourceCulture);
@@ -397,24 +388,6 @@ namespace ProxyBridge.GUI.Resources {
         internal static string LogRuleAddFailed {
             get {
                 return ResourceManager.GetString("LogRuleAddFailed", resourceCulture);
-            }
-        }
-
-        /// <summary>
-        ///   Looks up a localized string similar to DNS via Proxy: Enabled.
-        /// </summary>
-        internal static string LogDnsViaProxyEnabled {
-            get {
-                return ResourceManager.GetString("LogDnsViaProxyEnabled", resourceCulture);
-            }
-        }
-
-        /// <summary>
-        ///   Looks up a localized string similar to DNS via Proxy: Disabled.
-        /// </summary>
-        internal static string LogDnsViaProxyDisabled {
-            get {
-                return ResourceManager.GetString("LogDnsViaProxyDisabled", resourceCulture);
             }
         }
 

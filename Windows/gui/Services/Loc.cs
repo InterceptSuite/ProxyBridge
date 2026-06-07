@@ -40,7 +40,6 @@ public class Loc : INotifyPropertyChanged
     public string MenuProxy => Resources.Resources.MenuProxy;
     public string MenuProxySettings => Resources.Resources.MenuProxySettings;
     public string MenuProxyRules => Resources.Resources.MenuProxyRules;
-    public string MenuDnsViaProxy => Resources.Resources.MenuDnsViaProxy;
     public string MenuLocalhostViaProxy => Resources.Resources.MenuLocalhostViaProxy;
     public string MenuEnableTrafficLogging => Resources.Resources.MenuEnableTrafficLogging;
     public string MenuLogFilters => Resources.Resources.MenuLogFilters;
@@ -93,8 +92,6 @@ public class Loc : INotifyPropertyChanged
     public string LogProxySettingsFailed => Resources.Resources.LogProxySettingsFailed;
     public string LogRuleAdded => Resources.Resources.LogRuleAdded;
     public string LogRuleAddFailed => Resources.Resources.LogRuleAddFailed;
-    public string LogDnsViaProxyEnabled => Resources.Resources.LogDnsViaProxyEnabled;
-    public string LogDnsViaProxyDisabled => Resources.Resources.LogDnsViaProxyDisabled;
     public string LogLanguageChanged => Resources.Resources.LogLanguageChanged;
     public string LogWithAuth => Resources.Resources.LogWithAuth;
 

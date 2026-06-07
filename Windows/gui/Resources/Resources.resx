@@ -23,9 +23,6 @@
   <data name="MenuProxyRules" xml:space="preserve">
     <value>Proxy Rules</value>
   </data>
-  <data name="MenuDnsViaProxy" xml:space="preserve">
-    <value>DNS via Proxy</value>
-  </data>
   <data name="MenuLocalhostViaProxy" xml:space="preserve">
     <value>Localhost via Proxy</value>
   </data>
@@ -36,10 +33,10 @@
     <value>Log Filters...</value>
   </data>
   <data name="LogFiltersDesc1" xml:space="preserve">
-    <value>Only connections matching all your filters will appear in the log. Connections that don't match are silently ignored and never stored.</value>
+    <value>Each rule can match on any combination of fields leave a field empty or set to "All" to ignore it. Include rules show only matching connections. Exclude rules hide matching connections. Excludes run first.</value>
   </data>
   <data name="LogFiltersDesc2" xml:space="preserve">
-    <value>Use * as a wildcard anywhere in text fields: chrome* = starts with,  *.exe = ends with,  *ch* = contains anywhere. Action and Protocol use a dropdown choose "All" to ignore that field.</value>
+    <value>Use * as a wildcard in text fields: chrome* = starts with,  *.exe = ends with,  *ch* = contains anywhere.</value>
   </data>
   <data name="MenuAutoClearLogs" xml:space="preserve">
     <value>Auto Clear Logs</value>
@@ -163,12 +160,6 @@
   </data>
   <data name="LogRuleAddFailed" xml:space="preserve">
     <value>ERROR: Failed to add rule</value>
-  </data>
-  <data name="LogDnsViaProxyEnabled" xml:space="preserve">
-    <value>DNS via Proxy: Enabled</value>
-  </data>
-  <data name="LogDnsViaProxyDisabled" xml:space="preserve">
-    <value>DNS via Proxy: Disabled</value>
   </data>
   <data name="LogLanguageChanged" xml:space="preserve">
     <value>Language changed to</value>

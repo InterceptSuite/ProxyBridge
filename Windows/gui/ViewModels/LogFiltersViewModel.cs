@@ -9,76 +9,29 @@ using ProxyBridge.GUI.Services;
 
 namespace ProxyBridge.GUI.ViewModels;
 
-public class LogFilterRowViewModel : ViewModelBase
+public class LogFilterRuleViewModel : ViewModelBase
 {
-    private static readonly string[] _textOperators =
-        { "Contains", "Not Contains", "Equals", "Not Equals", "Starts With" };
-    private static readonly string[] _enumOperators =
-        { "Equals", "Not Equals" };
-    private static readonly string[] _actionValues =
-        { "All", "Proxy", "Direct", "Blocked" };
-    private static readonly string[] _protocolValues =
-        { "All", "TCP", "UDP" };
-    private static readonly string[] _noOptions = Array.Empty<string>();
+    public static readonly string[] Modes           = { "Include", "Exclude" };
+    public static readonly string[] ProtocolOptions = { "All", "TCP", "UDP" };
+    public static readonly string[] ActionOptions   = { "All", "Proxy", "Direct", "Blocked" };
 
-    public static readonly string[] AvailableFields =
-        { "Process Name", "IP", "Port", "Protocol", "Action" };
+    private string _mode        = "Include";
+    private string _processName = "";
+    private string _ip          = "";
+    private string _port        = "";
+    private string _protocol    = "All";
+    private string _action      = "All";
 
-    private string _field = "Process Name";
-    private string _operator = "Contains";
-    private string _value = "";
+    public string[] ModeList     => Modes;
+    public string[] ProtocolList => ProtocolOptions;
+    public string[] ActionList   => ActionOptions;
 
-    public string[] Fields => AvailableFields;
-
-    // Dynamic — depends on selected field
-    public string[] AvailableOperators =>
-        IsValueDropdown ? _enumOperators : _textOperators;
-
-    // Non-empty only for enum fields (Protocol, Action)
-    public string[] ValueOptions => _field switch
-    {
-        "Action"   => _actionValues,
-        "Protocol" => _protocolValues,
-        _          => _noOptions
-    };
-
-    public bool IsValueDropdown => _field is "Action" or "Protocol";
-
-    public string ValuePlaceholder => _field switch
-    {
-        "Process Name" => "e.g. chrome*, *.exe, *ch*",
-        "IP"           => "e.g. 192.168.*, *.1, 10.*",
-        "Port"         => "e.g. 443, 8080",
-        _              => ""
-    };
-
-    public string Field
-    {
-        get => _field;
-        set
-        {
-            if (!SetProperty(ref _field, value)) return;
-            OnPropertyChanged(nameof(AvailableOperators));
-            OnPropertyChanged(nameof(ValueOptions));
-            OnPropertyChanged(nameof(IsValueDropdown));
-            OnPropertyChanged(nameof(ValuePlaceholder));
-            // reset operator and value to sensible defaults for the new field
-            Operator = IsValueDropdown ? _enumOperators[0] : _textOperators[0];
-            Value    = ValueOptions.Length > 0 ? ValueOptions[0] : "";
-        }
-    }
-
-    public string Operator
-    {
-        get => _operator;
-        set => SetProperty(ref _operator, value);
-    }
-
-    public string Value
-    {
-        get => _value;
-        set => SetProperty(ref _value, value);
-    }
+    public string Mode        { get => _mode;        set => SetProperty(ref _mode,        value); }
+    public string ProcessName { get => _processName; set => SetProperty(ref _processName, value); }
+    public string Ip          { get => _ip;          set => SetProperty(ref _ip,          value); }
+    public string Port        { get => _port;        set => SetProperty(ref _port,        value); }
+    public string Protocol    { get => _protocol;    set => SetProperty(ref _protocol,    value); }
+    public string Action      { get => _action;      set => SetProperty(ref _action,      value); }
 }
 
 public class LogFiltersViewModel : ViewModelBase
@@ -88,13 +41,13 @@ public class LogFiltersViewModel : ViewModelBase
 
     public Loc Loc => Loc.Instance;
 
-    public ObservableCollection<LogFilterRowViewModel> FilterRows { get; } = new();
+    public ObservableCollection<LogFilterRuleViewModel> Rules { get; } = new();
 
-    public ICommand AddFilterCommand { get; }
-    public ICommand RemoveFilterRowCommand { get; }
-    public ICommand ClearAllCommand { get; }
-    public ICommand SaveCommand { get; }
-    public ICommand CloseCommand { get; }
+    public ICommand AddRuleCommand    { get; }
+    public ICommand RemoveRuleCommand { get; }
+    public ICommand ClearAllCommand   { get; }
+    public ICommand SaveCommand       { get; }
+    public ICommand CloseCommand      { get; }
 
     public LogFiltersViewModel(
         List<LogFilterEntry> existingFilters,
@@ -106,30 +59,32 @@ public class LogFiltersViewModel : ViewModelBase
 
         foreach (var f in existingFilters)
         {
-            FilterRows.Add(new LogFilterRowViewModel
+            Rules.Add(new LogFilterRuleViewModel
             {
-                Field = f.Field,
-                Operator = f.Operator,
-                Value = f.Value
+                Mode        = f.Mode,
+                ProcessName = f.ProcessName,
+                Ip          = f.Ip,
+                Port        = f.Port,
+                Protocol    = f.Protocol,
+                Action      = f.Action
             });
         }
 
-        AddFilterCommand = new RelayCommand(() =>
-            FilterRows.Add(new LogFilterRowViewModel()));
-
-        RemoveFilterRowCommand =
-            new RelayCommandWithParameter<LogFilterRowViewModel>(row => FilterRows.Remove(row));
-
-        ClearAllCommand = new RelayCommand(() => FilterRows.Clear());
+        AddRuleCommand    = new RelayCommand(() => Rules.Add(new LogFilterRuleViewModel()));
+        RemoveRuleCommand = new RelayCommandWithParameter<LogFilterRuleViewModel>(rule => Rules.Remove(rule));
+        ClearAllCommand   = new RelayCommand(() => Rules.Clear());
 
         SaveCommand = new RelayCommand(() =>
         {
-            var filters = FilterRows
+            var filters = Rules
                 .Select(r => new LogFilterEntry
                 {
-                    Field    = r.Field,
-                    Operator = r.Operator,
-                    Value    = r.Value
+                    Mode        = r.Mode,
+                    ProcessName = r.ProcessName,
+                    Ip          = r.Ip,
+                    Port        = r.Port,
+                    Protocol    = r.Protocol,
+                    Action      = r.Action
                 })
                 .ToList();
             _onSave(filters);
