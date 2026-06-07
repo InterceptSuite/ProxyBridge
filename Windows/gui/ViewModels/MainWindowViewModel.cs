@@ -842,15 +842,89 @@ public class MainWindowViewModel : ViewModelBase
         _currentLogFilters = filters;
         _activeFilters = filters.ToArray();
 
-        // Clear the connection log so the display starts fresh with the new filters
+        // Re-filter the existing connection log keep lines that still pass the new rules,
+        // remove lines that don't, without discarding the whole history.
         lock (_connectionLogLock)
             _pendingConnectionLogs.Clear();
 
-        _connectionLogLineCount = 0;
-        ConnectionsLog = "";
-        FilteredConnectionsLog = "";
+        if (filters.Count == 0)
+        {
+            // No filters → keep everything as-is
+        }
+        else
+        {
+            // parse each existing line and drop ones that no longer pass
+            var lines = _connectionsLog.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var kept = new System.Text.StringBuilder(_connectionsLog.Length);
+            int keptCount = 0;
+            foreach (var line in lines)
+            {
+                if (LinePassesLogFilters(line))
+                {
+                    kept.Append(line);
+                    kept.Append('\n');
+                    keptCount++;
+                }
+            }
+            _connectionLogLineCount = keptCount;
+            ConnectionsLog = kept.ToString();
+        }
 
         SaveCurrentProfileAsync();
+    }
+
+    // parse a rendered connection log line and run it through PassesLogFilters.
+    // format: [HH:mm:ss] processName (PID:pid) -> ip:port via proxyInfo
+    private bool LinePassesLogFilters(string line)
+    {
+        // quick path no filters active
+        if (_activeFilters.Length == 0) return true;
+
+        try
+        {
+            // Extract process name between "] " and " (PID:"
+            int procStart = line.IndexOf("] ", StringComparison.Ordinal);
+            if (procStart < 0) return true;
+            procStart += 2;
+            int pidStart = line.IndexOf(" (PID:", procStart, StringComparison.Ordinal);
+            if (pidStart < 0) return true;
+            string processName = line[procStart..pidStart];
+
+            // extract destination after " -> " and before last " via "
+            int arrowIdx = line.IndexOf(" -> ", pidStart, StringComparison.Ordinal);
+            if (arrowIdx < 0) return true;
+            int viaIdx = line.LastIndexOf(" via ", StringComparison.Ordinal);
+            if (viaIdx < 0 || viaIdx <= arrowIdx) return true;
+            string dest = line[(arrowIdx + 4)..viaIdx];
+
+            // exract proxyInfo after last " via "
+            string proxyInfo = line[(viaIdx + 5)..];
+
+            // Parse ip:port handle IPv6 [addr]:port
+            string destIp;
+            ushort destPort = 0;
+            if (dest.StartsWith('['))
+            {
+                int closeBracket = dest.IndexOf(']');
+                if (closeBracket < 0) return true;
+                destIp = dest[1..closeBracket];
+                if (closeBracket + 2 < dest.Length)
+                    ushort.TryParse(dest[(closeBracket + 2)..], out destPort);
+            }
+            else
+            {
+                int lastColon = dest.LastIndexOf(':');
+                if (lastColon < 0) return true;
+                destIp = dest[..lastColon];
+                ushort.TryParse(dest[(lastColon + 1)..], out destPort);
+            }
+
+            return PassesLogFilters(processName, destIp, destPort, proxyInfo);
+        }
+        catch
+        {
+            return true; // keep lines we cant parse
+        }
     }
 
     private bool PassesLogFilters(string processName, string destIp, ushort destPort, string proxyInfo)
