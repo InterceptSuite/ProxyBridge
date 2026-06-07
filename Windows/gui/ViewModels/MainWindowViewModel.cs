@@ -159,6 +159,8 @@ public class MainWindowViewModel : ViewModelBase
                     {
                         rule.RuleId = ruleId;
                         rule.Index = ProxyRules.IndexOf(rule) + 1;
+                        if (!rule.IsEnabled)
+                            _proxyService.DisableRule(ruleId);
                     }
                 }
 
@@ -1221,6 +1223,8 @@ public class MainWindowViewModel : ViewModelBase
                 {
                     rule.RuleId = ruleId;
                     rule.Index = ProxyRules.Count + 1;
+                    if (!rule.IsEnabled)
+                        _proxyService.DisableRule(ruleId);
                 }
             }
 
