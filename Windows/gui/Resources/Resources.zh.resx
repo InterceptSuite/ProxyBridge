@@ -23,9 +23,6 @@
   <data name="MenuProxyRules" xml:space="preserve">
     <value>代理规则</value>
   </data>
-  <data name="MenuDnsViaProxy" xml:space="preserve">
-    <value>DNS通过代理</value>
-  </data>
   <data name="MenuLocalhostViaProxy" xml:space="preserve">
     <value>本地主机通过代理</value>
   </data>
@@ -164,12 +161,6 @@
   </data>
   <data name="LogRuleAddFailed" xml:space="preserve">
     <value>错误: 添加规则失败</value>
-  </data>
-  <data name="LogDnsViaProxyEnabled" xml:space="preserve">
-    <value>DNS通过代理: 已启用</value>
-  </data>
-  <data name="LogDnsViaProxyDisabled" xml:space="preserve">
-    <value>DNS通过代理: 已禁用</value>
   </data>
   <data name="LogLanguageChanged" xml:space="preserve">
     <value>语言已更改为</value>

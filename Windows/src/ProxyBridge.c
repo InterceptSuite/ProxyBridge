@@ -230,7 +230,6 @@ static __forceinline void port_clear(UINT16 p)
 }
 
 static UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
-static BOOL g_dns_via_proxy = TRUE;
 static BOOL g_localhost_via_proxy = FALSE;  // default disabled for security - most proxy server block localhost for ssrf and also many app might not work if localhost trafic goes to remote server if proxy server is on diffrent machine
 static LogCallback g_log_callback = NULL;
 static ConnectionCallback g_connection_callback = NULL;
@@ -776,10 +775,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     DWORD pid = 0;
                     UINT32 proxy_config_id = 0;
 
-                    if (dest_port == 53 && !g_dns_via_proxy)
-                        action = RULE_ACTION_DIRECT;
-                    else
-                        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, &pid, &proxy_config_id);
+                    action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, &pid, &proxy_config_id);
 
                     // override PROXY to DIRECT if localhost proxy is disabled and destination is localhost
                     BYTE dest_first_octet = (dest_ip >> 0) & 0xFF;
@@ -988,10 +984,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 DWORD pid = 0;
                 UINT32 proxy_config_id = 0;
 
-                if (orig_dest_port == 53 && !g_dns_via_proxy)
-                    action = RULE_ACTION_DIRECT;
-                else
-                    action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, &pid, &proxy_config_id);
+                action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, &pid, &proxy_config_id);
 
                 BYTE orig_dest_first_octet = (orig_dest_ip >> 0) & 0xFF;
                 if (action == RULE_ACTION_PROXY && !g_localhost_via_proxy && orig_dest_first_octet == 127)
@@ -2757,6 +2750,13 @@ static BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg)
         return FALSE;
     }
 
+    // Many SOCKS5 servers return 0.0.0.0 as BND.ADDR in
+    // the UDP ASSOCIATE reply as per RFC 1928 says "use the same address
+    // as the TCP control connection".  sendto(0.0.0.0:PORT) fails with
+    // WSAEADDRNOTAVAIL (10049), so replace it with the proxy's resolved IP.
+    if (cfg->udp_relay_addr.sin_addr.s_addr == INADDR_ANY)
+        cfg->udp_relay_addr.sin_addr.s_addr = socks5_ip;
+
     cfg->udp_tcp_ctrl = tcp_sock;
 
     // create UDP socket for sending to SOCKS5 proxy
@@ -2772,7 +2772,9 @@ static BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg)
     configure_udp_socket(cfg->udp_send_sock, 262144, 30000);
 
     cfg->udp_connected = TRUE;
-    log_message("UDP ASSOCIATE established with SOCKS5 proxy %s:%d", cfg->host, cfg->port);
+    log_message("UDP ASSOCIATE established with SOCKS5 proxy %s:%d (UDP relay at %s:%d)",
+        cfg->host, cfg->port,
+        inet_ntoa(cfg->udp_relay_addr.sin_addr), ntohs(cfg->udp_relay_addr.sin_port));
     return TRUE;
 }
 
@@ -2800,8 +2802,9 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
     memset(&local_addr, 0, sizeof(local_addr));
     local_addr.sin_family = AF_INET;
-    local_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    local_addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);
+    local_addr.sin_addr.s_addr = htonl(INADDR_ANY);  // must be any WinDivert swaps src/dst IPs for
+    local_addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);// tracked connections so packets arrive at the
+                                                      // machines real ip and not 127.0.0.1
 
     if (bind(udp_relay_socket, (struct sockaddr *)&local_addr, sizeof(local_addr)) == SOCKET_ERROR)
     {
@@ -2822,7 +2825,7 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
         struct sockaddr_in6 a6;
         memset(&a6, 0, sizeof(a6));
         a6.sin6_family = AF_INET6;
-        a6.sin6_addr = in6addr_loopback;
+        a6.sin6_addr = in6addr_any;   // same tracked packets arrive at machines real IPv6
         a6.sin6_port = htons(LOCAL_UDP_RELAY_PORT);
         if (bind(udp_relay_socket6, (struct sockaddr*)&a6, sizeof(a6)) == SOCKET_ERROR)
         {
@@ -2958,10 +2961,6 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                         cfg->udp_connected = FALSE;
                     }
                 }
-                else
-                {
-                    log_message("[UDP RELAY] No connection found for port %d", from_port);
-                }
             }
         }
 
@@ -3000,11 +2999,11 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                     UINT32 src_ip = (recv_buf[4]<<0)|(recv_buf[5]<<8)|(recv_buf[6]<<16)|(recv_buf[7]<<24);
                     UINT16 src_port = (recv_buf[8]<<8)|recv_buf[9];
 
-                    AcquireSRWLockShared(&lock);
-                    struct sockaddr_in target_addr;
                     BOOL found = FALSE;
                     UINT32 target_ip = 0;
                     UINT16 target_port = 0;
+
+                    AcquireSRWLockShared(&lock);
                     ULONGLONG best_activity = 0;
                     for (int b = 0; b < CONNECTION_HASH_SIZE; b++)
                     {
@@ -3015,7 +3014,7 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                             {
                                 if (!found || conn->last_activity > best_activity)
                                 {
-                                    target_ip = conn->src_ip;
+                                    target_ip   = conn->src_ip;
                                     target_port = conn->src_port;
                                     best_activity = conn->last_activity;
                                     found = TRUE;
@@ -3025,8 +3024,10 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                         }
                     }
                     ReleaseSRWLockShared(&lock);
+
                     if (found)
                     {
+                        struct sockaddr_in target_addr;
                         memset(&target_addr, 0, sizeof(target_addr));
                         target_addr.sin_family = AF_INET;
                         target_addr.sin_addr.s_addr = target_ip;
@@ -4277,12 +4278,6 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char* ta
             snprintf(result_buffer, buffer_size, "Connection failed (code %d)", result);
         return result;
     }
-}
-
-PROXYBRIDGE_API void ProxyBridge_SetDnsViaProxy(BOOL enable)
-{
-    g_dns_via_proxy = enable;
-    log_message("DNS routing: %s", enable ? "via proxy" : "direct");
 }
 
 PROXYBRIDGE_API void ProxyBridge_SetLocalhostViaProxy(BOOL enable)

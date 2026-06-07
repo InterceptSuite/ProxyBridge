@@ -219,14 +219,6 @@
                                       Margin="0"/>
                         </MenuItem.Icon>
                     </MenuItem>
-                    <MenuItem Header="{Binding Loc.MenuDnsViaProxy}"
-                              Command="{Binding ToggleDnsViaProxyCommand}">
-                        <MenuItem.Icon>
-                            <CheckBox IsChecked="{Binding DnsViaProxy}"
-                                      IsHitTestVisible="False"
-                                      Margin="0"/>
-                        </MenuItem.Icon>
-                    </MenuItem>
                     <MenuItem Header="{Binding Loc.MenuLocalhostViaProxy}"
                               Command="{Binding ToggleLocalhostViaProxyCommand}">
                         <MenuItem.Icon>

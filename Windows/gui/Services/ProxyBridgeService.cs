@@ -153,11 +153,6 @@ public class ProxyBridgeService : IDisposable
         return ProxyBridgeNative.ProxyBridge_MoveRuleToPosition(ruleId, newPosition);
     }
 
-    public void SetDnsViaProxy(bool enable)
-    {
-        ProxyBridgeNative.ProxyBridge_SetDnsViaProxy(enable);
-    }
-
     public void SetLocalhostViaProxy(bool enable)
     {
         ProxyBridgeNative.ProxyBridge_SetLocalhostViaProxy(enable);

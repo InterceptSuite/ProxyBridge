@@ -127,7 +127,6 @@ public class MainWindowViewModel : ViewModelBase
             };
             _activityLogTimer.Start();
 
-            _proxyService.SetDnsViaProxy(_dnsViaProxy);
             _proxyService.SetLocalhostViaProxy(_localhostViaProxy);
 
             // Build stored-ID to native-ID map while registering proxy configs
@@ -280,20 +279,6 @@ public class MainWindowViewModel : ViewModelBase
         set => SetProperty(ref _newProxyAction, value);
     }
 
-    private bool _dnsViaProxy = true;
-    public bool DnsViaProxy
-    {
-        get => _dnsViaProxy;
-        set
-        {
-            if (SetProperty(ref _dnsViaProxy, value))
-            {
-                _proxyService?.SetDnsViaProxy(value);
-                SaveCurrentProfileAsync();
-            }
-        }
-    }
-
     private bool _localhostViaProxy = false;
     public bool LocalhostViaProxy
     {
@@ -388,7 +373,6 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand ShowLogFiltersCommand { get; }
     public ICommand ShowAboutCommand { get; }
     public ICommand CheckForUpdatesCommand { get; }
-    public ICommand ToggleDnsViaProxyCommand { get; }
     public ICommand ToggleLocalhostViaProxyCommand { get; }
     public ICommand ToggleTrafficLoggingCommand { get; }
     public ICommand ToggleAutoClearConnectionLogsCommand { get; }
@@ -505,7 +489,6 @@ public class MainWindowViewModel : ViewModelBase
                 await updateWindow.ShowDialog(_mainWindow);
         });
 
-        ToggleDnsViaProxyCommand = new RelayCommand(() => { DnsViaProxy = !DnsViaProxy; });
         ToggleLocalhostViaProxyCommand = new RelayCommand(() => { LocalhostViaProxy = !LocalhostViaProxy; });
         ToggleTrafficLoggingCommand = new RelayCommand(() => { IsTrafficLoggingEnabled = !IsTrafficLoggingEnabled; });
         ToggleAutoClearConnectionLogsCommand = new RelayCommand(() => { AutoClearConnectionLogs = !AutoClearConnectionLogs; });
@@ -1004,9 +987,6 @@ public class MainWindowViewModel : ViewModelBase
 
             var profile = ProfileManager.LoadProfile(profileName);
 
-            _dnsViaProxy = profile.DnsViaProxy;
-            OnPropertyChanged(nameof(DnsViaProxy));
-
             _localhostViaProxy = profile.LocalhostViaProxy;
             OnPropertyChanged(nameof(LocalhostViaProxy));
 
@@ -1091,10 +1071,6 @@ public class MainWindowViewModel : ViewModelBase
         _activeProfileName = name;
         ActiveProfileName = name;
         Title = $"ProxyBridge - {name}";
-
-        _dnsViaProxy = profile.DnsViaProxy;
-        OnPropertyChanged(nameof(DnsViaProxy));
-        _proxyService?.SetDnsViaProxy(profile.DnsViaProxy);
 
         _localhostViaProxy = profile.LocalhostViaProxy;
         OnPropertyChanged(nameof(LocalhostViaProxy));
@@ -1216,7 +1192,6 @@ public class MainWindowViewModel : ViewModelBase
     {
         return new ProxyProfile
         {
-            DnsViaProxy = _dnsViaProxy,
             LocalhostViaProxy = _localhostViaProxy,
             IsTrafficLoggingEnabled = _isTrafficLoggingEnabled,
             AutoClearConnectionLogs = _autoClearConnectionLogs,

@@ -23,9 +23,6 @@
   <data name="MenuProxyRules" xml:space="preserve">
     <value>Proxy Rules</value>
   </data>
-  <data name="MenuDnsViaProxy" xml:space="preserve">
-    <value>DNS via Proxy</value>
-  </data>
   <data name="MenuLocalhostViaProxy" xml:space="preserve">
     <value>Localhost via Proxy</value>
   </data>
@@ -163,12 +160,6 @@
   </data>
   <data name="LogRuleAddFailed" xml:space="preserve">
     <value>ERROR: Failed to add rule</value>
-  </data>
-  <data name="LogDnsViaProxyEnabled" xml:space="preserve">
-    <value>DNS via Proxy: Enabled</value>
-  </data>
-  <data name="LogDnsViaProxyDisabled" xml:space="preserve">
-    <value>DNS via Proxy: Disabled</value>
   </data>
   <data name="LogLanguageChanged" xml:space="preserve">
     <value>Language changed to</value>

@@ -39,7 +39,6 @@ public class ProxyProfile
 {
     public string Version { get; set; } = "1.0";
     public string Name { get; set; } = "Default";
-    public bool DnsViaProxy { get; set; } = true;
     public bool LocalhostViaProxy { get; set; } = false;
     public bool IsTrafficLoggingEnabled { get; set; } = true;
     public bool AutoClearConnectionLogs { get; set; } = true;
