@@ -96,39 +96,30 @@ jobs:
         with:
           languages: swift
 
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: latest-stable
+
       - name: Create stub xcconfig files
         run: |
           echo "// CI stub" > MacOS/ProxyBridge/Signing-Config-app.xcconfig
           echo "// CI stub" > MacOS/ProxyBridge/Signing-Config-ext.xcconfig
 
       - name: Build (no signing)
-        working-directory: MacOS/ProxyBridge
         run: |
-          # Build each target with separate SYMROOT/OBJROOT to avoid
-          # .swiftmodule output collisions between the app and extension targets.
+          cd MacOS/ProxyBridge
           xcodebuild \
             -project ProxyBridge.xcodeproj \
-            -target extension \
+            -scheme ProxyBridge \
             -configuration Release \
-            OBJROOT=/tmp/obj-ext \
-            SYMROOT=/tmp/sym-ext \
-            ONLY_ACTIVE_ARCH=YES \
+            -derivedDataPath build/DerivedData \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
-            build
-
-          xcodebuild \
-            -project ProxyBridge.xcodeproj \
-            -target ProxyBridge \
-            -configuration Release \
-            OBJROOT=/tmp/obj-app \
-            SYMROOT=/tmp/sym-app \
-            ONLY_ACTIVE_ARCH=YES \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_IDENTITY="" \
-            DEVELOPMENT_TEAM="" \
-            build
+            clean build
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
