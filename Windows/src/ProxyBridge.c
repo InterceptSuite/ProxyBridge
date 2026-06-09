@@ -483,6 +483,10 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                             action6u = RULE_ACTION_DIRECT;
                     }
 
+                    // Override PROXY to DIRECT for DHCPv6 ports (546=client, 547=server)
+                    if (action6u == RULE_ACTION_PROXY && (dp == 546 || dp == 547))
+                        action6u = RULE_ACTION_DIRECT;
+
                     if (g_connection_callback != NULL && pid6u > 0)
                     {
                         char pname[MAX_PROCESS_NAME];
@@ -1334,10 +1338,17 @@ static DWORD get_process_id_from_udp_connection_v6(const UINT8 src_ip6[16], UINT
 
 static BOOL is_ipv6_multicast_or_linklocal(const UINT8 ip6[16])
 {
-    // Multicast: FF00::/8
+    // Multicast: FF00::/8  (IPv6 has no broadcast; multicast replaces it)
     if (ip6[0] == 0xFF) return TRUE;
-    // Link-local: FE80::/10
+    // Link-local: FE80::/10  (equivalent to IPv4 APIPA 169.254.0.0/16)
     if (ip6[0] == 0xFE && (ip6[1] & 0xC0) == 0x80) return TRUE;
+    // Site-local (deprecated RFC 3879): FEC0::/10 — still seen on old equipment
+    if (ip6[0] == 0xFE && (ip6[1] & 0xC0) == 0xC0) return TRUE;
+    // Unspecified address: :: (all-zeros) — equivalent to IPv4 0.0.0.0
+    {
+        static const UINT8 unspec[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+        if (memcmp(ip6, unspec, 16) == 0) return TRUE;
+    }
     return FALSE;
 }
 
