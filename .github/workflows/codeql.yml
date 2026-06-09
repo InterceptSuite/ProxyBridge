@@ -1,0 +1,139 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [ "master", "dev" ]
+  pull_request:
+    branches: [ "master", "dev" ]
+  schedule:
+    - cron: '0 4 * * 1'
+
+jobs:
+
+  analyze-cpp:
+    name: Analyze (c-cpp)
+    runs-on: windows-latest
+    permissions:
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          languages: c-cpp
+
+      - name: Download WinDivert
+        run: |
+          $url = "https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip"
+          $expectedHash = "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15"
+          Invoke-WebRequest -Uri $url -OutFile "WinDivert.zip" -UseBasicParsing
+          $actualHash = (Get-FileHash "WinDivert.zip" -Algorithm SHA256).Hash
+          if ($actualHash -ne $expectedHash) {
+            Write-Error "WinDivert.zip SHA256 mismatch! Expected: $expectedHash  Got: $actualHash"
+            exit 1
+          }
+          Expand-Archive -Path "WinDivert.zip" -DestinationPath "C:\"
+        shell: pwsh
+
+      - name: Build (MSVC)
+        shell: pwsh
+        run: |
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+          cmd /c "`"$vcvars`" && cl.exe /nologo /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS /DPROXYBRIDGE_EXPORTS /GS /guard:cf /I`"C:\WinDivert-2.2.2-A\include`" Windows\src\ProxyBridge.c /LD /link /DYNAMICBASE /NXCOMPAT /LIBPATH:`"C:\WinDivert-2.2.2-A\x64`" WinDivert.lib ws2_32.lib iphlpapi.lib /OUT:ProxyBridgeCore.dll"
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          category: "/language:c-cpp"
+
+  analyze-csharp:
+    name: Analyze (csharp)
+    runs-on: windows-latest
+    permissions:
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          languages: csharp
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        run: dotnet build Windows/gui/ProxyBridge.GUI.csproj
+        shell: pwsh
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          category: "/language:csharp"
+
+  analyze-swift:
+    name: Analyze (swift)
+    runs-on: macos-latest
+    permissions:
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          languages: swift
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Create stub xcconfig files
+        run: |
+          cat > MacOS/ProxyBridge/Signing-Config-app.xcconfig << 'EOF'
+          PRODUCT_MODULE_NAME = ProxyBridge
+          PRODUCT_NAME = ProxyBridge
+          PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge
+          ARCHS = arm64 x86_64
+          ONLY_ACTIVE_ARCH = NO
+          EOF
+          cat > MacOS/ProxyBridge/Signing-Config-ext.xcconfig << 'EOF'
+          PRODUCT_MODULE_NAME = com_interceptsuite_ProxyBridge_extension
+          PRODUCT_NAME = extension
+          PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge.extension
+          ARCHS = arm64 x86_64
+          ONLY_ACTIVE_ARCH = NO
+          EOF
+
+      - name: Build (no signing)
+        run: |
+          cd MacOS/ProxyBridge
+          xcodebuild \
+            -project ProxyBridge.xcodeproj \
+            -scheme ProxyBridge \
+            -configuration Release \
+            -derivedDataPath build/DerivedData \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            clean build
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          category: "/language:swift"

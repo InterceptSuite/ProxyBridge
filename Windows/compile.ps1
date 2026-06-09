@@ -56,6 +56,8 @@ function Compile-MSVC {
     }
 
     Write-Host "Found Visual Studio at: $vsPath" -ForegroundColor Cyan
+    $script:foundVcvarsPath = $vcvarsPath
+    $script:foundArch = $Arch
 
     $clArgs = "/nologo /O2 /Ot /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
               "/D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS /DPROXYBRIDGE_EXPORTS /DNDEBUG " +
@@ -228,6 +230,33 @@ if ($success) {
         Write-Host $publishResult
     }
 
+    # ── Build CLI ────────────────────────────────────────────────────────────
+    Write-Host "`nBuilding CLI..." -ForegroundColor Green
+    if ($script:foundVcvarsPath -and (Test-Path $script:foundVcvarsPath)) {
+        $cliArgs = "/nologo /O2 /Ot /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
+                   "/D_WINSOCK_DEPRECATED_NO_WARNINGS /D_WIN32_WINNT=0x0601 /DNDEBUG " +
+                   "/arch:SSE2 /fp:fast /GS /guard:cf /Qpar " +
+                   "cli\main.c " +
+                   "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /NXCOMPAT /SUBSYSTEM:CONSOLE " +
+                   "winhttp.lib shell32.lib advapi32.lib " +
+                   "/OUT:ProxyBridge_CLI.exe"
+
+        $cliCmd = "`"$script:foundVcvarsPath`" $script:foundArch >nul && cl.exe $cliArgs"
+        Write-Host "Command: cl.exe $cliArgs" -ForegroundColor Gray
+
+        $cliOut = cmd /c $cliCmd '2>&1'
+        if ($LASTEXITCODE -eq 0) {
+            Move-Item "ProxyBridge_CLI.exe" -Destination $OutputDir -Force
+            Write-Host "  CLI built: ProxyBridge_CLI.exe" -ForegroundColor Gray
+            Remove-Item "*.obj" -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "  CLI build failed!" -ForegroundColor Red
+            Write-Host $cliOut
+        }
+    } else {
+        Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
+    }
+
     if (-not $NoSign) {
         Write-Host "`nSigning binaries..." -ForegroundColor Green
         $filesToSign = Get-ChildItem $OutputDir -Include *.exe,*.dll -Recurse
@@ -267,7 +296,10 @@ if ($success) {
         Pop-Location
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  Installer created successfully" -ForegroundColor Green
-            $installerName = "ProxyBridge-Setup-4.0.0.exe"
+            # Derive installer name from the version defined in the NSI file
+            $nsiContent = Get-Content "installer\ProxyBridge.nsi" -Raw -ErrorAction SilentlyContinue
+            $installerVersion = if ($nsiContent -match '!define PRODUCT_VERSION "([^"]+)"') { $Matches[1] } else { "0.0.0" }
+            $installerName = "ProxyBridge-Setup-$installerVersion.exe"
             if (Test-Path "installer\$installerName") {
                 Move-Item "installer\$installerName" -Destination $OutputDir -Force
                 Write-Host "  Moved: $installerName -> $OutputDir\" -ForegroundColor Gray
