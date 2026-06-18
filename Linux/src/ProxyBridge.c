@@ -1418,7 +1418,7 @@ static void* local_proxy_server(void *arg)
 // socks5 udp associate
 static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
 {
-    unsigned char buf[512];
+    unsigned char buf[SOCKS5_BUFFER_SIZE];
     ssize_t len;
 
     // auth handshake
