@@ -1102,7 +1102,26 @@ static void* connection_handler(void *arg)
             close(proxy_sock);
             return NULL;
         }
-    }
+    // Disable timeout for data transfer phase
+    struct timeval zero_timeout = {0, 0};
+    setsockopt(proxy_sock, SOL_SOCKET, SO_RCVTIMEO, &zero_timeout, sizeof(zero_timeout));
+    setsockopt(proxy_sock, SOL_SOCKET, SO_SNDTIMEO, &zero_timeout, sizeof(zero_timeout));
+    setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &zero_timeout, sizeof(zero_timeout));
+    setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, &zero_timeout, sizeof(zero_timeout));
+
+    // Enable and configure customized TCP keep-alives
+    int keepalive = 1;
+    int keepidle = 300;     // 5 minutes in seconds
+    int keepintvl = 1;      // 1 second interval
+    int keepcnt = 5;        // 5 probes before dropping
+    setsockopt(proxy_sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+    setsockopt(proxy_sock, SOL_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+    setsockopt(proxy_sock, SOL_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+    setsockopt(proxy_sock, SOL_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+    setsockopt(client_sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+    setsockopt(client_sock, SOL_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+    setsockopt(client_sock, SOL_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+    setsockopt(client_sock, SOL_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
 
     // setup transfer config
     transfer_config_t *transfer_config = (transfer_config_t *)malloc(sizeof(transfer_config_t));
@@ -1193,13 +1212,11 @@ static void* transfer_handler(void *arg)
             if (fds[0].events == 0 && fds[1].events == 0)
                 break;
 
-            int ready = poll(fds, 2, 60000);
+            int ready = poll(fds, 2, -1);
             if (ready < 0) {
                 if (errno == EINTR) continue;
                 break;
             }
-            if (ready == 0)
-                break; // 60s idle timeout
 
             // check for errors and hangups
             if (fds[0].revents & POLLERR) break;
@@ -1291,8 +1308,11 @@ fallback:
         fds[1].events = POLLIN;
 
         while (1) {
-            int ready = poll(fds, 2, 60000);
-            if (ready <= 0) break;
+            int ready = poll(fds, 2, -1);
+            if (ready < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
 
             if (fds[0].revents & POLLERR || fds[1].revents & POLLERR) break;
 
