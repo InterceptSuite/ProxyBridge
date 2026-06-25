@@ -2,6 +2,7 @@
 #include <windows.h>
 #include "ProxyBridge.h"
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include <iphlpapi.h>
 #include <psapi.h>
 #include <stdio.h>
@@ -16,7 +17,7 @@
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 1024
-#define VERSION "4.0.0"
+#define VERSION "4.0.6-Beta"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 30000
 // Single packet-processor thread eliminates TCP packet reordering.
@@ -315,6 +316,15 @@ static void configure_udp_socket(SOCKET sock, int bufsize, DWORD timeout)
     setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+
+#ifdef _WIN32
+    #ifndef SIO_UDP_CONNRESET
+    #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+    #endif
+    BOOL bNewBehavior = FALSE;
+    DWORD dwBytesReturned = 0;
+    WSAIoctl(sock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
+#endif
 }
 
 static int send_all(SOCKET sock, const char *buf, int len)
@@ -429,15 +439,12 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                             memcpy(ipv6_header->SrcAddr, orig_dst6, 16);
                             udp_header->SrcPort = htons(orig_dp);
                         }
-                        static const UINT8 _lb6u[16]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
-                        if (memcmp(ipv6_header->SrcAddr,_lb6u,16)!=0 || memcmp(ipv6_header->DstAddr,_lb6u,16)!=0)
-                        {
-                            UINT32 tmp[4];
-                            memcpy(tmp,ipv6_header->DstAddr,16);
-                            memcpy(ipv6_header->DstAddr,ipv6_header->SrcAddr,16);
-                            memcpy(ipv6_header->SrcAddr,tmp,16);
+                        // ::1 loopback: keep OUTBOUND so the loopback adapter echo
+                        // delivers reliably (same reasoning as IPv4 path below).
+                        // Non-loopback: inject INBOUND.
+                        static const UINT8 _lb6r[16]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+                        if (memcmp(ipv6_header->DstAddr, _lb6r, 16) != 0)
                             addr.Outbound = FALSE;
-                        }
                         goto ipv6u_send;
                     }
 
@@ -521,11 +528,17 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
                         static const UINT8 _lb6up[16]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
                         BOOL both_lb=(memcmp(ipv6_header->SrcAddr,_lb6up,16)==0&&memcmp(ipv6_header->DstAddr,_lb6up,16)==0);
-                        // redirect to ::1:34011
-                        memset(ipv6_header->DstAddr,0,16); ((UINT8*)ipv6_header->DstAddr)[15]=1;
-                        if (!both_lb)
+                        if (both_lb)
                         {
-                            memset(ipv6_header->SrcAddr,0,16); ((UINT8*)ipv6_header->SrcAddr)[15]=1;
+                            memset(ipv6_header->DstAddr, 0, 16);
+                            ((UINT8*)ipv6_header->DstAddr)[15] = 1;
+                        }
+                        else
+                        {
+                            UINT32 tmp[4];
+                            memcpy(tmp, ipv6_header->DstAddr, 16);
+                            memcpy(ipv6_header->DstAddr, ipv6_header->SrcAddr, 16);
+                            memcpy(ipv6_header->SrcAddr, tmp, 16);
                             addr.Outbound = FALSE;
                         }
                         goto ipv6u_send;
@@ -749,16 +762,44 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                         // Restore both source IP and port to original destination
                         ip_header->SrcAddr = orig_dest_ip;
                         udp_header->SrcPort = htons(orig_dest_port);
-                    }                    addr.Outbound = FALSE;
+
+                        // loopback need outbound injection inbound dont work on windows loopback
+                        // bcz fast path skip the recive layer we inject into
+                        // outbound makes loopback echo it back as inbound which actualy reach socket
+                        // impostor flag stops it getting recaptured again
+                        // for real nic inbound injection works fine no extra hop
+                        BYTE dst_first_octet = (ntohl(ip_header->DstAddr) >> 24) & 0xFF;
+                        if (dst_first_octet != 127)
+                            addr.Outbound = FALSE;
+                        // else: stay OUTBOUND — loopback echo delivers the packet
+                    }
+                    else
+                    {
+                        /* Connection entry gone expired or not added
+                         * relay port 34011 as source would be rejected by any connected
+                         * socket expecting the real server port.  Drop instead. */
+                        log_message("[UDP RELAY] No tracked connection for relay response to port %d dropping", dst_port);
+                        continue;
+                    }
                 }
                 else if (is_connection_tracked(ntohs(udp_header->SrcPort)))
                 {
                     UINT16 src_port = ntohs(udp_header->SrcPort);
-                    UINT32 temp_addr = ip_header->DstAddr;
                     udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
-                    ip_header->DstAddr = ip_header->SrcAddr;
-                    ip_header->SrcAddr = temp_addr;
-                    addr.Outbound = FALSE;
+
+                    BYTE src_first_octet = (ntohl(ip_header->SrcAddr) >> 24) & 0xFF;
+                    BOOL src_is_loopback = (src_first_octet == 127);
+                    if (src_is_loopback)
+                    {
+                        ip_header->DstAddr = htonl(INADDR_LOOPBACK);
+                    }
+                    else
+                    {
+                        UINT32 temp_addr = ip_header->DstAddr;
+                        ip_header->DstAddr = ip_header->SrcAddr;
+                        ip_header->SrcAddr = temp_addr;
+                        addr.Outbound = FALSE;
+                    }
                 }
                 else
                 {
@@ -850,15 +891,20 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 
                         // redirect to UDP relay server at 127.0.0.1:34011
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
-                        ip_header->DstAddr = htonl(INADDR_LOOPBACK);
 
-                        // check if source is localhos
+                        // check if source is localhost
                         BYTE src_first_octet = (ntohl(ip_header->SrcAddr) >> 24) & 0xFF;
                         BOOL src_is_loopback = (src_first_octet == 127);
 
-                        if (!src_is_loopback)
+                        if (src_is_loopback)
                         {
-                            // for non loopback source: mark as inbound
+                            ip_header->DstAddr = htonl(INADDR_LOOPBACK);
+                        }
+                        else
+                        {
+                            UINT32 temp_addr = ip_header->DstAddr;
+                            ip_header->DstAddr = ip_header->SrcAddr;
+                            ip_header->SrcAddr = temp_addr;
                             addr.Outbound = FALSE;
                         }
                         // for loopback we need keep as outbound (127.x.x.x -> 127.0.0.1)
@@ -2710,10 +2756,13 @@ static BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg)
     if (cfg->type != PROXY_TYPE_SOCKS5)
         return FALSE;
 
-    // Prevent retry spam - only try every 5 seconds per config
+    // Prevent retry spam - only try every 1 second per config
     ULONGLONG now = GetTickCount64();
-    if (now - cfg->last_udp_attempt < 5000)
+    if (now - cfg->last_udp_attempt < 1000)
+    {
+        log_message("[UDP ASSOC] Retry guard active for %s:%d, skipping", cfg->host, cfg->port);
         return FALSE;
+    }
 
     cfg->last_udp_attempt = now;
 
@@ -2767,6 +2816,20 @@ static BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg)
     // WSAEADDRNOTAVAIL (10049), so replace it with the proxy's resolved IP.
     if (cfg->udp_relay_addr.sin_addr.s_addr == INADDR_ANY)
         cfg->udp_relay_addr.sin_addr.s_addr = socks5_ip;
+
+    // haandshake completed remove the 3second timeout so the control socket stays open indefinitely
+    // keepalives below will detect actual disconnection.
+    DWORD zero_timeout = 0;
+    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&zero_timeout, sizeof(zero_timeout));
+    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&zero_timeout, sizeof(zero_timeout));
+
+    // we can enable TCP keepalives so the SOCKS5 proxy dont idleclose the control
+    // connection (few proxies terminate it after 60 second of silence, killing UDP ASSOCIATE).
+    BOOL ka_on = TRUE;
+    setsockopt(tcp_sock, SOL_SOCKET, SO_KEEPALIVE, (const char*)&ka_on, sizeof(ka_on));
+    struct tcp_keepalive ka = { 1, 10000, 2000 }; // idle 10s, retry every 2s
+    DWORD ka_bytes;
+    WSAIoctl(tcp_sock, SIO_KEEPALIVE_VALS, &ka, sizeof(ka), NULL, 0, &ka_bytes, NULL, NULL);
 
     cfg->udp_tcp_ctrl = tcp_sock;
 
@@ -2877,7 +2940,19 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
         struct timeval timeout = {1, 0};
         if (select(0, &read_fds, NULL, NULL, &timeout) <= 0)
+        {
+            // Select timed out proactively reconnect any dropped UDP ASSOCIATEs so
+            // the connection is ready before the next client packet arrives.
+            // Real time communication need real time packet transfer, a single UDP Associate connction can take 1 to 2 seconds and it break the UDP steam for client app
+            // fuck you udp this cause slight increase in performance but needed for udp
+            for (int i = 0; i < g_proxy_config_count; i++)
+            {
+                PROXY_CONFIG *rc = &g_proxy_configs[i];
+                if (rc->type == PROXY_TYPE_SOCKS5 && !rc->udp_connected)
+                    establish_udp_associate_for_config(rc);
+            }
             continue;
+        }
 
         // Check if any SOCKS5 proxy TCP control socket disconnected
         for (int i = 0; i < g_proxy_config_count; i++)
@@ -2890,7 +2965,7 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                 int result = recv(cfg->udp_tcp_ctrl, test_buf, sizeof(test_buf), MSG_PEEK);
                 if (result == 0 || (result == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK))
                 {
-                    log_message("[UDP RELAY] TCP control connection closed for proxy %s:%d", cfg->host, cfg->port);
+                    log_message("[UDP RELAY] TCP control connection closed for proxy %s:%d — reconnecting", cfg->host, cfg->port);
                     closesocket(cfg->udp_tcp_ctrl);
                     cfg->udp_tcp_ctrl = INVALID_SOCKET;
                     if (cfg->udp_send_sock != INVALID_SOCKET)
@@ -2899,6 +2974,8 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                         cfg->udp_send_sock = INVALID_SOCKET;
                     }
                     cfg->udp_connected = FALSE;
+                    // Reconnect immediately so the next client packet is not dropped.
+                    establish_udp_associate_for_config(cfg);
                 }
             }
         }
@@ -2929,7 +3006,6 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
                 if (get_connection(from_port, &dest_ip, &dest_port))
                 {
-                    // Get the proxy config for this connection
                     UINT32 proxy_config_id = get_connection_proxy_id(from_port);
                     PROXY_CONFIG *cfg = find_proxy_config(proxy_config_id);
 
@@ -2939,12 +3015,14 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                         continue;
                     }
 
-                    // Ensure UDP ASSOCIATE is established (retry if needed)
+                    // UDP ASSOCIATE is established (reconnect if dropped).
+                    // If reconnect succeeds, fall through and send the current packet
+                    // immediately so real-time streams lose at most one packet.
                     if (!cfg->udp_connected)
                     {
                         if (!establish_udp_associate_for_config(cfg))
                         {
-                            log_message("[UDP RELAY] Cannot send - UDP ASSOCIATE not established for %s:%d", cfg->host, cfg->port);
+                            log_message("[UDP RELAY] UDP ASSOCIATE unavailable for %s:%d — dropping packet", cfg->host, cfg->port);
                             continue;
                         }
                     }
@@ -2966,10 +3044,17 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
 
                     if (sent == SOCKET_ERROR) {
                         int err = WSAGetLastError();
-                        log_message("[UDP RELAY ERROR] Failed to send to SOCKS5 proxy %s:%d: %d - closing", cfg->host, cfg->port, err);
+                        log_message("[UDP RELAY ERROR] sendto proxy %s:%d failed: %d — reconnecting and retrying", cfg->host, cfg->port, err);
                         if (cfg->udp_tcp_ctrl != INVALID_SOCKET) { closesocket(cfg->udp_tcp_ctrl); cfg->udp_tcp_ctrl = INVALID_SOCKET; }
                         if (cfg->udp_send_sock != INVALID_SOCKET) { closesocket(cfg->udp_send_sock); cfg->udp_send_sock = INVALID_SOCKET; }
                         cfg->udp_connected = FALSE;
+                        // Reconnect and retry the current packet so real-time streams
+                        // lose at most one packet during a proxy reconnect event.
+                        if (establish_udp_associate_for_config(cfg))
+                        {
+                            sendto(cfg->udp_send_sock, (char*)send_buf, 10 + recv_len, 0,
+                                   (struct sockaddr *)&cfg->udp_relay_addr, sizeof(cfg->udp_relay_addr));
+                        }
                     }
                 }
             }
@@ -2980,7 +3065,18 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
         {
             PROXY_CONFIG *cfg = &g_proxy_configs[i];
             if (cfg->type != PROXY_TYPE_SOCKS5 || !cfg->udp_connected) continue;
-            if (cfg->udp_send_sock == INVALID_SOCKET || !FD_ISSET(cfg->udp_send_sock, &read_fds)) continue;
+            if (cfg->udp_send_sock == INVALID_SOCKET) continue;
+            // If not signalled by the outer select, do a zero-timeout check for
+            // sockets that were created this iteration (e.g. just after reconnect).
+            if (!FD_ISSET(cfg->udp_send_sock, &read_fds))
+            {
+                fd_set quick;
+                FD_ZERO(&quick);
+                FD_SET(cfg->udp_send_sock, &quick);
+                struct timeval zero_tv = {0, 0};
+                if (select(0, &quick, NULL, NULL, &zero_tv) <= 0 || !FD_ISSET(cfg->udp_send_sock, &quick))
+                    continue;
+            }
 
             from_len = sizeof(from_addr);
             recv_len = recvfrom(cfg->udp_send_sock, (char*)recv_buf, sizeof(recv_buf), 0,
@@ -3013,6 +3109,7 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                     BOOL found = FALSE;
                     UINT32 target_ip = 0;
                     UINT16 target_port = 0;
+                    CONNECTION_INFO *winner_conn = NULL;
 
                     AcquireSRWLockShared(&lock);
                     ULONGLONG best_activity = 0;
@@ -3025,15 +3122,24 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                             {
                                 if (!found || conn->last_activity > best_activity)
                                 {
-                                    target_ip   = conn->src_ip;
-                                    target_port = conn->src_port;
+                                    target_ip    = conn->src_ip;
+                                    target_port  = conn->src_port;
                                     best_activity = conn->last_activity;
-                                    found = TRUE;
+                                    found        = TRUE;
+                                    winner_conn  = conn;
+                                    // Do NOT update last_activity here; doing so mid-loop
+                                    // corrupts best_activity comparisons for later entries,
+                                    // causing split delivery when multiple clients share the
+                                    // same destination. Update after the loop completes.
                                 }
                             }
                             conn = conn->next;
                         }
                     }
+                    // Keep winner's session alive (update outside loop so comparisons above
+                    // use the original, unmodified timestamps for all candidates).
+                    if (winner_conn != NULL)
+                        InterlockedExchange64((LONGLONG volatile*)&winner_conn->last_activity, (LONGLONG)GetTickCount64());
                     ReleaseSRWLockShared(&lock);
 
                     if (found)
@@ -3043,8 +3149,15 @@ static DWORD WINAPI udp_relay_server(LPVOID arg)
                         target_addr.sin_family = AF_INET;
                         target_addr.sin_addr.s_addr = target_ip;
                         target_addr.sin_port = htons(target_port);
-                        sendto(udp_relay_socket, (char*)&recv_buf[10], recv_len-10, 0,
+                        int fwd = sendto(udp_relay_socket, (char*)&recv_buf[10], recv_len-10, 0,
                                (struct sockaddr*)&target_addr, sizeof(target_addr));
+                        if (fwd == SOCKET_ERROR)
+                            log_message("[UDP RELAY] sendto client port %d failed: %d", target_port, WSAGetLastError());
+                    }
+                    else
+                    {
+                        log_message("[UDP RELAY] No session found for proxy response from %d.%d.%d.%d:%d — dropped",
+                            recv_buf[4], recv_buf[5], recv_buf[6], recv_buf[7], src_port);
                     }
                 }
                 else if (recv_buf[3] == SOCKS5_ATYP_IPV6 && recv_len >= 22)
@@ -3392,6 +3505,22 @@ static DWORD WINAPI connection_handler(LPVOID arg)
         }
     }
 
+    // Disable timeout for data transfer phase
+    DWORD zero_timeout = 0;
+    setsockopt(socks_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&zero_timeout, sizeof(zero_timeout));
+    setsockopt(socks_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&zero_timeout, sizeof(zero_timeout));
+    setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&zero_timeout, sizeof(zero_timeout));
+    setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&zero_timeout, sizeof(zero_timeout));
+
+    // Enable and configure customized TCP keep-alives
+    struct tcp_keepalive keepalive_settings;
+    keepalive_settings.onoff = 1;
+    keepalive_settings.keepalivetime = 300000;      // 5 minutes in milliseconds
+    keepalive_settings.keepaliveinterval = 1000;    // 1 second interval
+    DWORD bytes_returned = 0;
+    WSAIoctl(socks_sock, SIO_KEEPALIVE_VALS, &keepalive_settings, sizeof(keepalive_settings), NULL, 0, &bytes_returned, NULL, NULL);
+    WSAIoctl(client_sock, SIO_KEEPALIVE_VALS, &keepalive_settings, sizeof(keepalive_settings), NULL, 0, &bytes_returned, NULL, NULL);
+
     TRANSFER_CONFIG *transfer_config = (TRANSFER_CONFIG *)malloc(sizeof(TRANSFER_CONFIG));
 
     if (transfer_config == NULL)
@@ -3529,18 +3658,20 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
     // check if already exists in this hash bucket
     while (existing != NULL) {
         if (existing->src_port == src_port) {
+            existing->is_ipv6 = FALSE;
             existing->src_ip = src_ip;
             existing->orig_dest_ip = dest_ip;
             existing->orig_dest_port = dest_port;
             existing->proxy_config_id = proxy_config_id;
             existing->is_tracked = TRUE;
+            existing->last_activity = GetTickCount64();
             ReleaseSRWLockExclusive(&lock);
             return;
         }
         existing = existing->next;
     }
 
-    CONNECTION_INFO *conn = (CONNECTION_INFO *)malloc(sizeof(CONNECTION_INFO));
+    CONNECTION_INFO *conn = (CONNECTION_INFO *)calloc(1, sizeof(CONNECTION_INFO));
     if (conn == NULL) {
         ReleaseSRWLockExclusive(&lock);
         return;
@@ -3552,6 +3683,7 @@ static void add_connection(UINT16 src_port, UINT32 src_ip, UINT32 dest_ip, UINT1
     conn->orig_dest_port = dest_port;
     conn->proxy_config_id = proxy_config_id;
     conn->is_tracked = TRUE;
+    conn->is_ipv6 = FALSE;
     conn->last_activity = GetTickCount64();
 
     conn->next = connection_hash_table[hash];
@@ -3574,6 +3706,7 @@ static void add_connection_v6(UINT16 src_port, const UINT8 src_ip6[16], const UI
             existing->orig_dest_port = dest_port;
             existing->proxy_config_id = proxy_config_id;
             existing->is_tracked = TRUE;
+            existing->last_activity = GetTickCount64();
             ReleaseSRWLockExclusive(&lock);
             return;
         }
@@ -3774,7 +3907,7 @@ static void cleanup_stale_connections(void)
 
         while (*conn_ptr != NULL)
         {
-            if (now - (*conn_ptr)->last_activity > 60000)
+            if (now - (*conn_ptr)->last_activity > 120000)
             {
                 CONNECTION_INFO *to_free = *conn_ptr;
                 *conn_ptr = (*conn_ptr)->next;
@@ -4572,13 +4705,19 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 
     Sleep(500);
 
+    // "not impostor" ensures WinDivert never re-captures packets it already injected.
+    // Without this, each WinDivertSend re-enters the capture queue, creating
+    // re-injection loops that delay delivery by seconds and cause DTLS handshake
+    // failures.  With "not impostor", injected packets bypass the driver entirely
+    // and flow directly to the OS — zero extra hops, no loops.
     snprintf(filter, sizeof(filter),
+        "not impostor and ("
         "(tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
         "(udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d))) or "
         "(udp and not outbound and udp.SrcPort == 53) or "
         "(ipv6 and udp and not outbound and udp.SrcPort == 53) or "
         "(ipv6 and tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
-        "(ipv6 and udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)))",
+        "(ipv6 and udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d))))",
         g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT,
         g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT);
 
