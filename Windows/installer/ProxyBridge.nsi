@@ -8,7 +8,7 @@
 Unicode True
 
 ; Version Information
-VIProductVersion "4.0.0.0"
+VIProductVersion "4.0.6.0"
 VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"

@@ -2,6 +2,9 @@
 
 Universal proxy client for Windows applications - route any application through SOCKS5/HTTP proxies without modifying the application.
 
+> **ProxyBridge is a proxy client - it routes your traffic. [InterceptSuite](https://interceptsuite.com) is the MITM SOCKS5 proxy server that lets you inspect it.**
+> Point ProxyBridge at InterceptSuite to intercept TCP, UDP, StartTLS, DTLS and TLS traffic from any application. [**Try InterceptSuite →**](https://interceptsuite.com)
+
 ## Table of Contents
 
 - [ProxyBridge for Windows](#proxybridge-for-windows)
@@ -27,6 +30,7 @@ Universal proxy client for Windows applications - route any application through 
     - [Manual Build - DLL (MSVC)](#manual-build---dll-msvc)
     - [Manual Build - DLL (GCC / MinGW-w64)](#manual-build---dll-gcc--mingw-w64)
     - [Manual Build - CLI (MSVC)](#manual-build---cli-msvc)
+  - [InterceptSuite](#interceptsuite)
   - [License](#license)
 
 ## Installation
@@ -447,6 +451,12 @@ cl /O2 /W4 /D_WIN32_WINNT=0x0601 /DNDEBUG /GS /guard:cf ^
    winhttp.lib shell32.lib advapi32.lib ^
    /OUT:ProxyBridge_CLI.exe
 ```
+
+## InterceptSuite
+
+ProxyBridge routes your traffic through a SOCKS5 or HTTP proxy. **[InterceptSuite](https://interceptsuite.com)** is the MITM SOCKS5 proxy server to pair it with - intercept and analyze TCP, UDP, StartTLS, DTLS, TLS traffic from any application without modifying it.
+
+[**Try InterceptSuite →**](https://interceptsuite.com)
 
 ## License
 
