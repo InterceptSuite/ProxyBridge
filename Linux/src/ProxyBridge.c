@@ -1558,6 +1558,22 @@ static bool establish_udp_associate(void)
     if (socks5_udp_relay_addr.sin_addr.s_addr == INADDR_ANY)
         socks5_udp_relay_addr.sin_addr.s_addr = socks5_ip;
 
+    // Handshake done - remove the 3s timeout so the control socket stays open indefinitely.
+    struct timeval zero_tv = {0, 0};
+    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, &zero_tv, sizeof(zero_tv));
+    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, &zero_tv, sizeof(zero_tv));
+
+    // Enable TCP keepalives so the SOCKS5 proxy doesn't idle-close the control
+    // connection (many proxies terminate it after ~60s of silence, killing UDP ASSOCIATE).
+    int ka_on = 1;
+    int ka_idle = 10;    // start keepalives after 10s idle
+    int ka_intvl = 2;    // send keepalive every 2s
+    int ka_cnt = 5;      // drop after 5 missed keepalives
+    setsockopt(tcp_sock, SOL_SOCKET,  SO_KEEPALIVE,    &ka_on,   sizeof(ka_on));
+    setsockopt(tcp_sock, SOL_TCP,     TCP_KEEPIDLE,    &ka_idle, sizeof(ka_idle));
+    setsockopt(tcp_sock, SOL_TCP,     TCP_KEEPINTVL,   &ka_intvl, sizeof(ka_intvl));
+    setsockopt(tcp_sock, SOL_TCP,     TCP_KEEPCNT,     &ka_cnt,  sizeof(ka_cnt));
+
     socks5_udp_control_socket = tcp_sock;
 
     socks5_udp_send_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -1645,7 +1661,12 @@ static void* udp_relay_server(void *arg)
 
         int ready = poll(fds, nfds, 1000); // 1s timeout
         if (ready <= 0)
+        {
+            // Proactively reconnect so the next client packet is not dropped.
+            if (!udp_associate_connected)
+                udp_associate_connected = establish_udp_associate();
             continue;
+        }
 
         // check if tcp control still alive
         // if it dies the udp associate is dead too
@@ -1655,8 +1676,10 @@ static void* udp_relay_server(void *arg)
             ssize_t peek_len = recv(socks5_udp_control_socket, peek_buf, 1, MSG_PEEK | MSG_DONTWAIT);
             if (peek_len == 0 || (peek_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
             {
-                // tcp died, proxy is gone
+                // tcp died — tear down and reconnect immediately so real-time streams
+                // lose as few packets as possible.
                 teardown_udp_associate();
+                udp_associate_connected = establish_udp_associate();
                 continue;
             }
         }
@@ -1701,10 +1724,26 @@ static void* udp_relay_server(void *arg)
             ssize_t sent = sendto(socks5_udp_send_socket, send_buf, 10 + recv_len, 0,
                    (struct sockaddr *)&socks5_udp_relay_addr, sizeof(socks5_udp_relay_addr));
 
-            // if send fails proxy died, teardown and retry later
             if (sent < 0)
             {
+                // sendto failed — proxy likely died.  Tear down, reconnect immediately
+                // and retry the current packet so real-time streams lose at most one packet.
                 teardown_udp_associate();
+                if (establish_udp_associate())
+                {
+                    udp_associate_connected = true;
+                    sendto(socks5_udp_send_socket, send_buf, (size_t)(10 + recv_len), 0,
+                           (struct sockaddr *)&socks5_udp_relay_addr, sizeof(socks5_udp_relay_addr));
+                }
+            }
+            else if (socks5_udp_send_socket >= 0)
+            {
+                // After sending (especially on a freshly established association), the proxy
+                // may respond within the same poll() cycle before the socket was in fds[].
+                // Do a non-blocking check now so we don't add an extra poll() round-trip.
+                struct pollfd quick = { socks5_udp_send_socket, POLLIN, 0 };
+                if (poll(&quick, 1, 0) > 0)
+                    fds[1].revents |= POLLIN;
             }
         }
 
@@ -1759,6 +1798,8 @@ static void* udp_relay_server(void *arg)
                         client_addr.sin_family = AF_INET;
                         client_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
                         client_addr.sin_port = htons(conn->src_port);
+                        // Keep session alive while proxy delivers data (benign relaxed write under read lock)
+                        conn->last_activity = get_monotonic_ms();
                         found_client = true;
                         break;
                     }
@@ -2129,7 +2170,7 @@ static void cleanup_stale_connections(void)
 
         while (*conn_ptr != NULL)
         {
-            if (now - (*conn_ptr)->last_activity > 60000)  // 60 sec timeout
+            if (now - (*conn_ptr)->last_activity > 120000)  // 120 sec timeout
             {
                 CONNECTION_INFO *to_free = *conn_ptr;
                 *conn_ptr = (*conn_ptr)->next;
