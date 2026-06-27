@@ -757,13 +757,20 @@ class AppProxyProvider: NETransparentProxyProvider {
     private func relayUDPThroughSOCKS5(clientFlow: NEAppProxyUDPFlow, relayHost: String, relayPort: UInt16, tcpConnection: NWTCPConnection, processPath: String) {
         let relayEndpoint = NWHostEndpoint(hostname: relayHost, port: String(relayPort))
         let udpSession = self.createUDPSession(to: relayEndpoint, from: nil)
-        
+
         tcpConnectionsLock.lock()
         udpTCPConnections[clientFlow] = tcpConnection
         tcpConnectionsLock.unlock()
-        
+
         readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
         readAndForwardRelayUDP(clientFlow: clientFlow, udpSession: udpSession)
+    }
+
+    private func cleanupUDPFlow(_ flow: NEAppProxyUDPFlow) {
+        tcpConnectionsLock.lock()
+        let conn = udpTCPConnections.removeValue(forKey: flow)
+        tcpConnectionsLock.unlock()
+        conn?.cancel()
     }
     
     private func readAndForwardClientUDP(clientFlow: NEAppProxyUDPFlow, udpSession: NWUDPSession, processPath: String) {
@@ -771,9 +778,10 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         clientFlow.readDatagrams { [weak self] datagrams, endpoints, error in
             guard let self = self else { return }
-            
+
             if let error = error {
                 self.log("UDP read error: \(error.localizedDescription)", level: "ERROR")
+                self.cleanupUDPFlow(clientFlow)
                 return
             }
             
