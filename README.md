@@ -112,7 +112,7 @@ curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/
 ## Documentation
 
 > [!IMPORTANT]
-> **[📖 Full Documentation](https://doc.interceptsuite.com/docs/proxybridge/)**
+> **[📖 Full Documentation](https://interceptsuite.com/docs/proxybridge/)**
 >
 > Everything you need to get started and go deep:
 > - Installation and setup guides
@@ -121,7 +121,7 @@ curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/
 > - UDP, IPv6, HTTP/3, DTLS setup
 > - Troubleshooting and advanced usage
 >
-> **[doc.interceptsuite.com/docs/proxybridge](https://doc.interceptsuite.com/docs/proxybridge/)**
+> **[interceptsuite.com/docs/proxybridge](https://interceptsuite.com/docs/proxybridge/)**
 
 ## Screenshots
 
