@@ -188,37 +188,48 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     private func reloadAndStartTunnel(manager: NETransparentProxyManager) {
         manager.loadFromPreferences { [weak self] loadError in
             guard let self = self else { return }
-            
+
             if let loadError = loadError {
                 self.addLog("ERROR", "Failed to reload preferences: \(loadError.localizedDescription)")
                 return
             }
-            
-            do {
-                try (manager.connection as? NETunnelProviderSession)?.startTunnel()
+
+            guard let session = manager.connection as? NETunnelProviderSession else { return }
+
+            // register before startTunnel so we can't miss a fast .connected transition
+            // remove the observer the moment it fires in oneshot to avoid configuring twice
+            var observer: NSObjectProtocol?
+            observer = NotificationCenter.default.addObserver(
+                forName: .NEVPNStatusDidChange,
+                object: session,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self = self, session.status == .connected else { return }
+                if let obs = observer { NotificationCenter.default.removeObserver(obs) }
+                observer = nil
+
+                self.setupLogPolling(session: session)
+
+                if let config = self.proxyConfig {
+                    self.sendProxyConfigToExtension(config, session: session)
+                }
                 
+                RuleManager.loadRulesFromUserDefaults(session: session) { success, count in
+                    if success && count > 0 {
+                        self.addLog("INFO", "Loaded \(count) rule(s) from local storage")
+                    }
+                }
+            }
+
+            do {
+                try session.startTunnel()
                 DispatchQueue.main.async {
                     self.isProxyActive = true
                     self.addLog("INFO", "Proxy tunnel started")
                 }
-                
-                if let session = manager.connection as? NETunnelProviderSession {
-                    // Wait a moment for tunnel to be ready, then configure
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
-                        self.setupLogPolling(session: session)
-                        
-                        if let config = self.proxyConfig {
-                            self.sendProxyConfigToExtension(config, session: session)
-                        }
-                        
-                        RuleManager.loadRulesFromUserDefaults(session: session) { success, count in
-                            if success && count > 0 {
-                                self.addLog("INFO", "Loaded \(count) rule(s) from local storage")
-                            }
-                        }
-                    }
-                }
             } catch {
+                if let obs = observer { NotificationCenter.default.removeObserver(obs) }
+                observer = nil
                 self.addLog("ERROR", "Failed to start tunnel: \(error.localizedDescription)")
             }
         }
