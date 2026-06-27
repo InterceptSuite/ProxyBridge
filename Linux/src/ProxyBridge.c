@@ -2793,12 +2793,15 @@ bool ProxyBridge_Start(void)
 
     // setup iptables rules for packet interception - USE MANGLE table so it runs BEFORE nat
     log_message("setting up iptables rules");
-    // mangle table runs before nat, so we can mark packets there
+    // mangle table runs before nat, so we can mark packets there.
+    // Exclude loopback first: local (lo) traffic must never be queued and reinjected,
+    // otherwise non-trivial 127.0.0.0/8 responses stall. Loopback never needs proxying.
+    int ret0 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT", NULL, NULL, NULL, NULL, NULL, NULL);
     int ret1 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
     int ret2 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
 
-    if (ret1 != 0 || ret2 != 0) {
-        log_message("failed to add iptables rules ret1=%d ret2=%d", ret1, ret2);
+    if (ret0 != 0 || ret1 != 0 || ret2 != 0) {
+        log_message("failed to add iptables rules ret0=%d ret1=%d ret2=%d", ret0, ret1, ret2);
     } else {
         log_message("iptables nfqueue rules added successfully");
     }
@@ -2840,10 +2843,12 @@ bool ProxyBridge_Stop(void)
     running = false;
 
     // cleanup iptables
+    int ret0 = run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-o", "lo", "-j", "ACCEPT", NULL, NULL, NULL, NULL, NULL, NULL);
     int ret1 = run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
     int ret2 = run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
     int ret3 = run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
     int ret4 = run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
+    (void)ret0;
     (void)ret1;
     (void)ret2;
     (void)ret3;
@@ -3102,6 +3107,7 @@ static void library_cleanup(void)
     {
         // Even if not running, ensure iptables rules are removed
         // This handles cases where the app crashed before calling Stop
+        run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-o", "lo", "-j", "ACCEPT", NULL, NULL, NULL, NULL, NULL, NULL);
         run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
         run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
         run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
