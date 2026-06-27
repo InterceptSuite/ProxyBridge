@@ -723,13 +723,16 @@ class AppProxyProvider: NETransparentProxyProvider {
     }
     
     private func parseSOCKS5Address(from data: Data, offset: Int) -> (String, UInt16) {
+        guard data.count > offset else { return ("0.0.0.0", 0) }
         let atyp = data[offset]
-        
+
         if atyp == 0x01 {
+            guard data.count >= offset + 7 else { return ("0.0.0.0", 0) }
             let ip = "\(data[offset+1]).\(data[offset+2]).\(data[offset+3]).\(data[offset+4])"
             let port = (UInt16(data[offset+5]) << 8) | UInt16(data[offset+6])
             return (ip, port)
         } else if atyp == 0x04 {
+            guard data.count >= offset + 19 else { return ("0.0.0.0", 0) }
             var ipv6Parts: [String] = []
             for i in 0..<8 {
                 let idx = offset + 1 + (i * 2)
@@ -740,12 +743,14 @@ class AppProxyProvider: NETransparentProxyProvider {
             let port = (UInt16(data[offset+17]) << 8) | UInt16(data[offset+18])
             return (ip, port)
         } else if atyp == 0x03 {
+            guard data.count >= offset + 2 else { return ("0.0.0.0", 0) }
             let len = Int(data[offset+1])
+            guard data.count >= offset + 2 + len + 2 else { return ("0.0.0.0", 0) }
             let domain = String(data: data[(offset+2)..<(offset+2+len)], encoding: .utf8) ?? "unknown"
             let port = (UInt16(data[offset+2+len]) << 8) | UInt16(data[offset+2+len+1])
             return (domain, port)
         }
-        
+
         return ("0.0.0.0", 0)
     }
     
@@ -904,17 +909,20 @@ class AppProxyProvider: NETransparentProxyProvider {
     
     private func decapsulateSOCKS5UDPWithEndpoint(datagram: Data) -> (Data, String, UInt16)? {
         guard datagram.count > 10 else { return nil }
-        
+
         let atyp = datagram[3]
         var headerLen = 4
         var destHost = ""
         var destPort: UInt16 = 0
-        
+
         if atyp == 0x01 {
+            // bytes 4-9: 4-byte IPv4 + 2-byte port (covered by count > 10)
             destHost = "\(datagram[4]).\(datagram[5]).\(datagram[6]).\(datagram[7])"
             destPort = (UInt16(datagram[8]) << 8) | UInt16(datagram[9])
             headerLen += 6
         } else if atyp == 0x04 {
+            // bytes 4-21: 16-byte IPv6 + 2-byte port
+            guard datagram.count >= 22 else { return nil }
             var ipv6Parts: [String] = []
             for i in 0..<8 {
                 let idx = 4 + (i * 2)
@@ -925,16 +933,19 @@ class AppProxyProvider: NETransparentProxyProvider {
             destPort = (UInt16(datagram[20]) << 8) | UInt16(datagram[21])
             headerLen += 18
         } else if atyp == 0x03 {
+            // byte 4: domain length, bytes 5..<5+len: domain, then 2-byte port
+            guard datagram.count >= 6 else { return nil }
             let domainLen = Int(datagram[4])
+            guard datagram.count >= 5 + domainLen + 2 else { return nil }
             destHost = String(data: datagram[5..<(5+domainLen)], encoding: .utf8) ?? "unknown"
             destPort = (UInt16(datagram[5+domainLen]) << 8) | UInt16(datagram[5+domainLen+1])
             headerLen += 1 + domainLen + 2
         } else {
             return nil
         }
-        
+
         guard datagram.count > headerLen else { return nil }
-        
+
         let payload = datagram[headerLen...]
         return (Data(payload), destHost, destPort)
     }
