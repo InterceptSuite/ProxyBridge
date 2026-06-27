@@ -25,7 +25,8 @@ struct RuleManager {
                 "enabled": enabled
             ]
         ) { success, result in
-            if success, let result = result, let ruleId = result["ruleId"] as? UInt32 {
+            if success, let result = result, result["status"] as? String == "ok" {
+                let ruleId = (result["ruleId"] as? NSNumber).map { UInt32($0.intValue) }
                 completion(true, "Rule added successfully", ruleId)
             } else {
                 completion(false, result?["message"] as? String ?? "Unknown error", nil)

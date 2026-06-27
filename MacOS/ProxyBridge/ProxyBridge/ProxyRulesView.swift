@@ -210,11 +210,11 @@ struct ProxyRulesView: View {
                     .width(80)
                     
                     TableColumn("Action") { rule in
-                        Text(rule.action)
+                        Text(actionDisplayName(rule.action))
                             .foregroundColor(actionColor(rule.action))
                             .fontWeight(.semibold)
                     }
-                    .width(80)
+                    .width(160)
                 }
                 .padding()
             }
@@ -242,10 +242,17 @@ struct ProxyRulesView: View {
     
     private func actionColor(_ action: String) -> Color {
         switch action {
-        case "PROXY": return .green
         case "BLOCK": return .red
         case "DIRECT": return .blue
-        default: return .primary
+        default: return .green  // any proxy config UUID
+        }
+    }
+
+    private func actionDisplayName(_ action: String) -> String {
+        switch action {
+        case "DIRECT", "BLOCK": return action
+        default:
+            return viewModel.proxyConfigs.first(where: { $0.id == action })?.displayName ?? action
         }
     }
     
@@ -368,27 +375,31 @@ struct RuleEditorView: View {
     @ObservedObject var viewModel: ProxyBridgeViewModel
     var existingRule: ProxyRule?
     var onSave: () -> Void
-    
+
     @Environment(\.dismiss) private var dismiss
-    
+
     @State private var processNames: String
     @State private var targetHosts: String
     @State private var targetPorts: String
     @State private var selectedProtocol: String
     @State private var selectedAction: String
-    
+    @State private var saveError: String = ""
+    @State private var isSaving = false
+
     private var isEditMode: Bool { existingRule != nil }
     
     init(viewModel: ProxyBridgeViewModel, existingRule: ProxyRule? = nil, onSave: @escaping () -> Void) {
         self.viewModel = viewModel
         self.existingRule = existingRule
         self.onSave = onSave
-        
+
         _processNames = State(initialValue: existingRule?.processNames ?? "*")
         _targetHosts = State(initialValue: existingRule?.targetHosts ?? "*")
         _targetPorts = State(initialValue: existingRule?.targetPorts ?? "*")
         _selectedProtocol = State(initialValue: existingRule?.ruleProtocol ?? "TCP")
-        _selectedAction = State(initialValue: existingRule?.action ?? "PROXY")
+        // default to first proxy config if there is one, otherwise direct
+        let defaultAction = existingRule?.action ?? viewModel.proxyConfigs.first?.id ?? "DIRECT"
+        _selectedAction = State(initialValue: defaultAction)
     }
     
     var body: some View {
@@ -435,11 +446,33 @@ struct RuleEditorView: View {
                         Text("Action")
                             .fontWeight(.medium)
                         Picker("", selection: $selectedAction) {
-                            Text("PROXY").tag("PROXY")
                             Text("DIRECT").tag("DIRECT")
                             Text("BLOCK").tag("BLOCK")
+                            if !viewModel.proxyConfigs.isEmpty {
+                                Divider()
+                                ForEach(viewModel.proxyConfigs) { config in
+                                    Text(config.displayName).tag(config.id)
+                                }
+                            }
                         }
-                        .pickerStyle(.segmented)
+                        .pickerStyle(.menu)
+                        if selectedProtocol == "UDP" || selectedProtocol == "BOTH" {
+                            let isHttp = viewModel.proxyConfigs.first(where: { $0.id == selectedAction })?.type.lowercased() == "http"
+                            if isHttp {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+                                    Text("UDP only works with SOCKS5 proxy. HTTP proxies do not support UDP.")
+                                        .font(.caption).foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        if viewModel.proxyConfigs.isEmpty {
+                            HStack(spacing: 4) {
+                                Image(systemName: "info.circle").foregroundColor(.secondary)
+                                Text("No proxy servers configured — add one in Proxy Settings.")
+                                    .font(.caption).foregroundColor(.secondary)
+                            }
+                        }
                     }
                 }
             }
@@ -453,16 +486,25 @@ struct RuleEditorView: View {
                 
                 Spacer()
                 
-                Button("Save Rule") {
+                Button(isSaving ? "Saving…" : "Save Rule") {
                     saveRule()
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
+                .disabled(isSaving)
             }
             .padding(.horizontal)
+
+            if !saveError.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
+                    Text(saveError).font(.caption).foregroundColor(.red)
+                }
+                .padding(.horizontal)
+            }
         }
         .padding()
-        .frame(width: 600, height: 550)
+        .frame(width: 600, height: 580)
     }
     
     @ViewBuilder
@@ -479,8 +521,12 @@ struct RuleEditorView: View {
     }
     
     private func saveRule() {
-        guard let session = viewModel.tunnelSession else { return }
-        
+        guard let session = viewModel.tunnelSession else {
+            saveError = "Proxy is not running. Start the proxy before saving rules."
+            return
+        }
+        saveError = ""
+        isSaving = true
         if let existing = existingRule {
             updateExistingRule(session: session, ruleId: existing.id)
         } else {
@@ -499,10 +545,14 @@ struct RuleEditorView: View {
             action: selectedAction,
             enabled: true
         ) { [self] success, _ in
-            if success { dismissOnSuccess() }
+            DispatchQueue.main.async {
+                isSaving = false
+                if success { onSave(); dismiss() }
+                else { saveError = "Extension rejected the update. Check the proxy is running." }
+            }
         }
     }
-    
+
     private func addNewRule(session: NETunnelProviderSession) {
         RuleManager.addRule(
             session: session,
@@ -513,14 +563,11 @@ struct RuleEditorView: View {
             action: selectedAction,
             enabled: true
         ) { [self] success, _, _ in
-            if success { dismissOnSuccess() }
-        }
-    }
-    
-    private func dismissOnSuccess() {
-        DispatchQueue.main.async {
-            onSave()
-            dismiss()
+            DispatchQueue.main.async {
+                isSaving = false
+                if success { onSave(); dismiss() }
+                else { saveError = "Extension rejected the rule. Check the proxy is running." }
+            }
         }
     }
 }

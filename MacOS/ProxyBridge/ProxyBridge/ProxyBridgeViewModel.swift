@@ -11,7 +11,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     
     var tunnelSession: NETunnelProviderSession?
     private var logTimer: Timer?
-    private(set) var proxyConfig: ProxyConfig?
+    @Published private(set) var proxyConfigs: [ProxyConfig] = []
     
     private let maxLogEntries = 1000
     // trim to 80% when limit hit to avoid trimming on each entry
@@ -29,12 +29,24 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     private var connectionIdCounter: Int = 0
     private var activityIdCounter: Int = 0
     
-    struct ProxyConfig {
+    struct ProxyConfig: Identifiable, Codable {
+        let id: String
         let type: String
         let host: String
         let port: Int
         let username: String?
         let password: String?
+
+        var displayName: String { "\(type.uppercased()) \(host):\(port)" }
+
+        init(id: String = UUID().uuidString, type: String, host: String, port: Int, username: String?, password: String?) {
+            self.id = id
+            self.type = type
+            self.host = host
+            self.port = port
+            self.username = username
+            self.password = password
+        }
     }
     
     struct ConnectionLog: Identifiable {
@@ -92,37 +104,60 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     private func loadProxyConfig() {
-        if let type = UserDefaults.standard.string(forKey: "proxyType"),
-           let host = UserDefaults.standard.string(forKey: "proxyHost"),
-           let port = UserDefaults.standard.object(forKey: "proxyPort") as? Int {
-            let username = UserDefaults.standard.string(forKey: "proxyUsername")
-            let password = UserDefaults.standard.string(forKey: "proxyPassword")
-            
-            proxyConfig = ProxyConfig(
-                type: type,
-                host: host,
-                port: port,
-                username: username,
-                password: password
-            )
+        if let data = UserDefaults.standard.data(forKey: "proxyConfigs"),
+           let configs = try? JSONDecoder().decode([ProxyConfig].self, from: data) {
+            proxyConfigs = configs
         }
     }
-    
-    private func saveProxyConfig(_ config: ProxyConfig) {
-        UserDefaults.standard.set(config.type, forKey: "proxyType")
-        UserDefaults.standard.set(config.host, forKey: "proxyHost")
-        UserDefaults.standard.set(config.port, forKey: "proxyPort")
-        
-        if let username = config.username {
-            UserDefaults.standard.set(username, forKey: "proxyUsername")
-        } else {
-            UserDefaults.standard.removeObject(forKey: "proxyUsername")
+
+    private func saveProxyConfigs() {
+        if let data = try? JSONEncoder().encode(proxyConfigs) {
+            UserDefaults.standard.set(data, forKey: "proxyConfigs")
         }
-        
-        if let password = config.password {
-            UserDefaults.standard.set(password, forKey: "proxyPassword")
-        } else {
-            UserDefaults.standard.removeObject(forKey: "proxyPassword")
+    }
+
+    func addProxyConfig(_ config: ProxyConfig) {
+        proxyConfigs.append(config)
+        saveProxyConfigs()
+        if let session = tunnelSession {
+            sendProxyConfigsToExtension(session: session)
+        }
+    }
+
+    func updateProxyConfig(_ config: ProxyConfig) {
+        if let index = proxyConfigs.firstIndex(where: { $0.id == config.id }) {
+            proxyConfigs[index] = config
+            saveProxyConfigs()
+            if let session = tunnelSession {
+                sendProxyConfigsToExtension(session: session)
+            }
+        }
+    }
+
+    func rulesUsingProxy(id: String) -> Int {
+        let saved = UserDefaults.standard.array(forKey: "proxyRules") as? [[String: Any]] ?? []
+        return saved.filter { ($0["action"] as? String) == id }.count
+    }
+
+    func removeProxyConfig(_ config: ProxyConfig) {
+        // reset any rules pointing to this config to DIRECT so they don't silently go direct anyway
+        if var saved = UserDefaults.standard.array(forKey: "proxyRules") as? [[String: Any]] {
+            var changed = false
+            for i in saved.indices where (saved[i]["action"] as? String) == config.id {
+                saved[i]["action"] = "DIRECT"
+                changed = true
+            }
+            if changed {
+                UserDefaults.standard.set(saved, forKey: "proxyRules")
+                if let session = tunnelSession {
+                    RuleManager.loadRulesFromUserDefaults(session: session) { _, _ in }
+                }
+            }
+        }
+        proxyConfigs.removeAll { $0.id == config.id }
+        saveProxyConfigs()
+        if let session = tunnelSession {
+            sendProxyConfigsToExtension(session: session)
         }
     }
     
@@ -209,9 +244,8 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
                 observer = nil
 
                 self.setupLogPolling(session: session)
-
-                if let config = self.proxyConfig {
-                    self.sendProxyConfigToExtension(config, session: session)
+                if !self.proxyConfigs.isEmpty {
+                    self.sendProxyConfigsToExtension(session: session)
                 }
                 
                 RuleManager.loadRulesFromUserDefaults(session: session) { success, count in
@@ -378,44 +412,30 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         }
     }
     
-    func setProxyConfig(_ config: ProxyConfig) {
-        proxyConfig = config
-        saveProxyConfig(config)
-        
-        guard let session = tunnelSession else {
-            addLog("ERROR", "Extension not connected")
-            return
+
+    func sendProxyConfigsToExtension(session: NETunnelProviderSession) {
+        let configsArray: [[String: Any]] = proxyConfigs.map { config in
+            var dict: [String: Any] = [
+                "id": config.id,
+                "proxyType": config.type,
+                "proxyHost": config.host,
+                "proxyPort": config.port
+            ]
+            if let u = config.username { dict["proxyUsername"] = u }
+            if let p = config.password { dict["proxyPassword"] = p }
+            return dict
         }
-        
-        sendProxyConfigToExtension(config, session: session)
-    }
-    
-    private func sendProxyConfigToExtension(_ config: ProxyConfig, session: NETunnelProviderSession) {
-        var message: [String: Any] = [
-            "action": "setProxyConfig",
-            "proxyType": config.type,
-            "proxyHost": config.host,
-            "proxyPort": config.port
-        ]
-        
-        if let username = config.username {
-            message["proxyUsername"] = username
-        }
-        if let password = config.password {
-            message["proxyPassword"] = password
-        }
-        
+        let message: [String: Any] = ["action": "setProxyConfigs", "configs": configsArray]
         guard let data = try? JSONSerialization.data(withJSONObject: message) else {
-            addLog("ERROR", "Failed to encode proxy config")
+            addLog("ERROR", "Failed to encode proxy configs")
             return
         }
-        
         try? session.sendProviderMessage(data) { [weak self] response in
             if let responseData = response,
                let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
                let status = json["status"] as? String, status == "ok" {
                 DispatchQueue.main.async {
-                    self?.addLog("INFO", "Proxy configured: \(config.type)://\(config.host):\(config.port)")
+                    self?.addLog("INFO", "Proxy configs sent: \(self?.proxyConfigs.count ?? 0) config(s)")
                 }
             }
         }
