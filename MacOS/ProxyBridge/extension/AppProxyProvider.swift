@@ -7,21 +7,15 @@ enum RuleProtocol: String, Codable {
     case both = "BOTH"
 }
 
-enum RuleAction: String, Codable {
-    case proxy = "PROXY"
-    case direct = "DIRECT"
-    case block = "BLOCK"
-}
-
 struct ProxyRule: Codable {
     var ruleId: UInt32
     let processNames: String
     let targetHosts: String
     let targetPorts: String
     let ruleProtocol: RuleProtocol
-    let action: RuleAction
+    let action: String  // "DIRECT", "BLOCK", or a proxy config UUID
     var enabled: Bool
-    
+
     enum CodingKeys: String, CodingKey {
         case ruleId
         case processNames
@@ -31,7 +25,7 @@ struct ProxyRule: Codable {
         case action = "ruleAction"
         case enabled
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.ruleId = try container.decodeIfPresent(UInt32.self, forKey: .ruleId) ?? 0
@@ -39,11 +33,11 @@ struct ProxyRule: Codable {
         self.targetHosts = try container.decode(String.self, forKey: .targetHosts)
         self.targetPorts = try container.decode(String.self, forKey: .targetPorts)
         self.ruleProtocol = try container.decode(RuleProtocol.self, forKey: .ruleProtocol)
-        self.action = try container.decode(RuleAction.self, forKey: .action)
+        self.action = try container.decode(String.self, forKey: .action)
         self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
     }
-    
-    init(ruleId: UInt32, processNames: String, targetHosts: String, targetPorts: String, ruleProtocol: RuleProtocol, action: RuleAction, enabled: Bool) {
+
+    init(ruleId: UInt32, processNames: String, targetHosts: String, targetPorts: String, ruleProtocol: RuleProtocol, action: String, enabled: Bool) {
         self.ruleId = ruleId
         self.processNames = processNames
         self.targetHosts = targetHosts
@@ -294,11 +288,14 @@ class AppProxyProvider: NETransparentProxyProvider {
     private let rulesLock = NSLock()
     private var nextRuleId: UInt32 = 1
     
-    private var proxyType: String?
-    private var proxyHost: String?
-    private var proxyPort: Int?
-    private var proxyUsername: String?
-    private var proxyPassword: String?
+    private struct StoredProxyConfig {
+        let type: String
+        let host: String
+        let port: Int
+        let username: String?
+        let password: String?
+    }
+    private var storedProxyConfigs: [String: StoredProxyConfig] = [:]
     private let proxyLock = NSLock()
     
     private func log(_ message: String, level: String = "INFO") {
@@ -378,27 +375,41 @@ class AppProxyProvider: NETransparentProxyProvider {
             } else {
                 completionHandler?(nil)
             }
+        case "setProxyConfigs":
+            if let configs = message["configs"] as? [[String: Any]] {
+                proxyLock.lock()
+                storedProxyConfigs = [:]
+                for configDict in configs {
+                    guard let id = configDict["id"] as? String,
+                          let type = configDict["proxyType"] as? String,
+                          let host = configDict["proxyHost"] as? String,
+                          let port = configDict["proxyPort"] as? Int else { continue }
+                    storedProxyConfigs[id] = StoredProxyConfig(
+                        type: type, host: host, port: port,
+                        username: configDict["proxyUsername"] as? String,
+                        password: configDict["proxyPassword"] as? String
+                    )
+                }
+                proxyLock.unlock()
+                log("Proxy configs updated: \(storedProxyConfigs.count) config(s)")
+            }
+            completionHandler?(try? JSONSerialization.data(withJSONObject: ["status": "ok"]))
+
         case "setProxyConfig":
+            // Legacy single-config path — store under "default" key
             if let proxyType = message["proxyType"] as? String,
                let proxyHost = message["proxyHost"] as? String,
                let proxyPort = message["proxyPort"] as? Int {
-                
                 proxyLock.lock()
-                self.proxyType = proxyType
-                self.proxyHost = proxyHost
-                self.proxyPort = proxyPort
-                self.proxyUsername = message["proxyUsername"] as? String
-                self.proxyPassword = message["proxyPassword"] as? String
+                storedProxyConfigs["default"] = StoredProxyConfig(
+                    type: proxyType, host: proxyHost, port: proxyPort,
+                    username: message["proxyUsername"] as? String,
+                    password: message["proxyPassword"] as? String
+                )
                 proxyLock.unlock()
-                
-                var logMsg = "Proxy config: \(proxyType)://\(proxyHost):\(proxyPort)"
-                if let username = message["proxyUsername"] as? String {
-                    logMsg += " (auth: \(username):***)"
-                }
-                log(logMsg)
+                log("Proxy config (legacy): \(proxyType)://\(proxyHost):\(proxyPort)")
             }
-            let response = ["status": "ok"]
-            completionHandler?(try? JSONSerialization.data(withJSONObject: response))
+            completionHandler?(try? JSONSerialization.data(withJSONObject: ["status": "ok"]))
         
         case "addRule":
             if let ruleData = try? JSONSerialization.data(withJSONObject: message),
@@ -409,8 +420,8 @@ class AppProxyProvider: NETransparentProxyProvider {
                 rules.append(rule)
                 rulesLock.unlock()
                 
-                log("Added rule #\(rule.ruleId): \(rule.processNames) -> \(rule.action.rawValue)")
-                
+                log("Added rule #\(rule.ruleId): \(rule.processNames) -> \(rule.action)")
+
                 let response: [String: Any] = [
                     "status": "ok",
                     "ruleId": rule.ruleId,
@@ -418,7 +429,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                     "targetHosts": rule.targetHosts,
                     "targetPorts": rule.targetPorts,
                     "protocol": rule.ruleProtocol.rawValue,
-                    "action": rule.action.rawValue,
+                    "action": rule.action,
                     "enabled": rule.enabled
                 ]
                 completionHandler?(try? JSONSerialization.data(withJSONObject: response))
@@ -437,7 +448,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                     rule.ruleId = ruleId
                     rules[index] = rule
                     rulesLock.unlock()
-                    log("Updated rule #\(ruleId): \(rule.processNames) -> \(rule.action.rawValue)")
+                    log("Updated rule #\(ruleId): \(rule.processNames) -> \(rule.action)")
                     let response: [String: Any] = ["status": "ok", "ruleId": ruleId]
                     completionHandler?(try? JSONSerialization.data(withJSONObject: response))
                 } else {
@@ -494,7 +505,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                     "targetHosts": rule.targetHosts,
                     "targetPorts": rule.targetPorts,
                     "protocol": rule.ruleProtocol.rawValue,
-                    "action": rule.action.rawValue,
+                    "action": rule.action,
                     "enabled": rule.enabled
                 ]
             }
@@ -566,30 +577,34 @@ class AppProxyProvider: NETransparentProxyProvider {
         let displayName = processName ?? processPath
         
         proxyLock.lock()
-        let hasProxyConfig = (proxyHost != nil && proxyPort != nil)
+        let hasProxyConfig = !storedProxyConfigs.isEmpty
         proxyLock.unlock()
-        
+
         if !hasProxyConfig {
             sendLogToApp(protocol: "TCP", process: displayName, destination: destination, port: portStr, proxy: "Direct")
             return false
         }
-        
+
         let matchedRule = findMatchingRule(bundleId: processPath, processName: processName, destination: destination, port: portNum, connectionProtocol: .tcp, checkIpPort: true)
-        
+
         if let rule = matchedRule {
-            let action = rule.action.rawValue
-            
+            let action = rule.action
             sendLogToApp(protocol: "TCP", process: displayName, destination: destination, port: portStr, proxy: action)
-            
-            switch rule.action {
-            case .direct:
+
+            switch action {
+            case "DIRECT":
                 return false
-            case .block:
+            case "BLOCK":
                 flow.closeReadWithError(nil)
                 flow.closeWriteWithError(nil)
                 return true
-            case .proxy:
-                proxyTCPFlow(flow, destination: destination, port: portNum)
+            default:
+                // action is a proxy config UUID; fall back to first config for legacy "PROXY" value
+                proxyLock.lock()
+                let config = storedProxyConfigs[action] ?? storedProxyConfigs.values.first
+                proxyLock.unlock()
+                guard let config = config else { return false }
+                proxyTCPFlow(flow, destination: destination, port: portNum, config: config)
                 return true
             }
         } else {
