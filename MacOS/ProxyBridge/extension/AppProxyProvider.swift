@@ -785,7 +785,14 @@ class AppProxyProvider: NETransparentProxyProvider {
                 return
             }
             
-            guard let datagrams = datagrams, let endpoints = endpoints, !datagrams.isEmpty else {
+            // empty datagrams with no error = flow closed cleanly
+            guard let datagrams = datagrams, let endpoints = endpoints else {
+                self.cleanupUDPFlow(clientFlow)
+                return
+            }
+
+            // empty but non-nil = nothing arrived this read, keep going
+            guard !datagrams.isEmpty else {
                 self.readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
                 return
             }
