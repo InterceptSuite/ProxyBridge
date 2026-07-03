@@ -17,7 +17,7 @@
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 1024
-#define VERSION "4.0.0"
+#define VERSION "4.0.7-Beta"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 30000
 // Single packet-processor thread eliminates TCP packet reordering.
@@ -579,6 +579,14 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT16 sp = ntohs(tcp_header->SrcPort);
                 UINT16 dp = ntohs(tcp_header->DstPort);
 
+                // fresh SYN = new connection on a possibly reused port. wipe stale decision
+                // and connection entry so it re decides clean #183
+                if (tcp_header->Syn && !tcp_header->Ack)
+                {
+                    port_clear(sp);
+                    remove_connection(sp);
+                }
+
                 if (port_is_decided(sp))
                 {
                     if (tcp_header->Fin || tcp_header->Rst) port_clear(sp);
@@ -951,6 +959,20 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             // Part of this taken from Cluade to fix windivert packet error
             {
                 UINT16 sp = ntohs(tcp_header->SrcPort);
+
+                // new connection = new SYN (no ACK). windows reuse ephemeral ports so a
+                // fresh SYN on a port means the old connection is gone even if we never saw
+                // its FIN/RST (sleep, network loss, inbound RST are not captured outbound).
+                // wipe any stale decision + connection entry so the port re decides clean
+                // and gets the correct destination. without this a reused port keeps the old
+                // direct bit (leaks direct) or old dest mapping (relay dials wrong server)
+                // until app restart. see issue #183
+                if (tcp_header->Syn && !tcp_header->Ack)
+                {
+                    port_clear(sp);
+                    remove_connection(sp);
+                }
+
                 if (port_is_decided(sp))
                 {
                     if (tcp_header->Fin || tcp_header->Rst)
