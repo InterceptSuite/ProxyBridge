@@ -132,7 +132,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         goto ipv6u_send;
                     }
 
-                    if (is_connection_tracked(sp, TRUE))
+                    if (is_connection_tracked(sp, TRUE, TRUE))
                     {
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
                         static const UINT8 _lb6u2[16]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
@@ -308,13 +308,13 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         memcpy(ipv6_header->SrcAddr, tmp, 16);
                         addr.Outbound = FALSE;
                     }
-                    if (tcp_header->Fin || tcp_header->Rst) remove_connection(client_sp, FALSE);
+                    if (tcp_header->Fin || tcp_header->Rst) remove_connection(client_sp, FALSE, TRUE);
                     goto ipv6_send;
                 }
 
-                if (is_connection_tracked(sp, FALSE))
+                if (is_connection_tracked(sp, FALSE, TRUE))
                 {
-                    if (tcp_header->Fin || tcp_header->Rst) { remove_connection(sp, FALSE); port_clear(sp); }
+                    if (tcp_header->Fin || tcp_header->Rst) { remove_connection(sp, FALSE, TRUE); port_clear(sp); }
                     tcp_header->DstPort = htons(g_local_relay_port);
 
                     static const UINT8 _lb6t[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
@@ -485,7 +485,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         continue;
                     }
                 }
-                else if (is_connection_tracked(ntohs(udp_header->SrcPort), TRUE))
+                else if (is_connection_tracked(ntohs(udp_header->SrcPort), TRUE, FALSE))
                 {
                     UINT16 src_port = ntohs(udp_header->SrcPort);
                     udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
@@ -708,15 +708,15 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 }
 
                 if (tcp_header->Fin || tcp_header->Rst)
-                    remove_connection(dst_port, FALSE);
+                    remove_connection(dst_port, FALSE, FALSE);
             }
-            else if (is_connection_tracked(ntohs(tcp_header->SrcPort), FALSE))
+            else if (is_connection_tracked(ntohs(tcp_header->SrcPort), FALSE, FALSE))
             {
                 UINT16 src_port = ntohs(tcp_header->SrcPort);
 
                 if (tcp_header->Fin || tcp_header->Rst)
                 {
-                    remove_connection(src_port, FALSE);
+                    remove_connection(src_port, FALSE, FALSE);
                     port_clear(src_port);
                 }
 

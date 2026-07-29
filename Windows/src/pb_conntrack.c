@@ -43,9 +43,10 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
     int hash = src_port % CONNECTION_HASH_SIZE;
     CONNECTION_INFO *existing = connection_hash_table[hash];
 
-    // Match on (port, protocol): a TCP and a UDP flow may legitimately share a port.
+    // Match on (port, protocol, family): a TCP and a UDP flow - or an IPv4 and an
+    // IPv6 flow - may legitimately share a numeric local port at the same time.
     while (existing != NULL) {
-        if (existing->src_port == src_port && existing->is_udp == is_udp) {
+        if (existing->src_port == src_port && existing->is_udp == is_udp && !existing->is_ipv6) {
             rev_unlink(existing);   // dest may change (port reuse) - re-key the reverse index
             existing->is_ipv6 = FALSE;
             existing->src_ip = src_ip;
@@ -91,7 +92,7 @@ void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], co
     CONNECTION_INFO *existing = connection_hash_table[hash];
 
     while (existing != NULL) {
-        if (existing->src_port == src_port && existing->is_udp == is_udp) {
+        if (existing->src_port == src_port && existing->is_udp == is_udp && existing->is_ipv6) {
             rev_unlink(existing);   // dest may change (port reuse) - re-key the reverse index
             existing->is_ipv6 = TRUE;
             memcpy(existing->src_ip6, src_ip6, 16);
@@ -174,7 +175,7 @@ BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UI
     return found;
 }
 
-BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp)
+BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp, BOOL is_ipv6)
 {
     BOOL tracked = FALSE;
     AcquireSRWLockShared(&lock);
@@ -183,7 +184,7 @@ BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp)
     CONNECTION_INFO *conn = connection_hash_table[hash];
 
     while (conn != NULL) {
-        if (conn->src_port == src_port && conn->is_udp == is_udp && conn->is_tracked) {
+        if (conn->src_port == src_port && conn->is_udp == is_udp && conn->is_ipv6 == is_ipv6 && conn->is_tracked) {
             tracked = TRUE;
             break;
         }
@@ -204,7 +205,7 @@ BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_
 
     while (conn != NULL)
     {
-        if (conn->src_port == src_port && conn->is_udp == is_udp)
+        if (conn->src_port == src_port && conn->is_udp == is_udp && !conn->is_ipv6)
         {
             *dest_ip = conn->orig_dest_ip;
             *dest_port = conn->orig_dest_port;
@@ -230,7 +231,7 @@ BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *
 
     while (conn != NULL)
     {
-        if (conn->src_port == src_port && conn->is_udp == is_udp)
+        if (conn->src_port == src_port && conn->is_udp == is_udp && !conn->is_ipv6)
         {
             *dest_ip = conn->orig_dest_ip;
             *dest_port = conn->orig_dest_port;
@@ -257,7 +258,7 @@ UINT32 get_connection_proxy_id(UINT16 src_port, BOOL is_udp)
 
     while (conn != NULL)
     {
-        if (conn->src_port == src_port && conn->is_udp == is_udp)
+        if (conn->src_port == src_port && conn->is_udp == is_udp && !conn->is_ipv6)
         {
             proxy_config_id = conn->proxy_config_id;
             break;
@@ -269,7 +270,7 @@ UINT32 get_connection_proxy_id(UINT16 src_port, BOOL is_udp)
     return proxy_config_id;
 }
 
-void remove_connection(UINT16 src_port, BOOL is_udp)
+void remove_connection(UINT16 src_port, BOOL is_udp, BOOL is_ipv6)
 {
     AcquireSRWLockExclusive(&lock);
 
@@ -278,7 +279,7 @@ void remove_connection(UINT16 src_port, BOOL is_udp)
 
     while (*conn_ptr != NULL)
     {
-        if ((*conn_ptr)->src_port == src_port && (*conn_ptr)->is_udp == is_udp)
+        if ((*conn_ptr)->src_port == src_port && (*conn_ptr)->is_udp == is_udp && (*conn_ptr)->is_ipv6 == is_ipv6)
         {
             CONNECTION_INFO *to_free = *conn_ptr;
             *conn_ptr = (*conn_ptr)->next;

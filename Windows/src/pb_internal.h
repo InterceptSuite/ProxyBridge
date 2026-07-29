@@ -331,11 +331,11 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
 void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id);
 BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id);
 BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port);
-BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp);
+BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port);
 BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id);
 UINT32 get_connection_proxy_id(UINT16 src_port, BOOL is_udp);
-void remove_connection(UINT16 src_port, BOOL is_udp);
+void remove_connection(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 void cleanup_stale_connections(void);
 BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
