@@ -119,6 +119,7 @@ typedef struct PROCESS_RULE {
 
 typedef struct CONNECTION_INFO {
     uint16_t src_port;
+    bool is_udp;              // protocol - a TCP and a UDP flow may share a local port
     uint32_t src_ip;
     uint32_t orig_dest_ip;
     uint16_t orig_dest_port;
@@ -323,9 +324,9 @@ static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_por
 static bool get_process_name_from_pid(uint32_t pid, char *name, size_t name_size);
 static RuleAction match_rule(const char *process_name, uint32_t dest_ip, uint16_t dest_port, bool is_udp);
 static RuleAction check_process_rule(uint32_t src_ip, uint16_t src_port, uint32_t dest_ip, uint16_t dest_port, bool is_udp, uint32_t *out_pid);
-static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port);
-static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_port);
-static bool is_connection_tracked(uint16_t src_port);
+static void add_connection(uint16_t src_port, bool is_udp, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port);
+static bool get_connection(uint16_t src_port, bool is_udp, uint32_t *dest_ip, uint16_t *dest_port);
+static bool is_connection_tracked(uint16_t src_port, bool is_udp);
 static void cleanup_stale_connections(void);
 static bool is_connection_already_logged(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action);
 static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action);
@@ -1463,7 +1464,7 @@ static void* local_proxy_server(void *arg)
         conn_config->client_socket = client_sock;
 
         uint16_t client_port = ntohs(client_addr.sin_port);
-        if (!get_connection(client_port, &conn_config->orig_dest_ip, &conn_config->orig_dest_port))
+        if (!get_connection(client_port, false, &conn_config->orig_dest_ip, &conn_config->orig_dest_port))
         {
             close(client_sock);
             free(conn_config);
@@ -1753,7 +1754,7 @@ static void* udp_relay_server(void *arg)
             uint32_t dest_ip;
             uint16_t dest_port;
 
-            if (!get_connection(client_port, &dest_ip, &dest_port))
+            if (!get_connection(client_port, true, &dest_ip, &dest_port))
                 continue;
 
             // make sure data fits with socks5 header
@@ -1839,7 +1840,8 @@ static void* udp_relay_server(void *arg)
                 CONNECTION_INFO *conn = connection_hash_table[hash];
                 while (conn != NULL)
                 {
-                    if (conn->orig_dest_ip == src_ip &&
+                    if (conn->is_udp &&
+                        conn->orig_dest_ip == src_ip &&
                         conn->orig_dest_port == src_port)
                     {
                         // found it, send response back to original client port
@@ -1925,7 +1927,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         if (src_port == g_local_relay_port)
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
-        if (is_connection_tracked(src_port))
+        if (is_connection_tracked(src_port, false))
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
         // only look at syn packets for new connections
@@ -1982,7 +1984,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         else if (action == RULE_ACTION_PROXY)
         {
             // store connection info
-            add_connection(src_port, src_ip, dest_ip, dest_port);
+            add_connection(src_port, false, src_ip, dest_ip, dest_port);
 
             // mark packet so nat table REDIRECT rule will catch it
             uint32_t mark = 1;
@@ -2001,7 +2003,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         if (src_port == LOCAL_UDP_RELAY_PORT)
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
-        if (is_connection_tracked(src_port))
+        if (is_connection_tracked(src_port, true))
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
         if (dest_port == 53 && !g_dns_via_proxy)
@@ -2069,7 +2071,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         else if (action == RULE_ACTION_PROXY)
         {
             // UDP proxy via SOCKS5 UDP ASSOCIATE
-            add_connection(src_port, src_ip, dest_ip, dest_port);
+            add_connection(src_port, true, src_ip, dest_ip, dest_port);
 
             // Mark UDP packet for redirect to local UDP relay (port 34011)
             uint32_t mark = 2;  // Use mark=2 for UDP (mark=1 is for TCP)
@@ -2105,7 +2107,7 @@ static inline uint32_t connection_hash(uint16_t port)
     return port % CONNECTION_HASH_SIZE;
 }
 
-static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port)
+static void add_connection(uint16_t src_port, bool is_udp, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port)
 {
     uint32_t hash = connection_hash(src_port);
     pthread_rwlock_wrlock(&conn_lock);
@@ -2113,7 +2115,7 @@ static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip,
     CONNECTION_INFO *conn = connection_hash_table[hash];
     while (conn != NULL)
     {
-        if (conn->src_port == src_port)
+        if (conn->src_port == src_port && conn->is_udp == is_udp)
         {
             conn->orig_dest_ip = dest_ip;
             conn->orig_dest_port = dest_port;
@@ -2130,6 +2132,7 @@ static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip,
     if (new_conn != NULL)
     {
         new_conn->src_port = src_port;
+        new_conn->is_udp = is_udp;
         new_conn->src_ip = src_ip;
         new_conn->orig_dest_ip = dest_ip;
         new_conn->orig_dest_port = dest_port;
@@ -2142,7 +2145,7 @@ static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip,
     pthread_rwlock_unlock(&conn_lock);
 }
 
-static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_port)
+static bool get_connection(uint16_t src_port, bool is_udp, uint32_t *dest_ip, uint16_t *dest_port)
 {
     uint32_t hash = connection_hash(src_port);
     pthread_rwlock_rdlock(&conn_lock);
@@ -2150,7 +2153,7 @@ static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_
     CONNECTION_INFO *conn = connection_hash_table[hash];
     while (conn != NULL)
     {
-        if (conn->src_port == src_port && conn->is_tracked)
+        if (conn->src_port == src_port && conn->is_udp == is_udp && conn->is_tracked)
         {
             *dest_ip = conn->orig_dest_ip;
             *dest_port = conn->orig_dest_port;
@@ -2165,7 +2168,7 @@ static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_
     return false;
 }
 
-static bool is_connection_tracked(uint16_t src_port)
+static bool is_connection_tracked(uint16_t src_port, bool is_udp)
 {
     uint32_t hash = connection_hash(src_port);
     pthread_rwlock_rdlock(&conn_lock);
@@ -2173,7 +2176,7 @@ static bool is_connection_tracked(uint16_t src_port)
     CONNECTION_INFO *conn = connection_hash_table[hash];
     while (conn != NULL)
     {
-        if (conn->src_port == src_port && conn->is_tracked)
+        if (conn->src_port == src_port && conn->is_udp == is_udp && conn->is_tracked)
         {
             pthread_rwlock_unlock(&conn_lock);
             return true;
@@ -2219,7 +2222,10 @@ static void cleanup_stale_connections(void)
 
         while (*conn_ptr != NULL)
         {
-            if (now - (*conn_ptr)->last_activity > 120000)  // 120 sec timeout
+            // 30 min idle timeout. Clean closes are removed on FIN/RST already; a short
+            // timeout would reap open-but-idle proxied connections (mail IDLE, voice,
+            // websocket) mid-session and silently break them until restart.
+            if (now - (*conn_ptr)->last_activity > 1800000)
             {
                 CONNECTION_INFO *to_free = *conn_ptr;
                 *conn_ptr = (*conn_ptr)->next;
