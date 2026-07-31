@@ -13,7 +13,7 @@ void save_config() {
             return;
         }
     } else if (chmod(CONFIG_DIR, 0700) != 0) {
-        perror("failed to tighten config dir permissions");
+        perror("chmod config dir failed");
     }
 
     int cfg_fd = open(CONFIG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -59,7 +59,7 @@ void save_config() {
 
 // load settings from file
 void load_config() {
-    chmod(CONFIG_PATH, 0600); // tighten legacy world-readable installs
+    chmod(CONFIG_PATH, 0600); // old installs might still be world readable
     FILE *f = fopen(CONFIG_PATH, "r");
     if (!f) return;
 

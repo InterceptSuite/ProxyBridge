@@ -1,5 +1,4 @@
 #include "gui.h"
-#include <ctype.h>
 
 // widgets
 GtkWidget *window;
@@ -35,67 +34,53 @@ static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
     save_config();
 }
 
-static bool tag_name_is_safe(const char *tag) {
-    if (!tag || !tag[0]) return false;
+static int tag_ok(const char *tag) {
+    if (!tag || !tag[0]) return 0;
     for (const char *p = tag; *p; p++) {
-        unsigned char c = (unsigned char)*p;
-        if (!(isalnum(c) || c == '.' || c == '-' || c == '_'))
-            return false;
+        char c = *p;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_')
+            continue;
+        return 0;
     }
-    return true;
+    return 1;
 }
 
-static gboolean fetch_latest_release_json(char **out_body) {
+static void on_check_update(GtkWidget *widget, gpointer data) {
     char *argv[] = {
-        (char *)"curl",
-        (char *)"-sS",
+        (char *)"curl", (char *)"-sS",
         (char *)"-H", (char *)"User-Agent: ProxyBridge-Linux",
         (char *)"-H", (char *)"Accept: application/vnd.github+json",
         (char *)"https://api.github.com/repos/InterceptSuite/ProxyBridge/releases/latest",
         NULL
     };
-    char *stdout_buf = NULL;
-    char *stderr_buf = NULL;
-    GError *error = NULL;
-    int exit_status = 0;
-    gboolean ok = g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
-                               &stdout_buf, &stderr_buf, &exit_status, &error);
-    if (!ok || exit_status != 0 || !stdout_buf || stdout_buf[0] == '\0') {
-        if (error) g_error_free(error);
-        g_free(stdout_buf);
-        g_free(stderr_buf);
-        return FALSE;
+    char *json = NULL;
+    char *curl_err = NULL;
+    GError *spawn_err = NULL;
+    int exit_code = 0;
+
+    // dont shell out with g_strdup_printf, and dont download+run deploy.sh as root anymore
+    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
+                      &json, &curl_err, &exit_code, &spawn_err)) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed: %s",
+                     spawn_err ? spawn_err->message : "unknown");
+        if (spawn_err) g_error_free(spawn_err);
+        g_free(curl_err);
+        return;
     }
-    *out_body = stdout_buf;
-    g_free(stderr_buf);
-    return TRUE;
-}
-
-static void open_release_page(const char *html_url) {
-    if (!html_url || !html_url[0]) return;
-    GError *error = NULL;
-    if (!gtk_show_uri_on_window(GTK_WINDOW(window), html_url, GDK_CURRENT_TIME, &error)) {
-        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR,
-                     "Could not open release page: %s", error ? error->message : "unknown error");
-        if (error) g_error_free(error);
-    }
-}
-
-static void on_check_update(GtkWidget *widget, gpointer data) {
-    (void)widget;
-    (void)data;
-
-    char *release_json = NULL;
-    if (!fetch_latest_release_json(&release_json)) {
-        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed (could not reach GitHub).");
+    if (exit_code != 0 || !json || json[0] == '\0') {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed (curl exit %d).", exit_code);
+        g_free(json);
+        g_free(curl_err);
         return;
     }
 
-    char *tag_name = extract_sub_json_str(release_json, "tag_name");
-    char *html_url = extract_sub_json_str(release_json, "html_url");
-    g_free(release_json);
+    char *tag_name = extract_sub_json_str(json, "tag_name");
+    char *html_url = extract_sub_json_str(json, "html_url");
+    g_free(json);
+    g_free(curl_err);
 
-    if (!tag_name || !tag_name_is_safe(tag_name)) {
+    if (!tag_name || !tag_ok(tag_name)) {
         show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse version info.");
         g_free(tag_name);
         g_free(html_url);
@@ -104,28 +89,31 @@ static void on_check_update(GtkWidget *widget, gpointer data) {
 
     char *current_tag = g_strdup_printf("v%s", PROXYBRIDGE_VERSION);
     if (strcmp(tag_name, current_tag) == 0) {
-        show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO,
-                     "You are using the latest version (%s).", PROXYBRIDGE_VERSION);
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO, "You are using the latest version (%s).", PROXYBRIDGE_VERSION);
     } else {
-        GtkWidget *dialog = gtk_message_dialog_new(
-            GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
-            "New version %s is available.\nCurrent: %s\n\nOpen the official GitHub release page to download?", tag_name, PROXYBRIDGE_VERSION);
+        GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT,
+            GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+            "Version %s is available (current %s).\nOpen the GitHub release page?", tag_name, PROXYBRIDGE_VERSION);
         gtk_dialog_add_button(GTK_DIALOG(dialog), "Open Release Page", GTK_RESPONSE_ACCEPT);
         gtk_dialog_add_button(GTK_DIALOG(dialog), "Close", GTK_RESPONSE_CANCEL);
         int resp = gtk_dialog_run(GTK_DIALOG(dialog));
         gtk_widget_destroy(dialog);
         if (resp == GTK_RESPONSE_ACCEPT) {
-            if (html_url && html_url[0])
-                open_release_page(html_url);
-            else {
-                char fallback[256];
+            char fallback[256];
+            const char *url = html_url;
+            if (!url || !url[0]) {
                 snprintf(fallback, sizeof(fallback),
-                         "https://github.com/InterceptSuite/ProxyBridge/releases/tag/%s", tag_name);
-                open_release_page(fallback);
+                    "https://github.com/InterceptSuite/ProxyBridge/releases/tag/%s", tag_name);
+                url = fallback;
+            }
+            GError *uri_err = NULL;
+            if (!gtk_show_uri_on_window(GTK_WINDOW(window), url, GDK_CURRENT_TIME, &uri_err)) {
+                show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not open browser: %s",
+                             uri_err ? uri_err->message : "unknown");
+                if (uri_err) g_error_free(uri_err);
             }
         }
     }
-
     g_free(current_tag);
     g_free(tag_name);
     g_free(html_url);
