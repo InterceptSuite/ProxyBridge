@@ -17,7 +17,7 @@ int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const 
     char cached_domain[256];
     const char *host_part;
     char host_buf[270];  // big enough for [ipv6]:port or domain
-    if (cfg->send_domain_to_proxy && dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
+    if (cfg != NULL && cfg->send_domain_to_proxy && dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
     {
         host_part = cached_domain;
         strncpy_s(host_buf, sizeof(host_buf), cached_domain, _TRUNCATE);
@@ -67,7 +67,7 @@ int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG 
     char cached_domain[256];
     char ip_str[32];
     const char *host_part;
-    if (cfg->send_domain_to_proxy && dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
+    if (cfg != NULL && cfg->send_domain_to_proxy && dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
     {
         host_part = cached_domain;
     }

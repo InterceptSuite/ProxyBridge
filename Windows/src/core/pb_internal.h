@@ -15,7 +15,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "windivert.h"
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -25,17 +24,6 @@
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 1024
 #define VERSION "4.0.13-Beta"
-#define PID_CACHE_SIZE 1024
-#define PID_CACHE_TTL_MS 30000
-// Single packet-processor thread eliminates TCP packet reordering.
-// With multiple threads each racing to WinDivertRecv+WinDivertSend, thread N+1
-// can re-inject its segment before thread N injects segment N, causing the
-// relay's TCP stack to send DUPACKs back to the browser.  The browser
-// interprets 3+ DUPACKs as loss, halves its congestion window, and upload
-// throughput collapses 50% A single ordered thread prevents this entirely.
-// One thread is fast enough at 200 Mbps with 1460-byte segments there are
-// 17 000 packets/sec a single core processes well over 200000 packets/sec.
-#define NUM_PACKET_THREADS 1
 #define CONNECTION_HASH_SIZE 4096
 #define SOCKS5_BUFFER_SIZE 1024
 #define HTTP_BUFFER_SIZE 1024
@@ -72,7 +60,7 @@ typedef struct PROCESS_RULE {
 #define CONNECTION_STALE_TIMEOUT_MS 1800000  // 30 minutes
 
 // DNS snooping cache: maps intercepted A-record answers to their hostnames so
-// that SOCKS5 conect can forward ATYP_DOMAIN instead of ATYP_IPV4, letting
+// that SOCKS5 connect can forward ATYP_DOMAIN instead of ATYP_IPV4, letting
 // proxy servers that do their own name-resolution (e.g. mihomo) see the
 // original hostname rather than a bare IP.  (Resolves issue #138.)
 #define DNS_CACHE_BUCKETS 1024
@@ -146,15 +134,6 @@ typedef struct LOGGED_CONNECTION {
     struct LOGGED_CONNECTION *next;
 } LOGGED_CONNECTION;
 
-typedef struct PID_CACHE_ENTRY {
-    UINT32 src_ip;
-    UINT16 src_port;
-    DWORD pid;
-    DWORD timestamp;
-    BOOL is_udp;
-    struct PID_CACHE_ENTRY *next;
-} PID_CACHE_ENTRY;
-
 // Internal proxy configuration with per-config UDP SOCKS5 state
 typedef struct {
     UINT32 config_id;           // Unique ID (1-based), 0 = unused slot
@@ -186,12 +165,9 @@ extern PROCESS_RULE *rules_list;
 extern UINT32 g_next_rule_id;
 extern SRWLOCK lock;
 extern SRWLOCK g_rules_lock;
-extern HANDLE windivert_handle;
-extern HANDLE packet_thread[NUM_PACKET_THREADS];
 extern HANDLE proxy_thread;
 extern HANDLE udp_relay_thread;
 extern HANDLE cleanup_thread;
-extern PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE];
 extern volatile BOOL g_has_active_rules;
 extern volatile BOOL g_has_domain_rules;
 extern SOCKET udp_relay_socket;
@@ -208,8 +184,6 @@ extern UINT16 g_local_relay_port;
 extern BOOL g_localhost_via_proxy;  // default disabled for security - most proxy server block localhost for ssrf and also many app might not work if localhost trafic goes to remote server if proxy server is on diffrent machine
 extern LogCallback g_log_callback;
 extern ConnectionCallback g_connection_callback;
-extern char  *g_pidtbl_buf;
-extern DWORD  g_pidtbl_cap;
 
 // ---- per-source-port decision bitmaps: hot-path inline helpers ----
 static __forceinline BOOL port_is_decided(UINT16 p)
@@ -252,22 +226,10 @@ UINT32 resolve_hostname(const char *hostname);
 void base64_encode(const char* input, char* output, size_t output_size);
 
 // ---- pb_process.c ----
-void *pidtbl_reserve(DWORD need);
-DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port);
-DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port);
-DWORD get_process_id_from_connection_v6(const UINT8 src_ip6[16], UINT16 src_port);
-DWORD get_process_id_from_udp_connection_v6(const UINT8 src_ip6[16], UINT16 src_port);
 BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
-UINT32 pid_cache_hash(UINT32 src_ip, UINT16 src_port, BOOL is_udp);
-DWORD get_cached_pid(UINT32 src_ip, UINT16 src_port, BOOL is_udp);
-void cache_pid(UINT32 src_ip, UINT16 src_port, DWORD pid, BOOL is_udp);
-void clear_pid_cache(void);
-void remove_cached_pid(UINT32 src_ip, UINT16 src_port, BOOL is_udp);
-void cleanup_stale_pid_cache(void);
 
 // ---- pb_rules.c ----
 BOOL is_ipv6_multicast_or_linklocal(const UINT8 ip6[16]);
-RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id);
 BOOL match_ip_pattern(const char *pattern, UINT32 ip);
 BOOL match_port_pattern(const char *pattern, UINT16 port);
 BOOL ip_match_wrapper(const char *token, const void *data);
@@ -289,11 +251,17 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
 RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
 RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
 RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
-RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id);
 void update_has_active_rules(void);
 
 // ---- pb_proxy.c ----
+// Guards g_proxy_configs[] + g_proxy_config_count against concurrent Add/Edit/Delete (GUI
+// thread) vs. relay/drain readers. Delete tombstones a slot (config_id=0) instead of shifting
+// the array, so pointers/indices held by other threads stay valid.
+extern SRWLOCK g_proxy_lock;
 PROXY_CONFIG* find_proxy_config(UINT32 config_id);
+// Snapshot a config into *out under the lock - use this on the TCP path where the caller holds
+// the config across blocking network I/O and must be immune to a concurrent Edit/Delete.
+BOOL find_proxy_config_copy(UINT32 config_id, PROXY_CONFIG *out);
 BOOL any_socks5_config(void);
 BOOL is_proxy_config_referenced(UINT32 config_id);
 
@@ -328,10 +296,8 @@ UINT32 rev_hash_v6(const UINT8 dest_ip6[16], UINT16 dest_port);
 void rev_insert(CONNECTION_INFO *c);
 void rev_unlink(CONNECTION_INFO *c);
 void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id);
-void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id);
 BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id);
 BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port);
-BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port);
 BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id);
 UINT32 get_connection_proxy_id(UINT16 src_port, BOOL is_udp);
@@ -339,6 +305,9 @@ void remove_connection(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 void cleanup_stale_connections(void);
 BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
+void pb_report_connection(DWORD pid, const char *name_override, BOOL is_ipv6, UINT32 dest_ip,
+                          const UINT8 dest_ip6[16], UINT16 dest_port, RuleAction action,
+                          UINT32 cfg_id, BOOL is_udp);
 void clear_logged_connections(void);
 
 // ---- pb_relay.c ----
@@ -349,8 +318,17 @@ DWORD WINAPI one_way_relay(LPVOID arg);
 DWORD WINAPI transfer_handler(LPVOID arg);
 
 // ---- ProxyBridge.c ----
-DWORD WINAPI packet_processor(LPVOID arg);
 DWORD WINAPI cleanup_worker(LPVOID arg);
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved);
+
+// ---- pb_driver.c (WFP driver integration, opt-in via PROXYBRIDGE_USE_DRIVER) ----
+extern BOOL g_use_wfp_driver;
+BOOL pb_driver_start(UINT16 relay_port);
+void pb_driver_stop(void);
+void pb_driver_sync_rules(void);   // re-push watch list after a rule change (no-op until started)
+void pb_driver_sync_config(void);  // re-push config after a setting change (e.g. localhost-via-proxy)
+BOOL pb_driver_orig_dest(SOCKET s, UINT32 *ip, UINT16 *port, DWORD *pid);
+BOOL pb_driver_orig_dest6(SOCKET s, UINT8 ip6[16], UINT16 *port, DWORD *pid);
+BOOL pb_driver_udp_orig(UINT32 src_ip, UINT16 src_port, UINT32 *ip, UINT16 *port, DWORD *pid);
 
 #endif // PB_INTERNAL_H

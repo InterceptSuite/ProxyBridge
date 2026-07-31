@@ -5,7 +5,7 @@ struct AboutView: View {
 
     // read from the bundle so the About window always shows the built version
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
     }
 
     var body: some View {

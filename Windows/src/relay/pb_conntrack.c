@@ -84,53 +84,6 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
     ReleaseSRWLockExclusive(&lock);
 }
 
-void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id)
-{
-    AcquireSRWLockExclusive(&lock);
-
-    int hash = src_port % CONNECTION_HASH_SIZE;
-    CONNECTION_INFO *existing = connection_hash_table[hash];
-
-    while (existing != NULL) {
-        if (existing->src_port == src_port && existing->is_udp == is_udp && existing->is_ipv6) {
-            rev_unlink(existing);   // dest may change (port reuse) - re-key the reverse index
-            existing->is_ipv6 = TRUE;
-            memcpy(existing->src_ip6, src_ip6, 16);
-            memcpy(existing->orig_dest_ip6, dest_ip6, 16);
-            existing->orig_dest_port = dest_port;
-            existing->proxy_config_id = proxy_config_id;
-            existing->is_tracked = TRUE;
-            existing->last_activity = GetTickCount64();
-            rev_insert(existing);
-            ReleaseSRWLockExclusive(&lock);
-            return;
-        }
-        existing = existing->next;
-    }
-
-    CONNECTION_INFO *conn = (CONNECTION_INFO *)calloc(1, sizeof(CONNECTION_INFO));
-    if (conn == NULL) {
-        ReleaseSRWLockExclusive(&lock);
-        return;
-    }
-
-    conn->src_port = src_port;
-    conn->is_udp = is_udp;
-    conn->src_ip = 0;
-    conn->orig_dest_ip = 0;
-    conn->is_ipv6 = TRUE;
-    memcpy(conn->src_ip6, src_ip6, 16);
-    memcpy(conn->orig_dest_ip6, dest_ip6, 16);
-    conn->orig_dest_port = dest_port;
-    conn->proxy_config_id = proxy_config_id;
-    conn->is_tracked = TRUE;
-    conn->last_activity = GetTickCount64();
-    conn->next = connection_hash_table[hash];
-    connection_hash_table[hash] = conn;
-    rev_insert(conn);
-    ReleaseSRWLockExclusive(&lock);
-}
-
 BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id)
 {
     BOOL found = FALSE;
@@ -173,25 +126,6 @@ BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UI
     }
     ReleaseSRWLockShared(&lock);
     return found;
-}
-
-BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp, BOOL is_ipv6)
-{
-    BOOL tracked = FALSE;
-    AcquireSRWLockShared(&lock);
-
-    int hash = src_port % CONNECTION_HASH_SIZE;
-    CONNECTION_INFO *conn = connection_hash_table[hash];
-
-    while (conn != NULL) {
-        if (conn->src_port == src_port && conn->is_udp == is_udp && conn->is_ipv6 == is_ipv6 && conn->is_tracked) {
-            tracked = TRUE;
-            break;
-        }
-        conn = conn->next;
-    }
-    ReleaseSRWLockShared(&lock);
-    return tracked;
 }
 
 BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port)
@@ -308,36 +242,15 @@ void cleanup_stale_connections(void)
                 CONNECTION_INFO *to_free = *conn_ptr;
                 *conn_ptr = (*conn_ptr)->next;
                 rev_unlink(to_free);              // must run under the exclusive lock
-                ReleaseSRWLockExclusive(&lock);
+                // Free WHILE holding the lock. Dropping it here (as before) let another thread's
+                // remove_connection free the predecessor or the next node that `conn_ptr` still
+                // points into, so re-acquiring and dereferencing `*conn_ptr` was a use-after-free.
+                // free() is cheap; keeping the lock across it is correct and race-free.
                 free(to_free);
-                AcquireSRWLockExclusive(&lock);
             }
             else
             {
                 conn_ptr = &(*conn_ptr)->next;
-            }
-        }
-        ReleaseSRWLockExclusive(&lock);
-    }
-
-    ULONGLONG now_cache = GetTickCount64();
-    for (int i = 0; i < PID_CACHE_SIZE; i++)
-    {
-        AcquireSRWLockExclusive(&lock);
-        PID_CACHE_ENTRY **entry_ptr = &pid_cache[i];
-        while (*entry_ptr != NULL)
-        {
-            if (now_cache - (*entry_ptr)->timestamp > 10000)
-            {
-                PID_CACHE_ENTRY *to_free = *entry_ptr;
-                *entry_ptr = (*entry_ptr)->next;
-                ReleaseSRWLockExclusive(&lock);
-                free(to_free);
-                AcquireSRWLockExclusive(&lock);
-            }
-            else
-            {
-                entry_ptr = &(*entry_ptr)->next;
             }
         }
         ReleaseSRWLockExclusive(&lock);
@@ -436,6 +349,59 @@ void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleActi
     }
 
     ReleaseSRWLockExclusive(&lock);
+}
+
+// Report one connection the relay decided on to the GUI (connection tab) and the history
+// list. Replaces the per-SYN logging the old WinDivert packet loop did. Called once per new
+// connection that reaches the relay (i.e. every watched/redirected app: proxy, block, direct).
+void pb_report_connection(DWORD pid, const char *name_override, BOOL is_ipv6, UINT32 dest_ip,
+                          const UINT8 dest_ip6[16], UINT16 dest_port, RuleAction action,
+                          UINT32 cfg_id, BOOL is_udp)
+{
+    // Fold the v6 address to a 32-bit dedup/history key (LOGGED_CONNECTION stores UINT32).
+    UINT32 key = dest_ip;
+    if (is_ipv6) {
+        key = 0;
+        for (int i = 0; i < 16; i++) key = key * 31u + dest_ip6[i];
+    }
+    if (is_connection_already_logged(pid, key, dest_port, action)) return;
+
+    // Prefer a caller-supplied name (the driver captured it in-kernel, so it survives a process
+    // that has already exited); otherwise resolve the live PID.
+    char pname[MAX_PROCESS_NAME] = "unknown";
+    if (name_override != NULL && name_override[0] != '\0')
+        strncpy_s(pname, sizeof(pname), name_override, _TRUNCATE);
+    else
+        get_process_name_from_pid(pid, pname, sizeof(pname));
+    const char *disp = extract_filename(pname);
+
+    char ipstr[64] = "?";
+    if (is_ipv6) {
+        inet_ntop(AF_INET6, (void *)dest_ip6, ipstr, sizeof(ipstr));
+    } else {
+        struct in_addr a; a.S_un.S_addr = dest_ip;
+        inet_ntop(AF_INET, &a, ipstr, sizeof(ipstr));
+    }
+
+    char info[160];
+    const char *u = is_udp ? " (UDP)" : "";
+    if (action == RULE_ACTION_PROXY) {
+        PROXY_CONFIG *p = find_proxy_config(cfg_id);
+        if (p != NULL && p->host[0] != '\0')
+            snprintf(info, sizeof(info), "Proxy %s://%s:%u%s",
+                     p->type == PROXY_TYPE_HTTP ? "http" : "socks5", p->host, p->port, u);
+        else
+            snprintf(info, sizeof(info), "Proxy%s", u);
+    } else if (action == RULE_ACTION_BLOCK) {
+        snprintf(info, sizeof(info), "Blocked%s", u);
+    } else {
+        snprintf(info, sizeof(info), "Direct%s", u);
+    }
+
+    if (g_connection_callback != NULL)
+        g_connection_callback(disp, pid, ipstr, dest_port, info);
+    if (g_traffic_logging_enabled)
+        add_logged_connection(pid, key, dest_port, action);
 }
 
 void clear_logged_connections(void)

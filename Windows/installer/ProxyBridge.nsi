@@ -33,7 +33,7 @@ RequestExecutionLevel admin
 !define MUI_UNICON "..\gui\res\logo.ico"
 
 !insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_LICENSE "..\..\\LICENSE"
+!insertmacro MUI_PAGE_LICENSE "..\..\LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 
@@ -63,10 +63,22 @@ Section "MainSection" SEC01
       Sleep 1500
   install_proceed:
 
-  ; Stop and unload the WinDivert driver so WinDivert64.sys can be replaced.
+  ; Stop and unload the WFP driver so ProxyBridgeDrv.sys can be replaced.
+  nsExec::ExecToLog 'sc stop ProxyBridgeDrv'
+  nsExec::ExecToLog 'sc delete ProxyBridgeDrv'
+  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\ProxyBridgeDrv"
+
+  ; Also clean up any legacy WinDivert driver from older installs.
   nsExec::ExecToLog 'sc stop WinDivert'
   nsExec::ExecToLog 'sc delete WinDivert'
   DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\WinDivert"
+  Delete "$INSTDIR\WinDivert.dll"
+  Delete "$INSTDIR\WinDivert64.sys"
+  ; Legacy: remove the old "pbwfp"-named driver from before the ProxyBridgeDrv rename.
+  nsExec::ExecToLog 'sc stop pbwfp'
+  nsExec::ExecToLog 'sc delete pbwfp'
+  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\pbwfp"
+  Delete "$INSTDIR\pbwfp.sys"
 
   ; Brief pause to let the OS release all file handles.
   Sleep 1000
@@ -77,8 +89,12 @@ Section "MainSection" SEC01
   File "..\output\ProxyBridge.exe"
   File "..\output\ProxyBridge_CLI.exe"
   File "..\output\ProxyBridgeCore.dll"
-  File "..\output\WinDivert.dll"
-  File "..\output\WinDivert64.sys"
+  File "..\output\ProxyBridgeDrv.sys"
+
+  ; Register the WFP driver as an on-demand kernel service from the (elevated) installer, so the
+  ; app doesn't have to create it on first launch. It stays stopped until ProxyBridge starts it.
+  ; (The driver must be signed - EV for production, or test-signed with test-signing mode enabled.)
+  nsExec::ExecToLog 'sc create ProxyBridgeDrv type= kernel start= demand binPath= "$INSTDIR\ProxyBridgeDrv.sys" DisplayName= "ProxyBridge WFP"'
 
   ; Remove leftover native libraries from the old C#/Avalonia GUI. The native C GUI
   ; does not use them; without this an upgrade would keep these stale DLLs behind.
@@ -127,15 +143,25 @@ Section Uninstall
   ; Remove the "Run at Startup" logon task the GUI may have created.
   nsExec::ExecToLog 'schtasks /Delete /F /TN "ProxyBridge"'
 
-  ; Stop the WinDivert driver first so WinDivert64.sys isn't held open.
+  ; Stop the WFP driver first so ProxyBridgeDrv.sys isn't held open.
+  nsExec::ExecToLog 'sc stop ProxyBridgeDrv'
+  nsExec::ExecToLog 'sc delete ProxyBridgeDrv'
+  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\ProxyBridgeDrv"
+  ; Legacy WinDivert cleanup for upgrades from older versions.
   nsExec::ExecToLog 'sc stop WinDivert'
   nsExec::ExecToLog 'sc delete WinDivert'
   DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\WinDivert"
+  ; Legacy pbwfp (pre-rename) cleanup.
+  nsExec::ExecToLog 'sc stop pbwfp'
+  nsExec::ExecToLog 'sc delete pbwfp'
+  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\pbwfp"
+  Delete "$INSTDIR\pbwfp.sys"
   Sleep 500
 
   Delete "$INSTDIR\ProxyBridge.exe"
   Delete "$INSTDIR\ProxyBridge_CLI.exe"
   Delete "$INSTDIR\ProxyBridgeCore.dll"
+  Delete "$INSTDIR\ProxyBridgeDrv.sys"
   Delete "$INSTDIR\WinDivert.dll"
   Delete "$INSTDIR\WinDivert64.sys"
   Delete "$INSTDIR\uninst.exe"

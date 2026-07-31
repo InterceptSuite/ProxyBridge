@@ -961,7 +961,7 @@ int main(int argc, char* argv[])
     if (!g_Start())
     {
         fprintf(stderr, "ERROR: Failed to start.\n");
-        fprintf(stderr, "Ensure WinDivert64.sys is present in the same directory.\n");
+        fprintf(stderr, "Ensure ProxyBridgeDrv.sys is present in the same directory and the driver is signed.\n");
         FreeLibrary(g_hDll);
         return 1;
     }

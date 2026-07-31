@@ -1,0 +1,44 @@
+;
+; ProxyBridgeDrv.inf - ProxyBridge WFP connect-redirect callout driver (non-PnP kernel service).
+;
+[Version]
+Signature   = "$Windows NT$"
+Class       = WFPCALLOUTS
+ClassGuid   = {57465043-616C-6C6F-7574-5F6C61796572}
+Provider    = %ProviderName%
+CatalogFile = ProxyBridgeDrv.cat
+DriverVer   = 01/01/2026,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12          ; %windir%\System32\drivers
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+ProxyBridgeDrv.sys = 1,,
+
+[DefaultInstall.NTamd64]
+OptionDesc = %ServiceDesc%
+CopyFiles  = ProxyBridgeDrv.CopyFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService = ProxyBridgeDrv,,ProxyBridgeDrv.Service
+
+[ProxyBridgeDrv.CopyFiles]
+ProxyBridgeDrv.sys
+
+[ProxyBridgeDrv.Service]
+DisplayName   = %ServiceDesc%
+Description   = %ServiceDesc%
+ServiceType   = 1            ; SERVICE_KERNEL_DRIVER
+StartType     = 3            ; SERVICE_DEMAND_START (started by the ProxyBridge app)
+ErrorControl  = 1            ; SERVICE_ERROR_NORMAL
+ServiceBinary = %12%\ProxyBridgeDrv.sys
+LoadOrderGroup = NDIS
+
+[Strings]
+ProviderName = "InterceptSuite"
+ServiceDesc  = "ProxyBridge WFP Redirect"
+DiskName     = "ProxyBridge WFP Driver Install Disk"

@@ -7,10 +7,12 @@ param(
     [switch]$NoSign
 )
 
-$WinDivertPath = "C:\WinDivert-2.2.2-A"
 $SourcePath = "src"
-# Core split across modular translation units (see src\pb_internal.h).
-$SourceFile = "ProxyBridge.c pb_util.c pb_process.c pb_rules.c pb_proxy.c pb_dns.c pb_socks5.c pb_http.c pb_conntrack.c pb_relay.c"
+# WFP kernel driver (driver\ProxyBridgeDrv.vcxproj) - built + test-signed below, packaged in output\.
+$DriverSys  = "driver\x64\Release\ProxyBridgeDrv.sys"
+$DriverProj = "driver\ProxyBridgeDrv.vcxproj"
+# Core split across subsystem subfolders (see src\core\pb_internal.h). Paths are relative to $SourcePath.
+$SourceFile = "core\ProxyBridge.c net\pb_util.c net\pb_process.c rules\pb_rules.c rules\pb_match.c rules\pb_ipmatch.c proxy\pb_proxy.c net\pb_dns.c proxy\pb_socks5.c proxy\pb_http.c relay\pb_conntrack.c relay\pb_relay_tcp.c relay\pb_relay_udp.c driver\pb_driver.c driver\ProxyBridgeDrv_user.c"
 $SourceFiles = ($SourceFile.Split(' ') | ForEach-Object { "$SourcePath\$_" }) -join ' '
 $OutputDLL = "ProxyBridgeCore.dll"
 $OutputDir = "output"
@@ -22,18 +24,23 @@ $TimestampServer = "http://timestamp.digicert.com"
 $Arch = if ([Environment]::Is64BitProcess) { "x64" } else { "x86" }
 Write-Host "Architecture: $Arch" -ForegroundColor Cyan
 
+# A running ProxyBridge locks ProxyBridgeCore.dll, so the build would silently keep the old
+# DLL. Close it first so the fresh build actually lands in output\.
+foreach ($proc in @('ProxyBridge','ProxyBridge_CLI')) {
+    $running = Get-Process $proc -ErrorAction SilentlyContinue
+    if ($running) {
+        Write-Host "Closing running $proc (it locks the DLL)..." -ForegroundColor Yellow
+        $running | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 if (Test-Path $OutputDir) {
     Write-Host "Removing existing output directory..." -ForegroundColor Yellow
     Remove-Item $OutputDir -Recurse -Force
 }
 Write-Host "Creating output directory: $OutputDir" -ForegroundColor Cyan
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-
-if (-not (Test-Path $WinDivertPath)) {
-    Write-Host "ERROR: WinDivert not found at: $WinDivertPath" -ForegroundColor Red
-    Write-Host "Please update the path in this script or install WinDivert" -ForegroundColor Yellow
-    exit 1
-}
 
 function Compile-MSVC {
     Write-Host "`nCompiling DLL with MSVC..." -ForegroundColor Green
@@ -64,12 +71,11 @@ function Compile-MSVC {
     $clArgs = "/nologo /O2 /Ot /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
               "/D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS /DPROXYBRIDGE_EXPORTS /DNDEBUG " +
               "/arch:SSE2 /fp:fast /GS /guard:cf /Qpar " +
-              "/I`"$WinDivertPath\include`" " +
+              "/I`"$SourcePath\core`" /I`"$SourcePath\driver`" " +
               "$SourceFiles " +
               "/LD " +
               "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /NXCOMPAT " +
-              "/LIBPATH:`"$WinDivertPath\$Arch`" " +
-              "WinDivert.lib ws2_32.lib iphlpapi.lib " +
+              "ws2_32.lib iphlpapi.lib advapi32.lib " +
               "/OUT:$OutputDLL"
 
     $cmd = "`"$vcvarsPath`" $Arch >nul && cl.exe $clArgs"
@@ -96,10 +102,8 @@ function Compile-GCC {
     Write-Host "GCC found: $($gccVersion[0])" -ForegroundColor Cyan
 
     $cmd = "gcc -shared -O2 -flto -s -Wall -D_WIN32_WINNT=0x0601 -DPROXYBRIDGE_EXPORTS " +
-           "-I`"$WinDivertPath\include`" " +
            "$SourcePath\$SourceFile " +
-           "-L`"$WinDivertPath\$Arch`" " +
-           "-lWinDivert -lws2_32 -liphlpapi " +
+           "-lws2_32 -liphlpapi -ladvapi32 " +
            "-o $OutputDLL"
 
     Write-Host "Command: $cmd" -ForegroundColor Gray
@@ -124,11 +128,6 @@ function Sign-Binary {
 
     $fileName = Split-Path $FilePath -Leaf
 
-    if ($fileName -like "WinDivert*") {
-        Write-Host "  Skipped: $fileName (WinDivert is already EV signed)" -ForegroundColor Yellow
-        return $true
-    }
-
     Write-Host "  Signing: $fileName" -ForegroundColor Cyan
 
     if ([string]::IsNullOrEmpty($CertThumbprint)) {
@@ -151,6 +150,55 @@ function Sign-Binary {
 
 
 
+
+# Build the WFP kernel driver via MSBuild + the WDK. Independent of the core compiler above.
+function Build-Driver {
+    Write-Host "`nBuilding WFP driver (ProxyBridgeDrv.sys)..." -ForegroundColor Green
+    $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $msb = $null
+    if (Test-Path $vsWhere) {
+        $msb = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+    }
+    if (-not $msb) {
+        $msb = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\MSBuild\Current\Bin\MSBuild.exe" -ErrorAction SilentlyContinue |
+               Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $msb) { Write-Host "  MSBuild not found - install VS + WDK. Skipping driver build." -ForegroundColor Yellow; return $false }
+
+    $out = & $msb $DriverProj /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:SpectreMitigation=false /v:minimal /nologo 2>&1
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $DriverSys)) {
+        Write-Host "  Driver built: $DriverSys" -ForegroundColor Gray
+        return $true
+    }
+    Write-Host "  Driver build FAILED (WDK installed?). Continuing without a fresh .sys." -ForegroundColor Yellow
+    Write-Host $out
+    return $false
+}
+
+# Test-sign output\ProxyBridgeDrv.sys with a self-signed cert so it can load on a machine where the
+# cert is trusted (run temp-sign.ps1 once to establish trust). Signing itself needs no elevation.
+function Sign-Driver {
+    $drv = Join-Path $OutputDir "ProxyBridgeDrv.sys"
+    if (-not (Test-Path $drv)) { return }
+    $subject = 'CN=ProxyBridge Test Signing'
+    $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $subject } | Select-Object -First 1
+    if (-not $cert) {
+        $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject -CertStoreLocation Cert:\CurrentUser\My `
+                  -KeyUsage DigitalSignature -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3') -NotAfter (Get-Date).AddYears(5)
+    }
+    $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+          Sort-Object FullName -Descending | Select-Object -First 1
+    if (-not $st) { $st = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
+    if (-not $st) { Write-Host "  signtool not found - driver left unsigned" -ForegroundColor Yellow; return }
+    & $st sign /fd SHA256 /sha1 $cert.Thumbprint $drv 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  Test-signed: ProxyBridgeDrv.sys ($((Get-AuthenticodeSignature $drv).Status))" -ForegroundColor Gray
+    } else {
+        Write-Host "  Driver signing failed (file locked by a running ProxyBridgeDrv service?)" -ForegroundColor Yellow
+    }
+}
+
+Build-Driver | Out-Null
 
 $success = $false
 
@@ -186,15 +234,19 @@ if ($success) {
     Move-Item $OutputDLL -Destination $OutputDir -Force
     Write-Host "  Moved: $OutputDLL -> $OutputDir\" -ForegroundColor Gray
 
-    $files = @(
-        "$WinDivertPath\$Arch\WinDivert.dll",
-        "$WinDivertPath\$Arch\WinDivert64.sys",
-        "$WinDivertPath\$Arch\WinDivert32.sys"
-    )
-    foreach ($file in $files) {
-        if (Test-Path $file) {
-            Copy-Item $file -Destination $OutputDir -Force
-            Write-Host "  Copied: $(Split-Path $file -Leaf)" -ForegroundColor Gray
+    if (Test-Path $DriverSys) {
+        Copy-Item $DriverSys -Destination $OutputDir -Force
+        Write-Host "  Copied: ProxyBridgeDrv.sys (WFP driver)" -ForegroundColor Gray
+        Sign-Driver
+    } else {
+        Write-Host "  WARNING: $DriverSys not found - build the driver first" -ForegroundColor Yellow
+    }
+
+    # Test-signing helper + VM test guide so output\ is a self-contained test package.
+    foreach ($extra in @("driver\temp-sign\temp-sign.ps1")) {
+        if (Test-Path $extra) {
+            Copy-Item $extra -Destination $OutputDir -Force
+            Write-Host "  Copied: $(Split-Path $extra -Leaf)" -ForegroundColor Gray
         }
     }
 
@@ -268,22 +320,15 @@ if ($success) {
         Write-Host "`nSigning binaries..." -ForegroundColor Green
         $filesToSign = Get-ChildItem $OutputDir -Include *.exe,*.dll -Recurse
         $signedCount = 0
-        $skippedCount = 0
 
         foreach ($file in $filesToSign) {
-            if ($file.Name -like "WinDivert*") {
-                Write-Host "  Skipped: $($file.Name) (WinDivert is already EV signed)" -ForegroundColor Yellow
-                $skippedCount++
-            } else {
-                if (Sign-Binary -FilePath $file.FullName) {
-                    $signedCount++
-                }
+            if (Sign-Binary -FilePath $file.FullName) {
+                $signedCount++
             }
         }
 
         Write-Host "`nSigning Summary:" -ForegroundColor Cyan
         Write-Host "  Signed: $signedCount files" -ForegroundColor Green
-        Write-Host "  Skipped: $skippedCount files (WinDivert)" -ForegroundColor Yellow
     } else {
         Write-Host "`nSigning skipped (-NoSign flag)" -ForegroundColor Yellow
     }

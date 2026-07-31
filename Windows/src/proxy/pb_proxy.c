@@ -2,31 +2,57 @@
 
 // Proxy config: config store, lookup helpers, and management/test API.
 
-// Helper: find proxy config by ID; falls back to first config if not found
+// Internal: locate a config (caller must hold g_proxy_lock). config_id 0 = "first available".
+// Tombstoned slots (config_id == 0) are skipped.
+static PROXY_CONFIG* find_locked(UINT32 config_id)
+{
+    if (config_id != 0)
+        for (int i = 0; i < g_proxy_config_count; i++)
+            if (g_proxy_configs[i].config_id == config_id)
+                return &g_proxy_configs[i];
+    // "first available" or id not found -> first live (non-tombstone) config
+    for (int i = 0; i < g_proxy_config_count; i++)
+        if (g_proxy_configs[i].config_id != 0)
+            return &g_proxy_configs[i];
+    return NULL;
+}
+
+// Find proxy config by ID; falls back to first live config. Returns a LIVE pointer for the
+// single-threaded UDP relay's persistent per-config state. TCP callers that hold the config
+// across blocking I/O must use find_proxy_config_copy() instead (immune to Edit/Delete).
 PROXY_CONFIG* find_proxy_config(UINT32 config_id)
 {
-    for (int i = 0; i < g_proxy_config_count; i++)
-    {
-        if (g_proxy_configs[i].config_id == config_id)
-            return &g_proxy_configs[i];
-    }
-    // Fall back to first available config
-    if (g_proxy_config_count > 0)
-        return &g_proxy_configs[0];
-    return NULL;
+    AcquireSRWLockShared(&g_proxy_lock);
+    PROXY_CONFIG *found = find_locked(config_id);
+    ReleaseSRWLockShared(&g_proxy_lock);
+    return found;
+}
+
+// Snapshot a config into *out under the lock. TRUE if a config was found.
+BOOL find_proxy_config_copy(UINT32 config_id, PROXY_CONFIG *out)
+{
+    AcquireSRWLockShared(&g_proxy_lock);
+    PROXY_CONFIG *found = find_locked(config_id);
+    if (found != NULL) *out = *found;
+    ReleaseSRWLockShared(&g_proxy_lock);
+    return found != NULL;
 }
 
 // Helper: check if any proxy config is SOCKS5 (needed to decide whether to start UDP relay)
 BOOL any_socks5_config(void)
 {
+    BOOL yes = FALSE;
+    AcquireSRWLockShared(&g_proxy_lock);
     for (int i = 0; i < g_proxy_config_count; i++)
     {
-        if (g_proxy_configs[i].type == PROXY_TYPE_SOCKS5 &&
+        if (g_proxy_configs[i].config_id != 0 &&
+            g_proxy_configs[i].type == PROXY_TYPE_SOCKS5 &&
             g_proxy_configs[i].host[0] != '\0' &&
             g_proxy_configs[i].port != 0)
-            return TRUE;
+        { yes = TRUE; break; }
     }
-    return FALSE;
+    ReleaseSRWLockShared(&g_proxy_lock);
+    return yes;
 }
 
 // TRUE if any enabled PROXY rule routes traffic through this proxy config. Used to skip
@@ -57,30 +83,41 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddProxyConfig(ProxyType type, const char* pr
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
         return 0;
 
-    if (resolve_hostname(proxy_ip) == 0)
+    UINT32 resolved = resolve_hostname(proxy_ip);   // network I/O - do it before taking the lock
+    if (resolved == 0)
         return 0;
 
-    if (g_proxy_config_count >= MAX_PROXY_CONFIGS)
-        return 0;
-
-    PROXY_CONFIG *cfg = &g_proxy_configs[g_proxy_config_count];
+    UINT32 new_id = 0;
+    char   log_host[256]; UINT16 log_port = 0; int log_type = 0;
+    AcquireSRWLockExclusive(&g_proxy_lock);
+    // Reuse a tombstoned slot if one exists (keeps the array bounded); else append.
+    int slot = -1;
+    for (int i = 0; i < g_proxy_config_count; i++)
+        if (g_proxy_configs[i].config_id == 0) { slot = i; break; }
+    if (slot < 0)
+    {
+        if (g_proxy_config_count >= MAX_PROXY_CONFIGS) { ReleaseSRWLockExclusive(&g_proxy_lock); return 0; }
+        slot = g_proxy_config_count++;
+    }
+    PROXY_CONFIG *cfg = &g_proxy_configs[slot];
     memset(cfg, 0, sizeof(PROXY_CONFIG));
-
     cfg->config_id = g_next_config_id++;
     cfg->type      = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
     cfg->port      = proxy_port;
     cfg->send_domain_to_proxy = send_domain_to_proxy;
     strncpy_s(cfg->host, sizeof(cfg->host), proxy_ip, _TRUNCATE);
-    cfg->resolved_ip = resolve_hostname(proxy_ip);
+    cfg->resolved_ip = resolved;
     if (username != NULL) strncpy_s(cfg->username, sizeof(cfg->username), username, _TRUNCATE);
     if (password != NULL) strncpy_s(cfg->password, sizeof(cfg->password), password, _TRUNCATE);
     cfg->udp_tcp_ctrl  = INVALID_SOCKET;
     cfg->udp_send_sock = INVALID_SOCKET;
     cfg->udp_connected = FALSE;
+    new_id = cfg->config_id;
+    strncpy_s(log_host, sizeof(log_host), cfg->host, _TRUNCATE); log_port = cfg->port; log_type = cfg->type;
+    ReleaseSRWLockExclusive(&g_proxy_lock);
 
-    g_proxy_config_count++;
-    log_message("Added proxy config ID %u: %s:%u (type %d)", cfg->config_id, cfg->host, cfg->port, cfg->type);
-    return cfg->config_id;
+    log_message("Added proxy config ID %u: %s:%u (type %d)", new_id, log_host, log_port, log_type);
+    return new_id;
 }
 
 PROXYBRIDGE_API BOOL ProxyBridge_EditProxyConfig(UINT32 config_id, ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password, BOOL send_domain_to_proxy)
@@ -88,14 +125,17 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditProxyConfig(UINT32 config_id, ProxyType typ
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
         return FALSE;
 
-    UINT32 resolved = resolve_hostname(proxy_ip);
+    UINT32 resolved = resolve_hostname(proxy_ip);   // network I/O - before the lock
     if (resolved == 0)
         return FALSE;
 
+    BOOL found = FALSE;
+    char log_host[256]; UINT16 log_port = 0; int log_type = 0;
+    AcquireSRWLockExclusive(&g_proxy_lock);
     for (int i = 0; i < g_proxy_config_count; i++)
     {
         PROXY_CONFIG *cfg = &g_proxy_configs[i];
-        if (cfg->config_id == config_id)
+        if (cfg->config_id != 0 && cfg->config_id == config_id)
         {
             // Close any open UDP state before changing config
             if (cfg->udp_tcp_ctrl != INVALID_SOCKET)  { closesocket(cfg->udp_tcp_ctrl);  cfg->udp_tcp_ctrl  = INVALID_SOCKET; }
@@ -112,34 +152,45 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditProxyConfig(UINT32 config_id, ProxyType typ
             if (username != NULL) strncpy_s(cfg->username, sizeof(cfg->username), username, _TRUNCATE);
             if (password != NULL) strncpy_s(cfg->password, sizeof(cfg->password), password, _TRUNCATE);
 
-            log_message("Edited proxy config ID %u: %s:%u (type %d)", config_id, cfg->host, cfg->port, cfg->type);
-            return TRUE;
+            strncpy_s(log_host, sizeof(log_host), cfg->host, _TRUNCATE); log_port = cfg->port; log_type = cfg->type;
+            found = TRUE;
+            break;
         }
     }
-    return FALSE;
+    ReleaseSRWLockExclusive(&g_proxy_lock);
+    if (found)
+        log_message("Edited proxy config ID %u: %s:%u (type %d)", config_id, log_host, log_port, log_type);
+    return found;
 }
 
 PROXYBRIDGE_API BOOL ProxyBridge_DeleteProxyConfig(UINT32 config_id)
 {
+    BOOL found = FALSE;
+    AcquireSRWLockExclusive(&g_proxy_lock);
     for (int i = 0; i < g_proxy_config_count; i++)
     {
         PROXY_CONFIG *cfg = &g_proxy_configs[i];
-        if (cfg->config_id == config_id)
+        if (cfg->config_id != 0 && cfg->config_id == config_id)
         {
             if (cfg->udp_tcp_ctrl != INVALID_SOCKET)  { closesocket(cfg->udp_tcp_ctrl);  }
             if (cfg->udp_send_sock != INVALID_SOCKET) { closesocket(cfg->udp_send_sock); }
 
-            // Shift remaining entries down
-            int remaining = g_proxy_config_count - i - 1;
-            if (remaining > 0)
-                memmove(&g_proxy_configs[i], &g_proxy_configs[i + 1], remaining * sizeof(PROXY_CONFIG));
-
-            g_proxy_config_count--;
-            log_message("Deleted proxy config ID %u", config_id);
-            return TRUE;
+            // Tombstone the slot instead of memmove-ing the array down. Shifting entries would
+            // invalidate PROXY_CONFIG* pointers and indices held by relay/drain threads (wrong
+            // proxy used, or a torn read). A tombstone (config_id = 0) is skipped by all readers
+            // and reused by a later Add, so the array stays structurally stable.
+            memset(cfg, 0, sizeof(*cfg));
+            cfg->config_id     = 0;              // tombstone marker (memset already did this)
+            cfg->udp_tcp_ctrl  = INVALID_SOCKET;
+            cfg->udp_send_sock = INVALID_SOCKET;
+            found = TRUE;
+            break;
         }
     }
-    return FALSE;
+    ReleaseSRWLockExclusive(&g_proxy_lock);
+    if (found)
+        log_message("Deleted proxy config ID %u", config_id);
+    return found;
 }
 
 PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char* target_host, UINT16 target_port, char* result_buffer, size_t buffer_size)

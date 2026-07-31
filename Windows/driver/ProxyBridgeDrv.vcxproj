@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- WDM/WFP callout driver project. Requires Visual Studio + the matching WDK installed. -->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{B7F0A1C2-3D45-4E67-8901-ABCDEF012345}</ProjectGuid>
+    <TargetVersion>Windows10</TargetVersion>
+    <!-- Pin to the installed SDK+WDK pair that actually has the km headers. -->
+    <WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion>
+    <DriverType>WDM</DriverType>
+    <ConfigurationType>Driver</ConfigurationType>
+    <RootNamespace>ProxyBridgeDrv</RootNamespace>
+    <SpectreMitigation>false</SpectreMitigation>
+    <SignMode>Off</SignMode>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WppEnabled>false</WppEnabled>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>%(AdditionalDependencies);fwpkclnt.lib;ndis.lib;wdmsec.lib</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <TimeStamp>1.0.0.0</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\ProxyBridgeDrv.c" />
+    <ClCompile Include="src\pbdrv_state.c" />
+    <ClInclude Include="src\pbdrv_state.h" />
+    <ClInclude Include="src\ProxyBridgeDrv_ioctl.h" />
+    <ResourceCompile Include="src\ProxyBridgeDrv.rc" />
+    <None Include="src\ProxyBridgeDrv.inf" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -234,6 +234,10 @@ UINT32 resolve_hostname(const char *hostname)
 void base64_encode(const char* input, char* output, size_t output_size)
 {
     static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    // Need >=5 bytes (one 4-char quantum + NUL). Guard first: the loop bound `output_size - 4`
+    // is size_t math, so output_size < 4 would wrap to a huge value and overrun `output`.
+    if (output == NULL || output_size == 0) return;
+    if (output_size < 5) { output[0] = '\0'; return; }
     size_t input_len = strnlen_s(input, output_size * 2);
     size_t output_len = 0;
 
