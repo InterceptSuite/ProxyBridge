@@ -1,4 +1,5 @@
 #include "gui.h"
+#include <ctype.h>
 
 // widgets
 GtkWidget *window;
@@ -34,54 +35,100 @@ static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
     save_config();
 }
 
-static void on_create_update_script_and_run() {
-    ProxyBridge_Stop();
-    const char *script_url = "https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh";
-    char tmp_dir_tpl[] = "/tmp/pb_update_XXXXXX";
-    char *tmp_dir = mkdtemp(tmp_dir_tpl);
-    if (!tmp_dir) { fprintf(stderr, "Failed to create temp directory for update.\n"); exit(1); }
-    char script_path[512];
-    snprintf(script_path, sizeof(script_path), "%s/deploy.sh", tmp_dir);
+static bool tag_name_is_safe(const char *tag) {
+    if (!tag || !tag[0]) return false;
+    for (const char *p = tag; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!(isalnum(c) || c == '.' || c == '-' || c == '_'))
+            return false;
+    }
+    return true;
+}
 
-    pid_t pid = fork();
-    if (pid == -1) { fprintf(stderr, "Fork failed.\n"); exit(1); }
-    else if (pid == 0) { execlp("curl", "curl", "-s", "-o", script_path, script_url, NULL); _exit(127); }
-    else { int status; waitpid(pid, &status, 0); if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { fprintf(stderr, "Failed to download update script.\n"); exit(1); } }
+static gboolean fetch_latest_release_json(char **out_body) {
+    char *argv[] = {
+        (char *)"curl",
+        (char *)"-sS",
+        (char *)"-H", (char *)"User-Agent: ProxyBridge-Linux",
+        (char *)"-H", (char *)"Accept: application/vnd.github+json",
+        (char *)"https://api.github.com/repos/InterceptSuite/ProxyBridge/releases/latest",
+        NULL
+    };
+    char *stdout_buf = NULL;
+    char *stderr_buf = NULL;
+    GError *error = NULL;
+    int exit_status = 0;
+    gboolean ok = g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
+                               &stdout_buf, &stderr_buf, &exit_status, &error);
+    if (!ok || exit_status != 0 || !stdout_buf || stdout_buf[0] == '\0') {
+        if (error) g_error_free(error);
+        g_free(stdout_buf);
+        g_free(stderr_buf);
+        return FALSE;
+    }
+    *out_body = stdout_buf;
+    g_free(stderr_buf);
+    return TRUE;
+}
 
-    if (chmod(script_path, S_IRWXU) != 0) { perror("chmod failed"); exit(1); }
-    execl("/bin/bash", "bash", script_path, NULL);
-    exit(0);
+static void open_release_page(const char *html_url) {
+    if (!html_url || !html_url[0]) return;
+    GError *error = NULL;
+    if (!gtk_show_uri_on_window(GTK_WINDOW(window), html_url, GDK_CURRENT_TIME, &error)) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR,
+                     "Could not open release page: %s", error ? error->message : "unknown error");
+        if (error) g_error_free(error);
+    }
 }
 
 static void on_check_update(GtkWidget *widget, gpointer data) {
-    const char *url = "https://api.github.com/repos/InterceptSuite/ProxyBridge/releases/latest";
-    char *cmd = g_strdup_printf("curl -s -H \"User-Agent: ProxyBridge-Linux\" %s", url);
-    char *standard_output = NULL;
-    char *standard_error = NULL;
-    GError *error = NULL;
-    int exit_status = 0;
+    (void)widget;
+    (void)data;
 
-    gboolean result = g_spawn_command_line_sync(cmd, &standard_output, &standard_error, &exit_status, &error);
-    g_free(cmd);
-    if (!result) { show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Failed to launch release check: %s", error ? error->message : "Unknown"); if (error) g_error_free(error); return; }
-    if (exit_status != 0 || !standard_output || strlen(standard_output) == 0) { show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed (Exit: %d).", exit_status); g_free(standard_output); g_free(standard_error); return; }
+    char *release_json = NULL;
+    if (!fetch_latest_release_json(&release_json)) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed (could not reach GitHub).");
+        return;
+    }
 
-    char *tag_name = extract_sub_json_str(standard_output, "tag_name");
-    g_free(standard_output); g_free(standard_error);
+    char *tag_name = extract_sub_json_str(release_json, "tag_name");
+    char *html_url = extract_sub_json_str(release_json, "html_url");
+    g_free(release_json);
 
-    if (!tag_name) { show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse version info."); return; }
+    if (!tag_name || !tag_name_is_safe(tag_name)) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse version info.");
+        g_free(tag_name);
+        g_free(html_url);
+        return;
+    }
+
     char *current_tag = g_strdup_printf("v%s", PROXYBRIDGE_VERSION);
-
-    if (strcmp(tag_name, current_tag) == 0) { show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO, "You are using the latest version (%s).", PROXYBRIDGE_VERSION); }
-    else {
-        GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "New version %s is available!\nCurrent: %s\n\nUpdate now?", tag_name, PROXYBRIDGE_VERSION);
-        gtk_dialog_add_button(GTK_DIALOG(dialog), "Download Now", GTK_RESPONSE_ACCEPT);
+    if (strcmp(tag_name, current_tag) == 0) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO,
+                     "You are using the latest version (%s).", PROXYBRIDGE_VERSION);
+    } else {
+        GtkWidget *dialog = gtk_message_dialog_new(
+            GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+            "New version %s is available.\nCurrent: %s\n\nOpen the official GitHub release page to download?", tag_name, PROXYBRIDGE_VERSION);
+        gtk_dialog_add_button(GTK_DIALOG(dialog), "Open Release Page", GTK_RESPONSE_ACCEPT);
         gtk_dialog_add_button(GTK_DIALOG(dialog), "Close", GTK_RESPONSE_CANCEL);
         int resp = gtk_dialog_run(GTK_DIALOG(dialog));
         gtk_widget_destroy(dialog);
-        if (resp == GTK_RESPONSE_ACCEPT) on_create_update_script_and_run();
+        if (resp == GTK_RESPONSE_ACCEPT) {
+            if (html_url && html_url[0])
+                open_release_page(html_url);
+            else {
+                char fallback[256];
+                snprintf(fallback, sizeof(fallback),
+                         "https://github.com/InterceptSuite/ProxyBridge/releases/tag/%s", tag_name);
+                open_release_page(fallback);
+            }
+        }
     }
-    g_free(current_tag); g_free(tag_name);
+
+    g_free(current_tag);
+    g_free(tag_name);
+    g_free(html_url);
 }
 
 static void on_about(GtkWidget *widget, gpointer data) {
