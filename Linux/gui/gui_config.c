@@ -1,4 +1,5 @@
 #include "gui.h"
+#include <fcntl.h>
 
 #define CONFIG_DIR "/etc/proxybridge"
 #define CONFIG_PATH "/etc/proxybridge/config.ini"
@@ -7,14 +8,22 @@
 void save_config() {
     struct stat st = {0};
     if (stat(CONFIG_DIR, &st) == -1) {
-        if (mkdir(CONFIG_DIR, 0755) != 0) {
+        if (mkdir(CONFIG_DIR, 0700) != 0) {
             perror("failed to create config dir");
             return;
         }
+    } else if (chmod(CONFIG_DIR, 0700) != 0) {
+        perror("failed to tighten config dir permissions");
     }
 
-    FILE *f = fopen(CONFIG_PATH, "w");
+    int cfg_fd = open(CONFIG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (cfg_fd < 0) {
+        printf("failed to save config to %s\n", CONFIG_PATH);
+        return;
+    }
+    FILE *f = fdopen(cfg_fd, "w");
     if (!f) {
+        close(cfg_fd);
         printf("failed to save config to %s\n", CONFIG_PATH);
         return;
     }
@@ -50,6 +59,7 @@ void save_config() {
 
 // load settings from file
 void load_config() {
+    chmod(CONFIG_PATH, 0600); // tighten legacy world-readable installs
     FILE *f = fopen(CONFIG_PATH, "r");
     if (!f) return;
 
