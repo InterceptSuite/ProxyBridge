@@ -37,15 +37,27 @@ static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
 // same feed as windows/mac: https://download.interceptsuite.com/proxybridge.json
 #define UPD_FEED_URL "https://download.interceptsuite.com/proxybridge.json"
 
+// match "linux": { ... } as a key, not a random "linux" string value
 static char *extract_platform_block(const char *json, const char *platform) {
     char needle[64];
     snprintf(needle, sizeof(needle), "\"%s\"", platform);
-    char *p = strstr(json, needle);
-    if (!p) return NULL;
-    char *brace = strchr(p, '{');
+    size_t nlen = strlen(needle);
+    const char *p = json;
+    const char *key = NULL;
+    while ((p = strstr(p, needle)) != NULL) {
+        const char *after = p + nlen;
+        while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r') after++;
+        if (*after == ':') {
+            key = p;
+            break;
+        }
+        p += nlen;
+    }
+    if (!key) return NULL;
+    const char *brace = strchr(key, '{');
     if (!brace) return NULL;
     int depth = 0;
-    for (char *q = brace; *q; q++) {
+    for (const char *q = brace; *q; q++) {
         if (*q == '{') depth++;
         else if (*q == '}') {
             depth--;

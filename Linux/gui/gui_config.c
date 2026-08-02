@@ -21,6 +21,10 @@ void save_config() {
         printf("failed to save config to %s\n", CONFIG_PATH);
         return;
     }
+    // mode on open only hits create; tighten existing 0644 installs too
+    if (fchmod(cfg_fd, 0600) != 0) {
+        perror("chmod config file failed");
+    }
     FILE *f = fdopen(cfg_fd, "w");
     if (!f) {
         close(cfg_fd);
