@@ -53,8 +53,9 @@ static void StartupSet(BOOL enable)
         wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);
         wchar_t args[1200];
         // ONLOGON task launching the exe minimized, highest run level.
+        // The short delay lets the shell/tray come up first so the tray icon appears
         _snwprintf_s(args, 1200, _TRUNCATE,
-                   L"/Create /F /TN \"ProxyBridge\" /TR \"\\\"%s\\\" --minimized\" /SC ONLOGON /RL HIGHEST",
+                   L"/Create /F /TN \"ProxyBridge\" /TR \"\\\"%s\\\" --minimized\" /SC ONLOGON /DELAY 0000:15 /RL HIGHEST",
                    exe);
         args[1199] = 0;
         RunSchtasks(args);

@@ -9,8 +9,8 @@
 #define PB_VER_MINOR 0
 #define PB_VER_PATCH 11
 #define PB_VER_BUILD 0
-#define PB_VER_STR   "4.0.11-Beta"     // narrow, for the .rc VERSIONINFO strings
-#define PB_VER_STRW  L"4.0.11-Beta"    // wide, for the C/About UI
+#define PB_VER_STR   "4.0.13-Beta"     // narrow, for the .rc VERSIONINFO strings
+#define PB_VER_STRW  L"4.0.13-Beta"    // wide, for the C/About UI
 
 #define IDI_APPICON                 101
 
@@ -86,6 +86,7 @@
 #define IDC_SE_G_AUTH              336   // "Authentication" group box
 #define IDC_SE_NAME                327   // friendly name edit
 #define IDC_SE_L_NAME              337   // "Name:" label
+#define IDC_SE_SENDDOMAIN          328   // "let proxy resolve DNS" checkbox
 
 // Proxy Checker dialog
 #define IDD_CHECKER                340

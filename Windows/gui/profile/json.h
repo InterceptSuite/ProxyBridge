@@ -25,7 +25,11 @@ typedef struct JVal {
 } JVal;
 
 // parser
-typedef struct { const char* p; const char* end; } JParser;
+// depth guards against stack overflow from deeply nested (or hostile) input:
+// json_parse recurses once per nesting level, so an unbounded document would
+// exhaust the stack. 64 levels is far more than any real profile needs.
+#define J_MAX_DEPTH 64
+typedef struct { const char* p; const char* end; int depth; } JParser;
 
 static JVal* j_new(JType t)
 {
@@ -121,12 +125,13 @@ static JVal* j_parse_value(JParser* s);
 
 static JVal* j_parse_container(JParser* s, char open, char close, JType type)
 {
+    if (++s->depth > J_MAX_DEPTH) { s->depth--; return NULL; }   // too deeply nested - reject
     s->p++; // consume open
     JVal* node = j_new(type);
-    if (!node) return NULL;
+    if (!node) { s->depth--; return NULL; }
     JVal* tail = NULL;
     j_skip_ws(s);
-    if (s->p < s->end && *s->p == close) { s->p++; return node; }
+    if (s->p < s->end && *s->p == close) { s->p++; s->depth--; return node; }
     while (s->p < s->end)
     {
         j_skip_ws(s);
@@ -138,7 +143,7 @@ static JVal* j_parse_container(JParser* s, char open, char close, JType type)
             if (s->p < s->end && *s->p == ':') s->p++;
         }
         JVal* val = j_parse_value(s);
-        if (!val) { free(key); json_free(node); return NULL; }
+        if (!val) { free(key); json_free(node); s->depth--; return NULL; }
         val->key = key;
         if (tail) tail->next = val; else node->child = val;
         tail = val;
@@ -148,6 +153,7 @@ static JVal* j_parse_container(JParser* s, char open, char close, JType type)
         break;
     }
     (void)open;
+    s->depth--;
     return node;
 }
 
@@ -182,7 +188,7 @@ static JVal* j_parse_value(JParser* s)
 // Parse a whole document. Returns root (owned) or NULL.
 static JVal* json_parse(const char* text, size_t length)
 {
-    JParser s; s.p = text; s.end = text + length;
+    JParser s; s.p = text; s.end = text + length; s.depth = 0;
     return j_parse_value(&s);
 }
 

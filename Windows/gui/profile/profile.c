@@ -179,6 +179,7 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
                 u2w(json_str(c, "Port", ""), cf->port, 16);
                 u2w(json_str(c, "Username", ""), cf->user, 128);
                 u2w(json_str(c, "Password", ""), cf->pass, 128);
+                cf->sendDomain = json_bool(c, "SendDomainToProxy", 1);   // default on
             }
 
         JVal* rules = json_get(root, "ProxyRules");
@@ -188,7 +189,7 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
                 if (r->type != J_OBJ) continue;
                 PBRule* ru = &p->rule[p->ruleCount++];
                 u2w(json_str(r, "Name", "ProxyBridge Rule"), ru->name, 128);
-                u2w(json_str(r, "ProcessName", "*"), ru->proc, 256);
+                u2w(json_str(r, "ProcessName", "*"), ru->proc, PB_APPS_MAX);
                 u2w(json_str(r, "TargetHosts", "*"), ru->hosts, 256);
                 u2w(json_str(r, "TargetPorts", "*"), ru->ports, 128);
                 u2w(json_str(r, "TargetDomains", "*"), ru->domains, 256);
@@ -218,7 +219,7 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
 
 static void put_kv_str(StrBuf* b, const char* indent, const char* key, const wchar_t* wval, const char* trail)
 {
-    char tmp[1024]; w2u(wval, tmp, sizeof(tmp));
+    char tmp[PB_APPS_MAX * 3 + 4]; w2u(wval, tmp, sizeof(tmp));   // UTF-8 worst case ~3 bytes/char
     sb_put(b, indent); sb_put(b, "\""); sb_put(b, key); sb_put(b, "\": ");
     sb_json_str(b, tmp); sb_put(b, trail);
 }
@@ -249,7 +250,8 @@ BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
         put_kv_str(&b, "      ", "Host", c->host, ",\n");
         put_kv_str(&b, "      ", "Port", c->port, ",\n");
         put_kv_str(&b, "      ", "Username", c->user, ",\n");
-        put_kv_str(&b, "      ", "Password", c->pass, "\n");
+        put_kv_str(&b, "      ", "Password", c->pass, ",\n");
+        sb_put(&b, "      \"SendDomainToProxy\": "); sb_put(&b, c->sendDomain ? "true" : "false"); sb_put(&b, "\n");
         sb_put(&b, "    }");
     }
     sb_put(&b, p->cfgCount ? "\n  ],\n" : "],\n");

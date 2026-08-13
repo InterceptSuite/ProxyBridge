@@ -119,6 +119,7 @@ typedef struct PROCESS_RULE {
 
 typedef struct CONNECTION_INFO {
     uint16_t src_port;
+    bool is_udp;              // protocol - a TCP and a UDP flow may share a local port
     uint32_t src_ip;
     uint32_t orig_dest_ip;
     uint16_t orig_dest_port;
@@ -323,9 +324,9 @@ static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_por
 static bool get_process_name_from_pid(uint32_t pid, char *name, size_t name_size);
 static RuleAction match_rule(const char *process_name, uint32_t dest_ip, uint16_t dest_port, bool is_udp);
 static RuleAction check_process_rule(uint32_t src_ip, uint16_t src_port, uint32_t dest_ip, uint16_t dest_port, bool is_udp, uint32_t *out_pid);
-static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port);
-static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_port);
-static bool is_connection_tracked(uint16_t src_port);
+static void add_connection(uint16_t src_port, bool is_udp, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port);
+static bool get_connection(uint16_t src_port, bool is_udp, uint32_t *dest_ip, uint16_t *dest_port);
+static bool is_connection_tracked(uint16_t src_port, bool is_udp);
 static void cleanup_stale_connections(void);
 static bool is_connection_already_logged(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action);
 static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action);
@@ -878,10 +879,53 @@ static RuleAction check_process_rule(uint32_t src_ip, uint16_t src_port, uint32_
     return action;
 }
 
+// Read exactly n bytes, looping over short reads. SOCKS5/HTTP replies can split
+// across TCP segments (common on high-latency remote proxies), so fixed-length
+// handshake reads must accumulate. Returns n on success, -1 on error/peer close.
+static int recv_n(int s, void *buf, size_t n)
+{
+    size_t got = 0;
+    while (got < n)
+    {
+        ssize_t r = recv(s, (char *)buf + got, n - got, 0);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return (int)n;
+}
+
+// Read and validate a SOCKS5 CONNECT reply (RFC 1928). The proxy chooses the
+// BND.ADDR type in its reply independently of the request's ATYP - many proxies
+// answer with a 4-byte IPv4 0.0.0.0 even for other requests - so parse the 4-byte
+// header (VER REP RSV ATYP) then drain the variable BND.ADDR + BND.PORT by ATYP,
+// instead of assuming a fixed 10-byte reply. *reply gets REP (or -1) for logging.
+static int socks5_read_connect_reply(int s, int *reply)
+{
+    unsigned char hdr[4];
+    if (reply) *reply = -1;
+    if (recv_n(s, hdr, 4) != 4) return -1;
+    if (reply) *reply = hdr[1];
+    if (hdr[0] != SOCKS5_VERSION || hdr[1] != 0x00) return -1;
+
+    int drain;
+    if      (hdr[3] == SOCKS5_ATYP_IPV4) drain = 4 + 2;
+    else if (hdr[3] == 0x04 /* IPv6 */)  drain = 16 + 2;
+    else if (hdr[3] == 0x03 /* domain */)
+    {
+        unsigned char dlen;
+        if (recv_n(s, &dlen, 1) != 1) return -1;
+        drain = (int)dlen + 2;
+    }
+    else return -1;   // unknown ATYP
+
+    unsigned char scratch[270];   // max drain = 255 + 2 (domain) < 270
+    if (drain > 0 && recv_n(s, scratch, (size_t)drain) != drain) return -1;
+    return 0;
+}
+
 static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
 {
     unsigned char buf[SOCKS5_BUFFER_SIZE];
-    ssize_t len;
     bool use_auth = (g_proxy_username[0] != '\0');
 
     buf[0] = SOCKS5_VERSION;
@@ -907,8 +951,7 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
         }
     }
 
-    len = recv(s, buf, 2, 0);
-    if (len != 2 || buf[0] != SOCKS5_VERSION)
+    if (recv_n(s, buf, 2) != 2 || buf[0] != SOCKS5_VERSION)
     {
         log_message("socks5 invalid auth response");
         return -1;
@@ -918,6 +961,11 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
     {
         size_t ulen = strlen(g_proxy_username);
         size_t plen = strlen(g_proxy_password);
+        if (ulen > 255 || plen > 255)   // SOCKS5 username/password fields are length-prefixed by one byte
+        {
+            log_message("socks5 credentials too long");
+            return -1;
+        }
         buf[0] = 0x01;
         buf[1] = (unsigned char)ulen;
         memcpy(buf + 2, g_proxy_username, ulen);
@@ -930,8 +978,7 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
             return -1;
         }
 
-        len = recv(s, buf, 2, 0);
-        if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
+        if (recv_n(s, buf, 2) != 2 || buf[0] != 0x01 || buf[1] != 0x00)
         {
             log_message("socks5 authentication failed");
             return -1;
@@ -957,10 +1004,10 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
         return -1;
     }
 
-    len = recv(s, buf, 10, 0);
-    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    int reply = -1;
+    if (socks5_read_connect_reply(s, &reply) != 0)
     {
-        log_message("socks5 connect failed status %d", len > 1 ? buf[1] : -1);
+        log_message("socks5 connect failed status %d", reply);
         return -1;
     }
 
@@ -1102,6 +1149,9 @@ static void* connection_handler(void *arg)
             close(proxy_sock);
             return NULL;
         }
+    }
+
+    // Data transfer phase (runs for both SOCKS5 and HTTP once the handshake succeeds).
     // Disable timeout for data transfer phase
     struct timeval zero_timeout = {0, 0};
     setsockopt(proxy_sock, SOL_SOCKET, SO_RCVTIMEO, &zero_timeout, sizeof(zero_timeout));
@@ -1363,7 +1413,8 @@ static void* local_proxy_server(void *arg)
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    // loopback only, INADDR_ANY was reachable from the lan
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(g_local_relay_port);
 
     if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
@@ -1414,7 +1465,7 @@ static void* local_proxy_server(void *arg)
         conn_config->client_socket = client_sock;
 
         uint16_t client_port = ntohs(client_addr.sin_port);
-        if (!get_connection(client_port, &conn_config->orig_dest_ip, &conn_config->orig_dest_port))
+        if (!get_connection(client_port, false, &conn_config->orig_dest_ip, &conn_config->orig_dest_port))
         {
             close(client_sock);
             free(conn_config);
@@ -1438,8 +1489,7 @@ static void* local_proxy_server(void *arg)
 // socks5 udp associate
 static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
 {
-    unsigned char buf[512];
-    ssize_t len;
+    unsigned char buf[SOCKS5_BUFFER_SIZE];   // must hold 3 + 255 + 255 auth bytes
 
     // auth handshake
     bool use_auth = (g_proxy_username[0] != '\0');
@@ -1452,14 +1502,15 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
     if (send(s, buf, use_auth ? 4 : 3, MSG_NOSIGNAL) != (use_auth ? 4 : 3))
         return -1;
 
-    len = recv(s, buf, 2, 0);
-    if (len != 2 || buf[0] != SOCKS5_VERSION)
+    if (recv_n(s, buf, 2) != 2 || buf[0] != SOCKS5_VERSION)
         return -1;
 
     if (buf[1] == 0x02 && use_auth)
     {
         size_t ulen = strlen(g_proxy_username);
         size_t plen = strlen(g_proxy_password);
+        if (ulen > 255 || plen > 255)
+            return -1;
         buf[0] = 0x01;
         buf[1] = (unsigned char)ulen;
         memcpy(buf + 2, g_proxy_username, ulen);
@@ -1469,8 +1520,7 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
         if (send(s, buf, 3 + ulen + plen, MSG_NOSIGNAL) != (ssize_t)(3 + ulen + plen))
             return -1;
 
-        len = recv(s, buf, 2, 0);
-        if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
+        if (recv_n(s, buf, 2) != 2 || buf[0] != 0x01 || buf[1] != 0x00)
             return -1;
     }
     else if (buf[1] != SOCKS5_AUTH_NONE)
@@ -1487,21 +1537,22 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
     if (send(s, buf, 10, MSG_NOSIGNAL) != 10)
         return -1;
 
-    len = recv(s, buf, 512, 0);
-    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    // Reply: VER REP RSV ATYP BND.ADDR BND.PORT. Parse the header then the bound
+    // relay endpoint; we only use IPv4 relay addresses.
+    unsigned char rep[4];
+    if (recv_n(s, rep, 4) != 4 || rep[0] != SOCKS5_VERSION || rep[1] != 0x00)
+        return -1;
+    if (rep[3] != SOCKS5_ATYP_IPV4)
+        return -1;
+    unsigned char ap[6];
+    if (recv_n(s, ap, 6) != 6)
         return -1;
 
-    // get relay address
-    if (buf[3] == SOCKS5_ATYP_IPV4)
-    {
-        memset(relay_addr, 0, sizeof(*relay_addr));
-        relay_addr->sin_family = AF_INET;
-        memcpy(&relay_addr->sin_addr.s_addr, buf + 4, 4);
-        memcpy(&relay_addr->sin_port, buf + 8, 2);
-        return 0;
-    }
-
-    return -1;
+    memset(relay_addr, 0, sizeof(*relay_addr));
+    relay_addr->sin_family = AF_INET;
+    memcpy(&relay_addr->sin_addr.s_addr, ap, 4);
+    memcpy(&relay_addr->sin_port, ap + 4, 2);
+    return 0;
 }
 
 static bool establish_udp_associate(void)
@@ -1625,7 +1676,7 @@ static void* udp_relay_server(void *arg)
 
     memset(&local_addr, 0, sizeof(local_addr));
     local_addr.sin_family = AF_INET;
-    local_addr.sin_addr.s_addr = INADDR_ANY;
+    local_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     local_addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);
 
     if (bind(udp_relay_socket, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0)
@@ -1704,7 +1755,7 @@ static void* udp_relay_server(void *arg)
             uint32_t dest_ip;
             uint16_t dest_port;
 
-            if (!get_connection(client_port, &dest_ip, &dest_port))
+            if (!get_connection(client_port, true, &dest_ip, &dest_port))
                 continue;
 
             // make sure data fits with socks5 header
@@ -1790,7 +1841,8 @@ static void* udp_relay_server(void *arg)
                 CONNECTION_INFO *conn = connection_hash_table[hash];
                 while (conn != NULL)
                 {
-                    if (conn->orig_dest_ip == src_ip &&
+                    if (conn->is_udp &&
+                        conn->orig_dest_ip == src_ip &&
                         conn->orig_dest_port == src_port)
                     {
                         // found it, send response back to original client port
@@ -1876,7 +1928,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         if (src_port == g_local_relay_port)
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
-        if (is_connection_tracked(src_port))
+        if (is_connection_tracked(src_port, false))
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
         // only look at syn packets for new connections
@@ -1933,7 +1985,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         else if (action == RULE_ACTION_PROXY)
         {
             // store connection info
-            add_connection(src_port, src_ip, dest_ip, dest_port);
+            add_connection(src_port, false, src_ip, dest_ip, dest_port);
 
             // mark packet so nat table REDIRECT rule will catch it
             uint32_t mark = 1;
@@ -1952,7 +2004,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         if (src_port == LOCAL_UDP_RELAY_PORT)
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
-        if (is_connection_tracked(src_port))
+        if (is_connection_tracked(src_port, true))
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
         if (dest_port == 53 && !g_dns_via_proxy)
@@ -2020,7 +2072,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         else if (action == RULE_ACTION_PROXY)
         {
             // UDP proxy via SOCKS5 UDP ASSOCIATE
-            add_connection(src_port, src_ip, dest_ip, dest_port);
+            add_connection(src_port, true, src_ip, dest_ip, dest_port);
 
             // Mark UDP packet for redirect to local UDP relay (port 34011)
             uint32_t mark = 2;  // Use mark=2 for UDP (mark=1 is for TCP)
@@ -2056,7 +2108,7 @@ static inline uint32_t connection_hash(uint16_t port)
     return port % CONNECTION_HASH_SIZE;
 }
 
-static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port)
+static void add_connection(uint16_t src_port, bool is_udp, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port)
 {
     uint32_t hash = connection_hash(src_port);
     pthread_rwlock_wrlock(&conn_lock);
@@ -2064,7 +2116,7 @@ static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip,
     CONNECTION_INFO *conn = connection_hash_table[hash];
     while (conn != NULL)
     {
-        if (conn->src_port == src_port)
+        if (conn->src_port == src_port && conn->is_udp == is_udp)
         {
             conn->orig_dest_ip = dest_ip;
             conn->orig_dest_port = dest_port;
@@ -2081,6 +2133,7 @@ static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip,
     if (new_conn != NULL)
     {
         new_conn->src_port = src_port;
+        new_conn->is_udp = is_udp;
         new_conn->src_ip = src_ip;
         new_conn->orig_dest_ip = dest_ip;
         new_conn->orig_dest_port = dest_port;
@@ -2093,7 +2146,7 @@ static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip,
     pthread_rwlock_unlock(&conn_lock);
 }
 
-static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_port)
+static bool get_connection(uint16_t src_port, bool is_udp, uint32_t *dest_ip, uint16_t *dest_port)
 {
     uint32_t hash = connection_hash(src_port);
     pthread_rwlock_rdlock(&conn_lock);
@@ -2101,7 +2154,7 @@ static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_
     CONNECTION_INFO *conn = connection_hash_table[hash];
     while (conn != NULL)
     {
-        if (conn->src_port == src_port && conn->is_tracked)
+        if (conn->src_port == src_port && conn->is_udp == is_udp && conn->is_tracked)
         {
             *dest_ip = conn->orig_dest_ip;
             *dest_port = conn->orig_dest_port;
@@ -2116,7 +2169,7 @@ static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_
     return false;
 }
 
-static bool is_connection_tracked(uint16_t src_port)
+static bool is_connection_tracked(uint16_t src_port, bool is_udp)
 {
     uint32_t hash = connection_hash(src_port);
     pthread_rwlock_rdlock(&conn_lock);
@@ -2124,7 +2177,7 @@ static bool is_connection_tracked(uint16_t src_port)
     CONNECTION_INFO *conn = connection_hash_table[hash];
     while (conn != NULL)
     {
-        if (conn->src_port == src_port && conn->is_tracked)
+        if (conn->src_port == src_port && conn->is_udp == is_udp && conn->is_tracked)
         {
             pthread_rwlock_unlock(&conn_lock);
             return true;
@@ -2170,7 +2223,10 @@ static void cleanup_stale_connections(void)
 
         while (*conn_ptr != NULL)
         {
-            if (now - (*conn_ptr)->last_activity > 120000)  // 120 sec timeout
+            // 30 min idle timeout. Clean closes are removed on FIN/RST already; a short
+            // timeout would reap open-but-idle proxied connections (mail IDLE, voice,
+            // websocket) mid-session and silently break them until restart.
+            if (now - (*conn_ptr)->last_activity > 1800000)
             {
                 CONNECTION_INFO *to_free = *conn_ptr;
                 *conn_ptr = (*conn_ptr)->next;

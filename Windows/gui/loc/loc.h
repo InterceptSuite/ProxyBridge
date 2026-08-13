@@ -36,7 +36,7 @@ enum {
     S_AB_VERSION, S_AB_DESC, S_AB_AUTHOR, S_AB_WEB, S_AB_GITHUB, S_AB_LICENSE,
     S_M_UPDATE, S_UPD_TITLE, S_UPD_AVAIL, S_UPD_NOTES, S_UPD_NOW, S_UPD_LATER,
     S_UPD_DONTASK, S_UPD_LATEST, S_UPD_ERR, S_UPD_DLING, S_UPD_DLFAIL,
-    S_L_NAME, S_COL_NAME,
+    S_L_NAME, S_COL_NAME, S_CHK_SENDDOMAIN,
     S_COUNT
 };
 
@@ -193,6 +193,7 @@ static const wchar_t* const g_strings[S_COUNT][2] = {
     /* S_UPD_DLFAIL         */ { L"Download failed.", L"下载失败。" },
     /* S_L_NAME             */ { L"Name:", L"名称:" },
     /* S_COL_NAME           */ { L"Name", L"名称" },
+    /* S_CHK_SENDDOMAIN     */ { L"Let proxy resolve DNS (send hostname)", L"由代理解析 DNS (发送主机名)" },
 };
 
 static const wchar_t* T(int id) { return g_strings[id][g_lang ? 1 : 0]; }

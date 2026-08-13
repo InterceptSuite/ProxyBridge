@@ -16,13 +16,14 @@
 #pragma comment(lib, "advapi32.lib")
 
 
-#define VERSION "4.0.11-Beta"
+#define VERSION "4.0.13-Beta"
 #define MAX_PROXY_CONFIGS 16
 #define MAX_RULES         256
 
 
 typedef uint32_t (*pfnAddProxyConfig)(int type, const char* ip, uint16_t port,
-                                      const char* user, const char* pass);
+                                      const char* user, const char* pass,
+                                      int send_domain_to_proxy);
 typedef uint32_t (*pfnAddRule)(const char* process, const char* hosts,
                                const char* ports, const char* domains,
                                int protocol, int action,
@@ -55,6 +56,7 @@ typedef struct {
     int      port;
     char     username[256];
     char     password[256];
+    int      send_domain_to_proxy;   // 1 = proxy resolves DNS (default), 0 = send IP
 } PBProxyConfig;
 
 typedef struct {
@@ -344,6 +346,10 @@ static bool load_profile(const char* path, PBProfile* prof)
 
             jstr(buf, "Username", c->username, sizeof(c->username));
             jstr(buf, "Password", c->password, sizeof(c->password));
+
+            // Boolean; default ON when the field is absent (older profiles).
+            const char* sd = jfind(buf, "SendDomainToProxy");
+            c->send_domain_to_proxy = (!sd || strncmp(sd, "true", 4) == 0) ? 1 : 0;
 
             free(buf);
 
@@ -885,7 +891,7 @@ int main(int argc, char* argv[])
     {
         PBProxyConfig* c   = &prof.configs[i];
         uint32_t       did = g_AddProxyConfig(c->type, c->host, (uint16_t)c->port,
-                                               c->username, c->password);
+                                               c->username, c->password, c->send_domain_to_proxy);
         if (did == 0)
         {
             fprintf(stderr, "  [%d] ERROR: Failed to add %s %s:%d\n",

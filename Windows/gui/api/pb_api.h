@@ -20,8 +20,8 @@ typedef void (*PBConnectionCallback)(const char* process_name, DWORD pid,
                                      const char* proxy_info);
 
 // exported function pointer typedefs
-typedef UINT32 (*PFN_AddProxyConfig)(PBProxyType, const char*, unsigned short, const char*, const char*);
-typedef BOOL   (*PFN_EditProxyConfig)(UINT32, PBProxyType, const char*, unsigned short, const char*, const char*);
+typedef UINT32 (*PFN_AddProxyConfig)(PBProxyType, const char*, unsigned short, const char*, const char*, BOOL);
+typedef BOOL   (*PFN_EditProxyConfig)(UINT32, PBProxyType, const char*, unsigned short, const char*, const char*, BOOL);
 typedef BOOL   (*PFN_DeleteProxyConfig)(UINT32);
 typedef int    (*PFN_TestProxyConfig)(UINT32, const char*, unsigned short, char*, size_t);
 typedef void   (*PBTestLogCallback)(const char* line, void* user);

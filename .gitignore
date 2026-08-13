@@ -99,3 +99,4 @@ Linux/cli/main.o
 Linux/cli/proxybridge-cli
 Linux/src/libproxybridge.so
 Linux/src/ProxyBridge.o
+Android/**

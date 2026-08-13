@@ -72,6 +72,7 @@ BEGIN
     EDITTEXT        IDC_SE_PORT,    268,  44,  36, 12, ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP
     LTEXT           "Protocol:",     IDC_SE_L_PROTO,  18,  70, 44, 10
     COMBOBOX        IDC_SE_PROTO,    66,  68, 168, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX    "Let proxy resolve DNS", IDC_SE_SENDDOMAIN, 18, 82, 288, 10, WS_TABSTOP
     GROUPBOX        "Authentication", IDC_SE_G_AUTH,  8, 102, 304, 66
     AUTOCHECKBOX    "Enable",        IDC_SE_AUTH,     18, 118, 60, 10
     LTEXT           "Username:",     IDC_SE_L_USER,   18, 136, 44, 10

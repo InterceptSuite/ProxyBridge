@@ -9,7 +9,9 @@ param(
 
 $WinDivertPath = "C:\WinDivert-2.2.2-A"
 $SourcePath = "src"
-$SourceFile = "ProxyBridge.c"
+# Core split across modular translation units (see src\pb_internal.h).
+$SourceFile = "ProxyBridge.c pb_util.c pb_process.c pb_rules.c pb_proxy.c pb_dns.c pb_socks5.c pb_http.c pb_conntrack.c pb_relay.c"
+$SourceFiles = ($SourceFile.Split(' ') | ForEach-Object { "$SourcePath\$_" }) -join ' '
 $OutputDLL = "ProxyBridgeCore.dll"
 $OutputDir = "output"
 
@@ -63,7 +65,7 @@ function Compile-MSVC {
               "/D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS /DPROXYBRIDGE_EXPORTS /DNDEBUG " +
               "/arch:SSE2 /fp:fast /GS /guard:cf /Qpar " +
               "/I`"$WinDivertPath\include`" " +
-              "$SourcePath\$SourceFile " +
+              "$SourceFiles " +
               "/LD " +
               "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /NXCOMPAT " +
               "/LIBPATH:`"$WinDivertPath\$Arch`" " +

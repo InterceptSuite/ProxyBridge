@@ -21,7 +21,7 @@ static LRESULT CALLBACK ListDarkSubProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT
             {
             case CDDS_PREPAINT:
                 FillRect(cd->hdc, &cd->rc, g_brPanel);
-                return CDRF_NOTIFYITEMDRAW;
+                return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
             case CDDS_ITEMPREPAINT:
             {
                 wchar_t txt[64] = {0};
@@ -35,6 +35,23 @@ static LRESULT CALLBACK ListDarkSubProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT
                 RECT ln = { cd->rc.right - 1, cd->rc.top, cd->rc.right, cd->rc.bottom };
                 FillRect(cd->hdc, &ln, g_brBg);   // subtle column divider
                 return CDRF_SKIPDEFAULT;
+            }
+            case CDDS_POSTPAINT:
+            {
+                // Paint the empty area to the right of the last column dark; otherwise
+                // it shows the default white header background (visible at the edge and
+                // whenever the columns don't span the full width, e.g. after a drag).
+                HWND hdr = nh->hwndFrom;
+                int n = Header_GetItemCount(hdr);
+                RECT last = {0, 0, 0, 0};
+                if (n > 0) Header_GetItemRect(hdr, n - 1, &last);
+                RECT hr; GetClientRect(hdr, &hr);
+                if (hr.right > last.right)
+                {
+                    RECT fill = { last.right, hr.top, hr.right, hr.bottom };
+                    FillRect(cd->hdc, &fill, g_brPanel);
+                }
+                return CDRF_DODEFAULT;
             }
             }
         }
@@ -122,6 +139,7 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_SE_L_PORT,   T(S_L_PORT));
         SetDlgItemTextW(dlg, IDC_SE_L_PROTO,  T(S_L_PROTO));
         SetDlgItemTextW(dlg, IDC_SE_AUTH,     T(S_CHK_ENABLE));
+        SetDlgItemTextW(dlg, IDC_SE_SENDDOMAIN, T(S_CHK_SENDDOMAIN));
         SetDlgItemTextW(dlg, IDC_SE_L_USER,   T(S_L_USER));
         SetDlgItemTextW(dlg, IDC_SE_L_PASS,   T(S_L_PASS));
         SetDlgItemTextW(dlg, IDOK,            T(S_BTN_OK));
@@ -135,6 +153,7 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         if (c->port[0]) SetDlgItemTextW(dlg, IDC_SE_PORT, c->port); else SetDlgItemInt(dlg, IDC_SE_PORT, 1080, FALSE);
         SetDlgItemTextW(dlg, IDC_SE_USER, c->user);
         SetDlgItemTextW(dlg, IDC_SE_PASS, c->pass);
+        CheckDlgButton(dlg, IDC_SE_SENDDOMAIN, c->sendDomain ? BST_CHECKED : BST_UNCHECKED);
         BOOL hasAuth = c->user[0] != 0;
         CheckDlgButton(dlg, IDC_SE_AUTH, hasAuth ? BST_CHECKED : BST_UNCHECKED);
         EnableWindow(GetDlgItem(dlg, IDC_SE_USER), hasAuth);
@@ -160,6 +179,7 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             lstrcpynW(c->type, isHttp ? L"HTTP" : L"SOCKS5", 16);
             GetDlgItemTextW(dlg, IDC_SE_NAME, c->name, 128);
             GetDlgItemTextW(dlg, IDC_SE_ADDR, c->host, 128);
+            c->sendDomain = (IsDlgButtonChecked(dlg, IDC_SE_SENDDOMAIN) == BST_CHECKED) ? 1 : 0;
             if (!c->name[0]) lstrcpynW(c->name, c->host[0] ? c->host : L"Proxy Server", 128);
             GetDlgItemTextW(dlg, IDC_SE_PORT, c->port, 16);
             if (IsDlgButtonChecked(dlg, IDC_SE_AUTH) == BST_CHECKED)
@@ -304,11 +324,12 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (g_profile.cfgCount >= PB_MAX_CFG) { MessageBoxW(dlg, L"Config limit reached.", APP_TITLE, MB_OK); return TRUE; }
             PBConfig c; ZeroMemory(&c, sizeof(c));
             lstrcpynW(c.name, L"Proxy Server", 128);
+            c.sendDomain = 1;   // default: let the proxy resolve DNS
             if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_SERVER), dlg, ServerEditDlgProc, (LPARAM)&c) == 1)
             {
                 char h[256], u[256], p[256]; W2Ux(c.host, h, sizeof(h)); W2Ux(c.user, u, sizeof(u)); W2Ux(c.pass, p, sizeof(p));
                 UINT32 id = g_api.AddProxyConfig((_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
-                                                 h, (unsigned short)_wtoi(c.port), u, p);
+                                                 h, (unsigned short)_wtoi(c.port), u, p, c.sendDomain ? TRUE : FALSE);
                 if (id > 0) { c.nativeId = id; c.storedId = id; g_profile.cfg[g_profile.cfgCount++] = c; SaveActive(); RefreshServerList(lv); }
                 else MessageBoxW(dlg, T(S_ERR_ADDCFG), APP_TITLE, MB_OK | MB_ICONERROR);
             }
@@ -324,7 +345,7 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 g_profile.cfg[sel] = c;
                 char h[256], u[256], p[256]; W2Ux(c.host, h, sizeof(h)); W2Ux(c.user, u, sizeof(u)); W2Ux(c.pass, p, sizeof(p));
                 g_api.EditProxyConfig(c.nativeId, (_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
-                                      h, (unsigned short)_wtoi(c.port), u, p);
+                                      h, (unsigned short)_wtoi(c.port), u, p, c.sendDomain ? TRUE : FALSE);
                 SaveActive(); RefreshServerList(lv);
                 ListView_SetItemState(lv, sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             }
@@ -409,8 +430,18 @@ static void RefreshRulesList(HWND lv)
     g_rulesRefreshing = FALSE;
 }
 
+// Append one application name to a "; "-separated list, respecting the existing separator.
+static void AppendApp(wchar_t* out, int cap, const wchar_t* name)
+{
+    if (!name || !name[0]) return;
+    size_t n = wcslen(out);
+    if (n == 0) { lstrcpynW(out, name, cap); return; }
+    const wchar_t* sep = (out[n - 1] == L';') ? L" " : L"; ";
+    _snwprintf_s(out + n, (size_t)cap - n, _TRUNCATE, L"%s%s", sep, name);
+}
+
 // Edit sub-dialog. lParam is a PBRule* seeded with current values; on OK it is written back
-// (proc/hosts/ports/domains/proto/action/cfgStoredId/enabled) and the dialog returns 1.
+// (name/proc/hosts/ports/domains/proto/action/cfgStoredId/enabled) and the dialog returns 1.
 INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -456,6 +487,7 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(ac, CB_SETDROPPEDWIDTH, 360, 0);
         // Seed fields from the rule.
         SetDlgItemTextW(dlg, IDC_RE_NAME,    r->name[0]    ? r->name    : L"ProxyBridge Rule");
+        SendDlgItemMessageW(dlg, IDC_RE_APPS, EM_LIMITTEXT, PB_APPS_MAX - 1, 0);
         SetDlgItemTextW(dlg, IDC_RE_APPS,    r->proc[0]    ? r->proc    : L"*");
         SetDlgItemTextW(dlg, IDC_RE_HOSTS,   r->hosts[0]   ? r->hosts   : L"*");
         SetDlgItemTextW(dlg, IDC_RE_PORTS,   r->ports[0]   ? r->ports   : L"*");
@@ -496,27 +528,38 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         {
         case IDC_RE_BROWSE:
         {
-            // Pick an .exe and append just its file name.
-            wchar_t path[MAX_PATH] = L"";
+            // Pick one or more .exe files and append each file name to the list.
+            // Multi-select needs a buffer big enough for the folder + every file name.
+            static wchar_t files[8192];
+            files[0] = 0;
             OPENFILENAMEW ofn; ZeroMemory(&ofn, sizeof(ofn));
             ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = dlg;
             ofn.lpstrFilter = L"Executables\0*.exe\0All Files\0*.*\0";
-            ofn.lpstrFile = path; ofn.nMaxFile = MAX_PATH;
-            ofn.lpstrTitle = L"Select Process Executable";
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST;
+            ofn.lpstrFile = files; ofn.nMaxFile = ARRAYSIZE(files);
+            ofn.lpstrTitle = L"Select Process Executable(s)";
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST |
+                        OFN_ALLOWMULTISELECT | OFN_EXPLORER;
             if (GetOpenFileNameW(&ofn))
             {
-                const wchar_t* base = path;
-                for (const wchar_t* p = path; *p; p++) if (*p == L'\\' || *p == L'/') base = p + 1;
-                wchar_t cur[256]; GetDlgItemTextW(dlg, IDC_RE_APPS, cur, 256);
-                wchar_t out[256];
-                if (!cur[0] || (cur[0] == L'*' && cur[1] == 0))
-                    lstrcpynW(out, base, 256);
+                wchar_t out[PB_APPS_MAX];
+                GetDlgItemTextW(dlg, IDC_RE_APPS, out, PB_APPS_MAX);
+                if (!out[0] || (out[0] == L'*' && out[1] == 0)) out[0] = 0;   // replace empty/"*"
+
+                // OFN_EXPLORER multi-select layout:
+                //   single: "C:\dir\app.exe\0\0"          (one full path)
+                //   multi:  "C:\dir\0a.exe\0b.exe\0...\0\0" (folder, then bare names)
+                const wchar_t* dir = files;
+                const wchar_t* p = files + wcslen(files) + 1;
+                if (*p == 0)
+                {
+                    const wchar_t* base = dir;                 // single: strip to file name
+                    for (const wchar_t* q = dir; *q; q++) if (*q == L'\\' || *q == L'/') base = q + 1;
+                    AppendApp(out, ARRAYSIZE(out), base);
+                }
                 else
                 {
-                    size_t n = wcslen(cur);
-                    _snwprintf_s(out, 256, _TRUNCATE, L"%s%s%s", cur, (n && cur[n - 1] == L';') ? L" " : L"; ", base);
-                    out[255] = 0;
+                    for (; *p; p += wcslen(p) + 1)             // multi: each p is a bare file name
+                        AppendApp(out, ARRAYSIZE(out), p);
                 }
                 SetDlgItemTextW(dlg, IDC_RE_APPS, out);
             }
@@ -527,7 +570,7 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             PBRule* r = (PBRule*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
             GetDlgItemTextW(dlg, IDC_RE_NAME,    r->name,    128);
             if (!r->name[0]) lstrcpynW(r->name, L"ProxyBridge Rule", 128);
-            GetDlgItemTextW(dlg, IDC_RE_APPS,    r->proc,    256);
+            GetDlgItemTextW(dlg, IDC_RE_APPS,    r->proc,    PB_APPS_MAX);
             GetDlgItemTextW(dlg, IDC_RE_HOSTS,   r->hosts,   256);
             GetDlgItemTextW(dlg, IDC_RE_PORTS,   r->ports,   128);
             GetDlgItemTextW(dlg, IDC_RE_DOMAINS, r->domains, 256);
