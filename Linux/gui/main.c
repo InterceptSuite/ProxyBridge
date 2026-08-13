@@ -34,54 +34,164 @@ static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
     save_config();
 }
 
-static void on_create_update_script_and_run() {
-    ProxyBridge_Stop();
-    const char *script_url = "https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh";
-    char tmp_dir_tpl[] = "/tmp/pb_update_XXXXXX";
-    char *tmp_dir = mkdtemp(tmp_dir_tpl);
-    if (!tmp_dir) { fprintf(stderr, "Failed to create temp directory for update.\n"); exit(1); }
-    char script_path[512];
-    snprintf(script_path, sizeof(script_path), "%s/deploy.sh", tmp_dir);
+// same feed as windows/mac: https://download.interceptsuite.com/proxybridge.json
+#define UPD_FEED_URL "https://download.interceptsuite.com/proxybridge.json"
 
-    pid_t pid = fork();
-    if (pid == -1) { fprintf(stderr, "Fork failed.\n"); exit(1); }
-    else if (pid == 0) { execlp("curl", "curl", "-s", "-o", script_path, script_url, NULL); _exit(127); }
-    else { int status; waitpid(pid, &status, 0); if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { fprintf(stderr, "Failed to download update script.\n"); exit(1); } }
+// match "linux": { ... } as a key, not a random "linux" string value
+static char *extract_platform_block(const char *json, const char *platform) {
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\"", platform);
+    size_t nlen = strlen(needle);
+    const char *p = json;
+    const char *key = NULL;
+    while ((p = strstr(p, needle)) != NULL) {
+        const char *after = p + nlen;
+        while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r') after++;
+        if (*after == ':') {
+            key = p;
+            break;
+        }
+        p += nlen;
+    }
+    if (!key) return NULL;
+    const char *brace = strchr(key, '{');
+    if (!brace) return NULL;
+    int depth = 0;
+    for (const char *q = brace; *q; q++) {
+        if (*q == '{') depth++;
+        else if (*q == '}') {
+            depth--;
+            if (depth == 0)
+                return g_strndup(brace, (gsize)(q - brace + 1));
+        }
+    }
+    return NULL;
+}
 
-    if (chmod(script_path, S_IRWXU) != 0) { perror("chmod failed"); exit(1); }
-    execl("/bin/bash", "bash", script_path, NULL);
-    exit(0);
+static void parse_ver(const char *s, int out[3]) {
+    out[0] = out[1] = out[2] = 0;
+    if (!s) return;
+    while (*s && (*s < '0' || *s > '9')) s++;
+    int i = 0;
+    while (*s && i < 3) {
+        if (*s >= '0' && *s <= '9') {
+            int n = 0;
+            while (*s >= '0' && *s <= '9') {
+                n = n * 10 + (*s - '0');
+                s++;
+            }
+            out[i++] = n;
+        } else if (*s == '.') {
+            s++;
+        } else {
+            break;
+        }
+    }
+}
+
+static int ver_cmp(const int a[3], const int b[3]) {
+    for (int i = 0; i < 3; i++) {
+        if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    }
+    return 0;
+}
+
+static int https_url_ok(const char *url) {
+    if (!url || strncmp(url, "https://", 8) != 0) return 0;
+    for (const char *p = url; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 32 || c > 126) return 0;
+        if (c == ' ' || c == '"' || c == '\'' || c == '`' || c == '\\') return 0;
+    }
+    return 1;
 }
 
 static void on_check_update(GtkWidget *widget, gpointer data) {
-    const char *url = "https://api.github.com/repos/InterceptSuite/ProxyBridge/releases/latest";
-    char *cmd = g_strdup_printf("curl -s -H \"User-Agent: ProxyBridge-Linux\" %s", url);
-    char *standard_output = NULL;
-    char *standard_error = NULL;
-    GError *error = NULL;
-    int exit_status = 0;
+    char *argv[] = {
+        (char *)"curl", (char *)"-sS",
+        (char *)"-H", (char *)"User-Agent: ProxyBridge-UpdateChecker",
+        (char *)UPD_FEED_URL,
+        NULL
+    };
+    char *json = NULL;
+    char *curl_err = NULL;
+    GError *spawn_err = NULL;
+    int exit_code = 0;
 
-    gboolean result = g_spawn_command_line_sync(cmd, &standard_output, &standard_error, &exit_status, &error);
-    g_free(cmd);
-    if (!result) { show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Failed to launch release check: %s", error ? error->message : "Unknown"); if (error) g_error_free(error); return; }
-    if (exit_status != 0 || !standard_output || strlen(standard_output) == 0) { show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed (Exit: %d).", exit_status); g_free(standard_output); g_free(standard_error); return; }
-
-    char *tag_name = extract_sub_json_str(standard_output, "tag_name");
-    g_free(standard_output); g_free(standard_error);
-
-    if (!tag_name) { show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse version info."); return; }
-    char *current_tag = g_strdup_printf("v%s", PROXYBRIDGE_VERSION);
-
-    if (strcmp(tag_name, current_tag) == 0) { show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO, "You are using the latest version (%s).", PROXYBRIDGE_VERSION); }
-    else {
-        GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "New version %s is available!\nCurrent: %s\n\nUpdate now?", tag_name, PROXYBRIDGE_VERSION);
-        gtk_dialog_add_button(GTK_DIALOG(dialog), "Download Now", GTK_RESPONSE_ACCEPT);
-        gtk_dialog_add_button(GTK_DIALOG(dialog), "Close", GTK_RESPONSE_CANCEL);
-        int resp = gtk_dialog_run(GTK_DIALOG(dialog));
-        gtk_widget_destroy(dialog);
-        if (resp == GTK_RESPONSE_ACCEPT) on_create_update_script_and_run();
+    // feed only, no deploy.sh. open the linux download/notes url in the browser
+    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
+                      &json, &curl_err, &exit_code, &spawn_err)) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed: %s",
+                     spawn_err ? spawn_err->message : "unknown");
+        if (spawn_err) g_error_free(spawn_err);
+        g_free(curl_err);
+        return;
     }
-    g_free(current_tag); g_free(tag_name);
+    if (exit_code != 0 || !json || json[0] == '\0') {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed (curl exit %d).", exit_code);
+        g_free(json);
+        g_free(curl_err);
+        return;
+    }
+
+    char *linux_obj = extract_platform_block(json, "linux");
+    g_free(json);
+    g_free(curl_err);
+    if (!linux_obj) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse linux update info.");
+        return;
+    }
+
+    char *version = extract_sub_json_str(linux_obj, "version");
+    char *download = extract_sub_json_str(linux_obj, "download");
+    char *notes = extract_sub_json_str(linux_obj, "release_notes");
+    g_free(linux_obj);
+
+    if (!version || !version[0]) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse version info.");
+        g_free(version);
+        g_free(download);
+        g_free(notes);
+        return;
+    }
+
+    int cur[3], lat[3];
+    parse_ver(PROXYBRIDGE_VERSION, cur);
+    parse_ver(version, lat);
+    if (ver_cmp(lat, cur) <= 0) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO, "You are using the latest version (%s).", PROXYBRIDGE_VERSION);
+        g_free(version);
+        g_free(download);
+        g_free(notes);
+        return;
+    }
+
+    GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT,
+        GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+        "Version %s is available (current %s).\nOpen the download page in your browser?",
+        version, PROXYBRIDGE_VERSION);
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Open in Browser", GTK_RESPONSE_ACCEPT);
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Close", GTK_RESPONSE_CANCEL);
+    int resp = gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    if (resp == GTK_RESPONSE_ACCEPT) {
+        const char *url = NULL;
+        if (https_url_ok(notes)) url = notes;
+        else if (https_url_ok(download)) url = download;
+        if (!url) {
+            show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "No safe https url in update feed.");
+        } else {
+            GError *uri_err = NULL;
+            if (!gtk_show_uri_on_window(GTK_WINDOW(window), url, GDK_CURRENT_TIME, &uri_err)) {
+                show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not open browser: %s",
+                             uri_err ? uri_err->message : "unknown");
+                if (uri_err) g_error_free(uri_err);
+            }
+        }
+    }
+    g_free(version);
+    g_free(download);
+    g_free(notes);
 }
 
 static void on_about(GtkWidget *widget, gpointer data) {

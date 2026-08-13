@@ -1413,7 +1413,8 @@ static void* local_proxy_server(void *arg)
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    // loopback only, INADDR_ANY was reachable from the lan
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(g_local_relay_port);
 
     if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
@@ -1675,7 +1676,7 @@ static void* udp_relay_server(void *arg)
 
     memset(&local_addr, 0, sizeof(local_addr));
     local_addr.sin_family = AF_INET;
-    local_addr.sin_addr.s_addr = INADDR_ANY;
+    local_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     local_addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);
 
     if (bind(udp_relay_socket, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0)
