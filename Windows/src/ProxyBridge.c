@@ -277,6 +277,13 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 UINT16 sp = ntohs(tcp_header->SrcPort);
                 UINT16 dp = ntohs(tcp_header->DstPort);
 
+                // Same ephemeral-port reuse problem as IPv4 below, and the decision
+                // bitmaps are shared by both stacks: a verdict cached for an IPv4
+                // connection must not be inherited by a new IPv6 connection that
+                // happens to reuse the port number, or vice versa.
+                if (tcp_header->Syn && !tcp_header->Ack && port_is_decided(sp))
+                    port_clear(sp);
+
                 if (port_is_decided(sp))
                 {
                     if (tcp_header->Fin || tcp_header->Rst) port_clear(sp);
@@ -669,7 +676,19 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 // process instead of a stale one (prevents wrong-app rule matching for
                 // up to PID_CACHE_TTL_MS after a port is recycled).
                 if (tcp_header->Syn && !tcp_header->Ack)
+                {
                     remove_cached_pid(ip_header->SrcAddr, sp, FALSE);
+
+                    // The cached rule decision belongs to the previous owner of this
+                    // port and has to go with it. FIN/RST is not a reliable eviction
+                    // trigger: server-initiated closes arrive on the inbound branch and
+                    // loopback/abortive teardowns never show up here at all, so a
+                    // DIRECT verdict can outlive the connection that produced it. The
+                    // next connection reusing the port would then hit the fast-path
+                    // above and go out unproxied without its own rule ever running.
+                    if (port_is_decided(sp))
+                        port_clear(sp);
+                }
 
                 if (port_is_decided(sp))
                 {
