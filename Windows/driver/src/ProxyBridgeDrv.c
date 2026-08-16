@@ -63,10 +63,22 @@ static PBDRV_CONFIG  gConfig;                         // redirect targets + excl
 static PBDRV_WATCHLIST *gWatch   = NULL;             // heap copy of the process watch list
 static volatile LONG gEnabled    = 0;                // 0 until user mode enables
 
+DRIVER_UNLOAD DriverUnload;
+
+_Dispatch_type_(IRP_MJ_CREATE)
+_Dispatch_type_(IRP_MJ_CLOSE)
+DRIVER_DISPATCH DispatchCreateClose;
+
+_Dispatch_type_(IRP_MJ_DEVICE_CONTROL)
+DRIVER_DISPATCH DispatchDeviceControl;
+
 // Case-insensitive check: does `path` end with `suffix` (both null-terminated WCHAR)?
 static BOOLEAN EndsWithI(const WCHAR *path, ULONG pathChars, const WCHAR *suffix)
 {
-    ULONG sl = 0; while (suffix[sl] && sl < PBDRV_NAME_LEN) sl++;
+    ULONG sl = 0;
+    while (sl < PBDRV_NAME_LEN && suffix[sl] != L'\0') {
+        sl++;
+    }
     if (sl == 0 || sl > pathChars) return FALSE;
     const WCHAR *p = path + (pathChars - sl);
     for (ULONG i = 0; i < sl; i++) {
@@ -170,9 +182,8 @@ static void ClassifyCore(
 
     // Capture the ORIGINAL destination (still in req->remoteAddressAndPort) into a context the
     // relay reads back via SIO_QUERY_WFP_CONNECTION_REDIRECT_CONTEXT.
-    PBDRV_REDIRECT_CTX *ctx = (PBDRV_REDIRECT_CTX *)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(*ctx), PB_TAG);
+    PBDRV_REDIRECT_CTX *ctx = (PBDRV_REDIRECT_CTX *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*ctx), PB_TAG);
     if (ctx != NULL) {
-        RtlZeroMemory(ctx, sizeof(*ctx));
         ctx->family = family; ctx->protocol = protocol; ctx->pid = pid;
         if (family == AF_INET) {
             PSOCKADDR_IN o = (PSOCKADDR_IN)&req->remoteAddressAndPort;
@@ -471,9 +482,8 @@ static void UnregisterWfp(void)
 }
 
 // ---- IOCTL device interface ----
-_Dispatch_type_(IRP_MJ_CREATE)
-_Dispatch_type_(IRP_MJ_CLOSE)
-static NTSTATUS DispatchCreateClose(PDEVICE_OBJECT dev, PIRP irp)
+_Use_decl_annotations_
+NTSTATUS DispatchCreateClose(PDEVICE_OBJECT dev, PIRP irp)
 {
     UNREFERENCED_PARAMETER(dev);
     irp->IoStatus.Status = STATUS_SUCCESS; irp->IoStatus.Information = 0;
@@ -481,8 +491,8 @@ static NTSTATUS DispatchCreateClose(PDEVICE_OBJECT dev, PIRP irp)
     return STATUS_SUCCESS;
 }
 
-_Dispatch_type_(IRP_MJ_DEVICE_CONTROL)
-static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT dev, PIRP irp)
+_Use_decl_annotations_
+NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT dev, PIRP irp)
 {
     UNREFERENCED_PARAMETER(dev);
     PIO_STACK_LOCATION sp = IoGetCurrentIrpStackLocation(irp);
@@ -507,7 +517,7 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT dev, PIRP irp)
         if (incoming->count > PBDRV_MAX_WATCH) { status = STATUS_INVALID_PARAMETER; break; }
         SIZE_T need = FIELD_OFFSET(PBDRV_WATCHLIST, entries) + (SIZE_T)incoming->count * sizeof(PBDRV_WATCH_ENTRY);
         if (inLen < need) { status = STATUS_BUFFER_TOO_SMALL; break; }
-        PBDRV_WATCHLIST *copy = (PBDRV_WATCHLIST *)ExAllocatePoolWithTag(NonPagedPoolNx, need, PB_TAG);
+        PBDRV_WATCHLIST *copy = (PBDRV_WATCHLIST *)ExAllocatePool2(POOL_FLAG_NON_PAGED, need, PB_TAG);
         if (!copy) { status = STATUS_INSUFFICIENT_RESOURCES; break; }
         RtlCopyMemory(copy, incoming, need);
         old = ExAcquireSpinLockExclusive(&gCfgLock);
@@ -546,7 +556,8 @@ static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT dev, PIRP irp)
 }
 
 // ---- Driver entry / unload ----
-static void DriverUnload(PDRIVER_OBJECT driver)
+_Use_decl_annotations_
+VOID DriverUnload(PDRIVER_OBJECT driver)
 {
     UNREFERENCED_PARAMETER(driver);
     InterlockedExchange(&gEnabled, 0);
@@ -566,6 +577,7 @@ static void DriverUnload(PDRIVER_OBJECT driver)
 
 DRIVER_INITIALIZE DriverEntry;
 
+_Use_decl_annotations_
 NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryPath)
 {
     UNREFERENCED_PARAMETER(registryPath);
