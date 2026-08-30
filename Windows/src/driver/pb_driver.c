@@ -1,5 +1,6 @@
 #include "pb_internal.h"
 #include "ProxyBridgeDrv_user.h"
+#include <fwpmu.h>
 
 // ProxyBridge <-> ProxyBridgeDrv.sys glue. The WFP connect-redirect driver is the sole capture
 // path: it redirects watched connections to the local relay and hands us the PID and the
@@ -88,38 +89,128 @@ static BOOL driver_service_start(void)
     return ok;
 }
 
+// Add one rule token to the kernel watch list. WFP exposes ALE_APP_ID as a kernel device
+// path, so exact DOS paths must be converted to that namespace before they can match.
+static BOOL driver_add_watch_entry(PBDRV_WATCHLIST *wl, const char *token)
+{
+    if (wl->count >= PBDRV_MAX_WATCH) {
+        log_message("driver: watchlist exceeds the %u-entry limit", (unsigned)PBDRV_MAX_WATCH);
+        return FALSE;
+    }
+
+    WCHAR token_w[MAX_PROCESS_NAME];
+    int token_chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, token, -1,
+                                          token_w, ARRAYSIZE(token_w));
+    if (token_chars == 0) {
+        log_message("driver: invalid UTF-8 watch entry '%s' (%lu)", token, GetLastError());
+        return FALSE;
+    }
+
+    const WCHAR *image = token_w;
+    size_t image_chars = (size_t)token_chars - 1;
+    FWP_BYTE_BLOB *app_id = NULL;
+    BOOL added = FALSE;
+    BOOL exact_path = (strchr(token, '\\') != NULL || strchr(token, '/') != NULL) &&
+                      strchr(token, '*') == NULL;
+
+    if (exact_path) {
+        DWORD status = FwpmGetAppIdFromFileName0(token_w, &app_id);
+        if (status != ERROR_SUCCESS) {
+            log_message("driver: cannot resolve watch path '%s' (%lu)", token, status);
+            goto done;
+        }
+        if (app_id == NULL || app_id->data == NULL ||
+            app_id->size < sizeof(WCHAR) || app_id->size % sizeof(WCHAR) != 0) {
+            log_message("driver: WFP returned an invalid app ID for '%s'", token);
+            goto done;
+        }
+
+        image = (const WCHAR *)app_id->data;
+        size_t available = app_id->size / sizeof(WCHAR);
+        image_chars = 0;
+        while (image_chars < available && image[image_chars] != 0) {
+            image_chars++;
+        }
+    }
+
+    if (image_chars == 0 || image_chars >= PBDRV_NAME_LEN) {
+        log_message("driver: watch entry '%s' exceeds the %u-character limit",
+                    token, (unsigned)PBDRV_NAME_LEN - 1);
+        goto done;
+    }
+
+    memcpy(wl->entries[wl->count].image, image, image_chars * sizeof(WCHAR));
+    wl->entries[wl->count].image[image_chars] = 0;
+    wl->count++;
+    added = TRUE;
+
+done:
+    if (app_id != NULL) {
+        FwpmFreeMemory0((void **)&app_id);
+    }
+    return added;
+}
+
 // Push the watch list = image names of enabled PROXY rules (relay refines the decision).
-static void driver_push_watchlist(void)
+static BOOL driver_push_watchlist(void)
 {
     PBDRV_WATCHLIST *wl = (PBDRV_WATCHLIST *)calloc(1, sizeof(*wl));
-    if (wl == NULL) return;
+    if (wl == NULL) {
+        log_message("driver: cannot allocate watchlist");
+        return FALSE;
+    }
 
+    BOOL valid = TRUE;
     AcquireSRWLockShared(&g_rules_lock);
-    for (PROCESS_RULE *r = rules_list; r != NULL && wl->count < PBDRV_MAX_WATCH; r = r->next) {
+    for (PROCESS_RULE *r = rules_list; r != NULL && valid; r = r->next) {
         // Watch = every app the relay must see: PROXY (redirect to upstream) and BLOCK
         // (redirect so the relay can refuse). DIRECT-only apps are left untouched in-kernel.
         if (!r->enabled || (r->action != RULE_ACTION_PROXY && r->action != RULE_ACTION_BLOCK)) continue;
-        if (r->process_name == NULL) continue;
-        // process_name is a ';'-delimited list of image patterns; push each token.
+        // Keep token parsing aligned with match_process_list: comma/semicolon separators,
+        // surrounding whitespace, and optional quotes around paths containing spaces.
         char tmp[1024];
         strncpy_s(tmp, sizeof(tmp), r->process_name, _TRUNCATE);
         char *ctxp = NULL;
-        for (char *tok = strtok_s(tmp, ";", &ctxp); tok && wl->count < PBDRV_MAX_WATCH; tok = strtok_s(NULL, ";", &ctxp)) {
-            while (*tok == ' ') tok++;
-            if (*tok == 0) continue;
-            // Leave room for the terminator: a boundary-length name would otherwise fill all
-            // PBDRV_NAME_LEN cells with no NUL (or fail and leave a partial entry). The buffer is
-            // calloc-zeroed, so forcing image[PBDRV_NAME_LEN-1]=0 guarantees a terminated string.
-            MultiByteToWideChar(CP_UTF8, 0, tok, -1, wl->entries[wl->count].image, PBDRV_NAME_LEN - 1);
-            wl->entries[wl->count].image[PBDRV_NAME_LEN - 1] = 0;
-            wl->count++;
+        for (char *tok = strtok_s(tmp, ",;", &ctxp); tok && valid;
+             tok = strtok_s(NULL, ",;", &ctxp)) {
+            while (*tok == ' ' || *tok == '\t') {
+                tok++;
+            }
+            char *end = tok + strlen(tok);
+            while (end > tok && (end[-1] == ' ' || end[-1] == '\t')) {
+                *(--end) = 0;
+            }
+            if (*tok == '"' && end > tok + 1) {
+                tok++;
+                char *quote = strchr(tok, '"');
+                if (quote != NULL) {
+                    *quote = 0;
+                }
+            }
+            if (*tok == 0) {
+                continue;
+            }
+            valid = driver_add_watch_entry(wl, tok);
         }
     }
     ReleaseSRWLockShared(&g_rules_lock);
 
-    pbdrv_set_watchlist(g_drv, wl);
+    if (!valid) {
+        log_message("driver: watchlist update rejected; previous list remains active");
+        free(wl);
+        return FALSE;
+    }
+
+    if (!pbdrv_set_watchlist(g_drv, wl)) {
+        log_message("driver: SET_WATCHLIST failed (%lu); previous list remains active",
+                    GetLastError());
+        free(wl);
+        return FALSE;
+    }
+
     log_message("driver: pushed %u watched image(s)", wl->count);
     free(wl);
+    return TRUE;
 }
 
 // Re-push the watch list to the driver after any rule change. Safe to call anytime:
@@ -174,7 +265,11 @@ BOOL pb_driver_start(UINT16 relay_port)
     if (!pbdrv_configure(g_drv, &cfg))
         log_message("driver: configure failed (%lu)", GetLastError());
 
-    driver_push_watchlist();
+    if (!driver_push_watchlist()) {
+        CloseHandle(g_drv);
+        g_drv = INVALID_HANDLE_VALUE;
+        return FALSE;
+    }
     pbdrv_enable(g_drv, TRUE);
 
     // Start the connection-log drain (logs every connection: direct/proxy/block).
