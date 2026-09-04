@@ -75,7 +75,7 @@ function Compile-MSVC {
               "$SourceFiles " +
               "/LD " +
               "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /NXCOMPAT " +
-              "ws2_32.lib iphlpapi.lib advapi32.lib " +
+              "ws2_32.lib iphlpapi.lib advapi32.lib fwpuclnt.lib " +
               "/OUT:$OutputDLL"
 
     $cmd = "`"$vcvarsPath`" $Arch >nul && cl.exe $clArgs"
@@ -103,7 +103,7 @@ function Compile-GCC {
 
     $cmd = "gcc -shared -O2 -flto -s -Wall -D_WIN32_WINNT=0x0601 -DPROXYBRIDGE_EXPORTS " +
            "$SourcePath\$SourceFile " +
-           "-lws2_32 -liphlpapi -ladvapi32 " +
+           "-lws2_32 -liphlpapi -ladvapi32 -lfwpuclnt " +
            "-o $OutputDLL"
 
     Write-Host "Command: $cmd" -ForegroundColor Gray
