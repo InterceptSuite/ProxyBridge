@@ -100,7 +100,7 @@ void UdpMapPut(UINT16 family, UINT32 srcV4, const UINT8 *srcV6, UINT16 srcPort,
             return;
         }
     }
-    UDP_ENTRY *e = (UDP_ENTRY *)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(*e), PB_TAG);
+    UDP_ENTRY *e = (UDP_ENTRY *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*e), PB_TAG);
     if (e != NULL) {
         RtlZeroMemory(e, sizeof(*e));
         e->family = family; e->srcPort = srcPort; e->origPort = origPort; e->pid = pid;
