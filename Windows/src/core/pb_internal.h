@@ -89,6 +89,7 @@ typedef struct CONNECTION_INFO {
     BOOL   is_tracked;
     ULONGLONG last_activity;
     UINT32 proxy_config_id;
+    RuleAction action;            // explicit: config id 0 is also "first proxy", not DIRECT
     BOOL   is_ipv6;
     UINT8  src_ip6[16];        // raw IPv6 src (only valid when is_ipv6)
     UINT8  orig_dest_ip6[16];  // raw IPv6 dest (only valid when is_ipv6)
@@ -103,6 +104,7 @@ typedef struct {
     UINT32 orig_dest_ip;
     UINT16 orig_dest_port;
     UINT32 proxy_config_id;
+    RuleAction action;
     BOOL   is_ipv6;
     UINT8  orig_dest_ip6[16];
 } CONNECTION_CONFIG;
@@ -295,9 +297,17 @@ UINT32 rev_hash_v4(UINT32 dest_ip, UINT16 dest_port);
 UINT32 rev_hash_v6(const UINT8 dest_ip6[16], UINT16 dest_port);
 void rev_insert(CONNECTION_INFO *c);
 void rev_unlink(CONNECTION_INFO *c);
-void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id);
-BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id);
-BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port);
+void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
+                    UINT16 dest_port, UINT32 proxy_config_id, RuleAction action);
+void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16],
+                       const UINT8 dest_ip6[16], UINT16 dest_port,
+                       UINT32 proxy_config_id, RuleAction action);
+BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16],
+                            UINT16 *dest_port, UINT32 *proxy_config_id, RuleAction *action);
+BOOL find_udp_sender(UINT32 orig_dest_ip, UINT16 orig_dest_port, RuleAction action,
+                     UINT32 *src_ip, UINT16 *src_port);
+BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port,
+                        RuleAction action, UINT8 src_ip6[16], UINT16 *src_port);
 BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port);
 BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id);
 UINT32 get_connection_proxy_id(UINT16 src_port, BOOL is_udp);
@@ -330,5 +340,7 @@ void pb_driver_sync_config(void);  // re-push config after a setting change (e.g
 BOOL pb_driver_orig_dest(SOCKET s, UINT32 *ip, UINT16 *port, DWORD *pid);
 BOOL pb_driver_orig_dest6(SOCKET s, UINT8 ip6[16], UINT16 *port, DWORD *pid);
 BOOL pb_driver_udp_orig(UINT32 src_ip, UINT16 src_port, UINT32 *ip, UINT16 *port, DWORD *pid);
+BOOL pb_driver_udp_orig6(const UINT8 src_ip6[16], UINT16 src_port,
+                         UINT8 ip6[16], UINT16 *port, DWORD *pid);
 
 #endif // PB_INTERNAL_H
