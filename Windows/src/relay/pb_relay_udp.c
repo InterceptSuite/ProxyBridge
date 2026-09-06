@@ -166,31 +166,81 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                 UINT32 dest_ip = 0;
                 UINT16 dest_port = 0;
                 UINT32 proxy_config_id = 0;
-                BOOL have_udp;
+                RuleAction action = RULE_ACTION_PROXY;
+                BOOL have_udp = FALSE;
 
                 if (g_use_wfp_driver)
                 {
-                    // Original dest from the driver's UDP map; feed the reverse index so the
-                    // proxy-reply path below routes replies back to this client unchanged.
+                    // A mapped source is an application datagram. If there is no driver mapping,
+                    // this may instead be a reply to a DIRECT datagram sent from this socket.
                     DWORD pid = 0;
                     have_udp = pb_driver_udp_orig(from_addr.sin_addr.s_addr, from_port, &dest_ip, &dest_port, &pid);
                     if (have_udp)
                     {
                         char pname[MAX_PROCESS_NAME];
-                        RuleAction act = RULE_ACTION_PROXY;
-                        if (get_process_name_from_pid(pid, pname, sizeof(pname)))
-                            act = match_rule(pname, dest_ip, dest_port, TRUE, &proxy_config_id);
-                        pb_report_connection(pid, NULL, FALSE, dest_ip, NULL, dest_port, act, proxy_config_id, TRUE);
-                        if (act == RULE_ACTION_PROXY)
-                            add_connection(from_port, TRUE, from_addr.sin_addr.s_addr, dest_ip, dest_port, proxy_config_id);
-                        else
+                        if (get_process_name_from_pid(pid, pname, sizeof(pname))) {
+                            action = match_rule(pname, dest_ip, dest_port, TRUE, &proxy_config_id);
+                        }
+                        pb_report_connection(pid, NULL, FALSE, dest_ip, NULL, dest_port,
+                                             action, proxy_config_id, TRUE);
+                        if (action == RULE_ACTION_BLOCK)
+                        {
+                            remove_connection(from_port, TRUE, FALSE);
                             have_udp = FALSE;
+                        }
+                        else
+                        {
+                            add_connection(from_port, TRUE, from_addr.sin_addr.s_addr, dest_ip,
+                                           dest_port, proxy_config_id, action);
+                        }
+                    }
+                    else
+                    {
+                        UINT32 target_ip = 0;
+                        UINT16 target_port = 0;
+                        if (find_udp_sender(from_addr.sin_addr.s_addr, from_port,
+                                            RULE_ACTION_DIRECT, &target_ip, &target_port))
+                        {
+                            if (from_port == 53) {
+                                snoop_dns_response(recv_buf, recv_len);
+                            }
+                            struct sockaddr_in target_addr;
+                            memset(&target_addr, 0, sizeof(target_addr));
+                            target_addr.sin_family = AF_INET;
+                            target_addr.sin_addr.s_addr = target_ip;
+                            target_addr.sin_port = htons(target_port);
+                            if (sendto(udp_relay_socket, (char*)recv_buf, recv_len, 0,
+                                       (struct sockaddr *)&target_addr,
+                                       sizeof(target_addr)) == SOCKET_ERROR)
+                            {
+                                log_message("[UDP RELAY] Direct response to client port %d "
+                                            "failed: %d",
+                                            target_port, WSAGetLastError());
+                            }
+                        }
                     }
                 }
                 else
                 {
                     have_udp = get_connection(from_port, TRUE, &dest_ip, &dest_port);
                     if (have_udp) proxy_config_id = get_connection_proxy_id(from_port, TRUE);
+                }
+
+                if (have_udp && action == RULE_ACTION_DIRECT)
+                {
+                    struct sockaddr_in direct_addr;
+                    memset(&direct_addr, 0, sizeof(direct_addr));
+                    direct_addr.sin_family = AF_INET;
+                    direct_addr.sin_addr.s_addr = dest_ip;
+                    direct_addr.sin_port = htons(dest_port);
+                    if (sendto(udp_relay_socket, (char*)recv_buf, recv_len, 0,
+                               (struct sockaddr *)&direct_addr,
+                               sizeof(direct_addr)) == SOCKET_ERROR)
+                    {
+                        log_message("[UDP RELAY] Direct send to port %d failed: %d",
+                                    dest_port, WSAGetLastError());
+                    }
+                    have_udp = FALSE;
                 }
 
                 if (have_udp)
@@ -302,39 +352,10 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                     if (g_use_wfp_driver && src_port == 53 && recv_len > 10)
                         snoop_dns_response(&recv_buf[10], recv_len - 10);
 
-                    BOOL found = FALSE;
                     UINT32 target_ip = 0;
                     UINT16 target_port = 0;
-                    CONNECTION_INFO *winner_conn = NULL;
-
-                    AcquireSRWLockShared(&lock);
-                    ULONGLONG best_activity = 0;
-                    // O(1): only the reverse bucket for this (dest ip, dest port) - not the
-                    // whole table - then pick the most-recently-active matching client.
-                    for (CONNECTION_INFO *conn = connection_rev_table[rev_hash_v4(src_ip, src_port)];
-                         conn != NULL; conn = conn->rev_next)
-                    {
-                        if (conn->is_udp && !conn->is_ipv6 && conn->orig_dest_ip == src_ip && conn->orig_dest_port == src_port)
-                        {
-                            if (!found || conn->last_activity > best_activity)
-                            {
-                                target_ip    = conn->src_ip;
-                                target_port  = conn->src_port;
-                                best_activity = conn->last_activity;
-                                found        = TRUE;
-                                winner_conn  = conn;
-                                // Do NOT update last_activity here; doing so mid-loop corrupts
-                                // best_activity comparisons for later entries. Update after.
-                            }
-                        }
-                    }
-                    // Keep winner's session alive (update outside loop so comparisons above
-                    // use the original, unmodified timestamps for all candidates).
-                    if (winner_conn != NULL)
-                        InterlockedExchange64((LONGLONG volatile*)&winner_conn->last_activity, (LONGLONG)GetTickCount64());
-                    ReleaseSRWLockShared(&lock);
-
-                    if (found)
+                    if (find_udp_sender(src_ip, src_port, RULE_ACTION_PROXY,
+                                        &target_ip, &target_port))
                     {
                         struct sockaddr_in target_addr;
                         memset(&target_addr, 0, sizeof(target_addr));
@@ -360,7 +381,9 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
 
                     UINT8 target_ip6[16];
                     UINT16 target_port = 0;
-                    if (find_v6_udp_sender(src_ip6, src_port, target_ip6, &target_port) && udp_relay_socket6 != INVALID_SOCKET)
+                    if (udp_relay_socket6 != INVALID_SOCKET &&
+                        find_v6_udp_sender(src_ip6, src_port, RULE_ACTION_PROXY,
+                                           target_ip6, &target_port))
                     {
                         struct sockaddr_in6 t6;
                         memset(&t6, 0, sizeof(t6));
@@ -374,7 +397,7 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
             }
         }
 
-        // IPv6 UDP packets from application
+        // IPv6 UDP packets from an application or a DIRECT destination
         if (udp_relay_socket6 != INVALID_SOCKET && FD_ISSET(udp_relay_socket6, &read_fds))
         {
             struct sockaddr_in6 from_addr6 = {0};
@@ -387,8 +410,84 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                 UINT8  dest_ip6[16];
                 UINT16 dest_port = 0;
                 UINT32 proxy_config_id = 0;
+                RuleAction action = RULE_ACTION_PROXY;
+                BOOL have_udp = FALSE;
 
-                if (get_connection_full_v6(from_port, TRUE, dest_ip6, &dest_port, &proxy_config_id))
+                if (g_use_wfp_driver)
+                {
+                    DWORD pid = 0;
+                    have_udp = pb_driver_udp_orig6((const UINT8 *)&from_addr6.sin6_addr, from_port,
+                                                    dest_ip6, &dest_port, &pid);
+                    if (have_udp)
+                    {
+                        char pname[MAX_PROCESS_NAME];
+                        if (get_process_name_from_pid(pid, pname, sizeof(pname))) {
+                            action = match_rule_v6(pname, dest_ip6, dest_port, TRUE,
+                                                   &proxy_config_id);
+                        }
+                        pb_report_connection(pid, NULL, TRUE, 0, dest_ip6, dest_port,
+                                             action, proxy_config_id, TRUE);
+                        if (action == RULE_ACTION_BLOCK)
+                        {
+                            remove_connection(from_port, TRUE, TRUE);
+                            have_udp = FALSE;
+                        }
+                        else
+                        {
+                            add_connection_v6(from_port, TRUE, (const UINT8 *)&from_addr6.sin6_addr,
+                                              dest_ip6, dest_port, proxy_config_id, action);
+                        }
+                    }
+                    else
+                    {
+                        UINT8 target_ip6[16];
+                        UINT16 target_port = 0;
+                        if (find_v6_udp_sender((const UINT8 *)&from_addr6.sin6_addr, from_port,
+                                               RULE_ACTION_DIRECT, target_ip6, &target_port))
+                        {
+                            if (from_port == 53) {
+                                snoop_dns_response(recv_buf, recv_len);
+                            }
+                            struct sockaddr_in6 target_addr6;
+                            memset(&target_addr6, 0, sizeof(target_addr6));
+                            target_addr6.sin6_family = AF_INET6;
+                            memcpy(&target_addr6.sin6_addr, target_ip6, 16);
+                            target_addr6.sin6_port = htons(target_port);
+                            if (sendto(udp_relay_socket6, (char*)recv_buf, recv_len, 0,
+                                       (struct sockaddr *)&target_addr6,
+                                       sizeof(target_addr6)) == SOCKET_ERROR)
+                            {
+                                log_message("[UDP RELAY] Direct IPv6 response to client port "
+                                            "%d failed: %d",
+                                            target_port, WSAGetLastError());
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    have_udp = get_connection_full_v6(from_port, TRUE, dest_ip6, &dest_port,
+                                                       &proxy_config_id, &action);
+                }
+
+                if (have_udp && action == RULE_ACTION_DIRECT)
+                {
+                    struct sockaddr_in6 direct_addr6;
+                    memset(&direct_addr6, 0, sizeof(direct_addr6));
+                    direct_addr6.sin6_family = AF_INET6;
+                    memcpy(&direct_addr6.sin6_addr, dest_ip6, 16);
+                    direct_addr6.sin6_port = htons(dest_port);
+                    if (sendto(udp_relay_socket6, (char*)recv_buf, recv_len, 0,
+                               (struct sockaddr *)&direct_addr6,
+                               sizeof(direct_addr6)) == SOCKET_ERROR)
+                    {
+                        log_message("[UDP RELAY] Direct IPv6 send to port %d failed: %d",
+                                    dest_port, WSAGetLastError());
+                    }
+                    have_udp = FALSE;
+                }
+
+                if (have_udp)
                 {
                     PROXY_CONFIG *cfg = find_proxy_config(proxy_config_id);
                     if (cfg != NULL && cfg->type == PROXY_TYPE_SOCKS5)

@@ -102,6 +102,7 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                 {
                     conn_config->client_socket = client_sock;
                     conn_config->is_ipv6 = FALSE;
+                    conn_config->action = RULE_ACTION_PROXY;
 
                     BOOL have_dest;
                     if (g_use_wfp_driver)
@@ -119,6 +120,7 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                             if (get_process_name_from_pid(pid, pname, sizeof(pname)))
                                 act = match_rule(pname, conn_config->orig_dest_ip, conn_config->orig_dest_port, FALSE, &cfg);
                             conn_config->proxy_config_id = cfg;
+                            conn_config->action = act;
                             struct in_addr da; da.S_un.S_addr = conn_config->orig_dest_ip;
                             log_message("[RELAY] accepted redirect: pid=%lu dest=%s:%u action=%d cfg=%u",
                                         pid, inet_ntoa(da), conn_config->orig_dest_port, act, cfg);
@@ -162,6 +164,7 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                 {
                     conn_config->client_socket = client_sock6;
                     conn_config->is_ipv6 = TRUE;
+                    conn_config->action = RULE_ACTION_PROXY;
 
                     BOOL have_dest6;
                     if (g_use_wfp_driver)
@@ -177,6 +180,7 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                             if (get_process_name_from_pid(pid, pname, sizeof(pname)))
                                 act = match_rule_v6(pname, conn_config->orig_dest_ip6, conn_config->orig_dest_port, FALSE, &cfg);
                             conn_config->proxy_config_id = cfg;
+                            conn_config->action = act;
                             pb_report_connection(pid, NULL, TRUE, 0, conn_config->orig_dest_ip6,
                                                  conn_config->orig_dest_port, act, cfg, FALSE);
                             if (act == RULE_ACTION_BLOCK) have_dest6 = FALSE;
@@ -185,8 +189,10 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                     else
                     {
                         UINT16 client_port = ntohs(client_addr6.sin6_port);
-                        have_dest6 = get_connection_full_v6(client_port, FALSE, conn_config->orig_dest_ip6,
-                                                            &conn_config->orig_dest_port, &conn_config->proxy_config_id);
+                        have_dest6 = get_connection_full_v6(
+                            client_port, FALSE, conn_config->orig_dest_ip6,
+                            &conn_config->orig_dest_port, &conn_config->proxy_config_id,
+                            &conn_config->action);
                     }
                     if (have_dest6)
                     {
@@ -211,39 +217,20 @@ DWORD WINAPI connection_handler(LPVOID arg)
 {
     CONNECTION_CONFIG *config = (CONNECTION_CONFIG *)arg;
     SOCKET client_sock = config->client_socket;
-    UINT32 dest_ip = config->orig_dest_ip;
+    BOOL is_ipv6 = config->is_ipv6;
+    UINT32 dest_ip = is_ipv6 ? 0 : config->orig_dest_ip;
     UINT16 dest_port = config->orig_dest_port;
     UINT32 proxy_config_id = config->proxy_config_id;
-    BOOL is_ipv6 = config->is_ipv6;
+    RuleAction action = config->action;
     UINT8 dest_ip6[16];
     if (is_ipv6) memcpy(dest_ip6, config->orig_dest_ip6, 16);
-    SOCKET socks_sock;
-    struct sockaddr_in socks_addr;
+    SOCKET upstream_sock = INVALID_SOCKET;
 
     free(config);
 
-    // Snapshot the proxy config so this thread is immune to a concurrent Edit/Delete while it
-    // uses the settings across the (blocking) SOCKS5/HTTP handshake below.
-    PROXY_CONFIG proxy_snapshot;
-    PROXY_CONFIG *proxy = &proxy_snapshot;
-    if (!find_proxy_config_copy(proxy_config_id, &proxy_snapshot) ||
-        proxy->host[0] == '\0' || proxy->port == 0)
-    {
-        log_message("[RELAY] No proxy config (id=%u) - dropping connection", proxy_config_id);
-        closesocket(client_sock);
-        return 1;
-    }
-
-    // Connect to proxy, use cached resolved IP to avoid DNS per connection
-    UINT32 proxy_ip = proxy->resolved_ip ? proxy->resolved_ip : resolve_hostname(proxy->host);
-    if (proxy_ip == 0)
-    {
-        closesocket(client_sock);
-        return 1;
-    }
-
-    socks_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (socks_sock == INVALID_SOCKET)
+    int upstream_family = (action == RULE_ACTION_DIRECT && is_ipv6) ? AF_INET6 : AF_INET;
+    upstream_sock = socket(upstream_family, SOCK_STREAM, IPPROTO_TCP);
+    if (upstream_sock == INVALID_SOCKET)
     {
         log_message("Socket creation failed (%d)", WSAGetLastError());
         closesocket(client_sock);
@@ -256,66 +243,133 @@ DWORD WINAPI connection_handler(LPVOID arg)
     // the proxy's receive window fills up, which stalls the relay loop and
     // triggers TCP flow-control on the client side → massive upload throughput
     // loss.  4 MB gives plenty of headroom even at high bitrates / high RTT.
-    configure_tcp_socket(socks_sock, 4194304, 30000);  // 4 MB – proxy connection
+    configure_tcp_socket(upstream_sock, 4194304, 30000);  // 4 MB - upstream connection
     configure_tcp_socket(client_sock, 4194304, 30000); // 4 MB – app connection
 
-    memset(&socks_addr, 0, sizeof(socks_addr));
-    socks_addr.sin_family = AF_INET;
-    socks_addr.sin_addr.s_addr = proxy_ip;
-    socks_addr.sin_port = htons(proxy->port);
-
-    if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
-    {
-        log_message("[RELAY] Failed to connect to proxy %s:%d (%d)", proxy->host, proxy->port, WSAGetLastError());
-        closesocket(client_sock);
-        closesocket(socks_sock);
-        return 0;
-    }
-
-    if (proxy->type == PROXY_TYPE_SOCKS5)
+    if (action == RULE_ACTION_DIRECT)
     {
         int rc;
-        char cached_domain[256];
-        // Per-config: only hand the hostname to the proxy (socks5h) when this config
-        // opts in; otherwise send the locally-resolved IP (socks5).
         if (is_ipv6)
         {
-            if (proxy->send_domain_to_proxy && dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
-                rc = socks5_connect_domain(socks_sock, cached_domain, dest_port, proxy);
-            else
-                rc = socks5_connect_v6(socks_sock, dest_ip6, dest_port, proxy);
+            struct sockaddr_in6 direct_addr6;
+            memset(&direct_addr6, 0, sizeof(direct_addr6));
+            direct_addr6.sin6_family = AF_INET6;
+            memcpy(&direct_addr6.sin6_addr, dest_ip6, 16);
+            direct_addr6.sin6_port = htons(dest_port);
+            rc = connect(upstream_sock, (struct sockaddr *)&direct_addr6, sizeof(direct_addr6));
         }
         else
         {
-            if (proxy->send_domain_to_proxy && dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
-                rc = socks5_connect_domain(socks_sock, cached_domain, dest_port, proxy);
-            else
-                rc = socks5_connect(socks_sock, dest_ip, dest_port, proxy);
+            struct sockaddr_in direct_addr;
+            memset(&direct_addr, 0, sizeof(direct_addr));
+            direct_addr.sin_family = AF_INET;
+            direct_addr.sin_addr.s_addr = dest_ip;
+            direct_addr.sin_port = htons(dest_port);
+            rc = connect(upstream_sock, (struct sockaddr *)&direct_addr, sizeof(direct_addr));
         }
-        if (rc != 0)
+        if (rc == SOCKET_ERROR)
         {
+            log_message("[RELAY] Direct connect to original destination failed (%d)",
+                        WSAGetLastError());
             closesocket(client_sock);
-            closesocket(socks_sock);
+            closesocket(upstream_sock);
             return 0;
         }
     }
-    else if (proxy->type == PROXY_TYPE_HTTP)
+    else
     {
-        int rc = is_ipv6
-            ? http_connect_v6(socks_sock, dest_ip6, dest_port, proxy)
-            : http_connect(socks_sock, dest_ip, dest_port, proxy);
-        if (rc != 0)
+        // Snapshot the proxy config so this thread is immune to a concurrent Edit/Delete while
+        // it uses the settings across the (blocking) SOCKS5/HTTP handshake below.
+        PROXY_CONFIG proxy_snapshot;
+        PROXY_CONFIG *proxy = &proxy_snapshot;
+        if (!find_proxy_config_copy(proxy_config_id, &proxy_snapshot) ||
+            proxy->host[0] == '\0' || proxy->port == 0)
+        {
+            log_message("[RELAY] No proxy config (id=%u) - dropping connection", proxy_config_id);
+            closesocket(client_sock);
+            closesocket(upstream_sock);
+            return 1;
+        }
+
+        // Connect to proxy, use cached resolved IP to avoid DNS per connection.
+        UINT32 proxy_ip = proxy->resolved_ip ? proxy->resolved_ip : resolve_hostname(proxy->host);
+        if (proxy_ip == 0)
         {
             closesocket(client_sock);
-            closesocket(socks_sock);
+            closesocket(upstream_sock);
+            return 1;
+        }
+
+        struct sockaddr_in proxy_addr;
+        memset(&proxy_addr, 0, sizeof(proxy_addr));
+        proxy_addr.sin_family = AF_INET;
+        proxy_addr.sin_addr.s_addr = proxy_ip;
+        proxy_addr.sin_port = htons(proxy->port);
+        if (connect(upstream_sock, (struct sockaddr *)&proxy_addr,
+                    sizeof(proxy_addr)) == SOCKET_ERROR)
+        {
+            log_message("[RELAY] Failed to connect to proxy %s:%d (%d)",
+                        proxy->host, proxy->port, WSAGetLastError());
+            closesocket(client_sock);
+            closesocket(upstream_sock);
             return 0;
+        }
+
+        if (proxy->type == PROXY_TYPE_SOCKS5)
+        {
+            int rc;
+            char cached_domain[256];
+            // Per-config: only hand the hostname to the proxy (socks5h) when this config
+            // opts in; otherwise send the locally-resolved IP (socks5).
+            if (is_ipv6)
+            {
+                if (proxy->send_domain_to_proxy &&
+                    dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
+                {
+                    rc = socks5_connect_domain(upstream_sock, cached_domain, dest_port, proxy);
+                }
+                else
+                {
+                    rc = socks5_connect_v6(upstream_sock, dest_ip6, dest_port, proxy);
+                }
+            }
+            else
+            {
+                if (proxy->send_domain_to_proxy &&
+                    dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
+                {
+                    rc = socks5_connect_domain(upstream_sock, cached_domain, dest_port, proxy);
+                }
+                else
+                {
+                    rc = socks5_connect(upstream_sock, dest_ip, dest_port, proxy);
+                }
+            }
+            if (rc != 0)
+            {
+                closesocket(client_sock);
+                closesocket(upstream_sock);
+                return 0;
+            }
+        }
+        else if (proxy->type == PROXY_TYPE_HTTP)
+        {
+            int rc = is_ipv6
+                ? http_connect_v6(upstream_sock, dest_ip6, dest_port, proxy)
+                : http_connect(upstream_sock, dest_ip, dest_port, proxy);
+            if (rc != 0)
+            {
+                closesocket(client_sock);
+                closesocket(upstream_sock);
+                return 0;
+            }
         }
     }
 
     // Disable timeout for data transfer phase
     DWORD zero_timeout = 0;
-    setsockopt(socks_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&zero_timeout, sizeof(zero_timeout));
-    setsockopt(socks_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&zero_timeout, sizeof(zero_timeout));
+    setsockopt(upstream_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&zero_timeout, sizeof(zero_timeout));
+    setsockopt(upstream_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&zero_timeout, sizeof(zero_timeout));
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&zero_timeout, sizeof(zero_timeout));
     setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&zero_timeout, sizeof(zero_timeout));
 
@@ -325,7 +379,8 @@ DWORD WINAPI connection_handler(LPVOID arg)
     keepalive_settings.keepalivetime = 300000;      // 5 minutes in milliseconds
     keepalive_settings.keepaliveinterval = 1000;    // 1 second interval
     DWORD bytes_returned = 0;
-    WSAIoctl(socks_sock, SIO_KEEPALIVE_VALS, &keepalive_settings, sizeof(keepalive_settings), NULL, 0, &bytes_returned, NULL, NULL);
+    WSAIoctl(upstream_sock, SIO_KEEPALIVE_VALS, &keepalive_settings,
+             sizeof(keepalive_settings), NULL, 0, &bytes_returned, NULL, NULL);
     WSAIoctl(client_sock, SIO_KEEPALIVE_VALS, &keepalive_settings, sizeof(keepalive_settings), NULL, 0, &bytes_returned, NULL, NULL);
 
     TRANSFER_CONFIG *transfer_config = (TRANSFER_CONFIG *)malloc(sizeof(TRANSFER_CONFIG));
@@ -334,12 +389,12 @@ DWORD WINAPI connection_handler(LPVOID arg)
     {
         log_message("Memory allocation failed for transfer_config");
         closesocket(client_sock);
-        closesocket(socks_sock);
+        closesocket(upstream_sock);
         return 0;
     }
 
     transfer_config->from_socket = client_sock;
-    transfer_config->to_socket = socks_sock;
+    transfer_config->to_socket = upstream_sock;
 
     // both transfer in current thread
     transfer_handler((LPVOID)transfer_config);

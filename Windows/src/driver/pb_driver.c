@@ -332,3 +332,17 @@ BOOL pb_driver_udp_orig(UINT32 src_ip, UINT16 src_port, UINT32 *ip, UINT16 *port
     if (pid) *pid = q.pid;
     return TRUE;
 }
+
+// Relay-side (UDP IPv6): recover a redirected datagram's original dest by its source.
+BOOL pb_driver_udp_orig6(const UINT8 src_ip6[16], UINT16 src_port,
+                         UINT8 ip6[16], UINT16 *port, DWORD *pid)
+{
+    if (g_drv == INVALID_HANDLE_VALUE) return FALSE;
+    PBDRV_UDP_QUERY q; memset(&q, 0, sizeof(q));
+    q.family = AF_INET6; q.srcPort = src_port;
+    memcpy(q.srcV6, src_ip6, 16);
+    if (!pbdrv_udp_query(g_drv, &q) || !q.found) return FALSE;
+    memcpy(ip6, q.origV6, 16); *port = q.origPort;
+    if (pid) *pid = q.pid;
+    return TRUE;
+}

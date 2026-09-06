@@ -36,55 +36,74 @@ void rev_unlink(CONNECTION_INFO *c)
     c->rev_next = NULL;
 }
 
-void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id)
+// Find or allocate an entry for the source tuple. Caller holds `lock` exclusively.
+static CONNECTION_INFO *upsert_connection(UINT16 src_port, BOOL is_udp, BOOL is_ipv6)
 {
-    AcquireSRWLockExclusive(&lock);
-
     int hash = src_port % CONNECTION_HASH_SIZE;
-    CONNECTION_INFO *existing = connection_hash_table[hash];
-
-    // Match on (port, protocol, family): a TCP and a UDP flow - or an IPv4 and an
-    // IPv6 flow - may legitimately share a numeric local port at the same time.
-    while (existing != NULL) {
-        if (existing->src_port == src_port && existing->is_udp == is_udp && !existing->is_ipv6) {
-            rev_unlink(existing);   // dest may change (port reuse) - re-key the reverse index
-            existing->is_ipv6 = FALSE;
-            existing->src_ip = src_ip;
-            existing->orig_dest_ip = dest_ip;
-            existing->orig_dest_port = dest_port;
-            existing->proxy_config_id = proxy_config_id;
-            existing->is_tracked = TRUE;
-            existing->last_activity = GetTickCount64();
-            rev_insert(existing);
-            ReleaseSRWLockExclusive(&lock);
-            return;
+    for (CONNECTION_INFO *conn = connection_hash_table[hash]; conn != NULL; conn = conn->next) {
+        if (conn->src_port == src_port && conn->is_udp == is_udp &&
+            conn->is_ipv6 == is_ipv6) {
+            rev_unlink(conn);
+            return conn;
         }
-        existing = existing->next;
     }
 
     CONNECTION_INFO *conn = (CONNECTION_INFO *)calloc(1, sizeof(CONNECTION_INFO));
+    if (conn != NULL) {
+        conn->src_port = src_port;
+        conn->is_udp = is_udp;
+        conn->is_ipv6 = is_ipv6;
+        conn->next = connection_hash_table[hash];
+        connection_hash_table[hash] = conn;
+    }
+    return conn;
+}
+
+void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
+                    UINT16 dest_port, UINT32 proxy_config_id, RuleAction action)
+{
+    AcquireSRWLockExclusive(&lock);
+    CONNECTION_INFO *conn = upsert_connection(src_port, is_udp, FALSE);
     if (conn == NULL) {
         ReleaseSRWLockExclusive(&lock);
         return;
     }
 
-    conn->src_port = src_port;
-    conn->is_udp = is_udp;
     conn->src_ip = src_ip;
     conn->orig_dest_ip = dest_ip;
     conn->orig_dest_port = dest_port;
     conn->proxy_config_id = proxy_config_id;
+    conn->action = action;
     conn->is_tracked = TRUE;
-    conn->is_ipv6 = FALSE;
     conn->last_activity = GetTickCount64();
-
-    conn->next = connection_hash_table[hash];
-    connection_hash_table[hash] = conn;
     rev_insert(conn);
     ReleaseSRWLockExclusive(&lock);
 }
 
-BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id)
+void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16],
+                       const UINT8 dest_ip6[16], UINT16 dest_port,
+                       UINT32 proxy_config_id, RuleAction action)
+{
+    AcquireSRWLockExclusive(&lock);
+    CONNECTION_INFO *conn = upsert_connection(src_port, is_udp, TRUE);
+    if (conn == NULL) {
+        ReleaseSRWLockExclusive(&lock);
+        return;
+    }
+
+    memcpy(conn->src_ip6, src_ip6, 16);
+    memcpy(conn->orig_dest_ip6, dest_ip6, 16);
+    conn->orig_dest_port = dest_port;
+    conn->proxy_config_id = proxy_config_id;
+    conn->action = action;
+    conn->is_tracked = TRUE;
+    conn->last_activity = GetTickCount64();
+    rev_insert(conn);
+    ReleaseSRWLockExclusive(&lock);
+}
+
+BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16],
+                            UINT16 *dest_port, UINT32 *proxy_config_id, RuleAction *action)
 {
     BOOL found = FALSE;
     AcquireSRWLockShared(&lock);
@@ -95,6 +114,7 @@ BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UI
             memcpy(dest_ip6, conn->orig_dest_ip6, 16);
             *dest_port = conn->orig_dest_port;
             if (proxy_config_id != NULL) *proxy_config_id = conn->proxy_config_id;
+            if (action != NULL) *action = conn->action;
             InterlockedExchange64((LONGLONG volatile*)&conn->last_activity, (LONGLONG)GetTickCount64());
             found = TRUE;
             break;
@@ -105,24 +125,62 @@ BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UI
     return found;
 }
 
-// Reverse lookup for IPv6 UDP relay responses: find src addr+port by orig dest ip6+port
-BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port)
+// Reverse lookup for an IPv4 UDP response. The action is part of the key because DIRECT
+// datagrams use the listener socket while proxied replies arrive on a per-proxy socket.
+BOOL find_udp_sender(UINT32 orig_dest_ip, UINT16 orig_dest_port, RuleAction action,
+                     UINT32 *src_ip, UINT16 *src_port)
 {
     BOOL found = FALSE;
     ULONGLONG best = 0;
+    CONNECTION_INFO *winner = NULL;
+    AcquireSRWLockShared(&lock);
+    for (CONNECTION_INFO *conn = connection_rev_table[rev_hash_v4(orig_dest_ip, orig_dest_port)];
+         conn != NULL; conn = conn->rev_next) {
+        if (conn->is_udp && !conn->is_ipv6 && conn->action == action &&
+            conn->orig_dest_ip == orig_dest_ip && conn->orig_dest_port == orig_dest_port) {
+            if (!found || conn->last_activity > best) {
+                *src_ip = conn->src_ip;
+                *src_port = conn->src_port;
+                best = conn->last_activity;
+                found = TRUE;
+                winner = conn;
+            }
+        }
+    }
+    if (winner != NULL) {
+        InterlockedExchange64((LONGLONG volatile *)&winner->last_activity,
+                              (LONGLONG)GetTickCount64());
+    }
+    ReleaseSRWLockShared(&lock);
+    return found;
+}
+
+// Reverse lookup for an IPv6 UDP response: find its application source endpoint.
+BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port,
+                        RuleAction action, UINT8 src_ip6[16], UINT16 *src_port)
+{
+    BOOL found = FALSE;
+    ULONGLONG best = 0;
+    CONNECTION_INFO *winner = NULL;
     AcquireSRWLockShared(&lock);
     // O(1): only the reverse bucket for this (dest ip6, dest port).
     for (CONNECTION_INFO *conn = connection_rev_table[rev_hash_v6(orig_dest_ip6, orig_dest_port)];
          conn != NULL; conn = conn->rev_next) {
-        if (conn->is_udp && conn->is_ipv6 && conn->orig_dest_port == orig_dest_port &&
+        if (conn->is_udp && conn->is_ipv6 && conn->action == action &&
+            conn->orig_dest_port == orig_dest_port &&
             memcmp(conn->orig_dest_ip6, orig_dest_ip6, 16) == 0) {
             if (!found || conn->last_activity > best) {
                 memcpy(src_ip6, conn->src_ip6, 16);
                 *src_port = conn->src_port;
                 best = conn->last_activity;
                 found = TRUE;
+                winner = conn;
             }
         }
+    }
+    if (winner != NULL) {
+        InterlockedExchange64((LONGLONG volatile *)&winner->last_activity,
+                              (LONGLONG)GetTickCount64());
     }
     ReleaseSRWLockShared(&lock);
     return found;
@@ -418,4 +476,3 @@ void clear_logged_connections(void)
 
     ReleaseSRWLockExclusive(&lock);
 }
-
