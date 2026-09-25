@@ -67,7 +67,7 @@ void PB_SetCheckUpdates(BOOL enable);
 
 // *.pbprofile. Load fills defaults if the file is missing/invalid.
 void PB_ProfileDefaults(PBProfile* p, const wchar_t* name);
-void PB_ProfileLoad(const wchar_t* name, PBProfile* p);
+BOOL PB_ProfileLoad(const wchar_t* name, PBProfile* p);
 BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p);
 
 // Management.

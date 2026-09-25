@@ -20,14 +20,9 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-    - name: Verify WinDivert installation
-      run: |
-        if (Test-Path "C:\WinDivert-2.2.2-A") {
-          Write-Host "WinDivert found at C:\WinDivert-2.2.2-A"
-        } else {
-          Write-Error "WinDivert not found. Please install WinDivert 2.2.2-A at C:\WinDivert-2.2.2-A"
-          exit 1
-        }
+    # Keep release fail-closed until production inputs and PB-SUT gates are complete.
+    - name: Require production PnP release integration
+      run: throw 'PnP release packaging is gated. Use installer/build-signed-package.ps1 with explicitly verified inputs for rehearsal; unsigned CI output is not a release.'
       shell: pwsh
 
     - name: Build and sign project

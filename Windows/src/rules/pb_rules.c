@@ -1,422 +1,279 @@
 #include "pb_internal.h"
 
-// Rule-management API: add / edit / delete / enable / disable / reorder rules.
+// One writer prepares a complete candidate; readers keep using the old list.
+// Activation/reconnect uses this same gate through publication of its handle.
+static SRWLOCK g_rules_writer = SRWLOCK_INIT;
 
-PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id)
+BOOL pb_rules_begin_update(void)
 {
-    if (process_name == NULL || process_name[0] == '\0')
-        return 0;
+    if (TryAcquireSRWLockExclusive(&g_rules_writer)) return TRUE;
+    SetLastError(ERROR_BUSY); // includes reentrant edits from log callbacks
+    return FALSE;
+}
 
-    PROCESS_RULE *rule = (PROCESS_RULE *)malloc(sizeof(PROCESS_RULE));
-    if (rule == NULL)
-        return 0;
+void pb_rules_end_update(void)
+{
+    ReleaseSRWLockExclusive(&g_rules_writer);
+}
 
-    rule->rule_id = g_next_rule_id++;
-    strncpy_s(rule->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
-    rule->protocol = protocol;
-    rule->proxy_config_id = proxy_config_id;
-    rule->target_hosts = NULL;
-    rule->target_ports = NULL;
-    rule->target_domains = NULL;
+#include "pb_rule_storage.inc"
 
-    if (target_hosts != NULL && target_hosts[0] != '\0')
-    {
-        size_t len = strnlen_s(target_hosts, MAX_LIST_SIZE) + 1;
-        rule->target_hosts = (char *)malloc(len);
-        if (rule->target_hosts == NULL)
-        {
-            free(rule);
-            return 0;
+static BOOL snapshot_rules(PROCESS_RULE **out)
+{
+    *out = NULL;
+    PROCESS_RULE **tail = out;
+    AcquireSRWLockShared(&g_rules_lock);
+    for (const PROCESS_RULE *r = rules_list; r != NULL; r = r->next) {
+        *tail = copy_rule(r);
+        if (*tail == NULL) {
+            ReleaseSRWLockShared(&g_rules_lock);
+            free_rules(*out);
+            *out = NULL;
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
         }
-        strncpy_s(rule->target_hosts, len, target_hosts, _TRUNCATE);
+        tail = &(*tail)->next;
     }
-    else
-    {
-        // Default to "*" = all IPs
-        rule->target_hosts = (char *)malloc(2);
-        if (rule->target_hosts == NULL)
-        {
-            free(rule);
-            return 0;
+    ReleaseSRWLockShared(&g_rules_lock);
+    return TRUE;
+}
+
+static PROCESS_RULE *make_rule(const char *process, const char *hosts, const char *ports,
+                               const char *domains, RuleProtocol protocol,
+                               RuleAction action, UINT32 proxy)
+{
+    if (!process || !*process || strnlen_s(process, MAX_PROCESS_NAME) >= MAX_PROCESS_NAME ||
+        (hosts && strnlen_s(hosts, MAX_LIST_SIZE) >= MAX_LIST_SIZE) ||
+        (ports && strnlen_s(ports, MAX_LIST_SIZE) >= MAX_LIST_SIZE) ||
+        (domains && strnlen_s(domains, MAX_LIST_SIZE) >= MAX_LIST_SIZE) ||
+        (protocol != RULE_PROTOCOL_TCP && protocol != RULE_PROTOCOL_UDP && protocol != RULE_PROTOCOL_BOTH) ||
+        (action != RULE_ACTION_DIRECT && action != RULE_ACTION_PROXY && action != RULE_ACTION_BLOCK)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+    PROCESS_RULE source = {0};
+    strcpy_s(source.process_name, MAX_PROCESS_NAME, process);
+    source.target_hosts = (char *)(hosts && *hosts ? hosts : "*");
+    source.target_ports = (char *)(ports && *ports ? ports : "*");
+    source.target_domains = (char *)(domains && *domains ? domains : "*");
+    source.protocol = protocol;
+    source.action = action;
+    source.proxy_config_id = proxy;
+    source.enabled = TRUE;
+    PROCESS_RULE *result = copy_rule(&source);
+    if (result == NULL) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    return result;
+}
+
+// Consumes candidate only on success. Preparation and callbacks occur outside
+// the readers' lock. The IOCTL and list/flag publication exclude rule matching:
+// a reader cannot observe the new user policy before the kernel accepts it.
+#include "pb_policy_commit.inc"
+
+static BOOL commit_rules(PROCESS_RULE *candidate, BOOL *flush)
+{
+    return commit_policy(candidate, flush, NULL, 0, NULL, NULL);
+}
+
+PROXYBRIDGE_API UINT32 ProxyBridge_AddRuleEx(const char *process_name, const char *target_hosts,
+    const char *target_ports, const char *target_domains, RuleProtocol protocol,
+    RuleAction action, UINT32 proxy_config_id, BOOL enabled, UINT32 position)
+{
+    PROCESS_RULE *added = make_rule(process_name, target_hosts, target_ports, target_domains,
+                                    protocol, action, proxy_config_id);
+    if (added == NULL) return 0;
+    if (!pb_rules_begin_update()) { free_rules(added); SetLastError(ERROR_BUSY); return 0; }
+    PROCESS_RULE *candidate = NULL;
+    BOOL ok = snapshot_rules(&candidate), flush = FALSE;
+    UINT32 id = 0;
+    if (ok && g_next_rule_id == 0) { SetLastError(ERROR_ARITHMETIC_OVERFLOW); ok = FALSE; }
+    if (ok) {
+        added->rule_id = g_next_rule_id;
+        added->enabled = !!enabled;
+        PROCESS_RULE **tail = &candidate;
+        for (UINT32 i = 1; *tail != NULL && (position == 0 || i < position); ++i) tail = &(*tail)->next;
+        added->next = *tail;
+        *tail = added;
+        added = NULL;
+        ok = commit_rules(candidate, &flush);
+        if (ok) id = g_next_rule_id++;
+    }
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    if (!ok) free_rules(candidate);
+    free_rules(added);
+    pb_rules_end_update();
+    if (flush) flush_dns_resolver_cache(); // preserve existing domain-rule edge trigger
+    if (ok) log_message("Added rule ID: %u", id);
+    SetLastError(error);
+    return id;
+}
+
+enum PB_RULE_CHANGE { PB_RULE_ENABLE, PB_RULE_DISABLE, PB_RULE_DELETE, PB_RULE_EDIT, PB_RULE_EDIT_STATE, PB_RULE_MOVE };
+
+static BOOL change_rule(UINT32 id, enum PB_RULE_CHANGE change, PROCESS_RULE *replacement, UINT32 position)
+{
+    if (id == 0 || (change == PB_RULE_MOVE && position == 0)) {
+        free_rules(replacement);
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!pb_rules_begin_update()) { free_rules(replacement); SetLastError(ERROR_BUSY); return FALSE; }
+    PROCESS_RULE *candidate = NULL;
+    BOOL ok = snapshot_rules(&candidate), flush = FALSE;
+    if (ok) {
+        PROCESS_RULE **link = &candidate;
+        while (*link != NULL && (*link)->rule_id != id) link = &(*link)->next;
+        if (*link == NULL) { SetLastError(ERROR_NOT_FOUND); ok = FALSE; }
+        else {
+            PROCESS_RULE *r = *link;
+            switch (change) {
+            case PB_RULE_ENABLE: r->enabled = TRUE; break;
+            case PB_RULE_DISABLE: r->enabled = FALSE; break;
+            case PB_RULE_DELETE:
+                *link = r->next;
+                r->next = NULL;
+                free_rules(r);
+                break;
+            case PB_RULE_EDIT:
+            case PB_RULE_EDIT_STATE:
+                replacement->rule_id = id;
+                if (change == PB_RULE_EDIT) replacement->enabled = r->enabled;
+                replacement->next = r->next;
+                *link = replacement;
+                replacement = NULL;
+                r->next = NULL;
+                free_rules(r);
+                break;
+            case PB_RULE_MOVE:
+                *link = r->next;
+                link = &candidate;
+                for (UINT32 i = 1; *link != NULL && i < position; ++i) link = &(*link)->next;
+                r->next = *link;
+                *link = r;
+                break;
+            }
+            ok = commit_rules(candidate, &flush);
         }
-        strcpy_s(rule->target_hosts, 2, "*");
     }
-
-    // Dynamically allocate memory for target_ports no size limit!
-    if (target_ports != NULL && target_ports[0] != '\0')
-    {
-        size_t len = strnlen_s(target_ports, MAX_LIST_SIZE) + 1;
-        rule->target_ports = (char *)malloc(len);
-        if (rule->target_ports == NULL)
-        {
-            free(rule->target_hosts);
-            free(rule);
-            return 0;
-        }
-        strncpy_s(rule->target_ports, len, target_ports, _TRUNCATE);
-    }
-    else
-    {
-        // Default to "*" - all ports
-        rule->target_ports = (char *)malloc(2);
-        if (rule->target_ports == NULL)
-        {
-            free(rule->target_hosts);
-            free(rule);
-            return 0;
-        }
-        strcpy_s(rule->target_ports, 2, "*");
-    }
-
-    // target_domains: "" or NULL means no domain restriction (stored as "*")
-    if (target_domains != NULL && target_domains[0] != '\0')
-    {
-        size_t len = strnlen_s(target_domains, MAX_LIST_SIZE) + 1;
-        rule->target_domains = (char *)malloc(len);
-        if (rule->target_domains == NULL)
-        {
-            free(rule->target_ports);
-            free(rule->target_hosts);
-            free(rule);
-            return 0;
-        }
-        strncpy_s(rule->target_domains, len, target_domains, _TRUNCATE);
-    }
-    else
-    {
-        rule->target_domains = (char *)malloc(2);
-        if (rule->target_domains == NULL)
-        {
-            free(rule->target_ports);
-            free(rule->target_hosts);
-            free(rule);
-            return 0;
-        }
-        strcpy_s(rule->target_domains, 2, "*");
-    }
-
-    rule->action = action;
-    rule->enabled = TRUE;
-    rule->next = NULL;
-
-    // Append to tail so rules are evaluated in the order they were added,
-    // matching the visual top-to-bottom order in the GUI (fixes issue #93).
-    AcquireSRWLockExclusive(&g_rules_lock);
-    if (rules_list == NULL)
-    {
-        rules_list = rule;
-    }
-    else
-    {
-        PROCESS_RULE *tail = rules_list;
-        while (tail->next != NULL)
-            tail = tail->next;
-        tail->next = rule;
-    }
-    UINT32 new_id = rule->rule_id;
-    ReleaseSRWLockExclusive(&g_rules_lock);
-
-    update_has_active_rules();
-    log_message("Added rule ID: %u for process '%s' (Protocol: %d, Action: %d, ProxyConfigId: %u, Domains: %s)", new_id, process_name, protocol, action, proxy_config_id, target_domains ? target_domains : "*");
-
-    return new_id;
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    if (!ok) free_rules(candidate);
+    free_rules(replacement);
+    pb_rules_end_update();
+    if (flush) flush_dns_resolver_cache();
+    if (ok) log_message("Updated rule ID: %u", id);
+    else log_message("Rule update rejected (%lu); previous rules were kept", error);
+    SetLastError(error);
+    return ok;
 }
 
 PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id)
-{
-    if (rule_id == 0)
-        return FALSE;
-
-    BOOL found = FALSE;
-    AcquireSRWLockExclusive(&g_rules_lock);
-    PROCESS_RULE *rule = rules_list;
-    while (rule != NULL)
-    {
-        if (rule->rule_id == rule_id)
-        {
-            rule->enabled = TRUE;
-            found = TRUE;
-            break;
-        }
-        rule = rule->next;
-    }
-    ReleaseSRWLockExclusive(&g_rules_lock);
-
-    if (found)
-    {
-        update_has_active_rules();
-        log_message("Enabled rule ID: %u", rule_id);
-    }
-    return found;
-}
-
+{ return change_rule(rule_id, PB_RULE_ENABLE, NULL, 0); }
 PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id)
-{
-    if (rule_id == 0)
-        return FALSE;
-
-    BOOL found = FALSE;
-    AcquireSRWLockExclusive(&g_rules_lock);
-    PROCESS_RULE *rule = rules_list;
-    while (rule != NULL)
-    {
-        if (rule->rule_id == rule_id)
-        {
-            rule->enabled = FALSE;
-            found = TRUE;
-            break;
-        }
-        rule = rule->next;
-    }
-    ReleaseSRWLockExclusive(&g_rules_lock);
-
-    if (found)
-    {
-        update_has_active_rules();  // Phase 1: Update fast-path flag
-        log_message("Disabled rule ID: %u", rule_id);
-    }
-    return found;
-}
-
+{ return change_rule(rule_id, PB_RULE_DISABLE, NULL, 0); }
 PROXYBRIDGE_API BOOL ProxyBridge_DeleteRule(UINT32 rule_id)
+{ return change_rule(rule_id, PB_RULE_DELETE, NULL, 0); }
+PROXYBRIDGE_API BOOL ProxyBridge_MoveRuleToPosition(UINT32 rule_id, UINT32 new_position)
+{ return change_rule(rule_id, PB_RULE_MOVE, NULL, new_position); }
+
+PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char *process_name,
+    const char *target_hosts, const char *target_ports, const char *target_domains,
+    RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id)
 {
-    if (rule_id == 0)
-        return FALSE;
-
-    BOOL found = FALSE;
-    AcquireSRWLockExclusive(&g_rules_lock);
-    PROCESS_RULE *rule = rules_list;
-    PROCESS_RULE *prev = NULL;
-
-    while (rule != NULL)
-    {
-        if (rule->rule_id == rule_id)
-        {
-            if (prev == NULL)
-                rules_list = rule->next;
-            else
-                prev->next = rule->next;
-
-            // Unlink + free under the exclusive lock so no reader can be mid-traversal
-            // on this node (readers hold the shared lock; exclusive waits them out).
-            if (rule->target_hosts != NULL)
-                free(rule->target_hosts);
-            if (rule->target_ports != NULL)
-                free(rule->target_ports);
-            if (rule->target_domains != NULL)
-                free(rule->target_domains);
-            free(rule);
-            found = TRUE;
-            break;
-        }
-        prev = rule;
-        rule = rule->next;
-    }
-    ReleaseSRWLockExclusive(&g_rules_lock);
-
-    if (found)
-    {
-        update_has_active_rules();
-        log_message("Deleted rule ID: %u", rule_id);
-    }
-    return found;
-}
-
-PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id)
-{
-    if (rule_id == 0 || process_name == NULL || target_hosts == NULL || target_ports == NULL)
-        return FALSE;
-
-    // NULL/"" domains means "no restriction" -> stored as "*"
-    const char *domains_in = (target_domains != NULL && target_domains[0] != '\0') ? target_domains : "*";
-
-    // Allocate the three replacements up front (outside the lock) so a failure leaves the
-    // rule untouched and the lock is held only for the pointer swap.
-    char *new_hosts   = _strdup(target_hosts);
-    char *new_ports   = _strdup(target_ports);
-    char *new_domains = _strdup(domains_in);
-    if (new_hosts == NULL || new_ports == NULL || new_domains == NULL)
-    {
-        free(new_hosts);
-        free(new_ports);
-        free(new_domains);
-        return FALSE;
-    }
-
-    BOOL found = FALSE;
-    AcquireSRWLockExclusive(&g_rules_lock);
-    PROCESS_RULE *rule = rules_list;
-    while (rule != NULL)
-    {
-        if (rule->rule_id == rule_id)
-        {
-            strncpy_s(rule->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
-
-            free(rule->target_hosts);
-            free(rule->target_ports);
-            free(rule->target_domains);
-            rule->target_hosts   = new_hosts;
-            rule->target_ports   = new_ports;
-            rule->target_domains = new_domains;
-
-            rule->protocol = protocol;
-            rule->action = action;
-            rule->proxy_config_id = proxy_config_id;
-            found = TRUE;
-            break;
-        }
-        rule = rule->next;
-    }
-    ReleaseSRWLockExclusive(&g_rules_lock);
-
-    if (!found)
-    {
-        // rule_id not found - the pre-allocated strings were never installed, free them.
-        free(new_hosts);
-        free(new_ports);
-        free(new_domains);
-        return FALSE;
-    }
-
-    update_has_active_rules();
-    log_message("Updated rule ID: %u (ProxyConfigId: %u, Domains: %s)", rule_id, proxy_config_id, domains_in);
-    return TRUE;
+    PROCESS_RULE *replacement = make_rule(process_name, target_hosts, target_ports, target_domains,
+                                         protocol, action, proxy_config_id);
+    if (replacement == NULL) return FALSE;
+    return change_rule(rule_id, PB_RULE_EDIT, replacement, 0);
 }
 
 PROXYBRIDGE_API UINT32 ProxyBridge_GetRulePosition(UINT32 rule_id)
 {
-    if (rule_id == 0)
-        return 0;
-
-    UINT32 position = 1;
-    UINT32 result = 0;
+    UINT32 result = 0, position = 1;
     AcquireSRWLockShared(&g_rules_lock);
-    PROCESS_RULE *rule = rules_list;
-    while (rule != NULL)
-    {
-        if (rule->rule_id == rule_id)
-        {
-            result = position;
-            break;
-        }
-        position++;
-        rule = rule->next;
-    }
+    for (const PROCESS_RULE *r = rules_list; r != NULL; r = r->next, ++position)
+        if (r->rule_id == rule_id) { result = position; break; }
     ReleaseSRWLockShared(&g_rules_lock);
     return result;
 }
 
-PROXYBRIDGE_API BOOL ProxyBridge_MoveRuleToPosition(UINT32 rule_id, UINT32 new_position)
+// Extended entry points publish fields, enable state and insertion position in
+// one transaction. Existing API callers retain their previous defaults.
+PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char *process, const char *hosts,
+    const char *ports, const char *domains, RuleProtocol protocol, RuleAction action, UINT32 proxy)
 {
-    if (rule_id == 0 || new_position == 0)
-        return FALSE;
-
-    // Relink under the exclusive lock so packet-path readers never see a half-moved list.
-    AcquireSRWLockExclusive(&g_rules_lock);
-
-    // first rule and remove it from current position
-    PROCESS_RULE *rule = rules_list;
-    PROCESS_RULE *prev = NULL;
-
-    while (rule != NULL)
-    {
-        if (rule->rule_id == rule_id)
-            break;
-        prev = rule;
-        rule = rule->next;
-    }
-
-    if (rule == NULL)
-    {
-        ReleaseSRWLockExclusive(&g_rules_lock);
-        return FALSE;
-    }
-
-    // Remove from current position
-    if (prev == NULL)
-    {
-        rules_list = rule->next;
-    }
-    else
-    {
-        prev->next = rule->next;
-    }
-
-    // Insert at new position
-    if (new_position == 1)
-    {
-        // Insert at head
-        rule->next = rules_list;
-        rules_list = rule;
-    }
-    else
-    {
-        // taken from stackflow
-        PROCESS_RULE *current = rules_list;
-        UINT32 pos = 1;
-
-        while (current != NULL && pos < new_position - 1)
-        {
-            current = current->next;
-            pos++;
-        }
-
-        if (current == NULL)
-        {
-            // position is beyond list end we can append to tail
-            current = rules_list;
-            while (current->next != NULL)
-                current = current->next;
-            current->next = rule;
-            rule->next = NULL;
-        }
-        else
-        {
-            rule->next = current->next;
-            current->next = rule;
-        }
-    }
-
-    ReleaseSRWLockExclusive(&g_rules_lock);
-
-    log_message("Moved rule ID %u to position %u", rule_id, new_position);
-    return TRUE;
+    return ProxyBridge_AddRuleEx(process, hosts, ports, domains, protocol, action, proxy, TRUE, 0);
 }
 
-// Recomputes the fast-path flags. Takes the shared rules lock itself, so callers must
-// NOT already hold g_rules_lock exclusive (SRW locks are non-recursive) - the rule API
-// functions below release their exclusive lock before calling this.
-void update_has_active_rules(void)
+PROXYBRIDGE_API BOOL ProxyBridge_EditRuleEx(UINT32 id, const char *process, const char *hosts,
+    const char *ports, const char *domains, RuleProtocol protocol, RuleAction action, UINT32 proxy, BOOL enabled)
 {
-    BOOL has_active = FALSE;
-    BOOL has_domain = FALSE;
+    PROCESS_RULE *replacement = make_rule(process, hosts, ports, domains, protocol, action, proxy);
+    if (replacement == NULL) return FALSE;
+    replacement->enabled = !!enabled;
+    return change_rule(id, PB_RULE_EDIT_STATE, replacement, 0);
+}
 
-    AcquireSRWLockShared(&g_rules_lock);
-    PROCESS_RULE *rule = rules_list;
-    while (rule != NULL)
-    {
-        if (rule->enabled)
-        {
-            has_active = TRUE;
-            if (rule_has_domain_filter(rule))
-            {
-                has_domain = TRUE;
-                break;  // both flags are now known
-            }
-        }
-        rule = rule->next;
+// Prepare every rule before touching the active list or the caller's ID array.
+// count == 0 clears the set using the same single commit as a replacement.
+PROXYBRIDGE_API BOOL ProxyBridge_ReplaceRules(const ProxyBridgeRuleSpec *rules, UINT32 count, UINT32 *out_ids)
+{
+    if (count != 0 && (rules == NULL || out_ids == NULL)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
     }
-    ReleaseSRWLockShared(&g_rules_lock);
+    if (!pb_rules_begin_update()) return FALSE;
+    BOOL ok = TRUE, flush = FALSE;
+    PROCESS_RULE *candidate = NULL;
+    PROCESS_RULE **tail = &candidate;
+    if (count != 0 && (g_next_rule_id == 0 || count - 1 > ~(UINT32)0 - g_next_rule_id)) {
+        SetLastError(ERROR_ARITHMETIC_OVERFLOW);
+        ok = FALSE;
+    }
+    for (UINT32 i = 0; i < count && ok; ++i) {
+        const ProxyBridgeRuleSpec *input = &rules[i];
+        PROCESS_RULE *rule = make_rule(input->process_name, input->target_hosts,
+            input->target_ports, input->target_domains, input->protocol,
+            input->action, input->proxy_config_id);
+        if (rule == NULL) { ok = FALSE; break; }
+        rule->enabled = !!input->enabled;
+        rule->rule_id = g_next_rule_id + i;
+        *tail = rule;
+        tail = &rule->next;
+    }
+    if (ok) ok = commit_rules(candidate, &flush);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    if (ok) {
+        for (UINT32 i = 0; i < count; ++i) out_ids[i] = g_next_rule_id + i;
+        g_next_rule_id += count;
+    } else free_rules(candidate);
+    pb_rules_end_update();
+    if (flush) flush_dns_resolver_cache();
+    SetLastError(error);
+    return ok;
+}
 
-    g_has_active_rules = has_active;
+#include "pb_prepared_profile.inc"
 
-    // Edge trigger: when domain rules first become active, flush the OS DNS cache so
-    // subsequent connections re-resolve and populate our snoop cache.
-    if (has_domain && !g_has_domain_rules && running)
-        flush_dns_resolver_cache();
-    g_has_domain_rules = has_domain;
-
-    // Rules changed -> refresh the kernel driver's watch list so live Add/Edit/Delete/Enable
-    // of proxy & block rules take effect immediately (no-op until the driver is started).
-    pb_driver_sync_rules();
+PROXYBRIDGE_API BOOL ProxyBridge_ReplaceProfile(const ProxyBridgeProxySpec *configs, UINT32 config_count,
+    const ProxyBridgeRuleSpec *rules, UINT32 rule_count, UINT32 *config_ids, UINT32 *rule_ids, BOOL loopback)
+{
+    if ((config_count && !config_ids) || (rule_count && !rule_ids)) {
+        SetLastError(ERROR_INVALID_PARAMETER); return FALSE;
+    }
+    void *prepared = ProxyBridge_PrepareProfile(configs, config_count, rules, rule_count, loopback);
+    return prepared ? ProxyBridge_CommitProfile(prepared, config_ids, rule_ids) : FALSE;
+}
+PROXYBRIDGE_API BOOL ProxyBridge_SetLocalhostViaProxyChecked(BOOL enable)
+{
+    if (!pb_rules_begin_update()) return FALSE;
+    PROCESS_RULE *candidate = NULL;
+    BOOL flush = FALSE;
+    BOOL ok = snapshot_rules(&candidate);
+    if (ok) ok = commit_policy(candidate, &flush, NULL, 0, NULL, &enable);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    if (!ok) free_rules(candidate);
+    pb_rules_end_update();
+    if (ok) log_message("Localhost routing: %s", enable ? "via proxy" : "direct");
+    else log_message("Localhost routing update rejected (%lu); previous policy was kept", error);
+    SetLastError(error);
+    return ok;
 }

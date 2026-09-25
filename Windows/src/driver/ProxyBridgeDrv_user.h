@@ -12,12 +12,15 @@
 extern "C" {
 #endif
 
-// Open \\.\ProxyBridgeDrv. Returns INVALID_HANDLE_VALUE if the driver isn't running.
+// Open the unique present PnP interface. Never installs/starts a service or picks
+// an arbitrary duplicate. Returns INVALID_HANDLE_VALUE with a Win32 error.
 HANDLE pbdrv_open(void);
+BOOL pbdrv_get_status(HANDLE h, PBDRV_STATUS *status);
 
 // Push relay endpoints + selfPid (config) and the process watch list to the driver.
 BOOL pbdrv_configure(HANDLE h, const PBDRV_CONFIG *cfg);
 BOOL pbdrv_set_watchlist(HANDLE h, const PBDRV_WATCHLIST *wl);
+BOOL pbdrv_set_rule_policy(HANDLE h, const PBDRV_WATCHLIST *wl, BOOL loopback);
 
 // Arm / disarm redirection.
 BOOL pbdrv_enable(HANDLE h, BOOL on);

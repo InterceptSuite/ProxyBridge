@@ -1,0 +1,31 @@
+// Use the same product icon for Start menu shortcuts and Apps & Features.
+1 ICON "../gui/res/logo.ico"
+
+1 VERSIONINFO
+FILEVERSION 1,0,0,1
+PRODUCTVERSION 1,0,0,1
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "InterceptSuite\0"
+      VALUE "FileDescription", "ProxyBridge Launcher\0"
+      VALUE "FileVersion", "1.0.0.1\0"
+      VALUE "InternalName", "ProxyBridgeLauncher.exe\0"
+      VALUE "OriginalFilename", "ProxyBridgeLauncher.exe\0"
+      VALUE "ProductName", "ProxyBridge\0"
+      VALUE "ProductVersion", "1.0.0.1\0"
+      VALUE "LegalCopyright", "Copyright (c) 2026 InterceptSuite\0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 1200
+  END
+END

@@ -26,7 +26,32 @@ typedef BOOL   (*PFN_DeleteProxyConfig)(UINT32);
 typedef int    (*PFN_TestProxyConfig)(UINT32, const char*, unsigned short, char*, size_t);
 typedef void   (*PBTestLogCallback)(const char* line, void* user);
 typedef int    (*PFN_TestProxyConfigEx)(UINT32, const char*, unsigned short, PBTestLogCallback, void*);
+typedef struct PBProxySpec {
+    PBProxyType type;
+    const char *host;
+    unsigned short port;
+    const char *username;
+    const char *password;
+    BOOL send_domain_to_proxy;
+} PBProxySpec;
+typedef struct PBRuleSpec {
+    const char *process_name;
+    const char *target_hosts;
+    const char *target_ports;
+    const char *target_domains;
+    PBRuleProtocol protocol;
+    PBRuleAction action;
+    UINT32 proxy_config_id;
+    BOOL enabled;
+} PBRuleSpec;
+typedef BOOL (*PFN_ReplaceProfile)(const PBProxySpec*, UINT32, const PBRuleSpec*, UINT32, UINT32*, UINT32*, BOOL);
+typedef void *(*PFN_PrepareProfile)(const PBProxySpec*, UINT32, const PBRuleSpec*, UINT32, BOOL);
+typedef BOOL (*PFN_CommitProfile)(void*, UINT32*, UINT32*);
+typedef void (*PFN_DiscardProfile)(void*);
+typedef BOOL (*PFN_ReplaceRules)(const PBRuleSpec*, UINT32, UINT32*);
 typedef UINT32 (*PFN_AddRule)(const char*, const char*, const char*, const char*, PBRuleProtocol, PBRuleAction, UINT32);
+typedef UINT32 (*PFN_AddRuleEx)(const char*, const char*, const char*, const char*, PBRuleProtocol, PBRuleAction, UINT32, BOOL, UINT32);
+typedef BOOL   (*PFN_EditRuleEx)(UINT32, const char*, const char*, const char*, const char*, PBRuleProtocol, PBRuleAction, UINT32, BOOL);
 typedef BOOL   (*PFN_EnableRule)(UINT32);
 typedef BOOL   (*PFN_DisableRule)(UINT32);
 typedef BOOL   (*PFN_DeleteRule)(UINT32);
@@ -34,12 +59,14 @@ typedef BOOL   (*PFN_EditRule)(UINT32, const char*, const char*, const char*, co
 typedef BOOL   (*PFN_MoveRuleToPosition)(UINT32, UINT32);
 typedef UINT32 (*PFN_GetRulePosition)(UINT32);
 typedef void   (*PFN_SetLocalhostViaProxy)(BOOL);
+typedef BOOL (*PFN_SetLocalhostViaProxyChecked)(BOOL);
 typedef void   (*PFN_SetLogCallback)(PBLogCallback);
 typedef void   (*PFN_SetConnectionCallback)(PBConnectionCallback);
 typedef void   (*PFN_SetTrafficLoggingEnabled)(BOOL);
 typedef void   (*PFN_ClearConnectionLogs)(void);
 typedef BOOL   (*PFN_Start)(void);
 typedef BOOL   (*PFN_Stop)(void);
+typedef BOOL   (*PFN_IsFilteringActive)(void);
 
 // resolved API table
 typedef struct {
@@ -49,7 +76,14 @@ typedef struct {
     PFN_DeleteProxyConfig         DeleteProxyConfig;
     PFN_TestProxyConfig           TestProxyConfig;
     PFN_TestProxyConfigEx         TestProxyConfigEx;
+    PFN_ReplaceProfile            ReplaceProfile;
+    PFN_PrepareProfile            PrepareProfile;
+    PFN_CommitProfile             CommitProfile;
+    PFN_DiscardProfile            DiscardProfile;
+    PFN_ReplaceRules              ReplaceRules;
     PFN_AddRule                   AddRule;
+    PFN_AddRuleEx                 AddRuleEx;
+    PFN_EditRuleEx                EditRuleEx;
     PFN_EnableRule                EnableRule;
     PFN_DisableRule               DisableRule;
     PFN_DeleteRule                DeleteRule;
@@ -57,12 +91,14 @@ typedef struct {
     PFN_MoveRuleToPosition        MoveRuleToPosition;
     PFN_GetRulePosition           GetRulePosition;
     PFN_SetLocalhostViaProxy      SetLocalhostViaProxy;
+    PFN_SetLocalhostViaProxyChecked SetLocalhostViaProxyChecked;
     PFN_SetLogCallback            SetLogCallback;
     PFN_SetConnectionCallback     SetConnectionCallback;
     PFN_SetTrafficLoggingEnabled  SetTrafficLoggingEnabled;
     PFN_ClearConnectionLogs       ClearConnectionLogs;
     PFN_Start                     Start;
     PFN_Stop                      Stop;
+    PFN_IsFilteringActive          IsFilteringActive;
 } PBApi;
 
 // Loads ProxyBridgeCore.dll (from the exe's directory) and resolves every export.
@@ -91,6 +127,13 @@ static BOOL PB_Load(PBApi* api)
     PB_BIND(DeleteProxyConfig,        "DeleteProxyConfig");
     PB_BIND(TestProxyConfig,          "TestProxyConfig");
     PB_BIND(TestProxyConfigEx,        "TestProxyConfigEx");
+    PB_BIND(ReplaceProfile,          "ReplaceProfile");
+    PB_BIND(PrepareProfile,          "PrepareProfile");
+    PB_BIND(CommitProfile,           "CommitProfile");
+    PB_BIND(DiscardProfile,          "DiscardProfile");
+    PB_BIND(ReplaceRules,            "ReplaceRules");
+    PB_BIND(AddRuleEx,                "AddRuleEx");
+    PB_BIND(EditRuleEx,               "EditRuleEx");
     PB_BIND(AddRule,                  "AddRule");
     PB_BIND(EnableRule,               "EnableRule");
     PB_BIND(DisableRule,              "DisableRule");
@@ -98,6 +141,7 @@ static BOOL PB_Load(PBApi* api)
     PB_BIND(EditRule,                 "EditRule");
     PB_BIND(MoveRuleToPosition,       "MoveRuleToPosition");
     PB_BIND(GetRulePosition,          "GetRulePosition");
+    PB_BIND(SetLocalhostViaProxyChecked, "SetLocalhostViaProxyChecked");
     PB_BIND(SetLocalhostViaProxy,     "SetLocalhostViaProxy");
     PB_BIND(SetLogCallback,           "SetLogCallback");
     PB_BIND(SetConnectionCallback,    "SetConnectionCallback");
@@ -105,6 +149,7 @@ static BOOL PB_Load(PBApi* api)
     PB_BIND(ClearConnectionLogs,      "ClearConnectionLogs");
     PB_BIND(Start,                    "Start");
     PB_BIND(Stop,                     "Stop");
+    PB_BIND(IsFilteringActive,        "IsFilteringActive");
     #undef PB_BIND
 
     return TRUE;

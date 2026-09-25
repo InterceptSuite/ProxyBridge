@@ -3,8 +3,7 @@
 // Drives ProxyBridgeCore.dll and reads/writes %APPDATA%\ProxyBridge settings.json +
 // *.pbprofile files.
 //
-// Threading: DLL log/connection callbacks fire on native threads; each formats a line and
-// PostMessage()s a heap wide-string to the UI thread, which appends it and frees it.
+// Threading: DLL callbacks enqueue owned lines; the UI timer drains bounded batches.
 
 #ifndef UNICODE
 #define UNICODE
@@ -93,20 +92,9 @@ static int       g_tbHot = -1;            // hovered menu-bar icon: 0 = settings
 
 // Per-log line store so the search box can filter without losing lines. New lines append to
 // the edit only when they match the active filter; changing the filter re-renders from here.
-#define LOG_MAX_LINES 4000
-#define LOG_PEND_MAX  8000
-typedef struct {
-    HWND     edit;
-    wchar_t* lines[LOG_MAX_LINES];
-    int      count;
-    wchar_t  filter[128];
-    wchar_t* pend[LOG_PEND_MAX];   // queued by native callback threads, drained by the UI timer
-    int      pendCount;
-    CRITICAL_SECTION lock;
-} LogStore;
+#include "ui/logstore-types.h"
 static LogStore g_connStore, g_actStore;
 #define TIMER_LOG 1                // batched log-flush timer
-static int g_idleTicks = 0;        // consecutive idle flushes (for working-set trim)
 static HFONT     g_hMono, g_hUi;
 static HINSTANCE g_hInst;
 static NOTIFYICONDATAW g_tray;
@@ -114,10 +102,12 @@ static BOOL      g_trayAdded = FALSE;
 static UINT      g_wmTaskbarCreated = 0;   // shell broadcast when the taskbar reappear
 static BOOL      g_reallyExit = FALSE;
 static BOOL      g_started = FALSE;
+static BOOL      g_filteringActive = FALSE;
 
 static PBProfile g_profile;
 static wchar_t   g_activeProfile[PB_NAME_MAX] = L"Default";
 static BOOL      g_localhost = FALSE, g_trafficLog = TRUE, g_closeToTray = TRUE;
+static volatile LONG g_connectionLogEnabled; // native callback gate; UI setting stays UI-owned
 static BOOL      g_startup = FALSE;   // "Run at Startup" (schtasks logon task)
 static BOOL      g_autoClear = TRUE;  // auto-clear logs past a line threshold to save memory
 #define AUTO_CLEAR_LINES 500
@@ -133,15 +123,6 @@ static HMENU     g_switchMenu = NULL;   // the Profile > Switch submenu (rebuilt
 static void W2Ux(const wchar_t* w, char* out, int cch)
 { WideCharToMultiByte(CP_UTF8, 0, w ? w : L"", -1, out, cch, NULL, NULL); }
 
-static wchar_t* U2Wdup(const char* s)
-{
-    if (!s) s = "";
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
-    wchar_t* w = (wchar_t*)malloc((size_t)n * sizeof(wchar_t));
-    if (w) MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
-    return w;
-}
-
 static int ProtoIdx(const wchar_t* s)  { if (!_wcsicmp(s, L"UDP")) return 1; if (!_wcsicmp(s, L"BOTH")) return 2; return 0; }
 static int ActionIdx(const wchar_t* s) { if (!_wcsicmp(s, L"DIRECT")) return 1; if (!_wcsicmp(s, L"BLOCK")) return 2; return 0; }
 static const wchar_t* ProtoName(int i)  { return i == 1 ? L"UDP" : i == 2 ? L"BOTH" : L"TCP"; }
@@ -152,17 +133,15 @@ static const wchar_t* ProtoName(int i)  { return i == 1 ? L"UDP" : i == 2 ? L"BO
 // forward decls
 static void SaveActive(void);
 static UINT32 ResolveNativeCfg(UINT32 storedId);
-static void ApplyConfigs(void);
-static void ApplyRules(void);
-static void UnapplyProfile(void);
-static void SwitchToProfile(const wchar_t* name);
+static BOOL ApplyProfile(PBProfile *profile);
+static BOOL SwitchToProfile(const wchar_t* name);
 static void RebuildProfileMenu(HWND hwnd);
 static void UpdateTitle(void);
 static void SyncMenuChecks(HWND hwnd);
 static void BuildMainMenu(HWND hwnd);
 static void RelocalizeUI(HWND hwnd);
-static UINT32 EngineAddRule(PBRule* r);
-static void EngineEditRule(PBRule* r);
+static UINT32 EngineAddRule(PBRule* r, UINT32 position);
+static BOOL EngineEditRule(PBRule* r);
 INT_PTR CALLBACK ServersDlgProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK ServerEditDlgProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK RulesDlgProc(HWND, UINT, WPARAM, LPARAM);
@@ -173,46 +152,13 @@ INT_PTR CALLBACK NameDlgProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK AboutDlgProc(HWND, UINT, WPARAM, LPARAM);
 
 // DLL callbacks (native thread)
-static void PBLogCb(const char* message)
-{
-    if (!g_hMain) return;
-    wchar_t* body = U2Wdup(message);
-    if (!body) return;
-    wchar_t ts[16]; GetTimePrefix(ts, 16);
-    size_t n = wcslen(ts) + wcslen(body) + 3;
-    wchar_t* line = (wchar_t*)malloc(n * sizeof(wchar_t));
-    if (line) { _snwprintf_s(line, n, _TRUNCATE, L"%s%s\r\n", ts, body); LogStoreQueue(&g_actStore, line); }
-    free(body);
-}
+#include "ui/log-callbacks.h"
 
-static void PBConnCb(const char* proc, DWORD pid, const char* ip, unsigned short port, const char* info)
-{
-    if (!g_hMain || !g_trafficLog) return;
-    wchar_t *wp = U2Wdup(proc), *wi = U2Wdup(ip), *wf = U2Wdup(info);
-    // Connection-log filters: derive protocol/action from the proxy_info and drop non-matches.
-    if (g_fltCount > 0)
-    {
-        wchar_t wport[16]; _snwprintf_s(wport, 16, _TRUNCATE, L"%u", port);
-        const wchar_t* proto  = (info && strstr(info, "(UDP)")) ? L"UDP" : L"TCP";
-        const wchar_t* action = (info && _strnicmp(info, "Direct", 6) == 0) ? L"Direct"
-                              : (info && _strnicmp(info, "Block",  5) == 0) ? L"Blocked" : L"Proxy";
-        if (!PassesLogFilters(wp ? wp : L"", wi ? wi : L"", wport, proto, action))
-        { free(wp); free(wi); free(wf); return; }
-    }
-    wchar_t ts[16]; GetTimePrefix(ts, 16);
-    size_t n = 64 + (wp ? wcslen(wp) : 0) + (wi ? wcslen(wi) : 0) + (wf ? wcslen(wf) : 0);
-    wchar_t* line = (wchar_t*)malloc(n * sizeof(wchar_t));
-    if (line)
-    {
-        _snwprintf_s(line, n, _TRUNCATE, L"%s%s (PID:%lu) -> %s:%u  via %s\r\n",
-                   ts, wp ? wp : L"?", pid, wi ? wi : L"?", port, wf ? wf : L"?");
-        LogStoreQueue(&g_connStore, line);
-    }
-    free(wp); free(wi); free(wf);
-}
+#include "ui/traffic-logging.h"
 
 // profile apply / persist
-static void SaveActive(void) { PB_ProfileSave(g_activeProfile, &g_profile); }
+static UINT64 g_profileEditRevision;
+static void SaveActive(void) { ++g_profileEditRevision; PB_ProfileSave(g_activeProfile, &g_profile); }
 
 static UINT32 ResolveNativeCfg(UINT32 storedId)
 {
@@ -221,87 +167,135 @@ static UINT32 ResolveNativeCfg(UINT32 storedId)
     return 0; // 0 => DLL uses first available config
 }
 
-static void ApplyConfigs(void)
+static void *PrepareEngineProfile(PBProfile *profile, PFN_PrepareProfile prepare)
 {
-    for (int i = 0; i < g_profile.cfgCount; i++)
-    {
-        PBConfig* c = &g_profile.cfg[i];
-        int type = (_wcsicmp(c->type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5;
-        char h[256], u[256], p[256];
-        W2Ux(c->host, h, sizeof(h)); W2Ux(c->user, u, sizeof(u)); W2Ux(c->pass, p, sizeof(p));
-        c->nativeId = g_api.AddProxyConfig((PBProxyType)type, h, (unsigned short)_wtoi(c->port), u, p, c->sendDomain ? TRUE : FALSE);
-        if (c->storedId == 0) c->storedId = c->nativeId;
+    typedef struct ProfileText {
+        char host[1024], user[512], password[512];
+    } ProfileText;
+    typedef struct RuleText {
+        char process[4096], hosts[1024], ports[512], domains[1024];
+    } RuleText;
+    if (profile->cfgCount < 0 || profile->cfgCount > PB_MAX_CFG ||
+        profile->ruleCount < 0 || profile->ruleCount > PB_MAX_RULE) {
+        SetLastError(ERROR_INVALID_DATA);
+        return NULL;
     }
+    UINT32 nc = (UINT32)profile->cfgCount, nr = (UINT32)profile->ruleCount;
+    ProfileText *ct = calloc(nc ? nc : 1, sizeof(*ct));
+    RuleText *rt = calloc(nr ? nr : 1, sizeof(*rt));
+    PBProxySpec *configs = calloc(nc ? nc : 1, sizeof(*configs));
+    PBRuleSpec *rules = calloc(nr ? nr : 1, sizeof(*rules));
+    void *prepared = NULL;
+    BOOL ok = ct && rt && configs && rules;
+    if (!ok) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    for (UINT32 i = 0; i < nc && ok; ++i) {
+        PBConfig *c = &profile->cfg[i];
+        for (UINT32 j = 0; j < i; ++j)
+            if (c->storedId != 0 && c->storedId == profile->cfg[j].storedId) {
+                SetLastError(ERROR_DUP_NAME); ok = FALSE; break;
+            }
+        if (!ok) break;
+        if (_wcsicmp(c->type, L"HTTP") == 0) configs[i].type = PB_PROXY_HTTP;
+        else if (_wcsicmp(c->type, L"SOCKS5") == 0) configs[i].type = PB_PROXY_SOCKS5;
+        else { SetLastError(ERROR_INVALID_DATA); ok = FALSE; break; }
+        wchar_t *end;
+        unsigned long port = wcstoul(c->port, &end, 10);
+        if (end == c->port || *end || port == 0 || port > 65535) {
+            SetLastError(ERROR_INVALID_PARAMETER); ok = FALSE; break;
+        }
+        ok = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, c->host, -1, ct[i].host, sizeof(ct[i].host), NULL, NULL) &&
+             WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, c->user, -1, ct[i].user, sizeof(ct[i].user), NULL, NULL) &&
+             WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, c->pass, -1, ct[i].password, sizeof(ct[i].password), NULL, NULL);
+        configs[i].host = ct[i].host;
+        configs[i].username = ct[i].user;
+        configs[i].password = ct[i].password;
+        configs[i].port = (unsigned short)port;
+        configs[i].send_domain_to_proxy = c->sendDomain;
+    }
+    for (UINT32 i = 0; i < nr && ok; ++i) {
+        PBRule *r = &profile->rule[i];
+        ok = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->proc, -1, rt[i].process, sizeof(rt[i].process), NULL, NULL) &&
+             WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->hosts, -1, rt[i].hosts, sizeof(rt[i].hosts), NULL, NULL) &&
+             WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->ports, -1, rt[i].ports, sizeof(rt[i].ports), NULL, NULL) &&
+             WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->domains, -1, rt[i].domains, sizeof(rt[i].domains), NULL, NULL);
+        rules[i].process_name = rt[i].process;
+        rules[i].target_hosts = rt[i].hosts;
+        rules[i].target_ports = rt[i].ports;
+        rules[i].target_domains = rt[i].domains;
+        rules[i].protocol = (PBRuleProtocol)ProtoIdx(r->proto);
+        rules[i].action = (PBRuleAction)ActionIdx(r->action);
+        rules[i].enabled = r->enabled;
+        if (ok && rules[i].action == PB_ACTION_PROXY && r->cfgStoredId != 0) {
+            for (UINT32 j = 0; j < nc; ++j)
+                if (profile->cfg[j].storedId == r->cfgStoredId) { rules[i].proxy_config_id = j + 1; break; }
+            if (rules[i].proxy_config_id == 0) { SetLastError(ERROR_NOT_FOUND); ok = FALSE; }
+        }
+    }
+    if (ok) { prepared = prepare(configs, nc, rules, nr, profile->localhostViaProxy); ok = prepared != NULL; }
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    free(ct); free(rt); free(configs); free(rules);
+    SetLastError(error);return prepared;
 }
-
-static void ApplyRules(void)
+static BOOL ApplyPreparedProfile(PBProfile *profile, void *prepared)
 {
-    for (int i = 0; i < g_profile.ruleCount; i++)
-    {
-        PBRule* r = &g_profile.rule[i];
-        char proc[2048], hosts[512], ports[256], domains[512];
-        W2Ux(r->proc, proc, sizeof(proc)); W2Ux(r->hosts, hosts, sizeof(hosts));
-        W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
-        r->nativeId = g_api.AddRule(proc, hosts, ports, domains,
-                                    (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
-                                    ResolveNativeCfg(r->cfgStoredId));
-        if (r->nativeId && !r->enabled) g_api.DisableRule(r->nativeId);
+    if (!prepared) return FALSE;
+    UINT32 configIds[PB_MAX_CFG], ruleIds[PB_MAX_RULE];
+    if (!g_api.CommitProfile(prepared, configIds, ruleIds)) return FALSE;
+    for (int i = 0; i < profile->cfgCount; ++i) {
+        profile->cfg[i].nativeId = configIds[i];
+        if (!profile->cfg[i].storedId) profile->cfg[i].storedId = configIds[i];
     }
+    for (int i = 0; i < profile->ruleCount; ++i) profile->rule[i].nativeId = ruleIds[i];
+    return TRUE;
 }
-
+static BOOL ApplyProfile(PBProfile *profile)
+{
+    return ApplyPreparedProfile(profile, PrepareEngineProfile(profile, g_api.PrepareProfile));
+}
 // Add one rule to the engine, returning its (stable) native id. Enable state applied too.
-static UINT32 EngineAddRule(PBRule* r)
+static UINT32 EngineAddRule(PBRule* r, UINT32 position)
 {
-    char proc[2048], hosts[512], ports[256], domains[512];
-    W2Ux(r->proc, proc, sizeof(proc)); W2Ux(r->hosts, hosts, sizeof(hosts));
-    W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
-    UINT32 id = g_api.AddRule(proc, hosts, ports, domains,
+    char proc[4096], hosts[1024], ports[512], domains[1024];
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->proc, -1, proc, sizeof(proc), NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->hosts, -1, hosts, sizeof(hosts), NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->ports, -1, ports, sizeof(ports), NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->domains, -1, domains, sizeof(domains), NULL, NULL))
+        return 0;
+    UINT32 nativeCfg = ResolveNativeCfg(r->cfgStoredId);
+    if ((PBRuleAction)ActionIdx(r->action) == PB_ACTION_PROXY && r->cfgStoredId != 0 && nativeCfg == 0) {
+        SetLastError(ERROR_NOT_FOUND);
+        return 0;
+    }
+    UINT32 id = g_api.AddRuleEx(proc, hosts, ports, domains,
                               (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
-                              ResolveNativeCfg(r->cfgStoredId));
-    if (id && !r->enabled) g_api.DisableRule(id);
+                              nativeCfg, r->enabled, position);
     return id;
 }
 // Edit an existing rule in place - keeps the same native id and list position.
-static void EngineEditRule(PBRule* r)
+static BOOL EngineEditRule(PBRule* r)
 {
-    char proc[2048], hosts[512], ports[256], domains[512];
-    W2Ux(r->proc, proc, sizeof(proc)); W2Ux(r->hosts, hosts, sizeof(hosts));
-    W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
-    g_api.EditRule(r->nativeId, proc, hosts, ports, domains,
+    char proc[4096], hosts[1024], ports[512], domains[1024];
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->proc, -1, proc, sizeof(proc), NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->hosts, -1, hosts, sizeof(hosts), NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->ports, -1, ports, sizeof(ports), NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, r->domains, -1, domains, sizeof(domains), NULL, NULL))
+        return 0;
+    UINT32 nativeCfg = ResolveNativeCfg(r->cfgStoredId);
+    if ((PBRuleAction)ActionIdx(r->action) == PB_ACTION_PROXY && r->cfgStoredId != 0 && nativeCfg == 0) {
+        SetLastError(ERROR_NOT_FOUND);
+        return 0;
+    }
+    return g_api.EditRuleEx(r->nativeId, proc, hosts, ports, domains,
                    (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
-                   ResolveNativeCfg(r->cfgStoredId));
-    if (r->enabled) g_api.EnableRule(r->nativeId); else g_api.DisableRule(r->nativeId);
+                   nativeCfg, r->enabled);
 }
 
-static void UnapplyProfile(void)
-{
-    for (int i = 0; i < g_profile.ruleCount; i++) if (g_profile.rule[i].nativeId) g_api.DeleteRule(g_profile.rule[i].nativeId);
-    for (int i = 0; i < g_profile.cfgCount; i++) if (g_profile.cfg[i].nativeId) g_api.DeleteProxyConfig(g_profile.cfg[i].nativeId);
-}
-
-static void SwitchToProfile(const wchar_t* name)
-{
-    UnapplyProfile();
-    PB_SetActiveProfile(name);
-    lstrcpynW(g_activeProfile, name, PB_NAME_MAX);
-    PB_ProfileLoad(name, &g_profile);
-    g_localhost = g_profile.localhostViaProxy;
-    g_trafficLog = g_profile.trafficLogging;
-    g_closeToTray = g_profile.closeToTray;
-    g_autoClear = g_profile.autoClearLogs;
-    ApplyFilterSnapshot();
-    g_api.SetLocalhostViaProxy(g_localhost);
-    g_api.SetTrafficLoggingEnabled(g_trafficLog);
-    ApplyConfigs();
-    ApplyRules();
-    SyncMenuChecks(g_hMain);
-    RebuildProfileMenu(g_hMain);
-    UpdateTitle();
-}
+#include "ui/profile-switch.h"
 
 static void UpdateTitle(void)
 {
     wchar_t t[128]; _snwprintf_s(t, 128, _TRUNCATE, L"%s - %s", APP_TITLE, g_activeProfile);
+    if (g_profileSwitchPending) _snwprintf_s(t,128,_TRUNCATE,L"%s - %s",APP_TITLE,T(S_PROFILE_LOADING));
     SetWindowTextW(g_hMain, t);
 }
 
@@ -734,29 +728,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_TIMER:
+        if (wp == TIMER_PROFILE_SWITCH) { ProfileSwitchPoll(); return 0; }
+        if (wp == TIMER_UPDATE_CHECK) { UpdPollCheck(hwnd); return 0; }
         if (wp == TIMER_LOG)
         {
-            int processed = LogStoreFlush(&g_connStore) + LogStoreFlush(&g_actStore);
-            // When traffic has been idle for a couple of seconds, hand freed pages back to the
-            // OS so memory drops after a burst instead of staying pinned in the working set.
-            if (processed == 0) { if (++g_idleTicks == 10) SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1); }
-            else g_idleTicks = 0;
+            BOOL active = g_started && g_api.IsFilteringActive && g_api.IsFilteringActive();
+            if (active != g_filteringActive) {
+                g_filteringActive = active;
+                LogStoreAdd(&g_actStore, T(active ? S_FILTER_ACTIVE : S_FILTER_INACTIVE));
+            }
+            LogStoreFlush(&g_connStore); LogStoreFlush(&g_actStore);
+            ULONGLONG now = GetTickCount64();
+            LogStoreReportDrops(&g_connStore, now, T(S_LOG_SKIPPED));
+            LogStoreReportDrops(&g_actStore, now, T(S_LOG_SKIPPED));
         }
         return 0;
-    case WM_APP_UPDATE:
-    {
-        UpdInfo* info = (UpdInfo*)lp;
-        BOOL ok = (wp & 1) != 0, manual = (wp & 2) != 0;
-        if (info)
-        {
-            if (ok && info->available)
-                DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_UPDATE), hwnd, UpdateDlgProc, (LPARAM)info);
-            else if (manual)
-                MessageBoxW(hwnd, ok ? T(S_UPD_LATEST) : T(S_UPD_ERR), T(S_UPD_TITLE), MB_OK | MB_ICONINFORMATION);
-            free(info);
-        }
-        return 0;
-    }
     case WM_APP_TRAY:
         if (LOWORD(lp) == WM_LBUTTONDBLCLK) ShowMainWindow(hwnd);
         else if (LOWORD(lp) == WM_RBUTTONUP)
@@ -778,7 +764,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (id >= IDM_PROFILE_SWITCH_BASE && id < IDM_PROFILE_SWITCH_BASE + g_profCount)
         {
             int i = id - IDM_PROFILE_SWITCH_BASE;
-            if (_wcsicmp(g_profNames[i], g_activeProfile) != 0) SwitchToProfile(g_profNames[i]);
+            SwitchToProfile(g_profNames[i]);
             return 0;
         }
         switch (id)
@@ -786,18 +772,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_PROXY_SETTINGS: DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_SERVERS), hwnd, ServersDlgProc); return 0;
         case IDM_PROXY_RULES:    DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_RULES),   hwnd, RulesDlgProc);   return 0;
         case IDM_SET_LOCALHOST:
-            g_localhost = !g_localhost; g_profile.localhostViaProxy = g_localhost;
-            g_api.SetLocalhostViaProxy(g_localhost); SaveActive(); SyncMenuChecks(hwnd); return 0;
+            if (g_api.SetLocalhostViaProxyChecked(!g_localhost)) {
+                g_localhost = !g_localhost;
+                g_profile.localhostViaProxy = g_localhost;
+                SaveActive(); SyncMenuChecks(hwnd);
+            } else {
+                wchar_t message[512];
+                _snwprintf_s(message, ARRAYSIZE(message), _TRUNCATE, T(S_ERR_RULEAPPLY), GetLastError());
+                MessageBoxW(hwnd, message, APP_TITLE, MB_OK | MB_ICONERROR);
+            }
+            return 0;
         case IDM_SET_TRAFFICLOG:
             g_trafficLog = !g_trafficLog; g_profile.trafficLogging = g_trafficLog;
-            g_api.SetTrafficLoggingEnabled(g_trafficLog); SaveActive(); SyncMenuChecks(hwnd); return 0;
+            ApplyTrafficLogging(); SaveActive(); SyncMenuChecks(hwnd); return 0;
         case IDM_SET_CLOSETOTRAY:
             g_closeToTray = !g_closeToTray; g_profile.closeToTray = g_closeToTray;
             SaveActive(); SyncMenuChecks(hwnd); return 0;
         case IDM_SET_STARTUP:
-            g_startup = !g_startup; StartupSet(g_startup);
-            g_startup = StartupIsEnabled();   // reflect the real state
+        {
+            DWORD error = StartupSet(!g_startup);
+            if (!error) g_startup = !g_startup;
+            else {
+                StartupRead(&g_startup); // Preserve last known state if query also fails.
+                wchar_t message[256];
+                _snwprintf_s(message, ARRAYSIZE(message), _TRUNCATE, T(S_STARTUP_FAIL), error);
+                MessageBoxW(hwnd, message, APP_TITLE, MB_OK | MB_ICONERROR);
+            }
             SyncMenuChecks(hwnd); return 0;
+        }
         case IDM_SET_AUTOCLEAR:
             g_autoClear = !g_autoClear; g_profile.autoClearLogs = g_autoClear;
             SaveActive(); SyncMenuChecks(hwnd); return 0;
@@ -817,7 +819,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (_wcsicmp(g_nameResult, g_activeProfile) != 0)
                 {
                     if (PB_ProfileRename(g_activeProfile, g_nameResult))
-                    { lstrcpynW(g_activeProfile, g_nameResult, PB_NAME_MAX); RebuildProfileMenu(hwnd); UpdateTitle(); }
+                    { ++g_profileEditRevision; lstrcpynW(g_activeProfile, g_nameResult, PB_NAME_MAX); RebuildProfileMenu(hwnd); UpdateTitle(); }
                     else MessageBoxW(hwnd, T(S_ERR_IMPORT), APP_TITLE, MB_OK | MB_ICONERROR);
                 }
             }
@@ -848,9 +850,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             { MessageBoxW(hwnd, T(S_INFO_NODELDEFAULT), APP_TITLE, MB_OK | MB_ICONINFORMATION); return 0; }
             {
                 wchar_t toDel[PB_NAME_MAX]; lstrcpynW(toDel, g_activeProfile, PB_NAME_MAX);
-                SwitchToProfile(L"Default");
-                PB_ProfileDelete(toDel);
-                RebuildProfileMenu(hwnd);
+                QueueProfileSwitch(L"Default", toDel);
             }
             return 0;
         case IDM_PROFILE_IMPORT:
@@ -894,10 +894,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        ProfileSwitchStop();
+        UpdStopCheck(hwnd);
         if (g_api.Stop) g_api.Stop();
         TrayRemove();
         KillTimer(hwnd, TIMER_LOG);
-        LogStoreFree(&g_connStore);    // release buffered + pending log lines + the lock
+        LogStoreFree(&g_connStore);    // close queue and release buffered + pending lines
         LogStoreFree(&g_actStore);
         if (g_hMono) DeleteObject(g_hMono);
         if (g_hUi)   DeleteObject(g_hUi);
@@ -940,7 +942,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
 
     // Load the active profile.
     PB_GetActiveProfile(g_activeProfile, PB_NAME_MAX);
-    PB_ProfileLoad(g_activeProfile, &g_profile);
+    BOOL profileReady = PB_ProfileLoad(g_activeProfile, &g_profile);
     g_localhost   = g_profile.localhostViaProxy;
     g_trafficLog  = g_profile.trafficLogging;
     g_closeToTray = g_profile.closeToTray;
@@ -998,15 +1000,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     RebuildProfileMenu(g_hMain);
     UpdateTitle();
 
-    // Wire callbacks + toggles, add configs (before Start so the UDP relay starts), start,
-    // then add rules.
-    g_api.SetLocalhostViaProxy(g_localhost);
-    g_api.SetTrafficLoggingEnabled(g_trafficLog);
+    // Prepare proxy configuration and the complete rule set before activation.
+    ApplyTrafficLogging();
     g_api.SetLogCallback(PBLogCb);
-    g_api.SetConnectionCallback(PBConnCb);
-    ApplyConfigs();
-    g_started = g_api.Start();
-    if (g_started) { ApplyRules(); LogStoreAdd(&g_actStore, T(S_STARTED)); }
+    g_started = profileReady && ApplyProfile(&g_profile) && g_api.Start();
+    g_filteringActive = g_started && g_api.IsFilteringActive();
+    if (g_started) { LogStoreAdd(&g_actStore, T(S_STARTED)); }
     else LogStoreAdd(&g_actStore, T(S_STARTFAIL));
 
     if (startMinimized) ShowWindow(g_hMain, SW_HIDE);   // launched by the logon task

@@ -11,18 +11,9 @@
 
 #define UPD_FEED_URL  L"https://download.interceptsuite.com/proxybridge.json"
 
-#define WM_APP_UPDATE  (WM_APP + 6)   // check worker -> main window (result)
-#define WM_APP_DLPROG  (WM_APP + 7)   // download worker -> dialog (percent)
-#define WM_APP_DLDONE  (WM_APP + 8)   // download worker -> dialog (success + job)
-
-typedef struct {
-    BOOL    available;
-    wchar_t latest[32];
-    wchar_t download[512];
-    wchar_t notes[512];
-    wchar_t date[32];
-} UpdInfo;
-
+#include "update-job.h"
+#define TIMER_UPDATE_CHECK 0x5055
+#define TIMER_UPDATE_DOWNLOAD 0x5056
 static void U8W(const char* s, wchar_t* out, int cch)
 {
     MultiByteToWideChar(CP_UTF8, 0, s ? s : "", -1, out, cch);
@@ -47,103 +38,14 @@ static int UpdVerCmp(const int a[3], const int b[3])
     return 0;
 }
 
-// Open a GET request and read the response headers. On success returns the request handle
-// and hands back the session/connection handles for cleanup; NULL on any failure.
-static HINTERNET UpdOpenGet(const wchar_t* url, HINTERNET* sOut, HINTERNET* cOut)
-{
-    *sOut = *cOut = NULL;
-    URL_COMPONENTS uc; wchar_t host[256] = {0}, path[2048] = {0};
-    ZeroMemory(&uc, sizeof(uc)); uc.dwStructSize = sizeof(uc);
-    uc.lpszHostName = host; uc.dwHostNameLength = 255;
-    uc.lpszUrlPath = path; uc.dwUrlPathLength = 2047;
-    if (!WinHttpCrackUrl(url, 0, 0, &uc)) return NULL;
-    BOOL https = (uc.nScheme == INTERNET_SCHEME_HTTPS);
-    HINTERNET s = WinHttpOpen(L"ProxyBridge-UpdateChecker", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!s) return NULL;
-    HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
-    if (!c) { WinHttpCloseHandle(s); return NULL; }
-    HINTERNET r = WinHttpOpenRequest(c, L"GET", path, NULL, WINHTTP_NO_REFERER,
-                                     WINHTTP_DEFAULT_ACCEPT_TYPES, https ? WINHTTP_FLAG_SECURE : 0);
-    if (!r ||
-        !WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-        !WinHttpReceiveResponse(r, NULL))
-    {
-        if (r) WinHttpCloseHandle(r);
-        WinHttpCloseHandle(c); WinHttpCloseHandle(s);
-        return NULL;
-    }
-    *sOut = s; *cOut = c;
-    return r;
-}
-static void UpdCloseGet(HINTERNET s, HINTERNET c, HINTERNET r)
-{
-    if (r) WinHttpCloseHandle(r);
-    if (c) WinHttpCloseHandle(c);
-    if (s) WinHttpCloseHandle(s);
-}
-
-// GET a URL into a malloc'd NUL-terminated buffer (caller frees). Follows redirects.
-static char* UpdHttpGet(const wchar_t* url, DWORD* outLen)
-{
-    HINTERNET s, c, r = UpdOpenGet(url, &s, &c);
-    if (!r) return NULL;
-    char* buf = NULL; DWORD cap = 0, len = 0, avail;
-    for (;;)
-    {
-        if (!WinHttpQueryDataAvailable(r, &avail) || avail == 0) break;
-        if (len + avail + 1 > cap)
-        {
-            DWORD ncap = (len + avail + 1) * 2;
-            char* nb = (char*)realloc(buf, ncap);
-            if (!nb) { free(buf); buf = NULL; break; }
-            buf = nb; cap = ncap;
-        }
-        DWORD read = 0;
-        if (!WinHttpReadData(r, buf + len, avail, &read) || read == 0) break;
-        len += read;
-    }
-    if (buf) buf[len] = 0;
-    UpdCloseGet(s, c, r);
-    if (buf && outLen) *outLen = len;
-    return buf;
-}
-
-// Download url -> dest file, posting percent to dlg via WM_APP_DLPROG.
-static BOOL UpdDownload(const wchar_t* url, const wchar_t* dest, HWND dlg)
-{
-    HINTERNET s, c, r = UpdOpenGet(url, &s, &c);
-    if (!r) return FALSE;
-    BOOL ok = FALSE;
-    DWORD total = 0, tsz = sizeof(total);
-    WinHttpQueryHeaders(r, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
-                        WINHTTP_HEADER_NAME_BY_INDEX, &total, &tsz, WINHTTP_NO_HEADER_INDEX);
-    HANDLE f = CreateFileW(dest, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f != INVALID_HANDLE_VALUE)
-    {
-        BYTE buf[16384]; DWORD got = 0, avail; ok = TRUE;
-        for (;;)
-        {
-            if (!WinHttpQueryDataAvailable(r, &avail)) { ok = FALSE; break; }
-            if (avail == 0) break;
-            DWORD toread = avail > sizeof(buf) ? sizeof(buf) : avail, read = 0;
-            if (!WinHttpReadData(r, buf, toread, &read) || read == 0) { ok = FALSE; break; }
-            DWORD written; WriteFile(f, buf, read, &written, NULL);
-            got += read;
-            if (total > 0) PostMessageW(dlg, WM_APP_DLPROG, (WPARAM)((got * 100) / total), 0);
-        }
-        CloseHandle(f);
-    }
-    UpdCloseGet(s, c, r);
-    return ok;
-}
+#include "update-http.h"
 
 // Fetch + parse the feed. Fills *out; returns FALSE only on network/parse failure.
-static BOOL UpdCheck(UpdInfo* out)
+static BOOL UpdCheck(UpdInfo* out, UpdWork* job)
 {
     ZeroMemory(out, sizeof(*out));
     DWORD len = 0;
-    char* body = UpdHttpGet(UPD_FEED_URL, &len);
+    char* body = UpdHttpGet(UPD_FEED_URL, &len, job);
     if (!body) return FALSE;
     JVal* root = json_parse(body, len);
     free(body);
@@ -170,114 +72,165 @@ static BOOL UpdCheck(UpdInfo* out)
     return ok;
 }
 
-// notification dialog
-typedef struct { HWND dlg; wchar_t url[512]; wchar_t dest[MAX_PATH]; } UpdDl;
+// Notification dialog. Only the UI owns dialog state; jobs are independently
+// reference-counted so cancellation never waits for a synchronous HTTP call.
+#include "update-launch.h"
+typedef struct { UpdInfo info; UpdWork *job; BOOL launching; } UpdDialog;
 static DWORD WINAPI UpdDlThread(LPVOID p)
 {
-    UpdDl* d = (UpdDl*)p;
-    BOOL ok = UpdDownload(d->url, d->dest, d->dlg);
-    PostMessageW(d->dlg, WM_APP_DLDONE, (WPARAM)(ok ? 1 : 0), (LPARAM)d);   // handler frees d
-    return 0;
+    UpdWork *job=(UpdWork*)p;
+    job->success=UpdDownload(job->info.download,job->dest,job);
+    InterlockedExchange(&job->done,1);
+    UpdWorkRelease(job);return 0;
+}
+static BOOL UpdReserveDestination(UpdWork *job)
+{
+    wchar_t directory[MAX_PATH],temporary[MAX_PATH],executable[MAX_PATH];
+    DWORD length=GetTempPathW(MAX_PATH,directory);
+    if(!length || length>=MAX_PATH || !GetTempFileNameW(directory,L"PBU",0,temporary))return FALSE;
+    BOOL ok=_snwprintf_s(executable,MAX_PATH,_TRUNCATE,L"%s.exe",temporary)>=0 && MoveFileW(temporary,executable);
+    if(ok)lstrcpynW(job->dest,executable,MAX_PATH);
+    else DeleteFileW(temporary);
+    return ok;
 }
 INT_PTR CALLBACK UpdateDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
-    switch (msg)
+    UpdDialog *state=(UpdDialog*)GetWindowLongPtrW(dlg,GWLP_USERDATA);
+    switch(msg)
     {
     case WM_INITDIALOG:
     {
-        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)lp);
-        UpdInfo* info = (UpdInfo*)lp;
-        SetWindowTextW(dlg, T(S_UPD_TITLE));
-        SetDlgItemTextW(dlg, IDC_UP_TEXT, T(S_UPD_AVAIL));
-        wchar_t v[160]; _snwprintf_s(v, 160, _TRUNCATE, L"%s  \x2192  %s", APP_VERSION, info->latest);
-        SetDlgItemTextW(dlg, IDC_UP_VERS, v);
-        if (info->date[0]) { wchar_t d[64]; _snwprintf_s(d, 64, _TRUNCATE, L"(%s)", info->date); SetDlgItemTextW(dlg, IDC_UP_DATE, d); }
-        if (info->notes[0]) { wchar_t n[640]; _snwprintf_s(n, 640, _TRUNCATE, L"<a href=\"%s\">%s</a>", info->notes, T(S_UPD_NOTES)); SetDlgItemTextW(dlg, IDC_UP_NOTES, n); }
-        else ShowWindow(GetDlgItem(dlg, IDC_UP_NOTES), SW_HIDE);
-        SetDlgItemTextW(dlg, IDC_UP_NOW,     T(S_UPD_NOW));
-        SetDlgItemTextW(dlg, IDCANCEL,       T(S_UPD_LATER));
-        SetDlgItemTextW(dlg, IDC_UP_DONTASK, T(S_UPD_DONTASK));
-        ShowWindow(GetDlgItem(dlg, IDC_UP_PROGRESS), SW_HIDE);
-        InitDarkMode(dlg);
-        return TRUE;
+        state=(UpdDialog*)calloc(1,sizeof(*state));
+        if(!state){EndDialog(dlg,0);return TRUE;}
+        state->info=*(UpdInfo*)lp;
+        SetWindowLongPtrW(dlg,GWLP_USERDATA,(LONG_PTR)state);
+        UpdInfo *info=&state->info;
+        SetWindowTextW(dlg,T(S_UPD_TITLE));
+        SetDlgItemTextW(dlg,IDC_UP_TEXT,T(S_UPD_AVAIL));
+        wchar_t v[160];_snwprintf_s(v,160,_TRUNCATE,L"%s  \x2192  %s",APP_VERSION,info->latest);
+        SetDlgItemTextW(dlg,IDC_UP_VERS,v);
+        if(info->date[0]){wchar_t d[64];_snwprintf_s(d,64,_TRUNCATE,L"(%s)",info->date);SetDlgItemTextW(dlg,IDC_UP_DATE,d);}
+        if(info->notes[0]){wchar_t n[640];_snwprintf_s(n,640,_TRUNCATE,L"<a href=\"%s\">%s</a>",info->notes,T(S_UPD_NOTES));SetDlgItemTextW(dlg,IDC_UP_NOTES,n);}
+        else ShowWindow(GetDlgItem(dlg,IDC_UP_NOTES),SW_HIDE);
+        SetDlgItemTextW(dlg,IDC_UP_NOW,T(S_UPD_NOW));
+        SetDlgItemTextW(dlg,IDCANCEL,T(S_UPD_LATER));
+        SetDlgItemTextW(dlg,IDC_UP_DONTASK,T(S_UPD_DONTASK));
+        ShowWindow(GetDlgItem(dlg,IDC_UP_PROGRESS),SW_HIDE);
+        InitDarkMode(dlg);return TRUE;
     }
     PB_DARK_CTLCOLORS;
     case WM_NOTIFY:
     {
-        LPNMHDR nh = (LPNMHDR)lp;
-        if ((nh->code == NM_CLICK || nh->code == NM_RETURN) && nh->idFrom == IDC_UP_NOTES)
-        { PNMLINK link = (PNMLINK)lp; ShellExecuteW(dlg, L"open", link->item.szUrl, NULL, NULL, SW_SHOWNORMAL); }
+        LPNMHDR nh=(LPNMHDR)lp;
+        if((nh->code==NM_CLICK || nh->code==NM_RETURN) && nh->idFrom==IDC_UP_NOTES)
+        {PNMLINK link=(PNMLINK)lp;ShellExecuteW(dlg,L"open",link->item.szUrl,NULL,NULL,SW_SHOWNORMAL);}
         return TRUE;
     }
-    case WM_APP_DLPROG:
-        SendDlgItemMessageW(dlg, IDC_UP_PROGRESS, PBM_SETPOS, (WPARAM)wp, 0);
-        return TRUE;
-    case WM_APP_DLDONE:
+    case WM_TIMER:
     {
-        UpdDl* d = (UpdDl*)lp;
-        if (wp)   // success: launch the installer and quit so it can replace files
+        if(wp!=TIMER_UPDATE_DOWNLOAD || !state || !state->job)return FALSE;
+        UpdWork *job=state->job;
+        SendDlgItemMessageW(dlg,IDC_UP_PROGRESS,PBM_SETPOS,(WPARAM)InterlockedCompareExchange(&job->progress,0,0),0);
+        if(!InterlockedCompareExchange(&job->done,0,0))return TRUE;
+        KillTimer(dlg,TIMER_UPDATE_DOWNLOAD);state->job=NULL;
+        if(job->success && !UpdCancelled(job))
         {
-            ShellExecuteW(dlg, L"open", d->dest, NULL, NULL, SW_SHOWNORMAL);
-            free(d);
-            g_reallyExit = TRUE;
-            DestroyWindow(g_hMain);
-            return TRUE;
+            DWORD error;BOOL previousActive=g_filteringActive;
+            state->launching=TRUE;
+            UpdLaunchResult result=UpdStopAndLaunch(dlg,job->dest,&error);
+            if(result==UPD_LAUNCHED)job->keepDestination=TRUE;
+            UpdWorkRelease(job);
+            // ShellExecute may pump messages. Do not touch a dialog destroyed
+            // during launch, or a recycled handle with different UI state.
+            if((UpdDialog*)GetWindowLongPtrW(dlg,GWLP_USERDATA)!=state)return TRUE;
+            state->launching=FALSE;
+            if(result!=UPD_LAUNCHED) {
+                if(previousActive!=g_filteringActive)
+                    LogStoreAdd(&g_actStore,T(g_filteringActive ? S_FILTER_ACTIVE : S_FILTER_INACTIVE));
+                wchar_t message[256];
+                _snwprintf_s(message,256,_TRUNCATE,L"%s (%lu)",
+                    T(result==UPD_STOP_FAILED ? S_UPD_STOPFAIL : result==UPD_RESTART_FAILED ? S_UPD_RESTARTFAIL : S_UPD_LAUNCHFAIL),error);
+                SetDlgItemTextW(dlg,IDC_UP_STATUS,message);
+                EnableWindow(GetDlgItem(dlg,IDC_UP_NOW),TRUE);return TRUE;
+            }
+            g_reallyExit=TRUE;EndDialog(dlg,IDOK);DestroyWindow(g_hMain);return TRUE;
         }
-        SetDlgItemTextW(dlg, IDC_UP_STATUS, T(S_UPD_DLFAIL));
-        EnableWindow(GetDlgItem(dlg, IDC_UP_NOW), TRUE);
-        free(d);
-        return TRUE;
+        UpdWorkRelease(job);
+        SetDlgItemTextW(dlg,IDC_UP_STATUS,T(S_UPD_DLFAIL));
+        EnableWindow(GetDlgItem(dlg,IDC_UP_NOW),TRUE);return TRUE;
     }
     case WM_COMMAND:
-        switch (LOWORD(wp))
+        if(!state || state->launching)return TRUE;
+        switch(LOWORD(wp))
         {
         case IDC_UP_NOW:
         {
-            UpdInfo* info = (UpdInfo*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
-            UpdDl* d = (UpdDl*)calloc(1, sizeof(UpdDl));
-            if (!d) return TRUE;
-            d->dlg = dlg; lstrcpynW(d->url, info->download, 512);
-            const wchar_t* fn = info->download;
-            for (const wchar_t* p = info->download; *p; p++) if (*p == L'/') fn = p + 1;
-            wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
-            _snwprintf_s(d->dest, MAX_PATH, _TRUNCATE, L"%s%s", tmp, fn[0] ? fn : L"ProxyBridge-Setup.exe");
-            EnableWindow(GetDlgItem(dlg, IDC_UP_NOW), FALSE);
-            ShowWindow(GetDlgItem(dlg, IDC_UP_PROGRESS), SW_SHOW);
-            SendDlgItemMessageW(dlg, IDC_UP_PROGRESS, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-            SetDlgItemTextW(dlg, IDC_UP_STATUS, T(S_UPD_DLING));
-            HANDLE t = CreateThread(NULL, 0, UpdDlThread, d, 0, NULL);
-            if (t) CloseHandle(t); else { free(d); EnableWindow(GetDlgItem(dlg, IDC_UP_NOW), TRUE); }
-            return TRUE;
+            if(state->job)return TRUE;
+            UpdWork *job=(UpdWork*)calloc(1,sizeof(*job));if(!job)return TRUE;
+            job->refs=1;job->info=state->info;
+            if(!UpdReserveDestination(job) || !SetTimer(dlg,TIMER_UPDATE_DOWNLOAD,200,NULL)) {
+                UpdWorkRelease(job);SetDlgItemTextW(dlg,IDC_UP_STATUS,T(S_UPD_DLFAIL));return TRUE;
+            }
+            state->job=job;
+            if(!UpdWorkStart(job,UpdDlThread)) {
+                KillTimer(dlg,TIMER_UPDATE_DOWNLOAD);UpdWorkCancel(&state->job);
+                SetDlgItemTextW(dlg,IDC_UP_STATUS,T(S_UPD_DLFAIL));return TRUE;
+            }
+            EnableWindow(GetDlgItem(dlg,IDC_UP_NOW),FALSE);
+            ShowWindow(GetDlgItem(dlg,IDC_UP_PROGRESS),SW_SHOW);
+            SendDlgItemMessageW(dlg,IDC_UP_PROGRESS,PBM_SETRANGE,0,MAKELPARAM(0,100));
+            SendDlgItemMessageW(dlg,IDC_UP_PROGRESS,PBM_SETPOS,0,0);
+            SetDlgItemTextW(dlg,IDC_UP_STATUS,T(S_UPD_DLING));return TRUE;
         }
-        case IDC_UP_DONTASK: PB_SetCheckUpdates(FALSE); EndDialog(dlg, 0); return TRUE;
-        case IDCANCEL:       EndDialog(dlg, 0); return TRUE;
+        case IDC_UP_DONTASK:PB_SetCheckUpdates(FALSE);EndDialog(dlg,0);return TRUE;
+        case IDCANCEL:EndDialog(dlg,0);return TRUE;
         }
         return FALSE;
+    case WM_CLOSE:
+        if(!state || !state->launching)EndDialog(dlg,0);
+        return TRUE;
+    case WM_DESTROY:
+        KillTimer(dlg,TIMER_UPDATE_DOWNLOAD);
+        SetWindowLongPtrW(dlg,GWLP_USERDATA,0);
+        if(state){UpdWorkCancel(&state->job);free(state);}
+        return TRUE;
     }
     return FALSE;
 }
 
-// orchestration
-typedef struct { HWND owner; BOOL manual; } UpdJob;
+// At most one feed check belongs to the main window. A manual check upgrades
+// notification preference without creating another worker or racing its data.
+static UpdWork *g_updateCheck;
 static DWORD WINAPI UpdCheckThread(LPVOID p)
 {
-    UpdJob* j = (UpdJob*)p;
-    UpdInfo* info = (UpdInfo*)malloc(sizeof(UpdInfo));
-    BOOL ok = FALSE;
-    if (info) { ok = UpdCheck(info); if (!ok) ZeroMemory(info, sizeof(*info)); }
-    WPARAM flags = (ok ? 1u : 0u) | (j->manual ? 2u : 0u);
-    PostMessageW(j->owner, WM_APP_UPDATE, flags, (LPARAM)info);
-    free(j);
-    return 0;
+    UpdWork *job=(UpdWork*)p;
+    job->success=UpdCheck(&job->info,job);
+    InterlockedExchange(&job->done,1);
+    UpdWorkRelease(job);return 0;
 }
-// Kick off a check on a worker thread. manual=TRUE also reports "up to date" / errors.
-static void UpdStartCheck(HWND owner, BOOL manual)
+static void UpdStartCheck(HWND owner,BOOL manual)
 {
-    UpdJob* j = (UpdJob*)calloc(1, sizeof(UpdJob));
-    if (!j) return;
-    j->owner = owner; j->manual = manual;
-    HANDLE t = CreateThread(NULL, 0, UpdCheckThread, j, 0, NULL);
-    if (t) CloseHandle(t); else free(j);
+    if(g_updateCheck){if(manual)g_updateCheck->manual=TRUE;return;}
+    UpdWork *job=(UpdWork*)calloc(1,sizeof(*job));if(!job)return;
+    job->refs=1;job->manual=manual;
+    if(!SetTimer(owner,TIMER_UPDATE_CHECK,200,NULL)){UpdWorkRelease(job);return;}
+    g_updateCheck=job;
+    if(!UpdWorkStart(job,UpdCheckThread)){KillTimer(owner,TIMER_UPDATE_CHECK);UpdWorkCancel(&g_updateCheck);}
 }
-
+static void UpdPollCheck(HWND owner)
+{
+    UpdWork *job=g_updateCheck;
+    if(!job || !InterlockedCompareExchange(&job->done,0,0))return;
+    g_updateCheck=NULL;KillTimer(owner,TIMER_UPDATE_CHECK);
+    UpdInfo info=job->info;BOOL ok=job->success && !UpdCancelled(job),manual=job->manual;
+    UpdWorkRelease(job);
+    if(ok && info.available)
+        DialogBoxParamW(g_hInst,MAKEINTRESOURCEW(IDD_UPDATE),owner,UpdateDlgProc,(LPARAM)&info);
+    else if(manual)
+        MessageBoxW(owner,ok ? T(S_UPD_LATEST) : T(S_UPD_ERR),T(S_UPD_TITLE),MB_OK|MB_ICONINFORMATION);
+}
+static void UpdStopCheck(HWND owner)
+{
+    KillTimer(owner,TIMER_UPDATE_CHECK);UpdWorkCancel(&g_updateCheck);
+}
 #endif // PB_UI_UPDATE_H

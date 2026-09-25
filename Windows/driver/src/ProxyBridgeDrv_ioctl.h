@@ -14,10 +14,11 @@
 #include <winioctl.h>
 #endif
 
-// Device / symlink names.
-#define PBDRV_DEVICE_NAME   L"\\Device\\ProxyBridgeDrv"
-#define PBDRV_SYMLINK_NAME  L"\\DosDevices\\ProxyBridgeDrv"
-#define PBDRV_USER_PATH     L"\\\\.\\ProxyBridgeDrv"     // CreateFile path from user mode
+// Stable package/device identity; interface GUID is separate from the setup class.
+#define PBDRV_HARDWARE_ID L"ROOT\\InterceptSuite_ProxyBridge"
+#define PBDRV_SERVICE_NAME L"ProxyBridgeDrv"
+static const GUID PBDRV_INTERFACE_GUID =
+    {0x7c1b6a10,0x2e44,0x4e8b,{0x9e,0x21,0x0f,0x9a,0x5d,0x3c,0x1a,0x08}};
 
 // IOCTLs (user -> driver).
 #define PBDRV_IOCTL_SET_CONFIG    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_WRITE_DATA)
@@ -30,6 +31,31 @@
 // Drain the connection-event ring (one entry per outbound connect the monitor callout saw).
 // Lets user mode log EVERY connection - direct/unwatched included - not just redirected ones.
 #define PBDRV_IOCTL_POP_EVENTS    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_READ_DATA)
+
+// Atomically replace watchlist and its loopback policy; relay endpoints stay unchanged.
+#define PBDRV_IOCTL_SET_RULE_POLICY CTL_CODE(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_WRITE_DATA)
+
+// Fixed-width handshake. A successful open alone does not prove that the expected
+// driver is loaded or that config/watchlist have been applied.
+#define PBDRV_IOCTL_GET_STATUS    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_READ_DATA)
+#define PBDRV_PROTOCOL_VERSION    4u
+#define PBDRV_DRIVER_VERSION      0x00010001u  // 1.0.0.1; also update INF and VERSIONINFO
+#define PBDRV_STATUS_READY        0x00000001u
+#define PBDRV_STATUS_CONFIGURED   0x00000002u
+#define PBDRV_STATUS_WATCHLIST    0x00000004u
+#define PBDRV_STATUS_ACTIVE       0x00000008u
+#define PBDRV_STATUS_UDP_ADMISSION_FAILED 0x00000010u
+
+typedef struct _PBDRV_STATUS {
+    UINT32 size;
+    UINT32 protocolVersion;
+    UINT32 driverVersion;
+    UINT32 flags;
+    UINT32 generation;           // scoped to this loaded device, not a persistent ID
+    UINT32 watchlistRevision;    // scoped to generation; zero means not configured
+    UINT32 lastActivationStatus; // NTSTATUS bit pattern
+    UINT32 reserved;
+} PBDRV_STATUS;
 
 #define PBDRV_MAX_WATCH 1024
 #define PBDRV_NAME_LEN  260     // max image-file-name chars we match against (WCHAR)
@@ -48,6 +74,11 @@ typedef struct _PBDRV_WATCHLIST {
     UINT32            count;                     // number of valid entries[]
     PBDRV_WATCH_ENTRY entries[PBDRV_MAX_WATCH];
 } PBDRV_WATCHLIST;
+
+typedef struct _PBDRV_RULE_POLICY {
+    UINT32 redirectLoopbackApps;
+    PBDRV_WATCHLIST watch;
+} PBDRV_RULE_POLICY;
 
 // Where the driver redirects matched flows - the user-mode relay's listeners.
 // Addresses are network byte order; ports are host byte order.
@@ -89,6 +120,7 @@ typedef struct _PBDRV_UDP_QUERY {
     UINT8  srcV6[16];   // in: family AF_INET6
     UINT8  origV6[16];  // out
     UINT32 pid;         // out
+    UINT64 mappingGeneration; // opaque generation, not a kernel handle/address
 } PBDRV_UDP_QUERY;
 
 // One observed outbound connection, reported by the monitor callout (ALE_AUTH_CONNECT) for

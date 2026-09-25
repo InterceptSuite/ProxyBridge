@@ -6,26 +6,28 @@
 // Tombstoned slots (config_id == 0) are skipped.
 static PROXY_CONFIG* find_locked(UINT32 config_id)
 {
-    if (config_id != 0)
+    if (config_id != 0) {
         for (int i = 0; i < g_proxy_config_count; i++)
             if (g_proxy_configs[i].config_id == config_id)
                 return &g_proxy_configs[i];
-    // "first available" or id not found -> first live (non-tombstone) config
+        return NULL; // an explicit deleted ID must not select a different proxy
+    }
+    // Only ID 0 selects the first live configuration.
     for (int i = 0; i < g_proxy_config_count; i++)
         if (g_proxy_configs[i].config_id != 0)
             return &g_proxy_configs[i];
     return NULL;
 }
 
-// Find proxy config by ID; falls back to first live config. Returns a LIVE pointer for the
-// single-threaded UDP relay's persistent per-config state. TCP callers that hold the config
-// across blocking I/O must use find_proxy_config_copy() instead (immune to Edit/Delete).
-PROXY_CONFIG* find_proxy_config(UINT32 config_id)
+// Copy definitions under the lock. Runtime UDP sockets never live in this store.
+int pb_proxy_snapshot(PROXY_CONFIG *out, LONG64 *revision)
 {
     AcquireSRWLockShared(&g_proxy_lock);
-    PROXY_CONFIG *found = find_locked(config_id);
+    int count = g_proxy_config_count;
+    memcpy(out, g_proxy_configs, count * sizeof(*out));
+    *revision = InterlockedCompareExchange64(&g_proxy_revision, 0, 0);
     ReleaseSRWLockShared(&g_proxy_lock);
-    return found;
+    return count;
 }
 
 // Snapshot a config into *out under the lock. TRUE if a config was found.
@@ -90,6 +92,11 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddProxyConfig(ProxyType type, const char* pr
     UINT32 new_id = 0;
     char   log_host[256]; UINT16 log_port = 0; int log_type = 0;
     AcquireSRWLockExclusive(&g_proxy_lock);
+    if (g_next_config_id == 0) {
+        ReleaseSRWLockExclusive(&g_proxy_lock);
+        SetLastError(ERROR_ARITHMETIC_OVERFLOW);
+        return 0;
+    }
     // Reuse a tombstoned slot if one exists (keeps the array bounded); else append.
     int slot = -1;
     for (int i = 0; i < g_proxy_config_count; i++)
@@ -102,6 +109,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddProxyConfig(ProxyType type, const char* pr
     PROXY_CONFIG *cfg = &g_proxy_configs[slot];
     memset(cfg, 0, sizeof(PROXY_CONFIG));
     cfg->config_id = g_next_config_id++;
+    cfg->revision = InterlockedIncrement64(&g_proxy_revision);
     cfg->type      = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
     cfg->port      = proxy_port;
     cfg->send_domain_to_proxy = send_domain_to_proxy;
@@ -109,9 +117,6 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddProxyConfig(ProxyType type, const char* pr
     cfg->resolved_ip = resolved;
     if (username != NULL) strncpy_s(cfg->username, sizeof(cfg->username), username, _TRUNCATE);
     if (password != NULL) strncpy_s(cfg->password, sizeof(cfg->password), password, _TRUNCATE);
-    cfg->udp_tcp_ctrl  = INVALID_SOCKET;
-    cfg->udp_send_sock = INVALID_SOCKET;
-    cfg->udp_connected = FALSE;
     new_id = cfg->config_id;
     strncpy_s(log_host, sizeof(log_host), cfg->host, _TRUNCATE); log_port = cfg->port; log_type = cfg->type;
     ReleaseSRWLockExclusive(&g_proxy_lock);
@@ -137,10 +142,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditProxyConfig(UINT32 config_id, ProxyType typ
         PROXY_CONFIG *cfg = &g_proxy_configs[i];
         if (cfg->config_id != 0 && cfg->config_id == config_id)
         {
-            // Close any open UDP state before changing config
-            if (cfg->udp_tcp_ctrl != INVALID_SOCKET)  { closesocket(cfg->udp_tcp_ctrl);  cfg->udp_tcp_ctrl  = INVALID_SOCKET; }
-            if (cfg->udp_send_sock != INVALID_SOCKET) { closesocket(cfg->udp_send_sock); cfg->udp_send_sock = INVALID_SOCKET; }
-            cfg->udp_connected = FALSE;
+            // Publish a new definition. The relay closes/replaces its own
+            // association after observing this revision, never under this lock.
+            cfg->revision = InterlockedIncrement64(&g_proxy_revision);
 
             cfg->type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
             cfg->port = proxy_port;
@@ -172,17 +176,10 @@ PROXYBRIDGE_API BOOL ProxyBridge_DeleteProxyConfig(UINT32 config_id)
         PROXY_CONFIG *cfg = &g_proxy_configs[i];
         if (cfg->config_id != 0 && cfg->config_id == config_id)
         {
-            if (cfg->udp_tcp_ctrl != INVALID_SOCKET)  { closesocket(cfg->udp_tcp_ctrl);  }
-            if (cfg->udp_send_sock != INVALID_SOCKET) { closesocket(cfg->udp_send_sock); }
-
-            // Tombstone the slot instead of memmove-ing the array down. Shifting entries would
-            // invalidate PROXY_CONFIG* pointers and indices held by relay/drain threads (wrong
-            // proxy used, or a torn read). A tombstone (config_id = 0) is skipped by all readers
-            // and reused by a later Add, so the array stays structurally stable.
+            // Readers hold copies; no sockets are shared with the relay.
+            InterlockedIncrement64(&g_proxy_revision);
             memset(cfg, 0, sizeof(*cfg));
             cfg->config_id     = 0;              // tombstone marker (memset already did this)
-            cfg->udp_tcp_ctrl  = INVALID_SOCKET;
-            cfg->udp_send_sock = INVALID_SOCKET;
             found = TRUE;
             break;
         }
@@ -193,10 +190,11 @@ PROXYBRIDGE_API BOOL ProxyBridge_DeleteProxyConfig(UINT32 config_id)
     return found;
 }
 
-PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char* target_host, UINT16 target_port, char* result_buffer, size_t buffer_size)
+static int test_proxy_config_impl(UINT32 config_id, const char* target_host, UINT16 target_port, char* result_buffer, size_t buffer_size)
 {
-    PROXY_CONFIG *cfg = find_proxy_config(config_id);
-    if (cfg == NULL)
+    PROXY_CONFIG snapshot;
+    PROXY_CONFIG *cfg = &snapshot;
+    if (!find_proxy_config_copy(config_id, cfg))
     {
         if (result_buffer && buffer_size > 0)
             strncpy_s(result_buffer, buffer_size, "No proxy config found", _TRUNCATE);
@@ -248,9 +246,9 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char* ta
 
     int result;
     if (cfg->type == PROXY_TYPE_SOCKS5)
-        result = socks5_connect(sock, dest_ip, target_port, cfg);
+        result = socks5_connect(sock, dest_ip, target_port, cfg, NULL);
     else
-        result = http_connect(sock, dest_ip, target_port, cfg);
+        result = http_connect(sock, dest_ip, target_port, cfg, NULL);
 
     closesocket(sock);
 
@@ -268,13 +266,14 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char* ta
     }
 }
 
-PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char* target_host, UINT16 target_port,
+static int test_proxy_config_ex_impl(UINT32 config_id, const char* target_host, UINT16 target_port,
                                                   ProxyTestLogCallback cb, void* user)
 {
     #define TLOG(...) do { if (cb) { char _l[300]; _snprintf_s(_l, sizeof(_l), _TRUNCATE, __VA_ARGS__); cb(_l, user); } } while (0)
 
-    PROXY_CONFIG *cfg = find_proxy_config(config_id);
-    if (cfg == NULL) { TLOG("[FAIL] No proxy config found"); return -1; }
+    PROXY_CONFIG snapshot;
+    PROXY_CONFIG *cfg = &snapshot;
+    if (!find_proxy_config_copy(config_id, cfg)) { TLOG("[FAIL] No proxy config found"); return -1; }
     if (target_host == NULL || target_host[0] == '\0') target_host = "www.google.com";
     if (target_port == 0) target_port = 80;
 
@@ -329,8 +328,8 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char* 
     else
     {
         ULONGLONG h0 = GetTickCount64();
-        int rc = is_socks ? socks5_connect(s, dest_ip, target_port, cfg)
-                          : http_connect(s, dest_ip, target_port, cfg);
+        int rc = is_socks ? socks5_connect(s, dest_ip, target_port, cfg, NULL)
+                          : http_connect(s, dest_ip, target_port, cfg, NULL);
         ULONGLONG h1 = GetTickCount64();
         if (rc != 0)
         {
@@ -409,3 +408,62 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char* 
     #undef TLOG
 }
 
+
+// Prepare without publishing, allocating IDs or creating association sockets.
+BOOL pb_proxy_prepare_definition(const ProxyBridgeProxySpec *input, PROXY_CONFIG *out)
+{
+    if ((input->type != PROXY_TYPE_HTTP && input->type != PROXY_TYPE_SOCKS5) ||
+        input->host == NULL || input->host[0] == 0 || input->port == 0 ||
+        strnlen_s(input->host, sizeof(out->host)) >= sizeof(out->host) ||
+        (input->username && strnlen_s(input->username, sizeof(out->username)) >= sizeof(out->username)) ||
+        (input->password && strnlen_s(input->password, sizeof(out->password)) >= sizeof(out->password))) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    UINT32 resolved = resolve_hostname(input->host);
+    if (resolved == 0) { SetLastError(ERROR_BAD_NET_NAME); return FALSE; }
+    memset(out, 0, sizeof(*out));
+    out->type = input->type;
+    out->port = input->port;
+    out->resolved_ip = resolved;
+    out->send_domain_to_proxy = !!input->send_domain_to_proxy;
+    strcpy_s(out->host, sizeof(out->host), input->host);
+    if (input->username) strcpy_s(out->username, sizeof(out->username), input->username);
+    if (input->password) strcpy_s(out->password, sizeof(out->password), input->password);
+    return TRUE;
+}
+
+PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char *target_host,
+    UINT16 target_port, char *result_buffer, size_t buffer_size)
+{
+    WSADATA wsa;
+    int error = WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (error != 0) {
+        if (result_buffer != NULL && buffer_size > 0)
+            snprintf(result_buffer, buffer_size, "Winsock initialization failed (%d)", error);
+        SetLastError((DWORD)error);
+        return -1;
+    }
+    int result = test_proxy_config_impl(config_id, target_host, target_port, result_buffer, buffer_size);
+    DWORD lastError = GetLastError();
+    WSACleanup();
+    SetLastError(lastError);
+    return result;
+}
+
+PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char *target_host,
+    UINT16 target_port, ProxyTestLogCallback callback, void *user)
+{
+    WSADATA wsa;
+    int error = WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (error != 0) {
+        if (callback != NULL) callback("[FAIL] Winsock initialization failed", user);
+        SetLastError((DWORD)error);
+        return -1;
+    }
+    int result = test_proxy_config_ex_impl(config_id, target_host, target_port, callback, user);
+    DWORD lastError = GetLastError();
+    WSACleanup();
+    SetLastError(lastError);
+    return result;
+}

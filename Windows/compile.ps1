@@ -4,18 +4,55 @@ param(
     [string]$Compiler = 'auto',
 
     [Parameter(Mandatory=$false)]
-    [switch]$NoSign
+    [switch]$NoSign,
+    [switch]$UserModeOnly,
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot 'output'),
+    [ValidatePattern('^v[0-9]+$')][string]$PlatformToolset = 'v143',
+    [ValidatePattern('^10\.0\.[0-9]+\.0$')][string]$WindowsSdkVersion = '10.0.26100.0'
 )
 
+$ErrorActionPreference = 'Stop'
+if (!$NoSign) { throw 'Compilation requires -NoSign. Use installer/build-signed-package.ps1 for explicit verified signed packaging; release remains gated.' }
+if ($Compiler -eq 'gcc') { throw 'The full Windows application requires MSVC.' }
+if (![Environment]::Is64BitProcess) { throw 'Use 64-bit PowerShell.' }
+# Build a private source snapshot: preserve existing outputs, running apps and source intermediates.
+$output = [IO.Path]::GetFullPath($OutputDirectory)
+if (Test-Path -LiteralPath $output) { throw 'OutputDirectory must be new.' }
+foreach ($path in @($output,$PSScriptRoot)) {
+    if ($path -match '[%&|<>^!"\r\n]') { throw 'Unsupported command-shell character in build path.' }
+}
+foreach ($folder in @('src','gui','cli','shared','installer','driver')) {
+    $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot $folder))
+    if ($output.Equals($sourceRoot,[StringComparison]::OrdinalIgnoreCase) -or
+        $output.StartsWith($sourceRoot + '\',[StringComparison]::OrdinalIgnoreCase)) {
+        throw 'OutputDirectory must be outside source subdirectories.'
+    }
+}
+New-Item -ItemType Directory -Path $output | Out-Null
+$work = Join-Path $output 'intermediate'
+New-Item -ItemType Directory -Path $work | Out-Null
+foreach ($folder in @('src','gui','cli','shared','installer','driver')) {
+    $source = Join-Path $PSScriptRoot $folder
+    $dest = Join-Path $work $folder
+    foreach ($file in Get-ChildItem -LiteralPath $source -Recurse -File) {
+        if ($file.Extension -notin @('.c','.cpp','.h','.inc','.rc','.ico','.manifest','.vcxproj','.inf')) { continue }
+        $target = Join-Path $dest $file.FullName.Substring($source.Length + 1)
+        New-Item -ItemType Directory -Path (Split-Path $target) -Force | Out-Null
+        Copy-Item -LiteralPath $file.FullName -Destination $target
+    }
+}
+Push-Location -LiteralPath $work
+try {
 $SourcePath = "src"
-# WFP kernel driver (driver\ProxyBridgeDrv.vcxproj) - built + test-signed below, packaged in output\.
+# WFP driver is compiled unsigned unless -UserModeOnly is specified.
 $DriverSys  = "driver\x64\Release\ProxyBridgeDrv.sys"
 $DriverProj = "driver\ProxyBridgeDrv.vcxproj"
 # Core split across subsystem subfolders (see src\core\pb_internal.h). Paths are relative to $SourcePath.
 $SourceFile = "core\ProxyBridge.c net\pb_util.c net\pb_process.c rules\pb_rules.c rules\pb_match.c rules\pb_ipmatch.c proxy\pb_proxy.c net\pb_dns.c proxy\pb_socks5.c proxy\pb_http.c relay\pb_conntrack.c relay\pb_relay_tcp.c relay\pb_relay_udp.c driver\pb_driver.c driver\ProxyBridgeDrv_user.c"
+$SourceFile += " ..\installer\install-journal.c ..\installer\install-store.c ..\installer\install-selection.c"
 $SourceFiles = ($SourceFile.Split(' ') | ForEach-Object { "$SourcePath\$_" }) -join ' '
 $OutputDLL = "ProxyBridgeCore.dll"
-$OutputDir = "output"
+$OutputDir = $output
 
 $SignTool = "signtool.exe"
 $CertThumbprint = ""
@@ -23,24 +60,6 @@ $TimestampServer = "http://timestamp.digicert.com"
 
 $Arch = if ([Environment]::Is64BitProcess) { "x64" } else { "x86" }
 Write-Host "Architecture: $Arch" -ForegroundColor Cyan
-
-# A running ProxyBridge locks ProxyBridgeCore.dll, so the build would silently keep the old
-# DLL. Close it first so the fresh build actually lands in output\.
-foreach ($proc in @('ProxyBridge','ProxyBridge_CLI')) {
-    $running = Get-Process $proc -ErrorAction SilentlyContinue
-    if ($running) {
-        Write-Host "Closing running $proc (it locks the DLL)..." -ForegroundColor Yellow
-        $running | Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 500
-    }
-}
-
-if (Test-Path $OutputDir) {
-    Write-Host "Removing existing output directory..." -ForegroundColor Yellow
-    Remove-Item $OutputDir -Recurse -Force
-}
-Write-Host "Creating output directory: $OutputDir" -ForegroundColor Cyan
-New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
 function Compile-MSVC {
     Write-Host "`nCompiling DLL with MSVC..." -ForegroundColor Green
@@ -68,88 +87,27 @@ function Compile-MSVC {
     $script:foundVcvarsPath = $vcvarsPath
     $script:foundArch = $Arch
 
-    $clArgs = "/nologo /O2 /Ot /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
+    $clArgs = "/nologo /utf-8 /O2 /MT /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
               "/D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS /DPROXYBRIDGE_EXPORTS /DNDEBUG " +
               "/arch:SSE2 /fp:fast /GS /guard:cf /Qpar " +
               "/I`"$SourcePath\core`" /I`"$SourcePath\driver`" " +
               "$SourceFiles " +
               "/LD " +
               "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /NXCOMPAT " +
-              "ws2_32.lib iphlpapi.lib advapi32.lib fwpuclnt.lib " +
+              "ws2_32.lib iphlpapi.lib advapi32.lib fwpuclnt.lib setupapi.lib " +
               "/OUT:$OutputDLL"
 
-    $cmd = "`"$vcvarsPath`" $Arch >nul && cl.exe $clArgs"
+    $cmd = "`"$vcvarsPath`" x64 $WindowsSdkVersion >nul && cl.exe $clArgs"
 
     Write-Host "Command: cl.exe $clArgs" -ForegroundColor Gray
 
-    $result = cmd /c $cmd '2>&1'
+    $result = cmd /d /c $cmd 2>&1
     $exitCode = $LASTEXITCODE
 
     Write-Host $result
 
     return $exitCode -eq 0
 }
-
-function Compile-GCC {
-    Write-Host "`nCompiling DLL with GCC..." -ForegroundColor Green
-
-    $gccVersion = cmd /c gcc --version 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "GCC not found in PATH" -ForegroundColor Yellow
-        return $false
-    }
-
-    Write-Host "GCC found: $($gccVersion[0])" -ForegroundColor Cyan
-
-    $cmd = "gcc -shared -O2 -flto -s -Wall -D_WIN32_WINNT=0x0601 -DPROXYBRIDGE_EXPORTS " +
-           "$SourcePath\$SourceFile " +
-           "-lws2_32 -liphlpapi -ladvapi32 -lfwpuclnt " +
-           "-o $OutputDLL"
-
-    Write-Host "Command: $cmd" -ForegroundColor Gray
-
-    $result = cmd /c $cmd '2>&1'
-    $exitCode = $LASTEXITCODE
-
-    Write-Host $result
-
-    return $exitCode -eq 0
-}
-
-function Sign-Binary {
-    param(
-        [string]$FilePath
-    )
-
-    if (-not (Test-Path $FilePath)) {
-        Write-Host "  File not found: $FilePath" -ForegroundColor Red
-        return $false
-    }
-
-    $fileName = Split-Path $FilePath -Leaf
-
-    Write-Host "  Signing: $fileName" -ForegroundColor Cyan
-
-    if ([string]::IsNullOrEmpty($CertThumbprint)) {
-        $cmd = "signtool.exe sign /a /fd SHA256 /tr `"$TimestampServer`" /td SHA256 `"$FilePath`""
-    } else {
-        $cmd = "signtool.exe sign /sha1 $CertThumbprint /fd SHA256 /tr `"$TimestampServer`" /td SHA256 `"$FilePath`""
-    }
-
-    $result = cmd /c $cmd '2>&1'
-    $exitCode = $LASTEXITCODE
-
-    if ($exitCode -eq 0) {
-        Write-Host "    ✓ Signed successfully" -ForegroundColor Green
-        return $true
-    } else {
-        Write-Host "    ✗ Signing failed: $result" -ForegroundColor Red
-        return $false
-    }
-}
-
-
-
 
 # Build the WFP kernel driver via MSBuild + the WDK. Independent of the core compiler above.
 function Build-Driver {
@@ -165,58 +123,18 @@ function Build-Driver {
     }
     if (-not $msb) { Write-Host "  MSBuild not found - install VS + WDK. Skipping driver build." -ForegroundColor Yellow; return $false }
 
-    $out = & $msb $DriverProj /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:SpectreMitigation=false /v:minimal /nologo 2>&1
+    $out = & $msb $DriverProj /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:SpectreMitigation=false /p:SignMode=Off "/p:WindowsTargetPlatformVersion=$WindowsSdkVersion" /v:minimal /nologo 2>&1
     if ($LASTEXITCODE -eq 0 -and (Test-Path $DriverSys)) {
         Write-Host "  Driver built: $DriverSys" -ForegroundColor Gray
         return $true
     }
-    Write-Host "  Driver build FAILED (WDK installed?). Continuing without a fresh .sys." -ForegroundColor Yellow
+    Write-Host "  Driver build FAILED (WDK installed?). No fresh driver will be accepted." -ForegroundColor Yellow
     Write-Host $out
     return $false
 }
 
-# Test-sign output\ProxyBridgeDrv.sys with a self-signed cert so it can load on a machine where the
-# cert is trusted (run temp-sign.ps1 once to establish trust). Signing itself needs no elevation.
-function Sign-Driver {
-    $drv = Join-Path $OutputDir "ProxyBridgeDrv.sys"
-    if (-not (Test-Path $drv)) { return }
-    $subject = 'CN=ProxyBridge Test Signing'
-    $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $subject } | Select-Object -First 1
-    if (-not $cert) {
-        $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject -CertStoreLocation Cert:\CurrentUser\My `
-                  -KeyUsage DigitalSignature -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3') -NotAfter (Get-Date).AddYears(5)
-    }
-    $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
-          Sort-Object FullName -Descending | Select-Object -First 1
-    if (-not $st) { $st = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
-    if (-not $st) { Write-Host "  signtool not found - driver left unsigned" -ForegroundColor Yellow; return }
-    & $st sign /fd SHA256 /sha1 $cert.Thumbprint $drv 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  Test-signed: ProxyBridgeDrv.sys ($((Get-AuthenticodeSignature $drv).Status))" -ForegroundColor Gray
-    } else {
-        Write-Host "  Driver signing failed (file locked by a running ProxyBridgeDrv service?)" -ForegroundColor Yellow
-    }
-}
-
-Build-Driver | Out-Null
-
-$success = $false
-
-if ($Compiler -eq 'auto') {
-    Write-Host "Auto-detecting compiler..." -ForegroundColor Cyan
-
-    $success = Compile-MSVC
-
-    if (-not $success) {
-        Write-Host "`nMSVC compilation failed, trying GCC..." -ForegroundColor Yellow
-        $success = Compile-GCC
-    }
-} elseif ($Compiler -eq 'msvc') {
-    $success = Compile-MSVC
-} elseif ($Compiler -eq 'gcc') {
-    $success = Compile-GCC
-}
-
+if (!$UserModeOnly -and !(Build-Driver)) { throw 'Driver build failed; stale artifacts are not accepted.' }
+$success = Compile-MSVC
 
 if ($success) {
     Write-Host "`nCompilation SUCCESSFUL!" -ForegroundColor Green
@@ -234,20 +152,12 @@ if ($success) {
     Move-Item $OutputDLL -Destination $OutputDir -Force
     Write-Host "  Moved: $OutputDLL -> $OutputDir\" -ForegroundColor Gray
 
-    if (Test-Path $DriverSys) {
+    if (!$UserModeOnly -and (Test-Path $DriverSys)) {
         Copy-Item $DriverSys -Destination $OutputDir -Force
         Write-Host "  Copied: ProxyBridgeDrv.sys (WFP driver)" -ForegroundColor Gray
-        Sign-Driver
-    } else {
-        Write-Host "  WARNING: $DriverSys not found - build the driver first" -ForegroundColor Yellow
-    }
 
-    # Test-signing helper + VM test guide so output\ is a self-contained test package.
-    foreach ($extra in @("driver\temp-sign\temp-sign.ps1")) {
-        if (Test-Path $extra) {
-            Copy-Item $extra -Destination $OutputDir -Force
-            Write-Host "  Copied: $(Split-Path $extra -Leaf)" -ForegroundColor Gray
-        }
+    } else {
+        Write-Host "User-mode-only build: driver explicitly omitted."
     }
 
     # ── C GUI (MSVC) ─────────────────────────────────────────────────────────
@@ -271,9 +181,9 @@ if ($success) {
         # Sources live in subfolders. rc runs from res\ so app.rc's relative paths
         # (resource.h, app.manifest, logo.ico) resolve; it writes app.res back to gui\.
         Push-Location "gui"
-        $guiCmd = "`"$script:foundVcvarsPath`" $script:foundArch >nul && " +
+        $guiCmd = "`"$script:foundVcvarsPath`" x64 $WindowsSdkVersion >nul && " +
                   "pushd res && rc /nologo /fo ..\app.res app.rc && popd && cl.exe $guiClArgs"
-        $guiOut  = cmd /c $guiCmd '2>&1'
+        $guiOut  = cmd /d /c $guiCmd 2>&1
         $guiExit = $LASTEXITCODE
         Pop-Location
 
@@ -283,16 +193,16 @@ if ($success) {
             Remove-Item "gui\*.obj","gui\app.res" -Force -ErrorAction SilentlyContinue
         } else {
             Write-Host "  C GUI build failed!" -ForegroundColor Red
-            Write-Host $guiOut
+            throw "GUI build failed: $guiOut"
         }
     } else {
-        Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
+        throw 'MSVC is required for all components.'
     }
 
     # ── Build CLI ────────────────────────────────────────────────────────────
     Write-Host "`nBuilding CLI..." -ForegroundColor Green
     if ($script:foundVcvarsPath -and (Test-Path $script:foundVcvarsPath)) {
-        $cliArgs = "/nologo /O2 /Ot /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
+        $cliArgs = "/nologo /utf-8 /O2 /MT /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
                    "/D_WINSOCK_DEPRECATED_NO_WARNINGS /D_WIN32_WINNT=0x0601 /DNDEBUG " +
                    "/arch:SSE2 /fp:fast /GS /guard:cf /Qpar " +
                    "cli\main.c " +
@@ -300,83 +210,55 @@ if ($success) {
                    "winhttp.lib shell32.lib advapi32.lib " +
                    "/OUT:ProxyBridge_CLI.exe"
 
-        $cliCmd = "`"$script:foundVcvarsPath`" $script:foundArch >nul && cl.exe $cliArgs"
+        $cliCmd = "`"$script:foundVcvarsPath`" x64 $WindowsSdkVersion >nul && cl.exe $cliArgs"
         Write-Host "Command: cl.exe $cliArgs" -ForegroundColor Gray
 
-        $cliOut = cmd /c $cliCmd '2>&1'
+        $cliOut = cmd /d /c $cliCmd 2>&1
         if ($LASTEXITCODE -eq 0) {
             Move-Item "ProxyBridge_CLI.exe" -Destination $OutputDir -Force
             Write-Host "  CLI built: ProxyBridge_CLI.exe" -ForegroundColor Gray
             Remove-Item "*.obj" -Force -ErrorAction SilentlyContinue
         } else {
             Write-Host "  CLI build failed!" -ForegroundColor Red
-            Write-Host $cliOut
+            throw "CLI build failed: $cliOut"
         }
     } else {
-        Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
+        throw 'MSVC is required for all components.'
     }
 
-    if (-not $NoSign) {
-        Write-Host "`nSigning binaries..." -ForegroundColor Green
-        $filesToSign = Get-ChildItem $OutputDir -Include *.exe,*.dll -Recurse
-        $signedCount = 0
-
-        foreach ($file in $filesToSign) {
-            if (Sign-Binary -FilePath $file.FullName) {
-                $signedCount++
-            }
-        }
-
-        Write-Host "`nSigning Summary:" -ForegroundColor Cyan
-        Write-Host "  Signed: $signedCount files" -ForegroundColor Green
-    } else {
-        Write-Host "`nSigning skipped (-NoSign flag)" -ForegroundColor Yellow
-    }
-
-    Write-Host "`nAll files ready in: $OutputDir\" -ForegroundColor Cyan
+    Write-Host "`nUser components compiled; building helper and launcher..." -ForegroundColor Cyan
     Write-Host "Contents:" -ForegroundColor Yellow
     Get-ChildItem $OutputDir | ForEach-Object {
         $size = [math]::Round($_.Length/1MB, 2)
         Write-Host "  - $($_.Name) ($size MB)" -ForegroundColor Gray
     }
 
-    Write-Host "`nBuilding installer..." -ForegroundColor Green
-    $nsisPath = "C:\Program Files (x86)\NSIS\Bin\makensis.exe"
-    if (Test-Path $nsisPath) {
-        Push-Location installer
-        $result = & $nsisPath "ProxyBridge.nsi" 2>&1
-        Pop-Location
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  Installer created successfully" -ForegroundColor Green
-            # Derive installer name from the version defined in the NSI file
-            $nsiContent = Get-Content "installer\ProxyBridge.nsi" -Raw -ErrorAction SilentlyContinue
-            $installerVersion = if ($nsiContent -match '!define PRODUCT_VERSION "([^"]+)"') { $Matches[1] } else { "0.0.0" }
-            $installerName = "ProxyBridge-Setup-$installerVersion.exe"
-            if (Test-Path "installer\$installerName") {
-                Move-Item "installer\$installerName" -Destination $OutputDir -Force
-                Write-Host "  Moved: $installerName -> $OutputDir\" -ForegroundColor Gray
-
-                if (-not $NoSign) {
-                    Write-Host "`nSigning installer..." -ForegroundColor Green
-                    if (Sign-Binary -FilePath "$OutputDir\$installerName") {
-                        $installerSize = [math]::Round((Get-Item "$OutputDir\$installerName").Length/1MB, 2)
-                        Write-Host "  Installer ready: $OutputDir\$installerName ($installerSize MB)" -ForegroundColor Cyan
-                    }
-                } else {
-                    $installerSize = [math]::Round((Get-Item "$OutputDir\$installerName").Length/1MB, 2)
-                    Write-Host "  Installer ready: $OutputDir\$installerName ($installerSize MB)" -ForegroundColor Cyan
-                }
-            }
-        } else {
-            Write-Host "  Installer build failed!" -ForegroundColor Red
-            Write-Host $result
-        }
-    } else {
-        Write-Host "  NSIS not found at: $nsisPath" -ForegroundColor Yellow
-        Write-Host "  Skipping installer creation" -ForegroundColor Yellow
+    $msb = Join-Path (Split-Path (Split-Path (Split-Path (Split-Path $script:foundVcvarsPath)))) 'MSBuild\Current\Bin\MSBuild.exe'
+    foreach ($component in @(
+        @{Project='driver-helper'; File='ProxyBridgeDriverSetup.exe'},
+        @{Project='launcher'; File='ProxyBridgeLauncher.exe'}
+    )) {
+        $name = $component.Project
+        & $msb "installer\$name.vcxproj" /t:Rebuild /p:Configuration=Release /p:Platform=x64 `
+            "/p:PlatformToolset=$PlatformToolset" "/p:WindowsTargetPlatformVersion=$WindowsSdkVersion" `
+            "/p:OutDir=$output\" "/p:IntDir=$work\$name-obj\" /v:minimal /nologo
+        if ($LASTEXITCODE -ne 0) { throw "$name failed (exit $LASTEXITCODE)." }
+        if (!(Test-Path -LiteralPath (Join-Path $output $component.File))) { throw "$name output missing." }
     }
+    $required = @('ProxyBridgeCore.dll','ProxyBridge.exe','ProxyBridge_CLI.exe','ProxyBridgeDriverSetup.exe','ProxyBridgeLauncher.exe')
+    if (!$UserModeOnly) { $required += 'ProxyBridgeDrv.sys' }
+    $files = @($required | ForEach-Object {
+        $file = Get-Item -LiteralPath (Join-Path $output $_)
+        [pscustomobject]@{Path=$_; Bytes=$file.Length; SHA256=(Get-FileHash -LiteralPath $file.FullName).Hash}
+    })
+    [pscustomobject]@{UserModeOnly=[bool]$UserModeOnly; ReleaseReady=$false; Files=$files} |
+        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $output 'build-result.json') -Encoding utf8
+    Write-Host 'Unsigned compilation complete. Signed packaging is a separate explicit step.'
+
 } else {
     Write-Host "`nCompilation FAILED!" -ForegroundColor Red
-    Write-Host "Need: Visual Studio with C++ or MinGW-w64" -ForegroundColor Yellow
-    exit 1
+    Write-Host "MSVC compilation failed; inspect compiler output above." -ForegroundColor Yellow
+    throw 'Core compilation failed.'
 }
+
+} finally { Pop-Location }

@@ -36,7 +36,14 @@ enum {
     S_AB_VERSION, S_AB_DESC, S_AB_AUTHOR, S_AB_WEB, S_AB_GITHUB, S_AB_LICENSE,
     S_M_UPDATE, S_UPD_TITLE, S_UPD_AVAIL, S_UPD_NOTES, S_UPD_NOW, S_UPD_LATER,
     S_UPD_DONTASK, S_UPD_LATEST, S_UPD_ERR, S_UPD_DLING, S_UPD_DLFAIL,
+    S_UPD_STOPFAIL, S_UPD_LAUNCHFAIL, S_UPD_RESTARTFAIL,
+    S_STARTUP_FAIL,
     S_L_NAME, S_COL_NAME, S_CHK_SENDDOMAIN,
+    S_ERR_RULEAPPLY,
+    S_ERR_PROFILEAPPLY,
+    S_FILTER_ACTIVE, S_FILTER_INACTIVE,
+    S_LOG_SKIPPED,
+    S_PROFILE_LOADING,
     S_COUNT
 };
 
@@ -191,9 +198,20 @@ static const wchar_t* const g_strings[S_COUNT][2] = {
     /* S_UPD_ERR            */ { L"Could not check for updates. Please try again later.", L"无法检查更新，请稍后重试。" },
     /* S_UPD_DLING          */ { L"Downloading update...", L"正在下载更新..." },
     /* S_UPD_DLFAIL         */ { L"Download failed.", L"下载失败。" },
+    /* S_UPD_STOPFAIL       */ { L"Could not stop ProxyBridge. Try again.", L"无法停止 ProxyBridge，请重试。" },
+    /* S_UPD_LAUNCHFAIL     */ { L"Could not start the installer. Try again.", L"无法启动安装程序，请重试。" },
+    /* S_UPD_RESTARTFAIL    */ { L"Installer failed to start. Restart ProxyBridge.", L"安装程序启动失败，请重启 ProxyBridge。" },
+    /* S_STARTUP_FAIL      */ { L"Could not change startup settings (error %lu). Check the installation and any existing ProxyBridge task.", L"无法更改启动设置（错误 %lu）。请检查安装及现有的 ProxyBridge 任务。" },
     /* S_L_NAME             */ { L"Name:", L"名称:" },
     /* S_COL_NAME           */ { L"Name", L"名称" },
     /* S_CHK_SENDDOMAIN     */ { L"Let proxy resolve DNS (send hostname)", L"由代理解析 DNS (发送主机名)" },
+    /* S_ERR_RULEAPPLY */ { L"Could not apply the rule change (error %lu). Previous rules were kept.", L"无法应用规则更改（错误 %lu）。已保留原有规则。" },
+    /* S_ERR_PROFILEAPPLY */ { L"Could not apply the profile (error %lu). The previous proxy configurations and rules were kept.", L"无法应用配置文件（错误 %lu）。已保留原有代理配置和规则。" },
+    /* S_FILTER_ACTIVE */ { L"Filtering is active.", L"过滤已启用。" },
+    /* S_FILTER_INACTIVE */ { L"Filtering is inactive. Check the activity log.", L"过滤未启用，请查看活动日志。" },
+    /* S_LOG_SKIPPED */ { L"[log] Could not store %llu entries since manual clear (log queue full or entry unavailable).\r\n",
+                          L"[日志] 自手动清空以来有 %llu 条记录无法保存（日志队列已满或记录不可用）。\r\n" },
+    /* S_PROFILE_LOADING */ { L"Loading profile...", L"正在加载配置..." },
 };
 
 static const wchar_t* T(int id) { return g_strings[id][g_lang ? 1 : 0]; }

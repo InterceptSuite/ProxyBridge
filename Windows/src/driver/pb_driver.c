@@ -1,6 +1,7 @@
 #include "pb_internal.h"
 #include "ProxyBridgeDrv_user.h"
 #include <fwpmu.h>
+#include <stdint.h>
 
 // ProxyBridge <-> ProxyBridgeDrv.sys glue. The WFP connect-redirect driver is the sole capture
 // path: it redirects watched connections to the local relay and hands us the PID and the
@@ -9,84 +10,136 @@
 
 BOOL g_use_wfp_driver = TRUE;   // the only capture path (WinDivert fully removed)
 static HANDLE g_drv = INVALID_HANDLE_VALUE;
+static volatile LONG g_filtering_active = FALSE;
+static volatile LONG64 g_driver_session_epoch = 0;
+static SRWLOCK g_driver_handle_lock = SRWLOCK_INIT;
 
 // Connection-log drain: pulls the driver's monitor events (every outbound connect) and turns
 // each into a connection-log entry (app / ip / port / proto / action) via the rule engine.
-static volatile BOOL g_drain_run = FALSE;
+static volatile LONG g_drain_run = FALSE;
 static HANDLE        g_drain_thread = NULL;
+#define PB_DRAIN_CAP 256u
+
+static HANDLE driver_open_configured(UINT16 relay_port);
+
+LONG64 pb_driver_session_epoch(void)
+{
+    return InterlockedCompareExchange64(&g_driver_session_epoch, 0, 0);
+}
+
+BOOL pb_driver_is_active(void)
+{
+    return InterlockedCompareExchange(&g_filtering_active, 0, 0) != 0;
+}
+
+static BOOL relay_threads_alive(void)
+{
+    // Core joins this worker before closing either relay thread handle.
+    return proxy_thread != NULL && udp_relay_thread != NULL &&
+        WaitForSingleObject(proxy_thread, 0) == WAIT_TIMEOUT &&
+        WaitForSingleObject(udp_relay_thread, 0) == WAIT_TIMEOUT;
+}
+
+
+#include "pb_driver_event_report.inc"
 
 static DWORD WINAPI driver_event_drain(LPVOID arg)
 {
-    (void)arg;
-    const DWORD CAP = 256;
-    PBDRV_EVENT *buf = (PBDRV_EVENT *)malloc(CAP * sizeof(PBDRV_EVENT));
-    if (buf == NULL) return 0;
+    const DWORD CAP = PB_DRAIN_CAP;
+    PBDRV_EVENT *buf = (PBDRV_EVENT *)arg;
+    ULONGLONG reconnectAt = 0;
+    DWORD reconnectDelay = 250;
+    ULONGLONG statusAt = 0;
+    BOOL admissionWarningShown = FALSE;
 
-    while (g_drain_run)
+    while (InterlockedCompareExchange(&g_drain_run, 0, 0))
     {
+        if (!relay_threads_alive()) {
+            InterlockedExchange(&g_filtering_active, FALSE);
+            AcquireSRWLockExclusive(&g_driver_handle_lock);
+            HANDLE stale = g_drv;
+            g_drv = INVALID_HANDLE_VALUE;
+            InterlockedIncrement64(&g_driver_session_epoch);
+            ReleaseSRWLockExclusive(&g_driver_handle_lock);
+            if (stale != INVALID_HANDLE_VALUE) {
+                pbdrv_enable(stale, FALSE);
+                CloseHandle(stale);
+            }
+            log_message("driver: relay worker exited; filtering disabled, restart required");
+            break; // Never reconnect capture to a dead listener.
+        }
+        BOOL warnAdmission = FALSE;
         DWORD got = 0;
-        if (g_drv != INVALID_HANDLE_VALUE && pbdrv_pop_events(g_drv, buf, CAP, &got) && got > 0)
+        AcquireSRWLockShared(&g_driver_handle_lock);
+        BOOL ok = g_drv != INVALID_HANDLE_VALUE && pbdrv_pop_events(g_drv, buf, CAP, &got);
+        if (ok && GetTickCount64() >= statusAt) {
+            PBDRV_STATUS state;
+            ok = pbdrv_get_status(g_drv, &state) &&
+                 (state.flags & PBDRV_STATUS_ACTIVE) != 0;
+            if (ok) {
+                BOOL rejected = (state.flags & PBDRV_STATUS_UDP_ADMISSION_FAILED) != 0;
+                warnAdmission = rejected && !admissionWarningShown;
+                admissionWarningShown = rejected;
+            }
+            InterlockedExchange(&g_filtering_active, ok);
+            statusAt = GetTickCount64() + 500;
+        }
+        ReleaseSRWLockShared(&g_driver_handle_lock);
+        if (warnAdmission)
+            log_message("driver: UDP admission rejected (capacity, allocation, missing endpoint or conflicting mapping); affected attempts were blocked, not sent direct");
+        if (ok && got > 0)
         {
             for (DWORD i = 0; i < got; i++)
             {
                 PBDRV_EVENT *e = &buf[i];
-                BOOL   is_udp = (e->protocol == IPPROTO_UDP);
-                BOOL   is_v6  = (e->family == AF_INET6);
-                UINT32 cfg    = 0;
-                char   pname[MAX_PROCESS_NAME] = "";
-                RuleAction act = RULE_ACTION_DIRECT;
-
-                // Resolve the process name: prefer the live PID (gives the full C:\ path so
-                // full-path rules work); fall back to the basename the driver captured at connect
-                // time, so a process that already exited still logs correctly (never "unknown").
-                if (!get_process_name_from_pid(e->pid, pname, sizeof(pname)) && e->image[0] != 0)
-                    WideCharToMultiByte(CP_UTF8, 0, e->image, -1, pname, sizeof(pname), NULL, NULL);
-
-                if (pname[0] != '\0')
-                    act = is_v6 ? match_rule_v6(pname, e->remoteV6, e->remotePort, is_udp, &cfg)
-                                : match_rule(pname, e->remoteV4, e->remotePort, is_udp, &cfg);
-
-                pb_report_connection(e->pid, pname[0] ? pname : NULL, is_v6, e->remoteV4, e->remoteV6,
-                                     e->remotePort, act, cfg, is_udp);
+                driver_report_event(e);
             }
             if (got == CAP) continue;   // ring likely still full - drain again without sleeping
         }
+        if (!ok) {
+            InterlockedExchange(&g_filtering_active, FALSE);
+            AcquireSRWLockExclusive(&g_driver_handle_lock);
+            HANDLE stale = g_drv;
+            g_drv = INVALID_HANDLE_VALUE;
+            InterlockedIncrement64(&g_driver_session_epoch);
+            ReleaseSRWLockExclusive(&g_driver_handle_lock);
+            if (stale != INVALID_HANDLE_VALUE) {
+                CloseHandle(stale); // revoke the old session before opening another
+                log_message("driver: device unavailable; filtering inactive, waiting to reconnect");
+                reconnectAt = GetTickCount64() + reconnectDelay;
+            }
+            if (GetTickCount64() >= reconnectAt && InterlockedCompareExchange(&g_drain_run, 0, 0)) {
+                BOOL ownsRules = pb_rules_begin_update();
+                HANDLE replacement = ownsRules ? driver_open_configured(g_local_relay_port) : INVALID_HANDLE_VALUE;
+                BOOL restored = FALSE;
+                AcquireSRWLockExclusive(&g_driver_handle_lock);
+                if (replacement != INVALID_HANDLE_VALUE &&
+                    InterlockedCompareExchange(&g_drain_run, 0, 0) && relay_threads_alive()) {
+                    g_drv = replacement;
+                    InterlockedIncrement64(&g_driver_session_epoch);
+                    restored = TRUE;
+                    InterlockedExchange(&g_filtering_active, TRUE);
+                }
+                ReleaseSRWLockExclusive(&g_driver_handle_lock);
+                if (!restored && replacement != INVALID_HANDLE_VALUE) {
+                    pbdrv_enable(replacement, FALSE);
+                    CloseHandle(replacement);
+                }
+                if (ownsRules) pb_rules_end_update();
+                if (restored) {
+                    reconnectDelay = 250;
+                    log_message("driver: filtering restored after applying current configuration and rules");
+                } else if (reconnectDelay < 5000) {
+                    reconnectDelay = min(reconnectDelay * 2, 5000);
+                }
+                reconnectAt = GetTickCount64() + reconnectDelay;
+            }
+        }
         Sleep(150);
     }
+    InterlockedExchange(&g_filtering_active, FALSE);
     free(buf);
     return 0;
-}
-
-// Install (if needed) and start the ProxyBridgeDrv kernel service from <exe dir>\ProxyBridgeDrv.sys.
-static BOOL driver_service_start(void)
-{
-    WCHAR path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return FALSE;
-    WCHAR *slash = wcsrchr(path, L'\\');
-    if (slash == NULL) return FALSE;
-    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - path), L"ProxyBridgeDrv.sys");
-
-    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-    if (scm == NULL) { log_message("driver: OpenSCManager failed (%lu)", GetLastError()); return FALSE; }
-
-    SC_HANDLE svc = OpenServiceW(scm, L"ProxyBridgeDrv", SERVICE_ALL_ACCESS);
-    if (svc == NULL) {
-        svc = CreateServiceW(scm, L"ProxyBridgeDrv", L"ProxyBridge WFP", SERVICE_ALL_ACCESS,
-                             SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
-                             path, NULL, NULL, NULL, NULL, NULL);
-        if (svc == NULL) {
-            log_message("driver: CreateService failed (%lu) - is ProxyBridgeDrv.sys next to the exe?", GetLastError());
-            CloseServiceHandle(scm);
-            return FALSE;
-        }
-    }
-    BOOL ok = StartServiceW(svc, 0, NULL);
-    if (!ok && GetLastError() == ERROR_SERVICE_ALREADY_RUNNING) ok = TRUE;
-    if (!ok) log_message("driver: StartService failed (%lu) - signed? testsigning on?", GetLastError());
-    CloseServiceHandle(svc);
-    CloseServiceHandle(scm);
-    return ok;
 }
 
 // Add one rule token to the kernel watch list. WFP exposes ALE_APP_ID as a kernel device
@@ -151,25 +204,23 @@ done:
     return added;
 }
 
-// Push the watch list = image names of enabled PROXY rules (relay refines the decision).
-static BOOL driver_push_watchlist(void)
+// Caller owns an immutable candidate or holds the rules writer gate.
+PBDRV_WATCHLIST *pb_driver_prepare_rules(const PROCESS_RULE *rules)
 {
-    PBDRV_WATCHLIST *wl = (PBDRV_WATCHLIST *)calloc(1, sizeof(*wl));
+    PBDRV_WATCHLIST *wl = calloc(1, sizeof(*wl));
     if (wl == NULL) {
-        log_message("driver: cannot allocate watchlist");
-        return FALSE;
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
     }
-
     BOOL valid = TRUE;
-    AcquireSRWLockShared(&g_rules_lock);
-    for (PROCESS_RULE *r = rules_list; r != NULL && valid; r = r->next) {
+    for (const PROCESS_RULE *r = rules; r != NULL && valid; r = r->next) {
+        if (!r->enabled || (r->action != RULE_ACTION_PROXY && r->action != RULE_ACTION_BLOCK)) continue;
         // Watch = every app the relay must see: PROXY (redirect to upstream) and BLOCK
         // (redirect so the relay can refuse). DIRECT-only apps are left untouched in-kernel.
-        if (!r->enabled || (r->action != RULE_ACTION_PROXY && r->action != RULE_ACTION_BLOCK)) continue;
         // Keep token parsing aligned with match_process_list: comma/semicolon separators,
         // surrounding whitespace, and optional quotes around paths containing spaces.
         char tmp[1024];
-        strncpy_s(tmp, sizeof(tmp), r->process_name, _TRUNCATE);
+        strcpy_s(tmp, sizeof(tmp), r->process_name);
         char *ctxp = NULL;
         for (char *tok = strtok_s(tmp, ",;", &ctxp); tok && valid;
              tok = strtok_s(NULL, ",;", &ctxp)) {
@@ -193,34 +244,36 @@ static BOOL driver_push_watchlist(void)
             valid = driver_add_watch_entry(wl, tok);
         }
     }
-    ReleaseSRWLockShared(&g_rules_lock);
 
     if (!valid) {
         log_message("driver: watchlist update rejected; previous list remains active");
         free(wl);
-        return FALSE;
+        SetLastError(ERROR_INVALID_DATA);
+        return NULL;
     }
 
-    if (!pbdrv_set_watchlist(g_drv, wl)) {
-        log_message("driver: SET_WATCHLIST failed (%lu); previous list remains active",
-                    GetLastError());
-        free(wl);
-        return FALSE;
-    }
-
-    log_message("driver: pushed %u watched image(s)", wl->count);
-    free(wl);
-    return TRUE;
+    return wl;
 }
 
-// Re-push the watch list to the driver after any rule change. Safe to call anytime:
-// a no-op until the driver handle is open (rules added before Start are picked up by
-// the push in pb_driver_start). This is the hook that makes live Add/Edit/Delete/Enable
-// of proxy & block rules take effect without a restart.
-void pb_driver_sync_rules(void)
+// Called under the rules writer gate and g_rules_lock exclusive. No callbacks.
+BOOL pb_driver_apply_rules(const PBDRV_WATCHLIST *watch)
 {
-    if (!g_use_wfp_driver || g_drv == INVALID_HANDLE_VALUE) return;
-    driver_push_watchlist();
+    AcquireSRWLockShared(&g_driver_handle_lock);
+    BOOL ok = g_drv == INVALID_HANDLE_VALUE || pbdrv_set_watchlist(g_drv, watch);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    ReleaseSRWLockShared(&g_driver_handle_lock);
+    SetLastError(error);
+    return ok;
+}
+
+BOOL pb_driver_apply_profile_rules(const PBDRV_WATCHLIST *watch, BOOL loopback)
+{
+    AcquireSRWLockShared(&g_driver_handle_lock);
+    BOOL ok = g_drv == INVALID_HANDLE_VALUE || pbdrv_set_rule_policy(g_drv, watch, loopback);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    ReleaseSRWLockShared(&g_driver_handle_lock);
+    SetLastError(error);
+    return ok;
 }
 
 // Build the driver config: relay endpoints, our own PID (never redirected), full TCP+UDP and
@@ -235,68 +288,167 @@ static void driver_build_config(PBDRV_CONFIG *cfg, UINT16 relay_port)
     cfg->udpV4Addr = htonl(INADDR_LOOPBACK); cfg->udpV4Port = LOCAL_UDP_RELAY_PORT;
     memcpy(cfg->udpV6Addr, lb6, 16);         cfg->udpV6Port = LOCAL_UDP_RELAY_PORT;
     cfg->selfPid            = GetCurrentProcessId();
-    cfg->redirectUdp        = 1;
-    cfg->redirectIpv6       = 1;
+    cfg->redirectUdp        = (udp_relay_thread != NULL);
+    cfg->redirectIpv6       = g_relay_ipv6_ready;
     cfg->redirectLoopbackApps = g_localhost_via_proxy ? 1 : 0;   // "Localhost via Proxy" menu option
 }
 
-// Re-push the driver config after a setting change (e.g. "Localhost via Proxy" toggled). No-op
-// until the driver is started; the relay port is the one the drain/relay are already using.
-void pb_driver_sync_config(void)
+static HANDLE driver_open_configured(UINT16 relay_port)
 {
-    if (!g_use_wfp_driver || g_drv == INVALID_HANDLE_VALUE) return;
-    PBDRV_CONFIG cfg;
-    driver_build_config(&cfg, g_local_relay_port);
-    pbdrv_configure(g_drv, &cfg);
-}
+    HANDLE driver = pbdrv_open();
+    if (driver == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        log_message("driver: PnP interface open failed (%lu); check installation and controller ownership", error);
+        SetLastError(error);
+        goto fail;
+    }
 
-BOOL pb_driver_start(UINT16 relay_port)
-{
-    if (!driver_service_start()) return FALSE;
-
-    g_drv = pbdrv_open();
-    if (g_drv == INVALID_HANDLE_VALUE) {
-        log_message("driver: open \\\\.\\ProxyBridgeDrv failed (%lu) - admin?", GetLastError());
-        return FALSE;
+    PBDRV_STATUS state;
+    if (!pbdrv_get_status(driver, &state)) {
+        DWORD error = GetLastError();
+        log_message("driver: incompatible or unreadable driver status (%lu)", error);
+        SetLastError(error);
+        goto fail;
+    }
+    if (!(state.flags & PBDRV_STATUS_READY)) {
+        log_message("driver: device is not ready");
+        SetLastError(ERROR_NOT_READY);
+        goto fail;
     }
 
     PBDRV_CONFIG cfg;
     driver_build_config(&cfg, relay_port);
-    if (!pbdrv_configure(g_drv, &cfg))
-        log_message("driver: configure failed (%lu)", GetLastError());
+    if (!pbdrv_configure(driver, &cfg)) {
+        DWORD error = GetLastError();
+        log_message("driver: configure failed (%lu)", error);
+        SetLastError(error);
+        goto fail;
+    }
 
-    if (!driver_push_watchlist()) {
-        CloseHandle(g_drv);
-        g_drv = INVALID_HANDLE_VALUE;
+    PBDRV_WATCHLIST *watch = pb_driver_prepare_rules(rules_list);
+    if (watch == NULL) {
+        SetLastError(ERROR_INVALID_DATA);
+        goto fail;
+    }
+    BOOL watchApplied = pbdrv_set_watchlist(driver, watch);
+    DWORD watchError = watchApplied ? ERROR_SUCCESS : GetLastError();
+    free(watch);
+    if (!watchApplied) {
+        SetLastError(watchError);
+        goto fail;
+    }
+    if (!relay_threads_alive()) {
+        SetLastError(ERROR_NOT_READY);
+        goto fail;
+    }
+    if (!pbdrv_enable(driver, TRUE)) {
+        DWORD error = GetLastError();
+        log_message("driver: enable failed (%lu)", error);
+        SetLastError(error);
+        goto fail;
+    }
+    if (!pbdrv_get_status(driver, &state)) {
+        DWORD error = GetLastError();
+        log_message("driver: activation status query failed (%lu)", error);
+        SetLastError(error);
+        goto fail;
+    }
+    if (!(state.flags & PBDRV_STATUS_ACTIVE) || !relay_threads_alive()) {
+        log_message("driver: activation was not confirmed (status=0x%08lx)",
+                    (unsigned long)state.lastActivationStatus);
+        SetLastError(ERROR_NOT_READY);
+        goto fail;
+    }
+
+    return driver;
+
+fail: {
+    DWORD error = GetLastError();
+    if (driver != INVALID_HANDLE_VALUE) {
+        pbdrv_enable(driver, FALSE);
+        CloseHandle(driver);
+        driver = INVALID_HANDLE_VALUE;
+    }
+    SetLastError(error);
+    return INVALID_HANDLE_VALUE;
+}
+}
+
+BOOL pb_driver_start(UINT16 relay_port)
+{
+    PBDRV_EVENT *events = malloc(PB_DRAIN_CAP * sizeof(*events));
+    if (events == NULL) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return FALSE;
     }
-    pbdrv_enable(g_drv, TRUE);
-
-    // Start the connection-log drain (logs every connection: direct/proxy/block).
-    g_drain_run = TRUE;
-    g_drain_thread = CreateThread(NULL, 0, driver_event_drain, NULL, 0, NULL);
-
-    log_message("driver: ProxyBridgeDrv active - relay 127.0.0.1:%u, TCP+UDP, IPv4+IPv6", relay_port);
+    if (!pb_rules_begin_update()) {
+        free(events);
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    HANDLE driver = driver_open_configured(relay_port);
+    if (driver == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        pb_rules_end_update();
+        free(events);
+        SetLastError(error);
+        return FALSE;
+    }
+    AcquireSRWLockExclusive(&g_driver_handle_lock);
+    g_drv = driver;
+    InterlockedIncrement64(&g_driver_session_epoch);
+    InterlockedExchange(&g_filtering_active, TRUE);
+    InterlockedExchange(&g_drain_run, TRUE);
+    g_drain_thread = CreateThread(NULL, 0, driver_event_drain, events, 0, NULL);
+    DWORD error = g_drain_thread == NULL ? GetLastError() : ERROR_SUCCESS;
+    if (g_drain_thread == NULL) {
+        InterlockedExchange(&g_drain_run, FALSE);
+        InterlockedExchange(&g_filtering_active, FALSE);
+        g_drv = INVALID_HANDLE_VALUE;
+        InterlockedIncrement64(&g_driver_session_epoch);
+    }
+    ReleaseSRWLockExclusive(&g_driver_handle_lock);
+    if (error != ERROR_SUCCESS) {
+        free(events);
+        pbdrv_enable(driver, FALSE);
+        CloseHandle(driver);
+        pb_rules_end_update();
+        log_message("driver: event worker creation failed (%lu)", error);
+        SetLastError(error);
+        return FALSE;
+    }
+    pb_rules_end_update();
+    log_message("driver: ProxyBridgeDrv active - relay port %u", relay_port);
     return TRUE;
+}
+BOOL pb_driver_is_worker_thread(void)
+{
+    // Called only by the serialized core lifecycle while handles are stable.
+    return g_drain_thread != NULL && GetThreadId(g_drain_thread) == GetCurrentThreadId();
 }
 
 void pb_driver_stop(void)
 {
+    InterlockedExchange(&g_filtering_active, FALSE);
     // Stop the drain thread before closing the handle it uses. Wait INFINITE (not a timeout):
     // the thread reads g_drv, so closing it while the thread is mid pbdrv_pop_events() would be
-    // a use-after-close. The loop checks g_drain_run every <=150 ms, so this returns promptly.
-    g_drain_run = FALSE;
+    // a use-after-close. The idle sleep is <=150 ms; an in-flight synchronous
+    // IOCTL or reconnect can take longer and must complete before the join.
+    InterlockedExchange(&g_drain_run, FALSE);
     if (g_drain_thread != NULL) {
         WaitForSingleObject(g_drain_thread, INFINITE);
         CloseHandle(g_drain_thread);
         g_drain_thread = NULL;
     }
+    AcquireSRWLockExclusive(&g_driver_handle_lock);
     if (g_drv != INVALID_HANDLE_VALUE) {
         pbdrv_enable(g_drv, FALSE);
         CloseHandle(g_drv);
         g_drv = INVALID_HANDLE_VALUE;
+        InterlockedIncrement64(&g_driver_session_epoch);
     }
-    // Service is left installed; a later start reuses it.
+    ReleaseSRWLockExclusive(&g_driver_handle_lock);
+    // The installer owns the devnode/package; closing the session leaves it ready.
 }
 
 // Relay-side (TCP IPv4): original dest + PID for an accepted redirected socket.
@@ -321,14 +473,49 @@ BOOL pb_driver_orig_dest6(SOCKET s, UINT8 ip6[16], UINT16 *port, DWORD *pid)
     return TRUE;
 }
 
-// Relay-side (UDP IPv4): recover a redirected datagram's original dest by its source.
-BOOL pb_driver_udp_orig(UINT32 src_ip, UINT16 src_port, UINT32 *ip, UINT16 *port, DWORD *pid)
+// Relay-side UDP: ERROR_NOT_FOUND is reserved for a successful query with no
+// mapping. An IOCTL failure must never be mistaken for proof of endpoint close.
+// IPv4: recover a redirected datagram's original dest by its source.
+BOOL pb_driver_udp_orig(UINT32 src_ip, UINT16 src_port, UINT32 *ip, UINT16 *port, DWORD *pid, UINT64 *generation)
 {
-    if (g_drv == INVALID_HANDLE_VALUE) return FALSE;
     PBDRV_UDP_QUERY q; memset(&q, 0, sizeof(q));
     q.family = AF_INET; q.srcV4 = src_ip; q.srcPort = src_port;
-    if (!pbdrv_udp_query(g_drv, &q) || !q.found) return FALSE;
+    AcquireSRWLockShared(&g_driver_handle_lock);
+    BOOL ok = g_drv != INVALID_HANDLE_VALUE && pbdrv_udp_query(g_drv, &q);
+    DWORD error = ok ? ERROR_SUCCESS :
+        (g_drv == INVALID_HANDLE_VALUE ? ERROR_INVALID_HANDLE : GetLastError());
+    if (!ok && error == ERROR_NOT_FOUND) error = ERROR_GEN_FAILURE;
+    ReleaseSRWLockShared(&g_driver_handle_lock);
+    if (!ok || !q.found) {
+        SetLastError(ok ? ERROR_NOT_FOUND : error);
+        return FALSE;
+    }
     *ip = q.origV4; *port = q.origPort;
     if (pid) *pid = q.pid;
+    if (generation) *generation = q.mappingGeneration;
+    return TRUE;
+}
+
+BOOL pb_driver_udp_orig6(const UINT8 src_ip6[16], UINT16 src_port,
+                         UINT8 ip6[16], UINT16 *port, DWORD *pid, UINT64 *generation)
+{
+    PBDRV_UDP_QUERY q; memset(&q, 0, sizeof(q));
+    q.family = AF_INET6;
+    memcpy(q.srcV6, src_ip6, 16);
+    q.srcPort = src_port;
+    AcquireSRWLockShared(&g_driver_handle_lock);
+    BOOL ok = g_drv != INVALID_HANDLE_VALUE && pbdrv_udp_query(g_drv, &q);
+    DWORD error = ok ? ERROR_SUCCESS :
+        (g_drv == INVALID_HANDLE_VALUE ? ERROR_INVALID_HANDLE : GetLastError());
+    if (!ok && error == ERROR_NOT_FOUND) error = ERROR_GEN_FAILURE;
+    ReleaseSRWLockShared(&g_driver_handle_lock);
+    if (!ok || !q.found) {
+        SetLastError(ok ? ERROR_NOT_FOUND : error);
+        return FALSE;
+    }
+    memcpy(ip6, q.origV6, 16);
+    *port = q.origPort;
+    if (pid != NULL) *pid = q.pid;
+    if (generation) *generation = q.mappingGeneration;
     return TRUE;
 }

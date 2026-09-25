@@ -31,9 +31,19 @@
 #define LOG_BUFFER_SIZE 1024
 #define MAX_LIST_SIZE 65536  // max byte length for semicolon-delimited host/port/process lists
 
+typedef struct {
+    size_t bytes;
+    char patterns[1]; // packed flags byte followed by a NUL-terminated pattern
+} PB_PROCESS_PATTERNS;
+
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
     char process_name[MAX_PROCESS_NAME];
+    PB_PROCESS_PATTERNS *prepared_process;
+    struct PB_PORT_FILTER *prepared_ports;
+    struct PB_DOMAIN_FILTER *prepared_domains;
+    struct PB_IPV6_FILTER *prepared_ipv6;
+    struct PB_IPV4_FILTER *prepared_ipv4;
     char *target_hosts;   // Dynamic: IP filter "*", "192.168.*.*", "10.0.0.1;172.16.0.0"
     char *target_ports;   // Dynamic: Port filter "*", "80", "80;443", "8000-9000"
     char *target_domains; // Dynamic: Domain filter "*", "google.com", "*.google.com;*.gstatic.com" ("" or "*" = no domain restriction)
@@ -99,15 +109,6 @@ typedef struct CONNECTION_INFO {
 } CONNECTION_INFO;
 
 typedef struct {
-    SOCKET client_socket;
-    UINT32 orig_dest_ip;
-    UINT16 orig_dest_port;
-    UINT32 proxy_config_id;
-    BOOL   is_ipv6;
-    UINT8  orig_dest_ip6[16];
-} CONNECTION_CONFIG;
-
-typedef struct {
     SOCKET from_socket;
     SOCKET to_socket;
 } TRANSFER_CONFIG;
@@ -126,16 +127,19 @@ typedef struct {
     SOCKET to;
 } ONE_WAY_CONFIG;
 
-typedef struct LOGGED_CONNECTION {
-    DWORD pid;
-    UINT32 dest_ip;
-    UINT16 dest_port;
-    RuleAction action;
-    struct LOGGED_CONNECTION *next;
-} LOGGED_CONNECTION;
-
-// Internal proxy configuration with per-config UDP SOCKS5 state
 typedef struct {
+    DWORD pid;
+    UINT8 address[16];
+    UINT16 dest_port;
+    BOOL ipv6, udp;
+    RuleAction action;
+    UINT32 proxy_id;
+    LONG64 proxy_revision;
+} PB_LOG_KEY;
+
+// Immutable proxy definition copied under g_proxy_lock.
+typedef struct {
+    LONG64 revision;            // immutable definition version; UDP state is relay-owned
     UINT32 config_id;           // Unique ID (1-based), 0 = unused slot
     ProxyType type;
     char host[256];
@@ -144,12 +148,36 @@ typedef struct {
     char password[256];
     BOOL send_domain_to_proxy;  // TRUE = proxy resolves DNS (send hostname), FALSE = send IP
     UINT32 resolved_ip;         // cached at add/edit time - avoids DNS per connection
+} PROXY_CONFIG;
+
+typedef struct {
+    SOCKET client_socket;
+    UINT32 orig_dest_ip;
+    UINT16 orig_dest_port;
+    UINT32 proxy_config_id;
+    BOOL   is_ipv6;
+    UINT8  orig_dest_ip6[16];
+    PROXY_CONFIG proxy_snapshot;
+} CONNECTION_CONFIG;
+
+// Mutable UDP transport state belongs only to the relay, never the shared store.
+#include "pb_udp_queue.h"
+// The definition snapshot remains valid throughout this association's lifetime.
+typedef struct {
+    PROXY_CONFIG config;
     ULONGLONG last_udp_attempt;
     SOCKET udp_tcp_ctrl;
     SOCKET udp_send_sock;
     struct sockaddr_in udp_relay_addr;
     BOOL udp_connected;
-} PROXY_CONFIG;
+    int setup_phase;
+    int setup_offset;
+    int setup_length;
+    ULONGLONG setup_deadline;
+    unsigned char setup_buffer[513]; // RFC1929: version + two lengths + 255-byte fields
+    BOOL setup_ready;
+    PB_UDP_QUEUE pending;
+} PB_UDP_ASSOCIATION;
 
 typedef BOOL (*token_match_func)(const char *token, const void *data);
 
@@ -157,17 +185,26 @@ typedef BOOL (*token_match_func)(const char *token, const void *data);
 extern PROXY_CONFIG g_proxy_configs[MAX_PROXY_CONFIGS];
 extern int g_proxy_config_count;
 extern UINT32 g_next_config_id;
+extern volatile LONG64 g_proxy_revision;
 extern CONNECTION_INFO *connection_hash_table[CONNECTION_HASH_SIZE];
 extern CONNECTION_INFO *connection_rev_table[CONNECTION_HASH_SIZE];
-extern LOGGED_CONNECTION *logged_connections;
-extern int g_logged_count;  // running length of logged_connections (guarded by `lock`)
 extern PROCESS_RULE *rules_list;
 extern UINT32 g_next_rule_id;
 extern SRWLOCK lock;
 extern SRWLOCK g_rules_lock;
+extern UINT64 g_rules_generation; // protected by g_rules_lock
 extern HANDLE proxy_thread;
 extern HANDLE udp_relay_thread;
 extern HANDLE cleanup_thread;
+
+// Published by each relay before signalling readyEvent. The startup owner keeps
+// this object alive until the signal or until the worker has been joined.
+typedef struct PB_RELAY_STARTUP {
+    HANDLE readyEvent;
+    BOOL ipv6Ready;
+} PB_RELAY_STARTUP;
+
+extern BOOL g_relay_ipv6_ready;
 extern volatile BOOL g_has_active_rules;
 extern volatile BOOL g_has_domain_rules;
 extern SOCKET udp_relay_socket;
@@ -218,6 +255,7 @@ void format_ip_address(UINT32 ip, char *buffer, size_t size);
 BOOL parse_token_list(const char *list, const char *delimiters, token_match_func match_func, const void *match_data);
 void configure_tcp_socket(SOCKET sock, int bufsize, DWORD timeout);
 int connect_with_timeout(SOCKET s, const struct sockaddr *addr, int addrlen, int timeout_ms);
+int pb_connect_relay(SOCKET s, const struct sockaddr *addr, int addrlen, int timeout_ms);
 void configure_udp_socket(SOCKET sock, int bufsize, DWORD timeout);
 int send_all(SOCKET sock, const char *buf, int len);
 int recv_n(SOCKET s, char *buf, int n);
@@ -227,6 +265,8 @@ void base64_encode(const char* input, char* output, size_t output_size);
 
 // ---- pb_process.c ----
 BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
+void pb_process_cache_clear(void);
+void pb_process_cache_dispose(void); // only with all readers quiescent
 
 // ---- pb_rules.c ----
 BOOL is_ipv6_multicast_or_linklocal(const UINT8 ip6[16]);
@@ -251,22 +291,51 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
 RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
 RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
 RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
-void update_has_active_rules(void);
+BOOL pb_rules_begin_update(void);
+void pb_rules_end_update(void);
 
 // ---- pb_proxy.c ----
 // Guards g_proxy_configs[] + g_proxy_config_count against concurrent Add/Edit/Delete (GUI
 // thread) vs. relay/drain readers. Delete tombstones a slot (config_id=0) instead of shifting
 // the array, so pointers/indices held by other threads stay valid.
 extern SRWLOCK g_proxy_lock;
-PROXY_CONFIG* find_proxy_config(UINT32 config_id);
+int pb_proxy_snapshot(PROXY_CONFIG *out, LONG64 *revision);
+BOOL pb_proxy_prepare_definition(const ProxyBridgeProxySpec *input, PROXY_CONFIG *out);
 // Snapshot a config into *out under the lock - use this on the TCP path where the caller holds
 // the config across blocking network I/O and must be immune to a concurrent Edit/Delete.
 BOOL find_proxy_config_copy(UINT32 config_id, PROXY_CONFIG *out);
+PB_PROCESS_PATTERNS *pb_prepare_process_list(const char *list);
+typedef struct { UINT16 first, last; } PB_PORT_RANGE;
+typedef struct PB_PORT_FILTER {
+    size_t count;
+    PB_PORT_RANGE ranges[1];
+} PB_PORT_FILTER;
+PB_PORT_FILTER *pb_prepare_port_list(const char *list);
+BOOL pb_match_port_prepared(const PB_PORT_FILTER *filter, UINT16 port);
+typedef struct PB_DOMAIN_FILTER {
+    size_t bytes;
+    BOOL unrestricted;
+    char patterns[1];
+} PB_DOMAIN_FILTER;
+PB_DOMAIN_FILTER *pb_prepare_domain_list(const char *list);
+BOOL pb_match_domain_prepared(const PB_DOMAIN_FILTER *filter, const char *domain);
+typedef struct { UINT8 first[16], last[16]; } PB_IPV6_RANGE;
+typedef struct PB_IPV6_FILTER { size_t count; PB_IPV6_RANGE ranges[1]; } PB_IPV6_FILTER;
+PB_IPV6_FILTER *pb_prepare_ipv6_list(const char *list);
+BOOL pb_match_ipv6_prepared(const PB_IPV6_FILTER *filter, const UINT8 ip[16]);
+typedef struct { UINT32 first, last; BOOL range; } PB_IPV4_TERM;
+typedef struct PB_IPV4_FILTER { size_t count; PB_IPV4_TERM terms[1]; } PB_IPV4_FILTER;
+PB_IPV4_FILTER *pb_prepare_ipv4_list(const char *list);
+BOOL pb_match_ipv4_prepared(const PB_IPV4_FILTER *filter, UINT32 ip);
+BOOL pb_match_process_prepared(const PB_PROCESS_PATTERNS *list, const char *process);
+RuleAction pb_select_proxy(const char *process_name, BOOL v6, UINT32 ip,
+                           const UINT8 ip6[16], UINT16 port, BOOL udp,
+                           UINT32 *id, PROXY_CONFIG *config, BOOL *available);
 BOOL any_socks5_config(void);
 BOOL is_proxy_config_referenced(UINT32 config_id);
 
 // ---- pb_dns.c ----
-void dns_cache_init(void);
+void dns_cache_clear(void);
 UINT32 dns_bucket(UINT32 ip);
 void dns_cache_store(UINT32 ip, const char *domain);
 BOOL dns_cache_lookup(UINT32 ip, char *out_domain, size_t out_size);
@@ -279,16 +348,21 @@ void cleanup_stale_dns_cache(void);
 void flush_dns_resolver_cache(void);
 
 // ---- pb_socks5.c ----
-int socks5_read_connect_reply(SOCKET s, int *reply);
-int socks5_connect_domain(SOCKET s, const char *hostname, UINT16 dest_port, const PROXY_CONFIG *cfg);
-int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg);
-int socks5_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg);
+typedef struct { ULONGLONG deadline; } PB_HANDSHAKE_CONTEXT;
+int pb_handshake_io(SOCKET s, char* buffer, int length, BOOL write, BOOL exact, const PB_HANDSHAKE_CONTEXT* context);
+int pb_handshake_peek(SOCKET s, char* buffer, int length, const PB_HANDSHAKE_CONTEXT* context);
+int socks5_read_connect_reply(SOCKET s, int *reply, const PB_HANDSHAKE_CONTEXT* context);
+int socks5_connect_domain(SOCKET s, const char *hostname, UINT16 dest_port, const PROXY_CONFIG *cfg, const PB_HANDSHAKE_CONTEXT* context);
+int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg, const PB_HANDSHAKE_CONTEXT* context);
+int socks5_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg, const PB_HANDSHAKE_CONTEXT* context);
 int socks5_udp_associate_with_config(SOCKET s, struct sockaddr_in *relay_addr, const PROXY_CONFIG *cfg);
-BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg);
+BOOL establish_udp_associate(PB_UDP_ASSOCIATION *association);
+short pb_udp_setup_events(const PB_UDP_ASSOCIATION *association);
+void pb_udp_association_close(PB_UDP_ASSOCIATION *association);
 
 // ---- pb_http.c ----
-int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg);
-int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg);
+int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg, const PB_HANDSHAKE_CONTEXT* context);
+int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg, const PB_HANDSHAKE_CONTEXT* context);
 
 // ---- pb_conntrack.c ----
 UINT32 rev_hash_v4(UINT32 dest_ip, UINT16 dest_port);
@@ -296,6 +370,8 @@ UINT32 rev_hash_v6(const UINT8 dest_ip6[16], UINT16 dest_port);
 void rev_insert(CONNECTION_INFO *c);
 void rev_unlink(CONNECTION_INFO *c);
 void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id);
+BOOL pb_driver_udp_orig6(const UINT8 src_ip6[16], UINT16 src_port, UINT8 ip6[16], UINT16 *port, DWORD *pid, UINT64 *generation);
+BOOL add_connection_v6(UINT16 src_port, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id);
 BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id);
 BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port);
 BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port);
@@ -303,18 +379,20 @@ BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *
 UINT32 get_connection_proxy_id(UINT16 src_port, BOOL is_udp);
 void remove_connection(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 void cleanup_stale_connections(void);
-BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
-void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
+BOOL pb_log_connection_once(const PB_LOG_KEY *key, BOOL record);
+void pb_set_traffic_logging(BOOL enabled);
 void pb_report_connection(DWORD pid, const char *name_override, BOOL is_ipv6, UINT32 dest_ip,
                           const UINT8 dest_ip6[16], UINT16 dest_port, RuleAction action,
-                          UINT32 cfg_id, BOOL is_udp);
+                          UINT32 cfg_id, BOOL is_udp, const PROXY_CONFIG *selected_proxy);
 void clear_logged_connections(void);
 
 // ---- pb_relay.c ----
 DWORD WINAPI udp_relay_server(LPVOID arg);
 DWORD WINAPI local_proxy_server(LPVOID arg);
-DWORD WINAPI connection_handler(LPVOID arg);
-DWORD WINAPI one_way_relay(LPVOID arg);
+BOOL pb_tcp_is_worker_thread(void);
+void pb_tcp_stop_workers(void);
+BOOL pb_tcp_start_workers(void);
+DWORD WINAPI one_way_relay(LPVOID arg); // legacy byte-pump reference fixture only
 DWORD WINAPI transfer_handler(LPVOID arg);
 
 // ---- ProxyBridge.c ----
@@ -325,10 +403,15 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved);
 extern BOOL g_use_wfp_driver;
 BOOL pb_driver_start(UINT16 relay_port);
 void pb_driver_stop(void);
-void pb_driver_sync_rules(void);   // re-push watch list after a rule change (no-op until started)
-void pb_driver_sync_config(void);  // re-push config after a setting change (e.g. localhost-via-proxy)
+BOOL pb_driver_is_worker_thread(void);
+BOOL pb_driver_is_active(void);
+LONG64 pb_driver_session_epoch(void);
+struct _PBDRV_WATCHLIST;
+struct _PBDRV_WATCHLIST *pb_driver_prepare_rules(const PROCESS_RULE *rules);
+BOOL pb_driver_apply_rules(const struct _PBDRV_WATCHLIST *watch);
+BOOL pb_driver_apply_profile_rules(const struct _PBDRV_WATCHLIST *watch, BOOL loopback);
 BOOL pb_driver_orig_dest(SOCKET s, UINT32 *ip, UINT16 *port, DWORD *pid);
 BOOL pb_driver_orig_dest6(SOCKET s, UINT8 ip6[16], UINT16 *port, DWORD *pid);
-BOOL pb_driver_udp_orig(UINT32 src_ip, UINT16 src_port, UINT32 *ip, UINT16 *port, DWORD *pid);
+BOOL pb_driver_udp_orig(UINT32 src_ip, UINT16 src_port, UINT32 *ip, UINT16 *port, DWORD *pid, UINT64 *generation);
 
 #endif // PB_INTERNAL_H

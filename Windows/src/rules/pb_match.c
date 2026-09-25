@@ -1,36 +1,16 @@
 #include "pb_internal.h"
 
+#include "pb_policy_selection.inc"
+
 // Rule matching engine: process/domain/wildcard matching and the match_rule decision.
 
-// Case-insensitive wildcard match; '*' matches any sequence (including empty).
-// Handles multiple wildcards anywhere in the pattern, e.g. "*steam*", "fire*.exe".
-BOOL wildcard_match(const char *pattern, const char *text)
-{
-    while (*text != '\0')
-    {
-        if (*pattern == '*')
-        {
-            while (*pattern == '*') pattern++;   // collapse consecutive *
-            if (*pattern == '\0') return TRUE;   // trailing * matches rest
-            while (*text != '\0')
-            {
-                if (wildcard_match(pattern, text))
-                    return TRUE;
-                text++;
-            }
-            return FALSE;
-        }
-        else
-        {
-            if (tolower((unsigned char)*pattern) != tolower((unsigned char)*text))
-                return FALSE;
-            pattern++;
-            text++;
-        }
-    }
-    while (*pattern == '*') pattern++;
-    return *pattern == '\0';
-}
+#include "pb_wildcard.inc"
+#include "pb_process_patterns.inc"
+#include "pb_port_filter.inc"
+#include "pb_domain_filter.inc"
+#include "pb_ipv6_filter.inc"
+#include "pb_ipv4_filter.inc"
+#include "pb_rule_cache.inc"
 
 BOOL match_process_pattern(const char *pattern, const char *process_full_path)
 {
@@ -97,7 +77,8 @@ BOOL match_process_list(const char *process_list, const char *process_name)
             token++;
 
         // Trim trailing whitespace (matters for CLI-parsed lists)
-        char *end = token + strnlen_s(token, MAX_LIST_SIZE) - 1;
+        size_t token_length = strnlen_s(token, MAX_LIST_SIZE);
+        char *end = token + (token_length ? token_length - 1 : 0);
         while (end > token && (*end == ' ' || *end == '\t'))
         {
             *end = '\0';
@@ -216,11 +197,7 @@ BOOL rule_has_domain_filter(const PROCESS_RULE *rule)
 //   - otherwise -> match the resolved hostname against the rule's domain list
 BOOL match_domain_filter(const PROCESS_RULE *rule, const char *domain)
 {
-    if (!rule_has_domain_filter(rule))
-        return TRUE;
-    if (domain == NULL || domain[0] == '\0')
-        return FALSE;
-    return match_domain_list(rule->target_domains, domain);
+    return pb_match_domain_prepared(rule->prepared_domains, domain);
 }
 
 BOOL is_broadcast_or_multicast(UINT32 ip)
@@ -254,7 +231,7 @@ BOOL is_broadcast_or_multicast(UINT32 ip)
 // Matches rules by process name, IP, port, and protocol
 // Inner matcher - caller MUST hold g_rules_lock (shared) for the whole traversal so
 // rules_list and the strings it points to cannot be freed/edited mid-match.
-RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
+static RuleAction match_rule_uncached(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
 {
     PROCESS_RULE *rule = rules_list;
     PROCESS_RULE *wildcard_rule = NULL;  // Save fully wildcard rule for last
@@ -303,8 +280,8 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
             if (has_ip_filter || has_port_filter || has_domain_filter)
             {
                 // Filtered wildcard - check if it matches
-                if (match_ip_list(rule->target_hosts, dest_ip) &&
-                    match_port_list(rule->target_ports, dest_port) &&
+                if (pb_match_ipv4_prepared(rule->prepared_ipv4, dest_ip) &&
+                    pb_match_port_prepared(rule->prepared_ports, dest_port) &&
                     match_domain_filter(rule, dst_domain))
                 {
                     // Matched! Return this rule's action
@@ -326,11 +303,11 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
         }
 
         // Check if process name matches
-        if (match_process_list(rule->process_name, process_name))
+        if (pb_match_process_prepared(rule->prepared_process, process_name))
         {
             // Process matched! Check IP, port and domain filters
-            if (match_ip_list(rule->target_hosts, dest_ip) &&
-                match_port_list(rule->target_ports, dest_port) &&
+            if (pb_match_ipv4_prepared(rule->prepared_ipv4, dest_ip) &&
+                pb_match_port_prepared(rule->prepared_ports, dest_port) &&
                 match_domain_filter(rule, dst_domain))
             {
                 // All filters matched! Return this rule's action
@@ -356,6 +333,21 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
 
 // Public matcher - takes the shared rules lock so a concurrent AddRule/EditRule/
 // DeleteRule/MoveRule from the GUI thread cannot free a node/string mid-match.
+RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
+{
+    if (rules_list == NULL || rules_list->next == NULL || g_has_domain_rules ||
+        strnlen_s(process_name, MAX_PROCESS_NAME) >= MAX_PROCESS_NAME)
+        return match_rule_uncached(process_name, dest_ip, dest_port, is_udp, out_proxy_config_id);
+    unsigned bucket = rule_cache_bucket(process_name, (const UINT8 *)&dest_ip, 4, dest_port, is_udp, FALSE);
+    RuleAction action; UINT32 proxy;
+    if (!rule_cache_lookup(bucket, process_name, (const UINT8 *)&dest_ip, 4, dest_port, is_udp, FALSE, &action, &proxy)) {
+        action = match_rule_uncached(process_name, dest_ip, dest_port, is_udp, &proxy);
+        rule_cache_store(bucket, process_name, (const UINT8 *)&dest_ip, 4, dest_port, is_udp, FALSE, action, proxy);
+    }
+    if (out_proxy_config_id != NULL) *out_proxy_config_id = proxy;
+    return action;
+}
+
 RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
 {
     AcquireSRWLockShared(&g_rules_lock);
@@ -368,7 +360,7 @@ RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port
 // Supports exact addresses ("::1"), CIDR ("2001:db8::/32"), and wildcards ("*").
 // IPv4-format patterns in target_hosts are silently skipped for IPv6 traffic.
 // Caller MUST hold g_rules_lock (shared) - see match_rule_v6 wrapper below.
-RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
+static RuleAction match_rule_v6_uncached(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
 {
     PROCESS_RULE *rule = rules_list;
     PROCESS_RULE *wildcard_rule = NULL;
@@ -404,8 +396,8 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
 
             if (has_ip_filter || has_port_filter || has_domain_filter)
             {
-                if (match_ip_list_v6(rule->target_hosts, dest_ip6) &&
-                    match_port_list(rule->target_ports, dest_port) &&
+                if (pb_match_ipv6_prepared(rule->prepared_ipv6, dest_ip6) &&
+                    pb_match_port_prepared(rule->prepared_ports, dest_port) &&
                     match_domain_filter(rule, dst_domain))
                 {
                     if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
@@ -421,10 +413,10 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
             continue;
         }
 
-        if (match_process_list(rule->process_name, process_name))
+        if (pb_match_process_prepared(rule->prepared_process, process_name))
         {
-            if (match_ip_list_v6(rule->target_hosts, dest_ip6) &&
-                match_port_list(rule->target_ports, dest_port) &&
+            if (pb_match_ipv6_prepared(rule->prepared_ipv6, dest_ip6) &&
+                pb_match_port_prepared(rule->prepared_ports, dest_port) &&
                 match_domain_filter(rule, dst_domain))
             {
                 if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
@@ -443,6 +435,21 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
 
     if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
     return RULE_ACTION_DIRECT;
+}
+
+RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
+{
+    if (rules_list == NULL || rules_list->next == NULL || g_has_domain_rules ||
+        strnlen_s(process_name, MAX_PROCESS_NAME) >= MAX_PROCESS_NAME)
+        return match_rule_v6_uncached(process_name, dest_ip6, dest_port, is_udp, out_proxy_config_id);
+    unsigned bucket = rule_cache_bucket(process_name, dest_ip6, 16, dest_port, is_udp, TRUE);
+    RuleAction action; UINT32 proxy;
+    if (!rule_cache_lookup(bucket, process_name, dest_ip6, 16, dest_port, is_udp, TRUE, &action, &proxy)) {
+        action = match_rule_v6_uncached(process_name, dest_ip6, dest_port, is_udp, &proxy);
+        rule_cache_store(bucket, process_name, dest_ip6, 16, dest_port, is_udp, TRUE, action, proxy);
+    }
+    if (out_proxy_config_id != NULL) *out_proxy_config_id = proxy;
+    return action;
 }
 
 RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)

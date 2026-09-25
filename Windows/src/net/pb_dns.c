@@ -2,12 +2,23 @@
 
 // DNS snoop cache: maps intercepted A/AAAA answers back to hostnames.
 
-// dns cache
-void dns_cache_init(void)
+// Reset contents without reinitializing the lock or losing allocated entries.
+void dns_cache_clear(void)
 {
-    InitializeSRWLock(&g_dns_cache_lock);
-    memset(g_dns_cache,    0, sizeof(g_dns_cache));
-    memset(g_dns_cache_v6, 0, sizeof(g_dns_cache_v6));
+    AcquireSRWLockExclusive(&g_dns_cache_lock);
+    for (int i = 0; i < DNS_CACHE_BUCKETS; ++i) {
+        while (g_dns_cache[i] != NULL) {
+            DNS_CACHE_ENTRY *entry = g_dns_cache[i];
+            g_dns_cache[i] = entry->next;
+            free(entry);
+        }
+        while (g_dns_cache_v6[i] != NULL) {
+            DNS_CACHE_ENTRY_V6 *entry = g_dns_cache_v6[i];
+            g_dns_cache_v6[i] = entry->next;
+            free(entry);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_dns_cache_lock);
 }
 
 UINT32 dns_bucket(UINT32 ip)

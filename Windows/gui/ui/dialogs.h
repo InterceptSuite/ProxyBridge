@@ -440,8 +440,16 @@ static void AppendApp(wchar_t* out, int cap, const wchar_t* name)
     _snwprintf_s(out + n, (size_t)cap - n, _TRUNCATE, L"%s%s", sep, name);
 }
 
+static void ShowRuleApplyError(HWND owner)
+{
+    DWORD error = GetLastError();
+    wchar_t message[512];
+    _snwprintf_s(message, ARRAYSIZE(message), _TRUNCATE, T(S_ERR_RULEAPPLY), error);
+    MessageBoxW(owner, message, APP_TITLE, MB_OK | MB_ICONERROR);
+}
+
 // Edit sub-dialog. lParam is a PBRule* seeded with current values; on OK it is written back
-// (name/proc/hosts/ports/domains/proto/action/cfgStoredId/enabled) and the dialog returns 1.
+// only after successful engine publication. On failure the dialog and its fields stay open.
 INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -586,6 +594,10 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             else                { lstrcpynW(r->action, L"PROXY",  16);
                                   r->cfgStoredId = (UINT32)SendMessageW(ac, CB_GETITEMDATA, asel, 0); }
             r->enabled = (IsDlgButtonChecked(dlg, IDC_RE_ENABLED) == BST_CHECKED) ? 1 : 0;
+            BOOL applied;
+            if (r->nativeId != 0) applied = EngineEditRule(r);
+            else { r->nativeId = EngineAddRule(r, 0); applied = r->nativeId != 0; }
+            if (!applied) { ShowRuleApplyError(dlg); return TRUE; }
             EndDialog(dlg, 1);
             return TRUE;
         }
@@ -599,11 +611,12 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 static void SwapRules(HWND lv, int a, int b)
 {
     if (a < 0 || b < 0 || a >= g_profile.ruleCount || b >= g_profile.ruleCount) return;
+    // Publish in the engine first. Keep the visible/profile order on rejection.
+    if (!g_api.MoveRuleToPosition(g_profile.rule[a].nativeId, (UINT32)(b + 1))) {
+        ShowRuleApplyError(GetParent(lv));
+        return;
+    }
     PBRule t = g_profile.rule[a]; g_profile.rule[a] = g_profile.rule[b]; g_profile.rule[b] = t;
-    // Reorder inside the engine without recreating rules - the rule keeps its native id.
-    // MoveRuleToPosition takes a 1-based position; the moved rule now sits at array index b.
-    if (g_profile.rule[b].nativeId)
-        g_api.MoveRuleToPosition(g_profile.rule[b].nativeId, (UINT32)(b + 1));
     SaveActive();
     RefreshRulesList(lv);
     ListView_SetItemState(lv, b, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
@@ -650,9 +663,16 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 PBRule* r = &g_profile.rule[nlv->iItem];
                 if ((BOOL)r->enabled != checked)
                 {
-                    r->enabled = checked ? 1 : 0;
-                    if (r->enabled) g_api.EnableRule(r->nativeId); else g_api.DisableRule(r->nativeId);
-                    SaveActive();
+                    BOOL applied = checked ? g_api.EnableRule(r->nativeId) : g_api.DisableRule(r->nativeId);
+                    if (applied) { r->enabled = checked ? 1 : 0; SaveActive(); }
+                    else {
+                        DWORD error = GetLastError();
+                        g_rulesRefreshing = TRUE;
+                        ListView_SetCheckState(lv, nlv->iItem, r->enabled);
+                        g_rulesRefreshing = FALSE;
+                        SetLastError(error);
+                        ShowRuleApplyError(dlg);
+                    }
                 }
             }
         }
@@ -674,9 +694,8 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             lstrcpynW(r.proto, L"BOTH", 8); lstrcpynW(r.action, L"DIRECT", 16); r.enabled = 1;
             if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_RULE), dlg, RuleEditDlgProc, (LPARAM)&r) == 1)
             {
-                UINT32 id = EngineAddRule(&r);          // appended at the end of the engine list
-                if (id) { r.nativeId = id; g_profile.rule[g_profile.ruleCount++] = r; SaveActive(); RefreshRulesList(lv); }
-                else MessageBoxW(dlg, T(S_ERR_ADDRULE), APP_TITLE, MB_OK | MB_ICONERROR);
+                g_profile.rule[g_profile.ruleCount++] = r;
+                SaveActive(); RefreshRulesList(lv);
             }
             return TRUE;
         }
@@ -685,12 +704,11 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (sel < 0 || sel >= g_profile.ruleCount) return TRUE;
             if (g_profile.ruleCount >= PB_MAX_RULE) { MessageBoxW(dlg, L"Rule limit reached.", APP_TITLE, MB_OK); return TRUE; }
             PBRule r = g_profile.rule[sel]; r.nativeId = 0;
-            UINT32 id = EngineAddRule(&r);              // new engine rule (its own id), added at the end
-            if (!id) { MessageBoxW(dlg, T(S_ERR_ADDRULE), APP_TITLE, MB_OK | MB_ICONERROR); return TRUE; }
+            UINT32 id = EngineAddRule(&r, (UINT32)(sel + 2)); // insert and enable state in one commit
+            if (!id) { ShowRuleApplyError(dlg); return TRUE; }
             r.nativeId = id;
             for (int i = g_profile.ruleCount; i > sel + 1; i--) g_profile.rule[i] = g_profile.rule[i - 1];
             g_profile.rule[sel + 1] = r; g_profile.ruleCount++;
-            g_api.MoveRuleToPosition(id, (UINT32)(sel + 2));   // slot it right after the source
             SaveActive(); RefreshRulesList(lv);
             ListView_SetItemState(lv, sel + 1, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             return TRUE;
@@ -702,7 +720,6 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_RULE), dlg, RuleEditDlgProc, (LPARAM)&r) == 1)
             {
                 g_profile.rule[sel] = r;
-                EngineEditRule(&r);
                 SaveActive(); RefreshRulesList(lv);
                 ListView_SetItemState(lv, sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             }
@@ -711,7 +728,10 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_RL_REMOVE:
         {
             if (sel < 0 || sel >= g_profile.ruleCount) return TRUE;
-            if (g_profile.rule[sel].nativeId) g_api.DeleteRule(g_profile.rule[sel].nativeId);
+            if (!g_api.DeleteRule(g_profile.rule[sel].nativeId)) {
+                ShowRuleApplyError(dlg);
+                return TRUE;
+            }
             for (int i = sel; i < g_profile.ruleCount - 1; i++) g_profile.rule[i] = g_profile.rule[i + 1];
             g_profile.ruleCount--;
             SaveActive(); RefreshRulesList(lv);

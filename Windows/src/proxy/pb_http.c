@@ -2,7 +2,9 @@
 
 // HTTP proxy: CONNECT tunnels (IPv4/IPv6).
 
-int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg)
+#include "pb_http_headers.inc"
+
+int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg, const PB_HANDSHAKE_CONTEXT* context)
 {
     char request[HTTP_BUFFER_SIZE];
     char response[4096];
@@ -44,9 +46,9 @@ int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const 
             host_part, dest_port, host_part, dest_port);
     }
 
-    if (send(s, request, len, 0) != len) return -1;
+    if (pb_handshake_io(s, request, len, TRUE, TRUE, context) != len) return -1;
 
-    len = recv(s, response, sizeof(response) - 1, 0);
+    len = http_read_headers(s, response, sizeof(response), context);
     if (len <= 0 || len >= (int)sizeof(response)) return -1;
     response[len] = '\0';
     char *code_start = strchr(response, ' ');
@@ -54,7 +56,7 @@ int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const 
     return 0;
 }
 
-int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg)
+int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg, const PB_HANDSHAKE_CONTEXT* context)
 {
     char request[HTTP_BUFFER_SIZE];
     char response[4096];
@@ -103,13 +105,13 @@ int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG 
             host_part, dest_port, host_part, dest_port);
     }
 
-    if (send(s, request, len, 0) != len)
+    if (pb_handshake_io(s, request, len, TRUE, TRUE, context) != len)
     {
         log_message("HTTP: Failed to send CONNECT request");
         return -1;
     }
 
-    len = recv(s, response, sizeof(response) - 1, 0);
+    len = http_read_headers(s, response, sizeof(response), context);
     if (len <= 0 || len >= (int)sizeof(response))
     {
         log_message("HTTP: Failed to receive response");

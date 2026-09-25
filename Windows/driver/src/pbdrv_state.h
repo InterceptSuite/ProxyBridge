@@ -13,16 +13,19 @@
 
 // UDP flow map: src endpoint -> original destination, so the relay can recover the dest of a
 // redirected connectionless datagram (which carries no per-datagram redirect context).
-void    UdpMapPut(UINT16 family, UINT32 srcV4, const UINT8 *srcV6, UINT16 srcPort,
+BOOLEAN UdpMapPut(UINT64 endpoint, UINT16 family, UINT32 srcV4, const UINT8 *srcV6, UINT16 srcPort,
                   UINT32 origV4, const UINT8 *origV6, UINT16 origPort, UINT32 pid);
 BOOLEAN UdpMapGet(PBDRV_UDP_QUERY *q);
+BOOLEAN UdpMapHadFailure(void);
 void    UdpMapClear(void);
+void    UdpMapRemoveEndpoint(UINT64 endpoint);
 
 // Connection-event ring: the monitor callout pushes one entry per observed outbound connect;
 // user mode drains it via PBDRV_IOCTL_POP_EVENTS. Bounded; oldest entry dropped when full.
 void  EventPush(UINT16 family, UINT8 proto, UINT32 v4, const UINT8 *v6, UINT16 port, UINT32 pid,
                 const WCHAR *image, ULONG imageChars);
 ULONG EventPopMany(PBDRV_EVENT *out, ULONG maxCount);
+void  EventClear(void);
 void  ImageBasename(const WCHAR *path, ULONG chars, const WCHAR **outName, ULONG *outLen);
 
 // Loopback address checks.

@@ -1,4 +1,4 @@
-// ui/startup.h - single-instance guard + "Run at Startup" logon task (schtasks).
+// ui/startup.h - single-instance guard + native-helper GUI startup settings.
 //
 // Unity-build include: pulled into main.c (uses only Win32 + APP-independent state).
 #ifndef PB_UI_STARTUP_H
@@ -26,41 +26,47 @@ static BOOL AnotherInstanceRunning(void)
     return found;
 }
 
-// Run at Startup (schtasks logon task)
-// Runs schtasks.exe hidden and returns its exit code (0 = success / task exists).
-static DWORD RunSchtasks(const wchar_t* args)
+// Keep scheduler/installation code in the existing native helper. The GUI
+// invokes its adjacent helper explicitly; no PATH lookup or shell expansion.
+static DWORD StartupCommand(const wchar_t *operation)
 {
-    wchar_t cmd[1024];
-    _snwprintf_s(cmd, 1024, _TRUNCATE, L"schtasks.exe %s", args); cmd[1023] = 0;
-    STARTUPINFOW si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
+    wchar_t helper[MAX_PATH], command[MAX_PATH + 80];
+    DWORD length = GetModuleFileNameW(NULL, helper, MAX_PATH);
+    if (!length) return GetLastError();
+    if (length >= MAX_PATH) return ERROR_FILENAME_EXCED_RANGE;
+    wchar_t *name = wcsrchr(helper, L'\\');
+    if (!name) return ERROR_INVALID_NAME;
+    if (wcscpy_s(name + 1, MAX_PATH - (size_t)(name + 1 - helper), L"ProxyBridgeDriverSetup.exe"))
+        return ERROR_FILENAME_EXCED_RANGE;
+    if (_snwprintf_s(command, ARRAYSIZE(command), _TRUNCATE, L"\"%s\" %s", helper, operation) < 0)
+        return ERROR_FILENAME_EXCED_RANGE;
+    STARTUPINFOW si = {0}; si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
-    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
-        return (DWORD)-1;
-    WaitForSingleObject(pi.hProcess, 15000);
-    DWORD code = (DWORD)-1; GetExitCodeProcess(pi.hProcess, &code);
+    PROCESS_INFORMATION pi = {0};
+    if (!CreateProcessW(helper, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+        return GetLastError();
+    DWORD wait = WaitForSingleObject(pi.hProcess, 15000), result;
+    if (wait == WAIT_OBJECT_0) {
+        if (!GetExitCodeProcess(pi.hProcess, &result)) result = GetLastError();
+    } else result = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-    return code;
+    return result;
+}
+static DWORD StartupRead(BOOL *enabled)
+{
+    DWORD error = StartupCommand(L"startup-query");
+    if (!error || error == ERROR_NOT_FOUND) { *enabled = !error; return 0; }
+    return error;
 }
 static BOOL StartupIsEnabled(void)
 {
-    return RunSchtasks(L"/Query /TN \"ProxyBridge\"") == 0;
+    BOOL enabled = FALSE;
+    StartupRead(&enabled);
+    return enabled;
 }
-static void StartupSet(BOOL enable)
+static DWORD StartupSet(BOOL enable)
 {
-    if (enable)
-    {
-        wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);
-        wchar_t args[1200];
-        // ONLOGON task launching the exe minimized, highest run level.
-        // The short delay lets the shell/tray come up first so the tray icon appears
-        _snwprintf_s(args, 1200, _TRUNCATE,
-                   L"/Create /F /TN \"ProxyBridge\" /TR \"\\\"%s\\\" --minimized\" /SC ONLOGON /DELAY 0000:15 /RL HIGHEST",
-                   exe);
-        args[1199] = 0;
-        RunSchtasks(args);
-    }
-    else RunSchtasks(L"/Delete /F /TN \"ProxyBridge\"");
+    return StartupCommand(enable ? L"startup-enable" : L"startup-disable");
 }
 
 #endif // PB_UI_STARTUP_H

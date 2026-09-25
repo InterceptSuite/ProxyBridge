@@ -2,9 +2,9 @@ name: Build Windows
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ main, dev, Driver ]
   pull_request:
-    branches: [ main, dev ]
+    branches: [ main, dev, Driver ]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     permissions:
       contents: read
       actions: read
@@ -21,68 +21,35 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-    - name: Install NSIS
-      run: |
-        choco install nsis -y
+    - name: Verify build failure propagation
+      run: .\Windows\tests\compile-entrypoint-test.ps1 -OutputDirectory "$env:RUNNER_TEMP\proxybridge-build-tests"
       shell: pwsh
 
-    - name: Install NSIS EnVar plugin
-      run: |
-        $nsisPluginDir = "C:\Program Files (x86)\NSIS\Plugins\x86-unicode"
-        $url = "https://nsis.sourceforge.io/mediawiki/images/7/7f/EnVar_plugin.zip"
-        $expectedHash = "E9AA92DE351345ED82795251D838F1AE9041BA35AF9D381A5780C7843B01F56A"
-        Invoke-WebRequest -Uri $url -OutFile "EnVar.zip" -UseBasicParsing
-        $actualHash = (Get-FileHash "EnVar.zip" -Algorithm SHA256).Hash
-        if ($actualHash -ne $expectedHash) {
-          Write-Error "EnVar.zip SHA256 mismatch! Expected: $expectedHash  Got: $actualHash"
-          exit 1
-        }
-        Expand-Archive -Path "EnVar.zip" -DestinationPath "EnVar"
-        Copy-Item "EnVar\Plugins\x86-unicode\EnVar.dll" -Destination $nsisPluginDir -Force
-        Write-Host "EnVar plugin installed successfully"
+    - name: Verify separate application and driver packaging inputs
+      run: .\Windows\installer\tests\package-inputs-test.ps1 -Results "$env:RUNNER_TEMP\proxybridge-package-tests"
       shell: pwsh
 
-    - name: Download WinDivert
-      run: |
-        $url = "https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip"
-        $expectedHash = "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15"
-        Invoke-WebRequest -Uri $url -OutFile "WinDivert.zip" -UseBasicParsing
-        $actualHash = (Get-FileHash "WinDivert.zip" -Algorithm SHA256).Hash
-        if ($actualHash -ne $expectedHash) {
-          Write-Error "WinDivert.zip SHA256 mismatch! Expected: $expectedHash  Got: $actualHash"
-          exit 1
-        }
-        Expand-Archive -Path "WinDivert.zip" -DestinationPath "C:\"
-      shell: pwsh
-
-    - name: Verify WinDivert installation
-      run: |
-        if (Test-Path "C:\WinDivert-2.2.2-A") {
-          Write-Host "WinDivert installed successfully"
-          Get-ChildItem "C:\WinDivert-2.2.2-A" -Recurse | Select-Object FullName
-        } else {
-          Write-Error "WinDivert installation failed"
-          exit 1
-        }
-      shell: pwsh
-
-    - name: Build project
+    - name: Build unsigned user-mode components (driver requires WDK)
       run: |
         cd Windows
-        .\compile.ps1 -NoSign
+        .\compile.ps1 -NoSign -UserModeOnly -PlatformToolset v143 -WindowsSdkVersion 10.0.26100.0
       shell: pwsh
 
     - name: Upload artifacts
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
-        name: ProxyBridge-Build-${{ github.sha }}
-        path: Windows/output/
+        name: ProxyBridge-Unsigned-UserMode-${{ github.sha }}
+        if-no-files-found: error
+        path: |
+          Windows/output/*.exe
+          Windows/output/*.dll
+          Windows/output/build-result.json
         retention-days: 30
 
     - name: List output files
       run: |
         Write-Host "`nBuild artifacts:"
-        Get-ChildItem Windows/output -Recurse | ForEach-Object {
+        Get-ChildItem Windows/output -File | ForEach-Object {
           $size = [math]::Round($_.Length/1MB, 2)
           Write-Host "  $($_.Name) - $size MB"
         }

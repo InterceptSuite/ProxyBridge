@@ -46,13 +46,17 @@ static char* read_file(const wchar_t* path, DWORD* outLen)
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return NULL;
     DWORD sz = GetFileSize(h, NULL);
-    if (sz == INVALID_FILE_SIZE || sz > (64u * 1024u * 1024u)) { CloseHandle(h); return NULL; }
+    if (sz == INVALID_FILE_SIZE || sz > (64u * 1024u * 1024u)) {
+        DWORD error = sz == INVALID_FILE_SIZE ? GetLastError() : ERROR_FILE_TOO_LARGE;
+        CloseHandle(h); SetLastError(error); return NULL;
+    }
     char* buf = (char*)malloc(sz + 1);
-    if (!buf) { CloseHandle(h); return NULL; }
+    if (!buf) { CloseHandle(h); SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
     DWORD rd = 0;
     BOOL ok = ReadFile(h, buf, sz, &rd, NULL);
+    DWORD error = !ok ? GetLastError() : (rd == sz ? ERROR_SUCCESS : ERROR_HANDLE_EOF);
     CloseHandle(h);
-    if (!ok) { free(buf); return NULL; }
+    if (error != ERROR_SUCCESS) { free(buf); SetLastError(error); return NULL; }
     buf[rd] = 0;
     if (rd >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF)
     { memmove(buf, buf + 3, rd - 3 + 1); rd -= 3; }
@@ -151,14 +155,32 @@ void PB_ProfileDefaults(PBProfile* p, const wchar_t* name)
     lstrcpynW(p->language, L"en", 8);
 }
 
-void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
+BOOL PB_ProfileLoad(const wchar_t* name, PBProfile* p)
 {
     PB_ProfileDefaults(p, name);
     wchar_t pp[MAX_PATH]; profile_path(name, pp, MAX_PATH);
     DWORD len = 0; char* txt = read_file(pp, &len);
-    if (!txt) return;
+    if (!txt) {
+        DWORD error = GetLastError();
+        // A never-saved Default is the built-in empty profile, not a parse error.
+        if (_wcsicmp(name, L"Default") == 0 &&
+            (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)) return TRUE;
+        SetLastError(error);
+        return FALSE;
+    }
     JVal* root = json_parse(txt, len);
-    if (root && root->type == J_OBJ)
+    BOOL valid = root && root->type == J_OBJ;
+    const char *keys[] = { "ProxyConfigs", "ProxyRules", "LogFilters" };
+    const int limits[] = { PB_MAX_CFG, PB_MAX_RULE, PB_MAX_FILTER };
+    for (int i = 0; i < 3 && valid; ++i) {
+        JVal *array = json_get(root, keys[i]);
+        if (array == NULL) continue;
+        if (array->type != J_ARR) { valid = FALSE; break; }
+        int count = 0;
+        for (JVal *v = array->child; v != NULL; v = v->next)
+            if (v->type != J_OBJ || ++count > limits[i]) { valid = FALSE; break; }
+    }
+    if (valid)
     {
         p->localhostViaProxy = json_bool(root, "LocalhostViaProxy", 0);
         p->trafficLogging    = json_bool(root, "IsTrafficLoggingEnabled", 1);
@@ -215,6 +237,8 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
     }
     if (root) json_free(root);
     free(txt);
+    if (!valid) SetLastError(ERROR_INVALID_DATA);
+    return valid;
 }
 
 static void put_kv_str(StrBuf* b, const char* indent, const char* key, const wchar_t* wval, const char* trail)

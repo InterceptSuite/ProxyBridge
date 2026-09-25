@@ -72,6 +72,7 @@ static char* j_parse_string(JParser* s)
     while (s->p < s->end && *s->p != '"')
     {
         char c = *s->p++;
+        if ((unsigned char)c < 0x20) { free(out); return NULL; }
         if (c == '\\' && s->p < s->end)
         {
             char e = *s->p++;
@@ -110,13 +111,14 @@ static char* j_parse_string(JParser* s)
                 }
                 continue;
             }
-            default: c = e; break;
+            default: free(out); return NULL;
             }
         }
         if (len + 1 >= cap) { cap *= 2; char* t = (char*)realloc(out, cap); if (!t) { free(out); return NULL; } out = t; }
         out[len++] = c;
     }
-    if (s->p < s->end && *s->p == '"') s->p++;
+    if (s->p >= s->end || *s->p != '"') { free(out); return NULL; }
+    s->p++;
     out[len] = 0;
     return out;
 }
@@ -140,7 +142,10 @@ static JVal* j_parse_container(JParser* s, char open, char close, JType type)
         {
             key = j_parse_string(s);
             j_skip_ws(s);
-            if (s->p < s->end && *s->p == ':') s->p++;
+            if (!key || s->p >= s->end || *s->p != ':') {
+                free(key); json_free(node); s->depth--; return NULL;
+            }
+            s->p++;
         }
         JVal* val = j_parse_value(s);
         if (!val) { free(key); json_free(node); s->depth--; return NULL; }
@@ -149,12 +154,13 @@ static JVal* j_parse_container(JParser* s, char open, char close, JType type)
         tail = val;
         j_skip_ws(s);
         if (s->p < s->end && *s->p == ',') { s->p++; continue; }
-        if (s->p < s->end && *s->p == close) { s->p++; break; }
+        if (s->p < s->end && *s->p == close) { s->p++; s->depth--; return node; }
         break;
     }
     (void)open;
+    json_free(node);
     s->depth--;
-    return node;
+    return NULL; // missing separator/closing delimiter, including truncated input
 }
 
 static JVal* j_parse_value(JParser* s)
@@ -164,21 +170,36 @@ static JVal* j_parse_value(JParser* s)
     char c = *s->p;
     if (c == '{') return j_parse_container(s, '{', '}', J_OBJ);
     if (c == '[') return j_parse_container(s, '[', ']', J_ARR);
-    if (c == '"') { char* str = j_parse_string(s); JVal* v = j_new(J_STR); if (v) v->sval = str; else free(str); return v; }
+    if (c == '"') { char* str = j_parse_string(s); if (!str) return NULL; JVal* v = j_new(J_STR); if (v) v->sval = str; else free(str); return v; }
     if (c == 't') { if (s->end - s->p >= 4 && strncmp(s->p, "true", 4) == 0) { s->p += 4; JVal* v = j_new(J_BOOL); if (v) v->bval = 1; return v; } return NULL; }
     if (c == 'f') { if (s->end - s->p >= 5 && strncmp(s->p, "false", 5) == 0) { s->p += 5; JVal* v = j_new(J_BOOL); if (v) v->bval = 0; return v; } return NULL; }
     if (c == 'n') { if (s->end - s->p >= 4 && strncmp(s->p, "null", 4) == 0) { s->p += 4; return j_new(J_NULL); } return NULL; }
     // number
     {
-        char numbuf[64]; int n = 0;
-        while (s->p < s->end && n < 63)
-        {
-            char d = *s->p;
-            if ((d >= '0' && d <= '9') || d == '-' || d == '+' || d == '.' || d == 'e' || d == 'E') { numbuf[n++] = d; s->p++; }
-            else break;
+        const char *start = s->p;
+        if (s->p < s->end && *s->p == '-') s->p++;
+        if (s->p >= s->end) return NULL;
+        if (*s->p == '0') s->p++;
+        else {
+            if (*s->p < '1' || *s->p > '9') return NULL;
+            do { s->p++; } while (s->p < s->end && *s->p >= '0' && *s->p <= '9');
         }
+        if (s->p < s->end && *s->p == '.') {
+            s->p++;
+            if (s->p >= s->end || *s->p < '0' || *s->p > '9') return NULL;
+            do { s->p++; } while (s->p < s->end && *s->p >= '0' && *s->p <= '9');
+        }
+        if (s->p < s->end && (*s->p == 'e' || *s->p == 'E')) {
+            s->p++;
+            if (s->p < s->end && (*s->p == '+' || *s->p == '-')) s->p++;
+            if (s->p >= s->end || *s->p < '0' || *s->p > '9') return NULL;
+            do { s->p++; } while (s->p < s->end && *s->p >= '0' && *s->p <= '9');
+        }
+        char numbuf[64];
+        size_t n = (size_t)(s->p - start);
+        if (n >= sizeof(numbuf)) return NULL;
+        memcpy(numbuf, start, n);
         numbuf[n] = 0;
-        if (n == 0) return NULL;
         JVal* v = j_new(J_NUM);
         if (v) v->nval = atof(numbuf);
         return v;
@@ -189,7 +210,10 @@ static JVal* j_parse_value(JParser* s)
 static JVal* json_parse(const char* text, size_t length)
 {
     JParser s; s.p = text; s.end = text + length; s.depth = 0;
-    return j_parse_value(&s);
+    JVal *root = j_parse_value(&s);
+    j_skip_ws(&s);
+    if (s.p != s.end) { json_free(root); return NULL; }
+    return root;
 }
 
 // DOM accessors

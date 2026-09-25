@@ -2,16 +2,7 @@
 
 // Utilities: logging, string/IP helpers, token parsing, socket setup, base64.
 
-void log_message(const char *msg, ...)
-{
-    if (g_log_callback == NULL) return;
-    char buffer[LOG_BUFFER_SIZE];
-    va_list args;
-    va_start(args, msg);
-    vsnprintf(buffer, sizeof(buffer), msg, args);
-    va_end(args);
-    g_log_callback(buffer);
-}
+#include "pb_logging.inc"
 
 // Extract filename from full path  C:\path\chrome.exe  >> chrome.exe
 const char* extract_filename(const char* path)
@@ -92,48 +83,58 @@ void configure_tcp_socket(SOCKET sock, int bufsize, DWORD timeout)
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
 }
 
-// connect() with a bounded timeout. A blocking connect() to an unreachable host stalls
-// for the OS SYN timeout (~21s on Windows), and the UDP relay runs on a single thread -
-// so one dead/unreachable proxy config would freeze the whole relay (and delay real
-// packets) while it waits. This does a non-blocking connect + select so a dead proxy
-// fails in `timeout_ms` instead. Returns 0 on success, SOCKET_ERROR otherwise.
-int connect_with_timeout(SOCKET s, const struct sockaddr *addr, int addrlen, int timeout_ms)
+// The caller owns this socket exclusively until connect finishes. Relay calls
+// observe Stop every 100 ms; standalone checkers can use the non-cancellable API.
+static int connect_bounded(SOCKET s, const struct sockaddr *addr, int addrlen,
+                           int timeout_ms, BOOL cancelOnStop)
 {
+    if (timeout_ms <= 0) { WSASetLastError(WSAEINVAL); return SOCKET_ERROR; }
+    if (cancelOnStop && !running) { WSASetLastError(WSAEINTR); return SOCKET_ERROR; }
     u_long nonblock = 1;
-    ioctlsocket(s, FIONBIO, &nonblock);
-
-    int result = 0;
-    if (connect(s, addr, addrlen) == SOCKET_ERROR)
-    {
-        if (WSAGetLastError() != WSAEWOULDBLOCK)
-        {
-            result = SOCKET_ERROR;
-        }
-        else
-        {
-            fd_set wfds, efds;
-            FD_ZERO(&wfds); FD_SET(s, &wfds);
-            FD_ZERO(&efds); FD_SET(s, &efds);
-            struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-            int sel = select(0, NULL, &wfds, &efds, &tv);
-            if (sel <= 0 || FD_ISSET(s, &efds))
-            {
-                result = SOCKET_ERROR;   // timed out or connect failed
-            }
-            else
-            {
-                int so_err = 0;
-                int errlen = sizeof(so_err);
-                getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&so_err, &errlen);
-                if (so_err != 0)
-                    result = SOCKET_ERROR;
+    if (ioctlsocket(s, FIONBIO, &nonblock) == SOCKET_ERROR) return SOCKET_ERROR;
+    ULONGLONG deadline = GetTickCount64() + (ULONGLONG)timeout_ms;
+    int error = 0;
+    if (connect(s, addr, addrlen) == SOCKET_ERROR) {
+        error = WSAGetLastError();
+        if (error == WSAEWOULDBLOCK) {
+            for (;;) {
+                if (cancelOnStop && !running) { error = WSAEINTR; break; }
+                ULONGLONG now = GetTickCount64();
+                if (now >= deadline) { error = WSAETIMEDOUT; break; }
+                int waitMs = (int)(deadline - now);
+                if (cancelOnStop && waitMs > 100) waitMs = 100;
+                fd_set writes, errors;
+                FD_ZERO(&writes); FD_SET(s, &writes);
+                FD_ZERO(&errors); FD_SET(s, &errors);
+                struct timeval timeout = { waitMs / 1000, (waitMs % 1000) * 1000 };
+                int selected = select(0, NULL, &writes, &errors, &timeout);
+                if (selected == SOCKET_ERROR) { error = WSAGetLastError(); break; }
+                if (selected == 0) continue;
+                int length = sizeof(error);
+                if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&error, &length) == SOCKET_ERROR)
+                    error = WSAGetLastError();
+                else if (error == 0 && FD_ISSET(s, &errors))
+                    error = WSAECONNABORTED;
+                break;
             }
         }
     }
-
+    if (error == 0 && cancelOnStop && !running) error = WSAEINTR;
     u_long blocking = 0;
-    ioctlsocket(s, FIONBIO, &blocking);   // restore blocking for the handshake reads
-    return result;
+    if (ioctlsocket(s, FIONBIO, &blocking) == SOCKET_ERROR && error == 0)
+        error = WSAGetLastError();
+    if (error != 0) { WSASetLastError(error); return SOCKET_ERROR; }
+    return 0;
+}
+
+int connect_with_timeout(SOCKET s, const struct sockaddr *addr, int addrlen, int timeout_ms)
+{
+    return connect_bounded(s, addr, addrlen, timeout_ms, FALSE);
+}
+
+int pb_connect_relay(SOCKET s, const struct sockaddr *addr, int addrlen, int timeout_ms)
+{
+    return connect_bounded(s, addr, addrlen, timeout_ms, TRUE);
 }
 
 void configure_udp_socket(SOCKET sock, int bufsize, DWORD timeout)
@@ -200,6 +201,10 @@ UINT32 resolve_hostname(const char *hostname)
     if (ip != 0)
         return ip;
 
+    WSADATA wsa;
+    int wsaError = WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (wsaError != 0) { SetLastError((DWORD)wsaError); return 0; }
+
     // Not an IP address, try DNS resolution
     struct addrinfo hints, *result = NULL;
     memset(&hints, 0, sizeof(hints));
@@ -208,6 +213,7 @@ UINT32 resolve_hostname(const char *hostname)
 
     if (getaddrinfo(hostname, NULL, &hints, &result) != 0)
     {
+        WSACleanup();
         log_message("Failed to resolve hostname: %s", hostname);
         return 0;
     }
@@ -216,6 +222,7 @@ UINT32 resolve_hostname(const char *hostname)
     {
         if (result != NULL)
             freeaddrinfo(result);
+        WSACleanup();
         log_message("No IPv4 address found for hostname: %s", hostname);
         return 0;
     }
@@ -223,6 +230,7 @@ UINT32 resolve_hostname(const char *hostname)
     struct sockaddr_in *addr = (struct sockaddr_in *)result->ai_addr;
     UINT32 resolved_ip = addr->sin_addr.s_addr;
     freeaddrinfo(result);
+    WSACleanup();
 
     log_message("Resolved %s to %d.%d.%d.%d", hostname,
         (resolved_ip >> 0) & 0xFF, (resolved_ip >> 8) & 0xFF,
@@ -255,3 +263,5 @@ void base64_encode(const char* input, char* output, size_t output_size)
     output[output_len] = '\0';
 }
 
+
+#include "pb_handshake_io.inc"

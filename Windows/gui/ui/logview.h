@@ -82,7 +82,8 @@ static BOOL FilterRuleMatches(const PBFilter* f, const wchar_t* proc, const wcha
            FilterEq(f->proto, proto) && FilterEq(f->action, action);
 }
 // Excludes run first (any match hides). Then includes: if any exist, at least one must match.
-static BOOL PassesLogFilters(const wchar_t* proc, const wchar_t* ip, const wchar_t* port,
+static SRWLOCK g_filterSnapshotLock = SRWLOCK_INIT;
+static BOOL PassesLogFiltersLocked(const wchar_t* proc, const wchar_t* ip, const wchar_t* port,
                              const wchar_t* proto, const wchar_t* action)
 {
     if (g_fltCount == 0) return TRUE;
@@ -95,116 +96,198 @@ static BOOL PassesLogFilters(const wchar_t* proc, const wchar_t* ip, const wchar
         { hasInc = TRUE; if (FilterRuleMatches(&g_flt[i], proc, ip, port, proto, action)) return TRUE; }
     return !hasInc;
 }
+static BOOL PassesLogFilters(const wchar_t* proc, const wchar_t* ip, const wchar_t* port,
+                             const wchar_t* proto, const wchar_t* action)
+{
+    AcquireSRWLockShared(&g_filterSnapshotLock);
+    BOOL pass = PassesLogFiltersLocked(proc, ip, port, proto, action);
+    ReleaseSRWLockShared(&g_filterSnapshotLock);
+    return pass;
+}
 static void ApplyFilterSnapshot(void)
 {
+    AcquireSRWLockExclusive(&g_filterSnapshotLock);
     g_fltCount = g_profile.filterCount;
+    if (g_fltCount < 0) g_fltCount = 0;
+    if (g_fltCount > PB_MAX_FILTER) g_fltCount = PB_MAX_FILTER;
     for (int i = 0; i < g_fltCount; i++) g_flt[i] = g_profile.filter[i];
+    ReleaseSRWLockExclusive(&g_filterSnapshotLock);
 }
-static void LogStoreAdd(LogStore* s, const wchar_t* line)
+// History owns each line once. Ring eviction never moves the other pointers.
+static void LogStoreDropOldest(LogStore* s)
 {
-    wchar_t* copy = _wcsdup(line);
-    if (!copy) return;
-    if (s->count >= LOG_MAX_LINES)                  // drop the oldest to stay bounded
-    {
-        free(s->lines[0]);
-        memmove(&s->lines[0], &s->lines[1], (LOG_MAX_LINES - 1) * sizeof(wchar_t*));
-        s->count--;
-    }
-    s->lines[s->count++] = copy;
-    if (LogLineMatches(s, line)) AppendToEdit(s->edit, line);
-    // Auto Clear: once a log grows past the threshold, wipe it to keep memory bounded.
+    wchar_t* line = s->lines[s->head];
+    s->bytes -= (wcslen(line) + 1) * sizeof(wchar_t);
+    free(line);
+    s->lines[s->head] = NULL;
+    s->head = (s->head + 1) % LOG_MAX_LINES;
+    s->count--;
+}
+static void LogStoreResetHistory(LogStore* s)
+{
+    while (s->count) LogStoreDropOldest(s);
+    s->head = 0;
+}
+static void LogStoreKeep(LogStore* s, wchar_t* line)
+{
+    size_t bytes = (wcslen(line) + 1) * sizeof(wchar_t);
+    while (s->count && (s->count == LOG_MAX_LINES || bytes > LOG_STORE_BYTES - s->bytes))
+        LogStoreDropOldest(s);
+    s->lines[(s->head + s->count) % LOG_MAX_LINES] = line;
+    s->count++;
+    s->bytes += bytes;
+}
+static void LogStoreAutoClear(LogStore* s)
+{
     if (g_autoClear && s->count > AUTO_CLEAR_LINES)
     {
-        for (int i = 0; i < s->count; i++) free(s->lines[i]);
-        s->count = 0;
+        LogStoreResetHistory(s);
         SetWindowTextW(s->edit, L"");
     }
 }
-static void LogStoreRebuild(LogStore* s)          // re-render the edit for the current filter
+static BOOL LogStoreAdd(LogStore* s, const wchar_t* line)
+{
+    if (wcslen(line) > MAX_LOG_CHARS) return FALSE;
+    wchar_t* copy = _wcsdup(line);
+    if (!copy) return FALSE;
+    LogStoreKeep(s, copy);
+    if (LogLineMatches(s, copy)) AppendToEdit(s->edit, copy);
+    LogStoreAutoClear(s);
+    return TRUE;
+}
+static void LogStoreRebuild(LogStore* s)
 {
     SetWindowTextW(s->edit, L"");
     for (int i = 0; i < s->count; i++)
-        if (LogLineMatches(s, s->lines[i])) AppendToEdit(s->edit, s->lines[i]);
+    {
+        const wchar_t* line = s->lines[(s->head + i) % LOG_MAX_LINES];
+        if (LogLineMatches(s, line)) AppendToEdit(s->edit, line);
+    }
+}
+// Caller holds the pending lock exclusively.
+static void LogStoreResetPending(LogStore* s)
+{
+    while (s->pendCount)
+    {
+        free(s->pend[s->pendHead]);
+        s->pend[s->pendHead] = NULL;
+        s->pendHead = (s->pendHead + 1) % LOG_PEND_MAX;
+        s->pendCount--;
+    }
+    s->pendHead = 0;
+    s->pendBytes = 0;
 }
 static void LogStoreClear(LogStore* s)
 {
-    for (int i = 0; i < s->count; i++) free(s->lines[i]);
-    s->count = 0;
-    EnterCriticalSection(&s->lock);
-    for (int i = 0; i < s->pendCount; i++) free(s->pend[i]);
-    s->pendCount = 0;
-    LeaveCriticalSection(&s->lock);
+    LogStoreResetHistory(s);
+    AcquireSRWLockExclusive(&s->lock);
+    LogStoreResetPending(s);
+    s->dropped = 0;
+    ReleaseSRWLockExclusive(&s->lock);
+    s->reported = s->reportAt = 0;
     SetWindowTextW(s->edit, L"");
 }
-// logs add approx 40 60% memory usage on load as proxybridge use pacekt not connections, too much overload
-// thanks to claude 4.8 ops flagging and fixing it - memory usage reduced:
-// On load memroy goes 70 to 120mb and keept increasing, now it is 20 to 30mb max (max in my test)
-// Memory goes down once load is reduced and come back at 10 to 2mb
-// approx 97% memory usage reduced, thanks to claude 4.8 ops
-// CPU usage is now based on usage instead of constantly increasing on load
-// batched pipeline: callbacks queue lines; the UI timer flushes them in one go
 static void LogStoreInit(LogStore* s, HWND edit)
 {
     s->edit = edit;
-    InitializeCriticalSection(&s->lock);
+    AcquireSRWLockExclusive(&s->lock);
+    s->accepting = TRUE;
+    ReleaseSRWLockExclusive(&s->lock);
 }
-// Native callback thread: takes ownership of `line`. Bounded - drops on overload so a burst
-// of connections (e.g. a speed test) can't balloon memory or back up a message queue.
+// Native producer transfers ownership even on rejection. Both count and bytes are
+// bounded. Drop new log entries on overload; this never discards traffic packets.
+static void LogStoreNoteDrop(LogStore* s)
+{
+    AcquireSRWLockExclusive(&s->lock);
+    if (s->accepting && s->dropped != ~(ULONGLONG)0) s->dropped++;
+    ReleaseSRWLockExclusive(&s->lock);
+}
 static void LogStoreQueue(LogStore* s, wchar_t* line)
 {
     if (!line) return;
-    EnterCriticalSection(&s->lock);
-    if (s->pendCount < LOG_PEND_MAX) { s->pend[s->pendCount++] = line; line = NULL; }
-    LeaveCriticalSection(&s->lock);
-    if (line) free(line);   // queue full → drop
+    size_t chars = wcslen(line);
+    if (chars > MAX_LOG_CHARS) { LogStoreNoteDrop(s); free(line); return; }
+    size_t bytes = (chars + 1) * sizeof(wchar_t);
+    AcquireSRWLockExclusive(&s->lock);
+    if (s->accepting && s->pendCount < LOG_PEND_MAX && bytes <= LOG_STORE_BYTES - s->pendBytes)
+    {
+        s->pend[(s->pendHead + s->pendCount) % LOG_PEND_MAX] = line;
+        s->pendCount++;
+        s->pendBytes += bytes;
+        line = NULL;
+    }
+    else if (s->accepting && s->dropped != ~(ULONGLONG)0) s->dropped++;
+    ReleaseSRWLockExclusive(&s->lock);
+    free(line);
 }
-// UI thread (timer): drain the queue, store the lines, and append the matching ones to the
-// edit in a SINGLE operation. Returns how many lines were processed.
+// UI thread: bound each timer slice by both line count and characters. The static
+// batch is UI-thread only; no per-flush allocation and no lock during edit updates.
 static int LogStoreFlush(LogStore* s)
 {
-    static wchar_t* local[LOG_PEND_MAX];   // UI-thread only
-    EnterCriticalSection(&s->lock);
-    int n = s->pendCount;
-    for (int i = 0; i < n; i++) local[i] = s->pend[i];
-    s->pendCount = 0;
-    LeaveCriticalSection(&s->lock);
-    if (n == 0) return 0;
-
-    size_t total = 0;
-    for (int i = 0; i < n; i++) if (LogLineMatches(s, local[i])) total += wcslen(local[i]);
-    wchar_t* batch = total ? (wchar_t*)malloc((total + 1) * sizeof(wchar_t)) : NULL;
+    wchar_t* local[LOG_FLUSH_LINES];
+    static wchar_t batch[MAX_LOG_CHARS + 1];
+    int n = 0;
+    size_t chars = 0;
+    AcquireSRWLockExclusive(&s->lock);
+    while (s->pendCount && n < LOG_FLUSH_LINES)
+    {
+        wchar_t* line = s->pend[s->pendHead];
+        size_t length = wcslen(line);
+        if (length > MAX_LOG_CHARS - chars) break;
+        chars += length;
+        local[n++] = line;
+        s->pend[s->pendHead] = NULL;
+        s->pendHead = (s->pendHead + 1) % LOG_PEND_MAX;
+        s->pendCount--;
+        s->pendBytes -= (length + 1) * sizeof(wchar_t);
+    }
+    ReleaseSRWLockExclusive(&s->lock);
     size_t off = 0;
     for (int i = 0; i < n; i++)
     {
         wchar_t* line = local[i];
-        if (s->count >= LOG_MAX_LINES)
+        if (LogLineMatches(s, line))
         {
-            free(s->lines[0]);
-            memmove(&s->lines[0], &s->lines[1], (LOG_MAX_LINES - 1) * sizeof(wchar_t*));
-            s->count--;
+            size_t length = wcslen(line);
+            memcpy(batch + off, line, length * sizeof(wchar_t));
+            off += length;
         }
-        s->lines[s->count++] = line;   // store takes ownership
-        if (batch && LogLineMatches(s, line)) { size_t l = wcslen(line); memcpy(batch + off, line, l * sizeof(wchar_t)); off += l; }
+        LogStoreKeep(s, line);
     }
-    if (batch) { batch[off] = 0; AppendToEdit(s->edit, batch); free(batch); }
-
-    if (g_autoClear && s->count > AUTO_CLEAR_LINES)
-    {
-        for (int i = 0; i < s->count; i++) free(s->lines[i]);
-        s->count = 0;
-        SetWindowTextW(s->edit, L"");
-    }
+    if (off) { batch[off] = 0; AppendToEdit(s->edit, batch); }
+    LogStoreAutoClear(s);
     return n;
+}
+// UI-only summary, at most once per five seconds. No recursive producer callback.
+// Keep the count on allocation failure, so a later timer can report it.
+static BOOL LogStoreReportDrops(LogStore* s, ULONGLONG now, const wchar_t* format)
+{
+    if (now < s->reportAt) return FALSE;
+    AcquireSRWLockShared(&s->lock);
+    ULONGLONG dropped = s->dropped;
+    ReleaseSRWLockShared(&s->lock);
+    if (dropped == s->reported) return FALSE;
+    wchar_t line[256], ts[16];
+    GetTimePrefix(ts, ARRAYSIZE(ts));
+    int prefix = _snwprintf_s(line, ARRAYSIZE(line), _TRUNCATE, L"%s", ts);
+    if (prefix < 0) return FALSE;
+    _snwprintf_s(line + prefix, ARRAYSIZE(line) - prefix, _TRUNCATE, format, dropped);
+    s->reportAt = now + 5000;
+    // Do not let the summary itself trigger auto-clear and immediately disappear.
+    if (g_autoClear && s->count >= AUTO_CLEAR_LINES) {
+        LogStoreResetHistory(s); SetWindowTextW(s->edit, L"");
+    }
+    if (!LogStoreAdd(s, line)) return FALSE;
+    s->reported = dropped;
+    return TRUE;
 }
 static void LogStoreFree(LogStore* s)
 {
-    for (int i = 0; i < s->count; i++) free(s->lines[i]);
-    s->count = 0;
-    EnterCriticalSection(&s->lock);
-    for (int i = 0; i < s->pendCount; i++) free(s->pend[i]);
-    s->pendCount = 0;
-    LeaveCriticalSection(&s->lock);
-    DeleteCriticalSection(&s->lock);
+    AcquireSRWLockExclusive(&s->lock);
+    s->accepting = FALSE;     // late producers can safely reject against the static lock
+    LogStoreResetPending(s);
+    ReleaseSRWLockExclusive(&s->lock);
+    LogStoreResetHistory(s);
 }
 
 #endif // PB_UI_LOGVIEW_H

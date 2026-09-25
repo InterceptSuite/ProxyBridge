@@ -1,3 +1,4 @@
+!error "Legacy service installer is incompatible with the PnP transaction model. Packaging is blocked until transactional uninstall and resume integration are complete."
 !define PRODUCT_NAME "ProxyBridge"
 !define PRODUCT_VERSION "4.0.13-Beta"
 !define PRODUCT_PUBLISHER "InterceptSuite"

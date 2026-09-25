@@ -15,14 +15,78 @@
 #include <ws2ipdef.h>
 #include <mstcpip.h>       // SIO_QUERY_WFP_CONNECTION_REDIRECT_RECORDS / _CONTEXT
 #include <ws2tcpip.h>
-#include "ProxyBridgeDrv_ioctl.h"
+#include <setupapi.h>
+#include <stdlib.h>
+#include "ProxyBridgeDrv_user.h"
 
 // ---- driver handle / config ------------------------------------------------
 
 HANDLE pbdrv_open(void)
 {
-    return CreateFileW(PBDRV_USER_PATH, GENERIC_READ | GENERIC_WRITE,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    HDEVINFO devices = SetupDiGetClassDevsW(&PBDRV_INTERFACE_GUID, NULL, NULL,
+                                           DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (devices == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    DWORD error = ERROR_SUCCESS;
+    SP_DEVICE_INTERFACE_DATA interfaceData = {0};
+    interfaceData.cbSize = sizeof(interfaceData);
+    PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail = NULL;
+    if (!SetupDiEnumDeviceInterfaces(devices, NULL, &PBDRV_INTERFACE_GUID, 0, &interfaceData)) {
+        error = GetLastError();
+        if (error == ERROR_NO_MORE_ITEMS) error = ERROR_NOT_FOUND;
+        goto done;
+    }
+    SP_DEVICE_INTERFACE_DATA duplicate = {0};
+    duplicate.cbSize = sizeof(duplicate);
+    if (SetupDiEnumDeviceInterfaces(devices, NULL, &PBDRV_INTERFACE_GUID, 1, &duplicate)) {
+        error = ERROR_DUP_NAME;
+        goto done; // never silently select one of several devices
+    }
+    if (GetLastError() != ERROR_NO_MORE_ITEMS) {
+        error = GetLastError();
+        goto done;
+    }
+    DWORD required = 0;
+    SetupDiGetDeviceInterfaceDetailW(devices, &interfaceData, NULL, 0, &required, NULL);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || required < sizeof(*detail)) {
+        error = ERROR_INVALID_DATA;
+        goto done;
+    }
+    detail = (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)malloc(required);
+    if (detail == NULL) {
+        error = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+    detail->cbSize = sizeof(*detail);
+    if (!SetupDiGetDeviceInterfaceDetailW(devices, &interfaceData, detail, required, NULL, NULL)) {
+        error = GetLastError();
+        goto done;
+    }
+    // No inheritance and no shared controller handles. KMDF also enforces one owner.
+    handle = CreateFileW(detail->DevicePath, GENERIC_READ | GENERIC_WRITE,
+                         0, NULL, OPEN_EXISTING, 0, NULL);
+    if (handle == INVALID_HANDLE_VALUE) error = GetLastError();
+done:
+    free(detail);
+    SetupDiDestroyDeviceInfoList(devices);
+    SetLastError(error);
+    return handle;
+}
+
+BOOL pbdrv_get_status(HANDLE h, PBDRV_STATUS *status)
+{
+    DWORD bytes = 0;
+    ZeroMemory(status, sizeof(*status));
+    if (!DeviceIoControl(h, PBDRV_IOCTL_GET_STATUS, NULL, 0,
+                         status, sizeof(*status), &bytes, NULL))
+        return FALSE;
+    if (bytes != sizeof(*status) || status->size != sizeof(*status) ||
+        status->protocolVersion != PBDRV_PROTOCOL_VERSION ||
+        status->driverVersion != PBDRV_DRIVER_VERSION || status->reserved != 0) {
+        SetLastError(ERROR_REVISION_MISMATCH);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 BOOL pbdrv_configure(HANDLE h, const PBDRV_CONFIG *cfg)
@@ -50,8 +114,22 @@ BOOL pbdrv_enable(HANDLE h, BOOL on)
 // Query a redirected UDP flow's original destination by its source endpoint (in/out `q`).
 BOOL pbdrv_udp_query(HANDLE h, PBDRV_UDP_QUERY *q)
 {
+    if (q == NULL || (q->family != AF_INET && q->family != AF_INET6)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    PBDRV_UDP_QUERY input = *q;
     DWORD ret = 0;
-    return DeviceIoControl(h, PBDRV_IOCTL_QUERY_UDP, q, sizeof(*q), q, sizeof(*q), &ret, NULL) && ret >= sizeof(*q);
+    if (!DeviceIoControl(h, PBDRV_IOCTL_QUERY_UDP, q, sizeof(*q), q, sizeof(*q), &ret, NULL))
+        return FALSE;
+    BOOL sameSource = q->family == input.family && q->srcPort == input.srcPort &&
+        (input.family == AF_INET ? q->srcV4 == input.srcV4 : memcmp(q->srcV6, input.srcV6, 16) == 0);
+    if (ret != sizeof(*q) || !sameSource || q->found > 1 ||
+        (q->found && q->mappingGeneration == 0)) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 // Drain the driver's connection-event ring into buf[0..maxCount). Returns the count via *got.
@@ -84,3 +162,23 @@ BOOL pbdrv_get_original_dest(SOCKET accepted, PBDRV_REDIRECT_CTX *ctx)
 // endpoint the same way; the driver's context carries the original dest either way.
 // (Reply datagrams the relay sends back are un-redirected by WFP to appear from the
 //  original destination, so the app's recvfrom() sees the expected source.)
+
+BOOL pbdrv_set_rule_policy(HANDLE h, const PBDRV_WATCHLIST *wl, BOOL loopback)
+{
+    if (wl == NULL || wl->count > PBDRV_MAX_WATCH) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    SIZE_T watchSize = FIELD_OFFSET(PBDRV_WATCHLIST, entries) + (SIZE_T)wl->count * sizeof(PBDRV_WATCH_ENTRY);
+    DWORD length = (DWORD)(FIELD_OFFSET(PBDRV_RULE_POLICY, watch) + watchSize);
+    PBDRV_RULE_POLICY *policy = malloc(length);
+    if (policy == NULL) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
+    policy->redirectLoopbackApps = !!loopback;
+    memcpy(&policy->watch, wl, watchSize);
+    DWORD returned = 0;
+    BOOL ok = DeviceIoControl(h, PBDRV_IOCTL_SET_RULE_POLICY, policy, length, NULL, 0, &returned, NULL);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    free(policy);
+    SetLastError(error);
+    return ok;
+}
