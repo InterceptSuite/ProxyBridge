@@ -1,44 +1,60 @@
-;
-; ProxyBridgeDrv.inf - ProxyBridge WFP connect-redirect callout driver (non-PnP kernel service).
-;
+; Root-enumerated KMDF function driver. The installer creates/reuses the devnode.
 [Version]
-Signature   = "$Windows NT$"
-Class       = WFPCALLOUTS
-ClassGuid   = {57465043-616C-6C6F-7574-5F6C61796572}
-Provider    = %ProviderName%
+Signature = "$Windows NT$"
+; Root-enumerated KMDF function drivers belong to the registered System
+; setup class. A made-up WFP class prevents SetupDiCreateDeviceInfo from
+; creating the devnode on a clean machine.
+Class = System
+ClassGuid = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider = %ProviderName%
 CatalogFile = ProxyBridgeDrv.cat
-DriverVer   = 01/01/2026,1.0.0.0
+DriverVer = 09/08/2026,1.0.0.1
 PnpLockdown = 1
 
+[Manufacturer]
+%ProviderName% = Models,NTamd64.10.0...19041
+
+[Models.NTamd64.10.0...19041]
+%DeviceDesc% = ProxyBridgeDrv.Install,ROOT\InterceptSuite_ProxyBridge
+
 [DestinationDirs]
-DefaultDestDir = 12          ; %windir%\System32\drivers
+ProxyBridgeDrv.CopyFiles = 13
 
 [SourceDisksNames]
 1 = %DiskName%,,,""
 
 [SourceDisksFiles]
-ProxyBridgeDrv.sys = 1,,
+ProxyBridgeDrv.sys = 1
 
-[DefaultInstall.NTamd64]
-OptionDesc = %ServiceDesc%
-CopyFiles  = ProxyBridgeDrv.CopyFiles
-
-[DefaultInstall.NTamd64.Services]
-AddService = ProxyBridgeDrv,,ProxyBridgeDrv.Service
+[ProxyBridgeDrv.Install.NT]
+CopyFiles = ProxyBridgeDrv.CopyFiles
 
 [ProxyBridgeDrv.CopyFiles]
 ProxyBridgeDrv.sys
 
+[ProxyBridgeDrv.Install.NT.HW]
+AddReg = ProxyBridgeDrv.Security
+
+[ProxyBridgeDrv.Security]
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+
+[ProxyBridgeDrv.Install.NT.Services]
+AddService = ProxyBridgeDrv,0x00000002,ProxyBridgeDrv.Service
+
 [ProxyBridgeDrv.Service]
-DisplayName   = %ServiceDesc%
-Description   = %ServiceDesc%
-ServiceType   = 1            ; SERVICE_KERNEL_DRIVER
-StartType     = 3            ; SERVICE_DEMAND_START (started by the ProxyBridge app)
-ErrorControl  = 1            ; SERVICE_ERROR_NORMAL
-ServiceBinary = %12%\ProxyBridgeDrv.sys
-LoadOrderGroup = NDIS
+DisplayName = %DeviceDesc%
+ServiceType = 1
+StartType = 3
+ErrorControl = 1
+ServiceBinary = %13%\ProxyBridgeDrv.sys
+
+[ProxyBridgeDrv.Install.NT.Wdf]
+KmdfService = ProxyBridgeDrv,ProxyBridgeDrv.Wdf
+
+[ProxyBridgeDrv.Wdf]
+KmdfLibraryVersion = 1.31
 
 [Strings]
 ProviderName = "InterceptSuite"
-ServiceDesc  = "ProxyBridge WFP Redirect"
-DiskName     = "ProxyBridge WFP Driver Install Disk"
+DeviceDesc = "ProxyBridge WFP Redirect"
+DiskName = "ProxyBridge Driver Package"

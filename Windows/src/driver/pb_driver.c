@@ -57,38 +57,6 @@ static DWORD WINAPI driver_event_drain(LPVOID arg)
     return 0;
 }
 
-// Install (if needed) and start the ProxyBridgeDrv kernel service from <exe dir>\ProxyBridgeDrv.sys.
-static BOOL driver_service_start(void)
-{
-    WCHAR path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return FALSE;
-    WCHAR *slash = wcsrchr(path, L'\\');
-    if (slash == NULL) return FALSE;
-    wcscpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - path), L"ProxyBridgeDrv.sys");
-
-    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-    if (scm == NULL) { log_message("driver: OpenSCManager failed (%lu)", GetLastError()); return FALSE; }
-
-    SC_HANDLE svc = OpenServiceW(scm, L"ProxyBridgeDrv", SERVICE_ALL_ACCESS);
-    if (svc == NULL) {
-        svc = CreateServiceW(scm, L"ProxyBridgeDrv", L"ProxyBridge WFP", SERVICE_ALL_ACCESS,
-                             SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
-                             path, NULL, NULL, NULL, NULL, NULL);
-        if (svc == NULL) {
-            log_message("driver: CreateService failed (%lu) - is ProxyBridgeDrv.sys next to the exe?", GetLastError());
-            CloseServiceHandle(scm);
-            return FALSE;
-        }
-    }
-    BOOL ok = StartServiceW(svc, 0, NULL);
-    if (!ok && GetLastError() == ERROR_SERVICE_ALREADY_RUNNING) ok = TRUE;
-    if (!ok) log_message("driver: StartService failed (%lu) - signed? testsigning on?", GetLastError());
-    CloseServiceHandle(svc);
-    CloseServiceHandle(scm);
-    return ok;
-}
-
 // Add one rule token to the kernel watch list. WFP exposes ALE_APP_ID as a kernel device
 // path, so exact DOS paths must be converted to that namespace before they can match.
 static BOOL driver_add_watch_entry(PBDRV_WATCHLIST *wl, const char *token)
@@ -252,7 +220,7 @@ void pb_driver_sync_config(void)
 
 BOOL pb_driver_start(UINT16 relay_port)
 {
-    if (!driver_service_start()) return FALSE;
+    // PnP owns the installed device and service; never create a legacy SCM service.
 
     g_drv = pbdrv_open();
     if (g_drv == INVALID_HANDLE_VALUE) {
@@ -262,15 +230,28 @@ BOOL pb_driver_start(UINT16 relay_port)
 
     PBDRV_CONFIG cfg;
     driver_build_config(&cfg, relay_port);
-    if (!pbdrv_configure(g_drv, &cfg))
-        log_message("driver: configure failed (%lu)", GetLastError());
+    if (!pbdrv_configure(g_drv, &cfg)) {
+        DWORD error = GetLastError();
+        CloseHandle(g_drv);
+        g_drv = INVALID_HANDLE_VALUE;
+        log_message("driver: configure failed (%lu)", error);
+        SetLastError(error);
+        return FALSE;
+    }
 
     if (!driver_push_watchlist()) {
         CloseHandle(g_drv);
         g_drv = INVALID_HANDLE_VALUE;
         return FALSE;
     }
-    pbdrv_enable(g_drv, TRUE);
+    if (!pbdrv_enable(g_drv, TRUE)) {
+        DWORD error = GetLastError();
+        CloseHandle(g_drv);
+        g_drv = INVALID_HANDLE_VALUE;
+        log_message("driver: PnP device activation failed (%lu)", error);
+        SetLastError(error);
+        return FALSE;
+    }
 
     // Start the connection-log drain (logs every connection: direct/proxy/block).
     g_drain_run = TRUE;

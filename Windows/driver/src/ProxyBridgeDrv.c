@@ -5,7 +5,7 @@
  * ALE_CONNECT_REDIRECT layer (one layer covers TCP+UDP; two callouts cover IPv4+IPv6), and
  * observes every connect at ALE_AUTH_CONNECT for the connection log. The relay recovers the
  * original destination from the redirect context - no packet mangling, PID delivered by WFP.
- * DriverEntry/IOCTL dispatch live here; the UDP map + event ring live in pbdrv_state.c.
+ * KMDF lifecycle lives in pbdrv_device.c; WFP and IOCTL payloads live here.
  */
 
 #include <initguid.h>   // must precede includes so DEFINE_GUID allocates the GUID bytes
@@ -13,7 +13,7 @@
 // fwpsk.h needs an NDIS version and pulls in ndis.h/ws2def.h/ws2ipdef.h - don't include those first.
 #define NDIS_SUPPORT_NDIS6 1
 #include <ntddk.h>
-#include <wdmsec.h>              // IoCreateDeviceSecure - restrict the control device to admins
+#include "pbdrv_device.h"
 #pragma warning(push)
 #pragma warning(disable: 4201)   // nameless struct/union in WFP headers
 #include <fwpsk.h>
@@ -22,13 +22,6 @@
 
 #include "ProxyBridgeDrv_ioctl.h"
 #include "pbdrv_state.h"
-
-// Control-device DACL: only SYSTEM and the built-in Administrators group may open \\.\ProxyBridgeDrv.
-// Without this the device is world-openable and any local user could reconfigure the redirect
-// target (hijack other apps' connections) or drain the connection-event log (info disclosure).
-DECLARE_CONST_UNICODE_STRING(gDeviceSddl, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
-// {7C1B6A10-2E44-4E8B-9E21-0F9A5D3C1A07} - device class GUID for IoCreateDeviceSecure.
-DEFINE_GUID(PB_DEVCLASS_GUID, 0x7c1b6a10,0x2e44,0x4e8b,0x9e,0x21,0x0f,0x9a,0x5d,0x3c,0x1a,0x07);
 
 // Diagnostics: DebugView/WinDbg only in checked (DBG) builds; compiled out of Release.
 #if DBG
@@ -56,21 +49,15 @@ static UINT32      gMonCalloutV4Id = 0;
 static UINT32      gMonCalloutV6Id = 0;
 static UINT64      gMonFilterV4Id  = 0;
 static UINT64      gMonFilterV6Id  = 0;
-static PDEVICE_OBJECT gDevice    = NULL;
+// Retain the FDO while kernel callouts can still enter this module.
+static PDEVICE_OBJECT gWfpDeviceReference = NULL;
 
 static EX_SPIN_LOCK  gCfgLock;                        // guards gConfig / gWatch
 static PBDRV_CONFIG  gConfig;                         // redirect targets + exclusions
 static PBDRV_WATCHLIST *gWatch   = NULL;             // heap copy of the process watch list
 static volatile LONG gEnabled    = 0;                // 0 until user mode enables
 
-DRIVER_UNLOAD DriverUnload;
-
-_Dispatch_type_(IRP_MJ_CREATE)
-_Dispatch_type_(IRP_MJ_CLOSE)
-DRIVER_DISPATCH DispatchCreateClose;
-
-_Dispatch_type_(IRP_MJ_DEVICE_CONTROL)
-DRIVER_DISPATCH DispatchDeviceControl;
+static BOOLEAN gConfigured;
 
 // Case-insensitive check: does `path` end with `suffix` (both null-terminated WCHAR)?
 static BOOLEAN EndsWithI(const WCHAR *path, ULONG pathChars, const WCHAR *suffix)
@@ -421,11 +408,18 @@ static NTSTATUS AddMonitorCallout(PDEVICE_OBJECT dev, const GUID *calloutKey, co
     return FwpmFilterAdd0(gEngine, &filter, NULL, outFilterId);
 }
 
-static NTSTATUS RegisterWfp(PDEVICE_OBJECT dev)
+NTSTATUS PbWfpStart(PDEVICE_OBJECT dev)
 {
+    if (gWfpDeviceReference != NULL) return STATUS_INVALID_DEVICE_STATE;
+    ObReferenceObject(dev);
+    gWfpDeviceReference = dev;
     NTSTATUS status;
     FWPM_SESSION0 session = {0};
     session.flags = FWPM_SESSION_FLAG_DYNAMIC;       // auto-cleanup engine objects on handle close
+
+    // Prepare redirect state before publishing any filters.
+    status = FwpsRedirectHandleCreate0(&PB_PROVIDER_GUID, 0, &gRedirect);
+    if (!NT_SUCCESS(status)) return status;
 
     status = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, &session, &gEngine);
     if (!NT_SUCCESS(status)) return status;
@@ -436,7 +430,11 @@ static NTSTATUS RegisterWfp(PDEVICE_OBJECT dev)
     FWPM_PROVIDER0 provider = {0};
     provider.providerKey = PB_PROVIDER_GUID;
     provider.displayData.name = L"ProxyBridge";
-    FwpmProviderAdd0(gEngine, &provider, NULL);      // ok if it already exists
+    status = FwpmProviderAdd0(gEngine, &provider, NULL);
+    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+        FwpmTransactionAbort0(gEngine);
+        return status;
+    }
 
     FWPM_SUBLAYER0 sub = {0};
     sub.subLayerKey = PB_SUBLAYER_GUID;
@@ -460,63 +458,110 @@ static NTSTATUS RegisterWfp(PDEVICE_OBJECT dev)
     status = FwpmTransactionCommit0(gEngine);
     if (!NT_SUCCESS(status)) { FwpmTransactionAbort0(gEngine); return status; }
 
-    // Shared redirect handle drives the loop-detection above.
-    return FwpsRedirectHandleCreate0(&PB_PROVIDER_GUID, 0, &gRedirect);
+    return STATUS_SUCCESS;
 }
 
-static void UnregisterWfp(void)
+static NTSTATUS UnregisterCallout(UINT32 *id)
+{
+    if (*id == 0) return STATUS_SUCCESS;
+    NTSTATUS status = FwpsCalloutUnregisterById0(*id);
+    if (NT_SUCCESS(status) || status == STATUS_FWP_CALLOUT_NOT_FOUND) {
+        *id = 0;
+        return STATUS_SUCCESS;
+    }
+    // No flow contexts are associated by this driver, and the KMDF lifecycle
+    // serializes all registration. BUSY/IN_USE would violate those invariants.
+    // Preserve ownership on any failure; never pretend the callout is gone.
+    return status;
+}
+
+NTSTATUS PbWfpStop(void)
 {
     // Teardown order matters. (1) Close the engine: the dynamic session removes our filters, so
     // no NEW classify can enter. (2) Unregister the kernel callouts: this waits for any in-flight
     // classify to drain. (3) Only now destroy the shared redirect handle - doing it earlier could
     // let a still-running classify dereference a freed gRedirect.
     if (gEngine) {
-        FwpmEngineClose0(gEngine);       // removes filters/callouts/sublayer/provider
+        NTSTATUS status = FwpmEngineClose0(gEngine);
+        if (!NT_SUCCESS(status)) return status;
         gEngine = NULL;
     }
-    if (gCalloutV4Id)    { FwpsCalloutUnregisterById0(gCalloutV4Id);    gCalloutV4Id = 0; }
-    if (gCalloutV6Id)    { FwpsCalloutUnregisterById0(gCalloutV6Id);    gCalloutV6Id = 0; }
-    if (gMonCalloutV4Id) { FwpsCalloutUnregisterById0(gMonCalloutV4Id); gMonCalloutV4Id = 0; }
-    if (gMonCalloutV6Id) { FwpsCalloutUnregisterById0(gMonCalloutV6Id); gMonCalloutV6Id = 0; }
+    NTSTATUS result = STATUS_SUCCESS;
+    UINT32 *ids[] = { &gCalloutV4Id, &gCalloutV6Id, &gMonCalloutV4Id, &gMonCalloutV6Id };
+    for (ULONG i = 0; i < RTL_NUMBER_OF(ids); ++i) {
+        NTSTATUS status = UnregisterCallout(ids[i]);
+        if (!NT_SUCCESS(status) && NT_SUCCESS(result)) result = status;
+    }
+    if (!NT_SUCCESS(result)) return result;
     if (gRedirect)       { FwpsRedirectHandleDestroy0(gRedirect);       gRedirect = NULL; }
-}
-
-// ---- IOCTL device interface ----
-_Use_decl_annotations_
-NTSTATUS DispatchCreateClose(PDEVICE_OBJECT dev, PIRP irp)
-{
-    UNREFERENCED_PARAMETER(dev);
-    irp->IoStatus.Status = STATUS_SUCCESS; irp->IoStatus.Information = 0;
-    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    if (gWfpDeviceReference != NULL) {
+        PDEVICE_OBJECT dev = gWfpDeviceReference;
+        gWfpDeviceReference = NULL;
+        ObDereferenceObject(dev);
+    }
     return STATUS_SUCCESS;
 }
 
-_Use_decl_annotations_
-NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT dev, PIRP irp)
+void PbResetSession(void)
 {
-    UNREFERENCED_PARAMETER(dev);
-    PIO_STACK_LOCATION sp = IoGetCurrentIrpStackLocation(irp);
-    ULONG code = sp->Parameters.DeviceIoControl.IoControlCode;
-    ULONG inLen = sp->Parameters.DeviceIoControl.InputBufferLength;
-    PVOID buf = irp->AssociatedIrp.SystemBuffer;
+    // Only after successful WFP teardown and after file requests have drained.
+    NT_ASSERT(gEngine == NULL && gRedirect == NULL);
+    KIRQL old = ExAcquireSpinLockExclusive(&gCfgLock);
+    PBDRV_WATCHLIST *watch = gWatch;
+    gWatch = NULL;
+    RtlZeroMemory(&gConfig, sizeof(gConfig));
+    gConfigured = FALSE;
+    ExReleaseSpinLockExclusive(&gCfgLock, old);
+    if (watch != NULL) ExFreePoolWithTag(watch, PB_TAG);
+    UdpMapClear();
+    EventClear();
+}
+
+// Buffer lengths are checked here even though KMDF validates buffer access.
+NTSTATUS PbDeviceControl(ULONG code, PVOID input, ULONG inLen,
+                         PVOID output, ULONG outputLength, ULONG_PTR *information)
+{
+    PVOID buf = input;
     NTSTATUS status = STATUS_SUCCESS;
     ULONG_PTR info = 0;
     KIRQL old;
-
     switch (code) {
     case PBDRV_IOCTL_SET_CONFIG:
         if (inLen < sizeof(PBDRV_CONFIG)) { status = STATUS_BUFFER_TOO_SMALL; break; }
+        {
+            const PBDRV_CONFIG *config = (const PBDRV_CONFIG *)buf;
+            if (config->selfPid == 0 || config->tcpV4Port == 0 ||
+                config->redirectUdp > 1 || config->redirectIpv6 > 1 ||
+                config->redirectLoopbackApps > 1 || !IsLoopbackV4(config->tcpV4Addr) ||
+                (config->redirectUdp && (config->udpV4Port == 0 || !IsLoopbackV4(config->udpV4Addr))) ||
+                (config->redirectIpv6 && (config->tcpV6Port == 0 || !IsLoopbackV6(config->tcpV6Addr))) ||
+                (config->redirectIpv6 && config->redirectUdp &&
+                 (config->udpV6Port == 0 || !IsLoopbackV6(config->udpV6Addr)))) {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+        }
         old = ExAcquireSpinLockExclusive(&gCfgLock);
         RtlCopyMemory(&gConfig, buf, sizeof(PBDRV_CONFIG));
+        gConfigured = TRUE;
         ExReleaseSpinLockExclusive(&gCfgLock, old);
         break;
 
     case PBDRV_IOCTL_SET_WATCHLIST: {
         if (inLen < sizeof(UINT32)) { status = STATUS_BUFFER_TOO_SMALL; break; }
-        PBDRV_WATCHLIST *incoming = (PBDRV_WATCHLIST *)buf;
+        const PBDRV_WATCHLIST *incoming = (const PBDRV_WATCHLIST *)buf;
         if (incoming->count > PBDRV_MAX_WATCH) { status = STATUS_INVALID_PARAMETER; break; }
         SIZE_T need = FIELD_OFFSET(PBDRV_WATCHLIST, entries) + (SIZE_T)incoming->count * sizeof(PBDRV_WATCH_ENTRY);
         if (inLen < need) { status = STATUS_BUFFER_TOO_SMALL; break; }
+        for (UINT32 i = 0; i < incoming->count; ++i) {
+            ULONG length = 0;
+            while (length < PBDRV_NAME_LEN && incoming->entries[i].image[length] != L'\0') ++length;
+            if (length == 0 || length == PBDRV_NAME_LEN) {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+        }
+        if (!NT_SUCCESS(status)) break;
         PBDRV_WATCHLIST *copy = (PBDRV_WATCHLIST *)ExAllocatePool2(POOL_FLAG_NON_PAGED, need, PB_TAG);
         if (!copy) { status = STATUS_INSUFFICIENT_RESOURCES; break; }
         RtlCopyMemory(copy, incoming, need);
@@ -528,83 +573,48 @@ NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT dev, PIRP irp)
     }
 
     case PBDRV_IOCTL_QUERY_UDP: {
-        ULONG outLen = sp->Parameters.DeviceIoControl.OutputBufferLength;
+        ULONG outLen = outputLength;
         if (inLen < sizeof(PBDRV_UDP_QUERY) || outLen < sizeof(PBDRV_UDP_QUERY)) { status = STATUS_BUFFER_TOO_SMALL; break; }
-        PBDRV_UDP_QUERY *q = (PBDRV_UDP_QUERY *)buf;
+        PBDRV_UDP_QUERY *q = (PBDRV_UDP_QUERY *)output;
+        RtlCopyMemory(q, input, sizeof(*q));
         q->found = UdpMapGet(q) ? 1 : 0;
         info = sizeof(PBDRV_UDP_QUERY);
         break;
     }
 
     case PBDRV_IOCTL_POP_EVENTS: {
-        ULONG outLen = sp->Parameters.DeviceIoControl.OutputBufferLength;
+        ULONG outLen = outputLength;
         ULONG maxCount = outLen / sizeof(PBDRV_EVENT);
         if (maxCount == 0) { status = STATUS_BUFFER_TOO_SMALL; break; }
-        ULONG got = EventPopMany((PBDRV_EVENT *)buf, maxCount);
+        ULONG got = EventPopMany((PBDRV_EVENT *)output, maxCount);
         info = (ULONG_PTR)got * sizeof(PBDRV_EVENT);
         break;
     }
 
-    case PBDRV_IOCTL_ENABLE:  InterlockedExchange(&gEnabled, 1); break;
-    case PBDRV_IOCTL_DISABLE: InterlockedExchange(&gEnabled, 0); break;
+    case PBDRV_IOCTL_ENABLE:
+        old = ExAcquireSpinLockExclusive(&gCfgLock);
+        if (!gConfigured || gWatch == NULL)
+            status = STATUS_INVALID_DEVICE_STATE;
+        else
+            InterlockedExchange(&gEnabled, 1);
+        ExReleaseSpinLockExclusive(&gCfgLock, old);
+        break;
+    case PBDRV_IOCTL_DISABLE:
+        old = ExAcquireSpinLockExclusive(&gCfgLock);
+        InterlockedExchange(&gEnabled, 0);
+        ExReleaseSpinLockExclusive(&gCfgLock, old);
+        break;
     default: status = STATUS_INVALID_DEVICE_REQUEST; break;
     }
 
-    irp->IoStatus.Status = status; irp->IoStatus.Information = info;
-    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    *information = info;
     return status;
 }
 
-// ---- Driver entry / unload ----
-_Use_decl_annotations_
-VOID DriverUnload(PDRIVER_OBJECT driver)
+BOOLEAN PbSessionConfigured(void)
 {
-    UNREFERENCED_PARAMETER(driver);
-    InterlockedExchange(&gEnabled, 0);
-    UnregisterWfp();
-    if (gDevice) {
-        UNICODE_STRING link; RtlInitUnicodeString(&link, PBDRV_SYMLINK_NAME);
-        IoDeleteSymbolicLink(&link);
-        IoDeleteDevice(gDevice);
-        gDevice = NULL;
-    }
-    KIRQL old = ExAcquireSpinLockExclusive(&gCfgLock);
-    PBDRV_WATCHLIST *w = gWatch; gWatch = NULL;
-    ExReleaseSpinLockExclusive(&gCfgLock, old);
-    if (w) ExFreePoolWithTag(w, PB_TAG);
-    UdpMapClear();
-}
-
-DRIVER_INITIALIZE DriverEntry;
-
-_Use_decl_annotations_
-NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryPath)
-{
-    UNREFERENCED_PARAMETER(registryPath);
-    NTSTATUS status;
-
-    driver->DriverUnload = DriverUnload;
-    driver->MajorFunction[IRP_MJ_CREATE]         = DispatchCreateClose;
-    driver->MajorFunction[IRP_MJ_CLOSE]          = DispatchCreateClose;
-    driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DispatchDeviceControl;
-
-    UNICODE_STRING devName; RtlInitUnicodeString(&devName, PBDRV_DEVICE_NAME);
-    // Secure device: SYSTEM + Administrators only (see gDeviceSddl). FILE_DEVICE_SECURE_OPEN
-    // makes the namespace-relative opens honor the same descriptor.
-    status = IoCreateDeviceSecure(driver, 0, &devName, FILE_DEVICE_UNKNOWN,
-                                  FILE_DEVICE_SECURE_OPEN, FALSE, &gDeviceSddl,
-                                  (LPCGUID)&PB_DEVCLASS_GUID, &gDevice);
-    if (!NT_SUCCESS(status)) return status;
-
-    UNICODE_STRING link; RtlInitUnicodeString(&link, PBDRV_SYMLINK_NAME);
-    status = IoCreateSymbolicLink(&link, &devName);
-    if (!NT_SUCCESS(status)) { IoDeleteDevice(gDevice); gDevice = NULL; return status; }
-
-    status = RegisterWfp(gDevice);
-    if (!NT_SUCCESS(status)) {
-        IoDeleteSymbolicLink(&link);
-        IoDeleteDevice(gDevice); gDevice = NULL;
-        return status;
-    }
-    return STATUS_SUCCESS;
+    KIRQL old = ExAcquireSpinLockShared(&gCfgLock);
+    BOOLEAN configured = gConfigured && gWatch != NULL;
+    ExReleaseSpinLockShared(&gCfgLock, old);
+    return configured;
 }

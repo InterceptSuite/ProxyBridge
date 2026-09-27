@@ -139,3 +139,11 @@ void UdpMapClear(void)
     }
     ExReleaseSpinLockExclusive(&gUdpLock, old);
 }
+
+// Clear session-owned events after file requests and WFP callbacks have drained.
+void EventClear(void)
+{
+    KIRQL old = ExAcquireSpinLockExclusive(&gEvLock);
+    gEvHead = gEvTail = 0;
+    ExReleaseSpinLockExclusive(&gEvLock, old);
+}
