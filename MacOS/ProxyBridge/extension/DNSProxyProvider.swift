@@ -4,8 +4,41 @@ import NetworkExtension
 // the resulting IP -> domain mapping so the transparent proxy can match rules by
 // domain. DoH/DoT that an app does itself is not visible here (by design).
 class DNSProxyProvider: NEDNSProxyProvider {
-    private var sessions = Set<NWUDPSession>()
-    private let sessionsLock = NSLock()
+    // one udp session per (flow, resolver), reused for every query on that flow.
+    // the system resolver keeps a handful of long-lived flows, so this replaces a
+    // socket per query with a few sockets total
+    private final class FlowSessions {
+        private var sessions: [String: NWUDPSession] = [:]
+        private let lock = NSLock()
+        private var closed = false
+
+        func session(for server: NWHostEndpoint, create: () -> NWUDPSession, onNew: (NWUDPSession) -> Void) -> NWUDPSession? {
+            let key = "\(server.hostname):\(server.port)"
+            lock.lock()
+            defer { lock.unlock() }
+            if closed { return nil }
+            if let existing = sessions[key], existing.state == .ready || existing.state == .preparing || existing.state == .waiting {
+                return existing
+            }
+            sessions[key]?.cancel()
+            let fresh = create()
+            sessions[key] = fresh
+            onNew(fresh)
+            return fresh
+        }
+
+        func closeAll() {
+            lock.lock()
+            closed = true
+            let all = sessions.values
+            sessions.removeAll()
+            lock.unlock()
+            all.forEach { $0.cancel() }
+        }
+    }
+
+    private var flowStates: [ObjectIdentifier: FlowSessions] = [:]
+    private let statesLock = NSLock()
 
     override func startProxy(options: [String: Any]?, completionHandler: @escaping (Error?) -> Void) {
         // start with a clean map so old browsing domains don't linger on disk
@@ -14,11 +47,11 @@ class DNSProxyProvider: NEDNSProxyProvider {
     }
 
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
-        sessionsLock.lock()
-        let all = sessions
-        sessions.removeAll()
-        sessionsLock.unlock()
-        all.forEach { $0.cancel() }
+        statesLock.lock()
+        let all = Array(flowStates.values)
+        flowStates.removeAll()
+        statesLock.unlock()
+        all.forEach { $0.closeAll() }
         DNSMapStore.shared.clear()
         completionHandler()
     }
@@ -32,62 +65,57 @@ class DNSProxyProvider: NEDNSProxyProvider {
                 udp.closeWriteWithError(error)
                 return
             }
-            self.readQueries(udp)
+            let state = FlowSessions()
+            self.statesLock.lock()
+            self.flowStates[ObjectIdentifier(udp)] = state
+            self.statesLock.unlock()
+            self.readQueries(udp, state)
         }
         return true
     }
 
-    private func readQueries(_ flow: NEAppProxyUDPFlow) {
+    private func finish(_ flow: NEAppProxyUDPFlow, _ state: FlowSessions) {
+        statesLock.lock()
+        flowStates.removeValue(forKey: ObjectIdentifier(flow))
+        statesLock.unlock()
+        state.closeAll()
+        flow.closeReadWithError(nil)
+        flow.closeWriteWithError(nil)
+    }
+
+    private func readQueries(_ flow: NEAppProxyUDPFlow, _ state: FlowSessions) {
         flow.readDatagrams { [weak self] datagrams, endpoints, error in
             guard let self = self else { return }
 
             guard error == nil, let datagrams = datagrams, let endpoints = endpoints, !datagrams.isEmpty else {
-                flow.closeReadWithError(nil)
-                flow.closeWriteWithError(nil)
+                self.finish(flow, state)
                 return
             }
 
             for i in 0..<min(datagrams.count, endpoints.count) {
                 guard let server = endpoints[i] as? NWHostEndpoint else { continue }
-                self.forward(query: datagrams[i], to: server, on: flow)
+                self.forward(query: datagrams[i], to: server, on: flow, state: state)
             }
 
-            self.readQueries(flow)
+            self.readQueries(flow, state)
         }
     }
 
-    // forward one query to its resolver, parse the reply, write it back
-    private func forward(query: Data, to server: NWHostEndpoint, on flow: NEAppProxyUDPFlow) {
-        let session = createUDPSession(to: server, from: nil)
-        sessionsLock.lock(); sessions.insert(session); sessionsLock.unlock()
-
-        session.setReadHandler({ [weak self, weak session] responses, _ in
-            guard let self = self else { return }
-            if let responses = responses {
+    // forward one query to its resolver over the flow's shared session
+    private func forward(query: Data, to server: NWHostEndpoint, on flow: NEAppProxyUDPFlow, state: FlowSessions) {
+        let session = state.session(for: server, create: { createUDPSession(to: server, from: nil) }, onNew: { fresh in
+            // replies are parsed for the ip -> domain map, then handed back to the app
+            fresh.setReadHandler({ responses, _ in
+                guard let responses = responses else { return }
                 for response in responses {
                     if let parsed = DNSParser.parse(response) {
                         DNSMapStore.shared.record(domain: parsed.domain, ips: parsed.ips)
                     }
-                    flow.writeDatagrams([response], sentBy: [server]) { _ in }
                 }
-            }
-            // a dns exchange is one response, drop the session afterwards
-            if let session = session { self.drop(session) }
-        }, maxDatagrams: 4)
-
-        session.writeDatagram(query) { _ in }
-
-        // safety net: a dropped/unanswered query must not leak the session forever
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self, weak session] in
-            if let session = session { self?.drop(session) }
-        }
-    }
-
-    private func drop(_ session: NWUDPSession) {
-        sessionsLock.lock()
-        let present = sessions.remove(session) != nil
-        sessionsLock.unlock()
-        if present { session.cancel() }
+                flow.writeDatagrams(responses, sentBy: [NWEndpoint](repeating: server, count: responses.count)) { _ in }
+            }, maxDatagrams: 16)
+        })
+        session?.writeDatagram(query) { _ in }
     }
 }
 

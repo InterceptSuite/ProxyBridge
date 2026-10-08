@@ -298,8 +298,10 @@ class AppProxyProvider: NETransparentProxyProvider {
     private let logQueueLock = NSLock()
     private let dateFormatter: ISO8601DateFormatter = ISO8601DateFormatter()
     
-    // cache by pid so we don't call proc_pidpath on every connection
-    private var pidCache: [pid_t: String] = [:]
+    // cache by pid + pid version so we don't call proc_pidpath on every
+    // connection. the version changes when a pid is reused, so a new process
+    // never inherits the previous owner's name
+    private var pidCache: [UInt64: String] = [:]
     private let pidCacheLock = NSLock()
     private static let pidCacheMaxSize = 256
     
@@ -311,16 +313,17 @@ class AppProxyProvider: NETransparentProxyProvider {
             return nil
         }
         
-        let pid = auditTokenData.withUnsafeBytes { ptr -> pid_t in
-            guard let baseAddress = ptr.baseAddress else { return 0 }
+        let (pid, pidVersion) = auditTokenData.withUnsafeBytes { ptr -> (pid_t, UInt32) in
+            guard let baseAddress = ptr.baseAddress else { return (0, 0) }
             let token = baseAddress.assumingMemoryBound(to: UInt32.self)
-            return pid_t(token[5])
+            return (pid_t(token[5]), token[7])
         }
         
         guard pid > 0 else { return nil }
+        let key = (UInt64(UInt32(pid)) << 32) | UInt64(pidVersion)
         
         pidCacheLock.lock()
-        if let cached = pidCache[pid] {
+        if let cached = pidCache[key] {
             pidCacheLock.unlock()
             return cached
         }
@@ -339,7 +342,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         if pidCache.count >= AppProxyProvider.pidCacheMaxSize {
             pidCache.removeAll(keepingCapacity: true)
         }
-        pidCache[pid] = processName
+        pidCache[key] = processName
         pidCacheLock.unlock()
         
         return processName
