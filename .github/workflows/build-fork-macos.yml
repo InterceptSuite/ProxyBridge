@@ -48,6 +48,7 @@ jobs:
           PRODUCT_NAME = ProxyBridge
           CODE_SIGN_STYLE = Automatic
           CODE_SIGN_IDENTITY = -
+          CODE_SIGN_ENTITLEMENTS = ProxyBridge/ProxyBridgeRelease.entitlements
           DEVELOPMENT_TEAM = 
           PROVISIONING_PROFILE_SPECIFIER = 
           CODE_SIGNING_REQUIRED = NO
@@ -63,6 +64,7 @@ jobs:
           PRODUCT_NAME = com.interceptsuite.ProxyBridge.extension
           CODE_SIGN_STYLE = Automatic
           CODE_SIGN_IDENTITY = -
+          CODE_SIGN_ENTITLEMENTS = extension/extensionRelease.entitlements
           DEVELOPMENT_TEAM = 
           PROVISIONING_PROFILE_SPECIFIER = 
           CODE_SIGNING_REQUIRED = NO
@@ -96,8 +98,17 @@ jobs:
           OUTPUT_DIR="MacOS/ProxyBridge/output"
           mkdir -p "$OUTPUT_DIR"
 
-          # Ad-hoc sign the built app bundle
-          codesign --force --deep --sign - "$APP_PATH" || true
+          # Explicitly sign the system extension first with its entitlements
+          EXT_PATH="$APP_PATH/Contents/Library/SystemExtensions/com.interceptsuite.ProxyBridge.extension.systemextension"
+          if [ -d "$EXT_PATH" ]; then
+            codesign --force --sign - --entitlements MacOS/ProxyBridge/extension/extensionRelease.entitlements "$EXT_PATH" || true
+          fi
+
+          # Sign the main application with system-extension.install entitlements
+          codesign --force --sign - --entitlements MacOS/ProxyBridge/ProxyBridge/ProxyBridgeRelease.entitlements "$APP_PATH" || true
+
+          # Verify entitlements are present in signature
+          codesign -d --entitlements :- "$APP_PATH" || true
 
           # Copy to output
           cp -R "$APP_PATH" "$OUTPUT_DIR/ProxyBridge.app"
