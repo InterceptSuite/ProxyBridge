@@ -1,0 +1,168 @@
+name: Build & Package macOS (Fork Self-Use)
+
+on:
+  push:
+    branches:
+      - 'fix/**'
+      - 'feature/**'
+      - 'dev'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish as GitHub Release'
+        required: false
+        type: boolean
+        default: true
+      release_tag:
+        description: 'Release Tag (leave empty for auto-generated)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Configure Signing & Build Environment
+        run: |
+          mkdir -p MacOS/ProxyBridge/build
+          mkdir -p MacOS/ProxyBridge/output
+
+          cat << 'EOF' > MacOS/ProxyBridge/Signing-Config-app.xcconfig
+          PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge
+          PRODUCT_MODULE_NAME = ProxyBridge
+          PRODUCT_NAME = ProxyBridge
+          CODE_SIGN_STYLE = Automatic
+          CODE_SIGN_IDENTITY = -
+          CODE_SIGN_ENTITLEMENTS = ProxyBridge/ProxyBridgeRelease.entitlements
+          DEVELOPMENT_TEAM = 
+          PROVISIONING_PROFILE_SPECIFIER = 
+          CODE_SIGNING_REQUIRED = NO
+          CODE_SIGNING_ALLOWED = YES
+          ENABLE_HARDENED_RUNTIME = NO
+          ARCHS = arm64 x86_64
+          ONLY_ACTIVE_ARCH = NO
+          EOF
+
+          cat << 'EOF' > MacOS/ProxyBridge/Signing-Config-ext.xcconfig
+          PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge.extension
+          PRODUCT_MODULE_NAME = com_interceptsuite_ProxyBridge_extension
+          PRODUCT_NAME = com.interceptsuite.ProxyBridge.extension
+          CODE_SIGN_STYLE = Automatic
+          CODE_SIGN_IDENTITY = -
+          CODE_SIGN_ENTITLEMENTS = extension/extensionRelease.entitlements
+          DEVELOPMENT_TEAM = 
+          PROVISIONING_PROFILE_SPECIFIER = 
+          CODE_SIGNING_REQUIRED = NO
+          CODE_SIGNING_ALLOWED = YES
+          ENABLE_HARDENED_RUNTIME = NO
+          ARCHS = arm64 x86_64
+          ONLY_ACTIVE_ARCH = NO
+          EOF
+
+      - name: Build Universal Binary
+        run: |
+          cd MacOS/ProxyBridge
+          xcodebuild \
+            -project ProxyBridge.xcodeproj \
+            -scheme ProxyBridge \
+            -configuration Release \
+            -derivedDataPath build/DerivedData \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE="Automatic" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            clean build
+
+      - name: Prepare Output & Ad-Hoc Sign
+        run: |
+          APP_PATH="MacOS/ProxyBridge/build/DerivedData/Build/Products/Release/ProxyBridge.app"
+          OUTPUT_DIR="MacOS/ProxyBridge/output"
+          mkdir -p "$OUTPUT_DIR"
+
+          # Explicitly sign the system extension first with its entitlements
+          EXT_PATH="$APP_PATH/Contents/Library/SystemExtensions/com.interceptsuite.ProxyBridge.extension.systemextension"
+          if [ -d "$EXT_PATH" ]; then
+            codesign --force --sign - --entitlements MacOS/ProxyBridge/extension/extensionRelease.entitlements "$EXT_PATH" || true
+          fi
+
+          # Sign the main application with system-extension.install entitlements
+          codesign --force --sign - --entitlements MacOS/ProxyBridge/ProxyBridge/ProxyBridgeRelease.entitlements "$APP_PATH" || true
+
+          # Verify entitlements are present in signature
+          codesign -d --entitlements :- "$APP_PATH" || true
+
+          # Copy to output
+          cp -R "$APP_PATH" "$OUTPUT_DIR/ProxyBridge.app"
+
+          # Create zip archive
+          cd "$OUTPUT_DIR"
+          ditto -c -k --keepParent ProxyBridge.app ProxyBridge-macOS-Universal.zip
+          cd -
+
+      - name: Build PKG Installer
+        run: |
+          cd MacOS/ProxyBridge
+          chmod +x build.sh
+          # build.sh creates output/ProxyBridge-v4.1.0-Universal-Installer.pkg
+          bash build.sh || true
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProxyBridge-macOS-Fork-Build
+          path: |
+            MacOS/ProxyBridge/output/ProxyBridge-macOS-Universal.zip
+            MacOS/ProxyBridge/output/*.pkg
+          retention-days: 30
+
+      - name: Determine Release Tag
+        id: release_info
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v4.1.0-fork-${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.create_release == true) || startsWith(github.ref, 'refs/tags/') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag }}
+          name: ProxyBridge ${{ steps.release_info.outputs.tag }}
+          body: |
+            ## ProxyBridge Custom Build (Fork)
+
+            Built automatically from fork with fixes for:
+            - macOS file descriptor leak (`RLIMIT_NOFILE` soft limit exhaustion).
+            - Unreleased UDP flow leaks and SOCKS5 UDP control disconnection monitoring.
+            - 100% CPU spin loop under connection failures.
+
+            ### Installation Instructions
+            1. Download `ProxyBridge-macOS-Universal.zip` or the `.pkg` installer below.
+            2. Drag `ProxyBridge.app` to `/Applications`.
+            3. If macOS blocks opening due to Gatekeeper:
+               - Right-click `ProxyBridge.app` and choose **Open**.
+               - Or run in Terminal: `xattr -cr /Applications/ProxyBridge.app`
+          files: |
+            MacOS/ProxyBridge/output/ProxyBridge-macOS-Universal.zip
+            MacOS/ProxyBridge/output/*.pkg
