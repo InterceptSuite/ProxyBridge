@@ -39,13 +39,21 @@ RequestExecutionLevel admin
 
 ; Finish page offers to launch ProxyBridge - checkbox is checked by default.
 !define MUI_FINISHPAGE_RUN "$INSTDIR\ProxyBridge.exe"
+!define MUI_FINISHPAGE_RUN_FUNCTION LaunchInstalled
 !define MUI_FINISHPAGE_RUN_TEXT "Run ProxyBridge now"
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_UNPAGE_FINISH
 
 !insertmacro MUI_LANGUAGE "English"
+
+Function LaunchInstalled
+  IfRebootFlag launch_done
+  Exec '"$INSTDIR\ProxyBridge.exe"'
+  launch_done:
+FunctionEnd
 
 Section "MainSection" SEC01
   ; A running ProxyBridge locks the files we need to overwrite. Detect it and ask
@@ -62,11 +70,6 @@ Section "MainSection" SEC01
       nsExec::ExecToLog 'taskkill /F /IM ProxyBridge_CLI.exe'
       Sleep 1500
   install_proceed:
-
-  ; Stop and unload the WFP driver so ProxyBridgeDrv.sys can be replaced.
-  nsExec::ExecToLog 'sc stop ProxyBridgeDrv'
-  nsExec::ExecToLog 'sc delete ProxyBridgeDrv'
-  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\ProxyBridgeDrv"
 
   ; Also clean up any legacy WinDivert driver from older installs.
   nsExec::ExecToLog 'sc stop WinDivert'
@@ -89,12 +92,32 @@ Section "MainSection" SEC01
   File "..\output\ProxyBridge.exe"
   File "..\output\ProxyBridge_CLI.exe"
   File "..\output\ProxyBridgeCore.dll"
-  File "..\output\ProxyBridgeDrv.sys"
-
-  ; Register the WFP driver as an on-demand kernel service from the (elevated) installer, so the
-  ; app doesn't have to create it on first launch. It stays stopped until ProxyBridge starts it.
-  ; (The driver must be signed - EV for production, or test-signed with test-signing mode enabled.)
-  nsExec::ExecToLog 'sc create ProxyBridgeDrv type= kernel start= demand binPath= "$INSTDIR\ProxyBridgeDrv.sys" DisplayName= "ProxyBridge WFP"'
+  SetOutPath "$INSTDIR\driver"
+  File "..\output\driver\ProxyBridgeDrv.inf"
+  File "..\output\driver\ProxyBridgeDrv.cat"
+  File "..\output\driver\ProxyBridgeDrv.sys"
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File "..\output\ProxyBridgeDriverSetup.exe"
+  nsExec::ExecToLog '"$PLUGINSDIR\ProxyBridgeDriverSetup.exe" install "$INSTDIR\driver\ProxyBridgeDrv.inf"'
+  Pop $0
+  StrCmp $0 "0" driver_installed
+  StrCmp $0 "3010" driver_reboot
+  StrCmp $0 "1072" driver_pending
+    SetErrorLevel 1
+    MessageBox MB_OK|MB_ICONSTOP "Driver installation failed (code $0). See installation details and Windows\INF\setupapi.dev.log."
+    Abort
+  driver_pending:
+    SetRebootFlag true
+    SetErrorLevel 3010
+    MessageBox MB_OK|MB_ICONINFORMATION "Restart Windows, then run Setup again to replace the old driver service."
+    Abort
+  driver_reboot:
+    SetRebootFlag true
+    SetErrorLevel 3010
+  driver_installed:
+  SetOutPath "$INSTDIR"
+  Delete /REBOOTOK "$INSTDIR\ProxyBridgeDrv.sys"
 
   ; Remove leftover native libraries from the old C#/Avalonia GUI. The native C GUI
   ; does not use them; without this an upgrade would keep these stale DLLs behind.
@@ -143,10 +166,22 @@ Section Uninstall
   ; Remove the "Run at Startup" logon task the GUI may have created.
   nsExec::ExecToLog 'schtasks /Delete /F /TN "ProxyBridge"'
 
-  ; Stop the WFP driver first so ProxyBridgeDrv.sys isn't held open.
-  nsExec::ExecToLog 'sc stop ProxyBridgeDrv'
-  nsExec::ExecToLog 'sc delete ProxyBridgeDrv'
-  DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Services\ProxyBridgeDrv"
+  ; Remove the PnP device and its package before removing uninstall metadata.
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File "..\output\ProxyBridgeDriverSetup.exe"
+  nsExec::ExecToLog '"$PLUGINSDIR\ProxyBridgeDriverSetup.exe" remove "$INSTDIR\driver\ProxyBridgeDrv.inf"'
+  Pop $0
+  StrCmp $0 "0" driver_removed
+  StrCmp $0 "3010" uninst_reboot
+    SetErrorLevel 1
+    MessageBox MB_OK|MB_ICONSTOP "Driver removal failed (code $0). See removal details and Windows\INF\setupapi.dev.log."
+    Abort
+  uninst_reboot:
+    SetRebootFlag true
+    SetErrorLevel 3010
+  driver_removed:
+  SetOutPath "$TEMP"
   ; Legacy WinDivert cleanup for upgrades from older versions.
   nsExec::ExecToLog 'sc stop WinDivert'
   nsExec::ExecToLog 'sc delete WinDivert'
@@ -158,18 +193,22 @@ Section Uninstall
   Delete "$INSTDIR\pbwfp.sys"
   Sleep 500
 
-  Delete "$INSTDIR\ProxyBridge.exe"
-  Delete "$INSTDIR\ProxyBridge_CLI.exe"
-  Delete "$INSTDIR\ProxyBridgeCore.dll"
-  Delete "$INSTDIR\ProxyBridgeDrv.sys"
+  Delete /REBOOTOK "$INSTDIR\ProxyBridge.exe"
+  Delete /REBOOTOK "$INSTDIR\ProxyBridge_CLI.exe"
+  Delete /REBOOTOK "$INSTDIR\ProxyBridgeCore.dll"
+  Delete /REBOOTOK "$INSTDIR\ProxyBridgeDrv.sys"
+  Delete /REBOOTOK "$INSTDIR\driver\ProxyBridgeDrv.inf"
+  Delete /REBOOTOK "$INSTDIR\driver\ProxyBridgeDrv.cat"
+  Delete /REBOOTOK "$INSTDIR\driver\ProxyBridgeDrv.sys"
+  RMDir /REBOOTOK "$INSTDIR\driver"
   Delete "$INSTDIR\WinDivert.dll"
   Delete "$INSTDIR\WinDivert64.sys"
-  Delete "$INSTDIR\uninst.exe"
+  Delete /REBOOTOK "$INSTDIR\uninst.exe"
 
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk"
   Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
   RMDir "$SMPROGRAMS\${PRODUCT_NAME}"
-  RMDir "$INSTDIR"
+  RMDir /REBOOTOK "$INSTDIR"
 
   ; Remove from PATH using EnVar plugin
   EnVar::SetHKLM

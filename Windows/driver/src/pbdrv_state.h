@@ -22,6 +22,7 @@ void    UdpMapClear(void);
 // user mode drains it via PBDRV_IOCTL_POP_EVENTS. Bounded; oldest entry dropped when full.
 void  EventPush(UINT16 family, UINT8 proto, UINT32 v4, const UINT8 *v6, UINT16 port, UINT32 pid,
                 const WCHAR *image, ULONG imageChars);
+void  EventClear(void);
 ULONG EventPopMany(PBDRV_EVENT *out, ULONG maxCount);
 void  ImageBasename(const WCHAR *path, ULONG chars, const WCHAR **outName, ULONG *outLen);
 

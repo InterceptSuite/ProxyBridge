@@ -8,8 +8,8 @@ param(
 )
 
 $SourcePath = "src"
-# WFP kernel driver (driver\ProxyBridgeDrv.vcxproj) - built + test-signed below, packaged in output\.
-$DriverSys  = "driver\x64\Release\ProxyBridgeDrv.sys"
+# PnP requires the matching INF/CAT/SYS package, not a standalone service binary.
+$DriverPackage = "driver\x64\Release\ProxyBridgeDrv"
 $DriverProj = "driver\ProxyBridgeDrv.vcxproj"
 # Core split across subsystem subfolders (see src\core\pb_internal.h). Paths are relative to $SourcePath.
 $SourceFile = "core\ProxyBridge.c net\pb_util.c net\pb_process.c rules\pb_rules.c rules\pb_match.c rules\pb_ipmatch.c proxy\pb_proxy.c net\pb_dns.c proxy\pb_socks5.c proxy\pb_http.c relay\pb_conntrack.c relay\pb_relay_tcp.c relay\pb_relay_udp.c driver\pb_driver.c driver\ProxyBridgeDrv_user.c"
@@ -163,39 +163,24 @@ function Build-Driver {
         $msb = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\MSBuild\Current\Bin\MSBuild.exe" -ErrorAction SilentlyContinue |
                Select-Object -First 1 -ExpandProperty FullName
     }
-    if (-not $msb) { Write-Host "  MSBuild not found - install VS + WDK. Skipping driver build." -ForegroundColor Yellow; return $false }
+    if (-not $msb) { throw "MSBuild not found; install Visual Studio and the matching WDK." }
 
     $out = & $msb $DriverProj /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:SpectreMitigation=false /v:minimal /nologo 2>&1
-    if ($LASTEXITCODE -eq 0 -and (Test-Path $DriverSys)) {
-        Write-Host "  Driver built: $DriverSys" -ForegroundColor Gray
+    if ($LASTEXITCODE -eq 0) {
+        foreach ($name in @('ProxyBridgeDrv.inf', 'ProxyBridgeDrv.cat', 'ProxyBridgeDrv.sys')) {
+            if (-not (Test-Path (Join-Path $DriverPackage $name))) { throw "Missing driver package file: $name" }
+        }
+        Write-Host "  Driver built: $DriverPackage" -ForegroundColor Gray
         return $true
     }
-    Write-Host "  Driver build FAILED (WDK installed?). Continuing without a fresh .sys." -ForegroundColor Yellow
     Write-Host $out
-    return $false
+    throw "Driver build failed; refusing to package stale driver files."
 }
 
-# Test-sign output\ProxyBridgeDrv.sys with a self-signed cert so it can load on a machine where the
-# cert is trusted (run temp-sign.ps1 once to establish trust). Signing itself needs no elevation.
+# Sign the SYS before regenerating its catalog, then sign the matching CAT.
+# Trust/test-signing configuration remains an explicit lab-machine operation.
 function Sign-Driver {
-    $drv = Join-Path $OutputDir "ProxyBridgeDrv.sys"
-    if (-not (Test-Path $drv)) { return }
-    $subject = 'CN=ProxyBridge Test Signing'
-    $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $subject } | Select-Object -First 1
-    if (-not $cert) {
-        $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject -CertStoreLocation Cert:\CurrentUser\My `
-                  -KeyUsage DigitalSignature -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3') -NotAfter (Get-Date).AddYears(5)
-    }
-    $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
-          Sort-Object FullName -Descending | Select-Object -First 1
-    if (-not $st) { $st = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
-    if (-not $st) { Write-Host "  signtool not found - driver left unsigned" -ForegroundColor Yellow; return }
-    & $st sign /fd SHA256 /sha1 $cert.Thumbprint $drv 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  Test-signed: ProxyBridgeDrv.sys ($((Get-AuthenticodeSignature $drv).Status))" -ForegroundColor Gray
-    } else {
-        Write-Host "  Driver signing failed (file locked by a running ProxyBridgeDrv service?)" -ForegroundColor Yellow
-    }
+    & .\driver\temp-sign\temp-sign.ps1 -DriverDirectory (Join-Path $OutputDir 'driver')
 }
 
 Build-Driver | Out-Null
@@ -234,13 +219,22 @@ if ($success) {
     Move-Item $OutputDLL -Destination $OutputDir -Force
     Write-Host "  Moved: $OutputDLL -> $OutputDir\" -ForegroundColor Gray
 
-    if (Test-Path $DriverSys) {
-        Copy-Item $DriverSys -Destination $OutputDir -Force
-        Write-Host "  Copied: ProxyBridgeDrv.sys (WFP driver)" -ForegroundColor Gray
-        Sign-Driver
-    } else {
-        Write-Host "  WARNING: $DriverSys not found - build the driver first" -ForegroundColor Yellow
+    $packageOutput = Join-Path $OutputDir 'driver'
+    New-Item -ItemType Directory -Path $packageOutput -Force | Out-Null
+    foreach ($name in @('ProxyBridgeDrv.inf', 'ProxyBridgeDrv.cat', 'ProxyBridgeDrv.sys')) {
+        Copy-Item (Join-Path $DriverPackage $name) -Destination $packageOutput -Force
     }
+    if (-not $NoSign) { Sign-Driver }
+
+    # This helper is only extracted to NSIS's private temporary directory.
+    if (-not $script:foundVcvarsPath) { throw "MSVC is required to build the Windows installer helper." }
+    $helperArgs = '/nologo /O1 /MT /W4 /WX /GS /guard:cf /DUNICODE /D_UNICODE ' +
+                  'installer\driver-setup.c /Fo:output\driver-setup.obj /Fe:output\ProxyBridgeDriverSetup.exe ' +
+                  '/link /OPT:REF /OPT:ICF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf /CETCOMPAT ' +
+                  'setupapi.lib newdev.lib cfgmgr32.lib advapi32.lib'
+    $helperOutput = cmd /c "`"$script:foundVcvarsPath`" x64 >nul && cl.exe $helperArgs" '2>&1'
+    if ($LASTEXITCODE -ne 0) { Write-Host $helperOutput; throw "Installer helper build failed." }
+    Remove-Item (Join-Path $OutputDir 'driver-setup.obj') -Force
 
     # Test-signing helper + VM test guide so output\ is a self-contained test package.
     foreach ($extra in @("driver\temp-sign\temp-sign.ps1")) {
@@ -282,8 +276,8 @@ if ($success) {
             Write-Host "  C GUI built: ProxyBridge.exe" -ForegroundColor Gray
             Remove-Item "gui\*.obj","gui\app.res" -Force -ErrorAction SilentlyContinue
         } else {
-            Write-Host "  C GUI build failed!" -ForegroundColor Red
             Write-Host $guiOut
+            throw "C GUI build failed."
         }
     } else {
         Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
@@ -309,8 +303,8 @@ if ($success) {
             Write-Host "  CLI built: ProxyBridge_CLI.exe" -ForegroundColor Gray
             Remove-Item "*.obj" -Force -ErrorAction SilentlyContinue
         } else {
-            Write-Host "  CLI build failed!" -ForegroundColor Red
             Write-Host $cliOut
+            throw "CLI build failed."
         }
     } else {
         Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
@@ -368,8 +362,8 @@ if ($success) {
                 }
             }
         } else {
-            Write-Host "  Installer build failed!" -ForegroundColor Red
             Write-Host $result
+            throw "Installer build failed."
         }
     } else {
         Write-Host "  NSIS not found at: $nsisPath" -ForegroundColor Yellow
