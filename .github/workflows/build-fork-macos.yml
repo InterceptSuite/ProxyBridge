@@ -83,7 +83,11 @@ jobs:
             ARCHS="arm64 x86_64" \
             ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE="Automatic" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
             CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
             clean build
 
       - name: Prepare Output & Ad-Hoc Sign
@@ -92,8 +96,8 @@ jobs:
           OUTPUT_DIR="MacOS/ProxyBridge/output"
           mkdir -p "$OUTPUT_DIR"
 
-          # Re-sign with ad-hoc identity to ensure valid bundle structure
-          codesign --force --deep --sign - "$APP_PATH"
+          # Ad-hoc sign the built app bundle
+          codesign --force --deep --sign - "$APP_PATH" || true
 
           # Copy to output
           cp -R "$APP_PATH" "$OUTPUT_DIR/ProxyBridge.app"
@@ -119,12 +123,21 @@ jobs:
             MacOS/ProxyBridge/output/*.pkg
           retention-days: 30
 
+      - name: Determine Release Tag
+        id: release_info
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v4.1.0-fork-${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         if: ${{ (github.event_name == 'workflow_dispatch' && inputs.create_release == true) || startsWith(github.ref, 'refs/tags/') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || format('v4.1.0-custom-{0}', github.run_number) }}
-          name: ${{ inputs.release_tag != '' && format('ProxyBridge {0}', inputs.release_tag) || format('ProxyBridge v4.1.0 (Custom Build #{0})', github.run_number) }}
+          tag_name: ${{ steps.release_info.outputs.tag }}
+          name: ProxyBridge ${{ steps.release_info.outputs.tag }}
           body: |
             ## ProxyBridge Custom Build (Fork)
 
