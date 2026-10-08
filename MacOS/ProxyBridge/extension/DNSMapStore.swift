@@ -15,6 +15,15 @@ final class DNSMapStore {
     private let maxEntries = 1024
     private var lastMtime: Date?
 
+    // the file is rewritten at most once per persistInterval no matter how many
+    // lookups land, and the reader only stats it once per reloadCheckInterval,
+    // domains(forIP:) runs for every new connection
+    private let persistInterval: TimeInterval = 1.0
+    private let reloadCheckInterval: TimeInterval = 1.0
+    private var persistScheduled = false
+    private var lastReloadCheck = Date.distantPast
+    private let ioQueue = DispatchQueue(label: "com.interceptsuite.ProxyBridge.dnsmap", qos: .utility)
+
     private init() {
         fileURL = FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
@@ -45,18 +54,25 @@ final class DNSMapStore {
                 order.append(ip)
                 changed = true
                 if order.count > maxEntries {
-                    let evicted = order.removeFirst()
-                    map[evicted] = nil
+                    // drop a batch at once so the O(n) removal isn't paid per insert
+                    let overflow = order.count - maxEntries + 64
+                    for evicted in order.prefix(overflow) { map[evicted] = nil }
+                    order.removeFirst(min(overflow, order.count))
                 }
             }
             if map[ip]?.insert(name).inserted == true { changed = true }
         }
         // only touch the file when something actually changed, most resolutions
         // are repeats of already-known domains
-        let snapshot = changed ? map : nil
+        let shouldSchedule = changed && !persistScheduled
+        if shouldSchedule { persistScheduled = true }
         lock.unlock()
 
-        if let snapshot = snapshot { persist(snapshot) }
+        if shouldSchedule {
+            ioQueue.asyncAfter(deadline: .now() + persistInterval) { [weak self] in
+                self?.persist()
+            }
+        }
     }
 
     // reader side (transparent proxy): domains that resolved to this ip, if any
@@ -67,15 +83,36 @@ final class DNSMapStore {
         return Array(map[ip] ?? [])
     }
 
-    private func persist(_ snapshot: [String: Set<String>]) {
+    private func persist() {
+        lock.lock()
+        persistScheduled = false
+        let snapshot = map
+        lock.unlock()
+
         guard let fileURL = fileURL else { return }
         let plain = snapshot.mapValues { Array($0) }
         guard let data = try? JSONSerialization.data(withJSONObject: plain) else { return }
         try? data.write(to: fileURL, options: .atomic)
+
+        // remember our own write so the reader doesn't parse back what it already has
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate]) as? Date
+        lock.lock()
+        lastMtime = mtime
+        lock.unlock()
     }
 
     private func reloadIfChanged() {
         guard let fileURL = fileURL else { return }
+
+        lock.lock()
+        let now = Date()
+        if now.timeIntervalSince(lastReloadCheck) < reloadCheckInterval {
+            lock.unlock()
+            return
+        }
+        lastReloadCheck = now
+        lock.unlock()
+
         let mtime = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate]) as? Date
         lock.lock()
         let needsReload = mtime != nil && mtime != lastMtime
@@ -89,6 +126,8 @@ final class DNSMapStore {
         }
         lock.lock()
         map = plain.mapValues { Set($0) }
+        // keep eviction order in step with the loaded map
+        order = Array(plain.keys)
         lock.unlock()
     }
 }
