@@ -666,7 +666,9 @@ class AppProxyProvider: NETransparentProxyProvider {
                     guard let self = self else { return }
                     // a closed flow here is normal churn (quic opening and dropping
                     // udp/443 flows constantly), nothing to do and not worth logging
-                    if error != nil {
+                    if let error = error {
+                        flow.closeReadWithError(error)
+                        flow.closeWriteWithError(error)
                         return
                     }
                     // pass the resolved display name (curl), not the raw signing id (curl-<hash>)
@@ -888,9 +890,17 @@ class AppProxyProvider: NETransparentProxyProvider {
 
         readAndForwardClientUDP(association)
         readAndForwardRelayUDP(association)
-        // note: we deliberately don't read the control connection to detect close.
-        // holding a strong ref keeps the associate alive, and reading it risks a
-        // spurious teardown that would EPIPE the app's udp socket.
+        monitorControlConnection(association)
+    }
+
+    // RFC 1928: A UDP association terminates when the TCP connection terminates.
+    // Read from the control connection to detect server-side termination or EOF.
+    private func monitorControlConnection(_ association: UDPAssociation) {
+        let clientFlow = association.clientFlow
+        association.controlConnection.readMinimumLength(1, maximumLength: 1) { [weak self] _, _ in
+            guard let self = self else { return }
+            self.teardownUDP(clientFlow)
+        }
     }
 
     // idempotent, cancels both channels and closes the flow exactly once
@@ -968,9 +978,8 @@ class AppProxyProvider: NETransparentProxyProvider {
             guard let self = self else { return }
 
             if let error = error {
-                // stop reading the relay but don't close the app's flow, let it
-                // time out on its own instead of getting a hard EPIPE
                 self.log("UDP relay error: \(error.localizedDescription)", level: "ERROR")
+                self.teardownUDP(clientFlow)
                 return
             }
 
@@ -1340,20 +1349,25 @@ class AppProxyProvider: NETransparentProxyProvider {
                 if code != 57 && code != 54 && code != 89 {
                     self?.log("Client read error: \(error.localizedDescription)", level: "ERROR")
                 }
+                clientFlow.closeReadWithError(error)
+                clientFlow.closeWriteWithError(error)
                 proxyConnection.cancel()
                 return
             }
             
             guard let data = data, !data.isEmpty else {
+                clientFlow.closeReadWithError(nil)
+                clientFlow.closeWriteWithError(nil)
                 proxyConnection.cancel()
                 return
             }
             
-            proxyConnection.write(data) { error in
+            proxyConnection.write(data) { [weak self] error in
                 if let error = error {
                     self?.log("Proxy write error: \(error.localizedDescription)", level: "ERROR")
                     clientFlow.closeReadWithError(error)
                     clientFlow.closeWriteWithError(error)
+                    proxyConnection.cancel()
                 } else {
                     self?.relayClientToProxy(clientFlow: clientFlow, proxyConnection: proxyConnection)
                 }
@@ -1370,18 +1384,22 @@ class AppProxyProvider: NETransparentProxyProvider {
                 }
                 clientFlow.closeReadWithError(nil)
                 clientFlow.closeWriteWithError(nil)
+                proxyConnection.cancel()
                 return
             }
             
             guard let data = data, !data.isEmpty else {
                 clientFlow.closeReadWithError(nil)
                 clientFlow.closeWriteWithError(nil)
+                proxyConnection.cancel()
                 return
             }
             
-            clientFlow.write(data) { error in
+            clientFlow.write(data) { [weak self] error in
                 if let error = error {
                     self?.log("Client write error: \(error.localizedDescription)", level: "ERROR")
+                    clientFlow.closeReadWithError(error)
+                    clientFlow.closeWriteWithError(error)
                     proxyConnection.cancel()
                 } else {
                     self?.relayProxyToClient(clientFlow: clientFlow, proxyConnection: proxyConnection)
