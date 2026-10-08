@@ -78,7 +78,9 @@ NTSTATUS PbEvtD0Entry(WDFDEVICE device, WDF_POWER_DEVICE_STATE previousState)
     WdfWaitLockAcquire(context->lifecycle, NULL);
     NTSTATUS status = context->teardownStatus;
     if (NT_SUCCESS(status)) {
-        if (++context->generation == 0) ++context->generation;
+        // A sleep/resume keeps the existing controller and WFP session.
+        if (context->owner == NULL && ++context->generation == 0)
+            ++context->generation;
         context->ready = TRUE;
     }
     // No BFE work here. A started devnode is independent of filtering activation.
@@ -89,11 +91,13 @@ NTSTATUS PbEvtD0Entry(WDFDEVICE device, WDF_POWER_DEVICE_STATE previousState)
 _Use_decl_annotations_
 NTSTATUS PbEvtD0Exit(WDFDEVICE device, WDF_POWER_DEVICE_STATE targetState)
 {
-    UNREFERENCED_PARAMETER(targetState);
     PB_DEVICE_CONTEXT *context = PbDeviceContext(device);
     WdfWaitLockAcquire(context->lifecycle, NULL);
     context->ready = FALSE;
-    NTSTATUS status = PbQuiesce(context);
+    // The software callouts have no hardware to power down. Keep their state
+    // across sleep/hibernate; removal, rebalance and final shutdown still drain it.
+    NTSTATUS status = targetState == WdfPowerDeviceD3Final
+        ? PbQuiesce(context) : STATUS_SUCCESS;
     WdfWaitLockRelease(context->lifecycle);
     return status;
 }

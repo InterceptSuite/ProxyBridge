@@ -4,6 +4,8 @@ This branch is limited to issue #228 (WDTF/CHAOS device discovery) and the
 separate Static Tools Logo DVL preparation issue. It is based on `Driver`
 commit `63be0eb`. It does not include the GUI, network refactoring, installer
 replacement, benchmarks, or test suites from the full Windows development branch.
+The follow-up fixes preserve sessions across sleep and adapt the original NSIS
+installer to the PnP driver, without adopting the full branch's installer design.
 
 ## CHAOS: a started PnP device
 
@@ -14,9 +16,10 @@ one root-enumerated KMDF device in the System setup class, with hardware ID
 
 KMDF owns device creation, power transitions, removal and file cleanup. WFP
 activation remains explicit: a started devnode does not depend on the Base
-Filtering Engine already being available. Closing the controller or taking
-the device out of D0 disables filtering and drains session state. A second
-device cannot share the driver's singleton WFP state.
+Filtering Engine already being available. Closing the controller or removing
+the device disables filtering and drains session state. Transient sleep and
+hibernate preserve the controller, WFP session and configuration so the running
+application can resume. A second device cannot share the driver's singleton WFP state.
 
 The existing `\\.\ProxyBridgeDrv` open path and all existing IOCTL layouts are
 retained. The application no longer creates a legacy service: install the PnP
@@ -32,16 +35,34 @@ application core from this branch too. Sign the generated driver package using
 your lab's test-signing procedure before installing it on a test-signing client.
 Do not reuse a catalog or DVL generated for a different binary/source revision.
 
-The existing application installer has not been adapted to PnP installation.
-For this focused HLK change, use the signed INF/CAT/SYS directly in the lab.
+The original NSIS installer now packages matching INF/CAT/SYS files. Its
+temporary native helper creates one root device or updates the existing device,
+and removes the device and driver package during uninstall. The published INF
+name is retained in the existing uninstall registry entry for removal retries.
+PnP owns the driver service; the installer does not delete its registry key.
+Replacing the original legacy service may require a restart and rerunning Setup.
+Uninstall completes application removal and uses the standard finish page when
+driver cleanup requires a restart. No automatic restart is performed by the helper.
+
+`Windows\compile.ps1` requires a fresh WDK build. Unless `-NoSign` is supplied,
+it test-signs the SYS, regenerates its catalog and then signs the CAT. Lab trust
+and test-signing mode must still be configured explicitly on the client.
+
+Alternatively, use the signed INF/CAT/SYS directly in the lab.
 On a clean client with no existing ProxyBridge device or legacy service, use
 the WDK's DevCon from an elevated terminal, in the signed package directory:
 
 ```powershell
 devcon.exe install .\ProxyBridgeDrv.inf 'ROOT\InterceptSuite_ProxyBridge'
-Get-PnpDevice | Where-Object InstanceId -Like 'ROOT\INTERCEPTSUITE_PROXYBRIDGE\*'
+Get-PnpDevice -Class System | Where-Object {
+    $ids = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_HardwareIds -ErrorAction SilentlyContinue).Data
+    @($ids) -contains 'ROOT\InterceptSuite_ProxyBridge'
+}
 sc.exe query ProxyBridgeDrv
 ```
+
+DevCon may assign an instance ID such as `ROOT\SYSTEM\0001`. Use the hardware
+ID above to identify the device; the instance ID prefix is not fixed.
 
 DevCon `install` creates a new root device every time: do not repeat it for an
 already installed device. For an existing lab device use `devcon.exe update`
@@ -85,11 +106,13 @@ build used `SkipPackageVerification=true` and ran the installed x64 verifier
 separately against the generated INF. No source-level verification bypass was
 added to the project.
 
-This reduced branch has not been installed or run through HLK yet. Historical
-CHAOS passes and filtered Static Tools results from the full branch do not
-certify this new binary. A fresh CodeQL/DVL run and physical HLK validation are
-required before claiming either blocker resolved for this revision. No
-production signature or certification is claimed.
+The original minimal branch at `149137f` was tested on Windows 11 25H2 x64.
+The supplied `minimal version test.hlkx` contains 62 final passes and no final
+failures; Static Tools Logo uses Microsoft filter 320241 version 3. The actual
+minimal-project run lasted 5 hours 18 minutes 27 seconds. These results apply
+to the previous tested revision, not the follow-up sleep and installer fixes.
+A fresh CodeQL/DVL run and physical HLK validation are required for the updated
+driver. No production signature or certification is claimed.
 
 References:
 

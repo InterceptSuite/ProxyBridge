@@ -107,7 +107,7 @@ driver/
     ProxyBridgeDrv_ioctl.h    shared user/kernel contract (config, watch list, context, IOCTLs)
     ProxyBridgeDrv.rc / .inf  version resource + install information
   temp-sign/
-    temp-sign.ps1             test-sign the .sys with a self-signed certificate (development)
+    temp-sign.ps1             test-sign an offline INF/CAT/SYS package (development)
 ```
 
 The user-mode glue that talks to this driver (`ProxyBridgeDrv_user.c/.h`) ships with the core DLL
@@ -143,16 +143,21 @@ signing to the step below. The driver links `fwpkclnt.lib`, `ndis.lib`, and `wdm
 
 ## Sign & load
 
-Production distribution requires an **EV certificate** (or attestation signing); a driver signed
-that way loads on any machine without test mode. For a development or test VM, use test-signing:
+Production distribution requires the appropriate Microsoft driver-signing submission;
+a local test certificate does not provide production signing. For a development
+or test VM, use test-signing:
 
 1. In a throwaway VM with **Secure Boot off**: `bcdedit /set testsigning on`, then reboot.
-2. From the folder containing `ProxyBridgeDrv.sys`, in an elevated shell:
-   `powershell -ExecutionPolicy Bypass -File .\temp-sign.ps1`
-   This creates and trusts a self-signed certificate, signs the driver, and clears any stale
-   service.
-3. Launch ProxyBridge as Administrator; it installs and starts the `ProxyBridgeDrv` kernel
-   service. Confirm with `sc.exe query ProxyBridgeDrv` (expect `STATE : 4 RUNNING`).
+2. From the build's `output` directory, in an elevated shell:
+   `powershell -ExecutionPolicy Bypass -File .\temp-sign.ps1 -Trust`
+   This signs the offline `driver` package and explicitly trusts its test certificate.
+   From the source driver directory instead, supply
+   `-DriverDirectory .\x64\Release\ProxyBridgeDrv` to `temp-sign\temp-sign.ps1`.
+   The script never deletes a service or changes installed DriverStore files.
+3. Install the signed PnP package using Setup or the lab procedure in [HLK.md](HLK.md),
+   then launch ProxyBridge. Confirm with `sc.exe query ProxyBridgeDrv`
+   (expect `STATE : 4 RUNNING`). Do not sign package files after building the installer;
+   rebuild Setup if the packaged signature needs to change.
 
 Always bring a kernel driver up in a VM first — a fault is a bugcheck, not an exception. For
 deeper debugging, build `build.bat Debug` for `ProxyBridgeDrv:` traces in DebugView and enable
@@ -165,5 +170,5 @@ deeper debugging, build `build.bat Debug` for `ProxyBridgeDrv:` traces in DebugV
 - IPv4/TCP proxying and full connection logging are the primary supported path.
 - UDP (DNS/QUIC via SOCKS5 UDP ASSOCIATE) and IPv6 are implemented and should be validated with
   real traffic before relying on them in production.
-- The `ProxyBridgeDrv` service is installed on demand and left registered between runs; the
-  ProxyBridge installer removes it on uninstall.
+- PnP owns the `ProxyBridgeDrv` service and its driver package. The ProxyBridge installer
+  removes the device and package on uninstall; a required restart is shown on the finish page.
