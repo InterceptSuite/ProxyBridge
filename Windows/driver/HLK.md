@@ -111,8 +111,21 @@ The supplied `minimal version test.hlkx` contains 62 final passes and no final
 failures; Static Tools Logo uses Microsoft filter 320241 version 3. The actual
 minimal-project run lasted 5 hours 18 minutes 27 seconds. These results apply
 to the previous tested revision, not the follow-up sleep and installer fixes.
-A fresh CodeQL/DVL run and physical HLK validation are required for the updated
-driver. No production signature or certification is claimed.
+
+The follow-up revision `a75735e` was tested on Windows 11 25H2 x64 with HLK
+10.1.26100.8328. The supplied `minimal fix test.hlkx` contains 62 final passes,
+no final failures and no tests left running or not run. Both CHAOS variants,
+ApiValidator variants and the sleep/PnP tests passed without filters. Static
+Tools Logo uses Microsoft filter 320241 version 3 for the documented CodeQL
+DVL 1.1.0.0 versus 1.2.0.0 version mismatch; it is a filtered pass.
+Elapsed time from the first result's StartTime to the last CompletionTime,
+including gaps between tests, was 4 hours 54 minutes 2.850 seconds.
+
+The target's SYS catalog hash and INF/CAT file hashes match the signed
+2026-10-08 build from `a75735e`. The signed SYS SHA-256 is
+`3E5C3C709EE8C8800628F04B5550F3A82377DEB264B045AB2F2CCBAB3FD8FB4C`.
+Fresh CodeQL/DVL evidence was generated for the same source revision before
+this run. No production signature or certification is claimed.
 
 References:
 
