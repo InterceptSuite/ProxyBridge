@@ -42,12 +42,10 @@ jobs:
           mkdir -p MacOS/ProxyBridge/build
           mkdir -p MacOS/ProxyBridge/output
 
-          # If secrets exist, use them; otherwise, configure Ad-Hoc signing for fork builds
-          if [ -n "${{ secrets.MACOS_APP_XCCONFIG }}" ]; then
-            echo "${{ secrets.MACOS_APP_XCCONFIG }}" > MacOS/ProxyBridge/Signing-Config-app.xcconfig
-            echo "${{ secrets.MACOS_EXT_XCCONFIG }}" > MacOS/ProxyBridge/Signing-Config-ext.xcconfig
-          else
-            cat << 'EOF' > MacOS/ProxyBridge/Signing-Config-app.xcconfig
+          cat << 'EOF' > MacOS/ProxyBridge/Signing-Config-app.xcconfig
+          PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge
+          PRODUCT_MODULE_NAME = ProxyBridge
+          PRODUCT_NAME = ProxyBridge
           CODE_SIGN_STYLE = Automatic
           CODE_SIGN_IDENTITY = -
           DEVELOPMENT_TEAM = 
@@ -59,7 +57,10 @@ jobs:
           ONLY_ACTIVE_ARCH = NO
           EOF
 
-            cat << 'EOF' > MacOS/ProxyBridge/Signing-Config-ext.xcconfig
+          cat << 'EOF' > MacOS/ProxyBridge/Signing-Config-ext.xcconfig
+          PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge.extension
+          PRODUCT_MODULE_NAME = com_interceptsuite_ProxyBridge_extension
+          PRODUCT_NAME = com.interceptsuite.ProxyBridge.extension
           CODE_SIGN_STYLE = Automatic
           CODE_SIGN_IDENTITY = -
           DEVELOPMENT_TEAM = 
@@ -70,7 +71,6 @@ jobs:
           ARCHS = arm64 x86_64
           ONLY_ACTIVE_ARCH = NO
           EOF
-          fi
 
       - name: Build Universal Binary
         run: |
