@@ -108,6 +108,7 @@ typedef struct CONNECTION_INFO {
     struct CONNECTION_INFO *rev_next;  // chain in the reverse table (keyed by orig_dest)
     UINT32 rev_bucket;                 // reverse bucket this entry is currently linked in
     BOOL   in_rev;                     // TRUE while linked in the reverse table
+    UINT8  fin_flags;                  // TCP: 1 = app sent FIN, 2 = relay sent FIN (entry dropped when both seen)
 } CONNECTION_INFO;
 
 typedef struct {
@@ -354,6 +355,12 @@ BOOL udp_flow_validate(UINT16 src_port, BOOL is_ipv6, UINT32 dest_ip, const UINT
 BOOL udp_direct_cached(BOOL is_ipv6, const void *dst, UINT16 src_port, UINT16 dst_port);
 void udp_direct_remember(BOOL is_ipv6, const void *dst, UINT16 src_port, UINT16 dst_port);
 void udp_direct_reset(void);
+
+// TCP close handling. A FIN must NOT delete the entry on the spot: a client that sends and closes
+// at once can have its FIN seen before the relay has accept()ed - the relay's lookup then fails
+// and the connection (and its data) is silently dropped. The entry is kept until both sides have
+// sent their FIN (bit 1 = app, bit 2 = relay); a reset still removes it immediately.
+void connection_fin(UINT16 src_port, BOOL is_ipv6, UINT8 bit);
 
 BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port);

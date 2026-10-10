@@ -134,6 +134,29 @@ static void reset_stale_tcp_state(UINT16 sp, BOOL is_ipv6)
     }
 }
 
+// Re-injection wrapper. Every WinDivertSend() in the packet loop used to ignore its result, so a
+// failed injection dropped the packet without a trace and the sender only noticed on its next
+// retransmission (~1 s later). Failures are now counted and logged (first few, then rarely).
+static volatile LONG g_send_fail = 0;
+static BOOL pb_divert_send(HANDLE h, PVOID pkt, UINT len, const WINDIVERT_ADDRESS *addr)
+{
+    if (WinDivertSend(h, pkt, len, NULL, addr))
+        return TRUE;
+    DWORD err = GetLastError();
+    LONG n = InterlockedIncrement(&g_send_fail);
+    if (n <= 10 || n % 500 == 0)
+    {
+        PWINDIVERT_IPHDR ip4 = NULL; PWINDIVERT_IPV6HDR ip6 = NULL; PWINDIVERT_TCPHDR t = NULL; PWINDIVERT_UDPHDR u = NULL;
+        WinDivertHelperParsePacket(pkt, len, &ip4, &ip6, NULL, NULL, NULL, &t, &u, NULL, NULL, NULL, NULL);
+        log_message("WinDivertSend failed (error %lu, %ld total): %s %s %u bytes%s%s%s",
+                    err, n, ip4 ? "IPv4" : ip6 ? "IPv6" : "?", t ? "TCP" : u ? "UDP" : "?", len,
+                    addr->Outbound ? " outbound" : " inbound", addr->Loopback ? " loopback" : "",
+                    (t && t->Syn) ? " SYN" : (t && t->Fin) ? " FIN" : (t && t->Rst) ? " RST" : "");
+    }
+    return FALSE;
+}
+#define WinDivertSend(h, p, l, s, a) pb_divert_send((h), (p), (l), (a))
+
 DWORD WINAPI packet_processor(LPVOID arg)
 {
     unsigned char packet[MAXBUF];
@@ -390,13 +413,15 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         memcpy(ipv6_header->SrcAddr, tmp, 16);
                         addr.Outbound = FALSE;
                     }
-                    if (tcp_header->Fin || tcp_header->Rst) remove_connection(client_sp, FALSE, TRUE);
+                    if (tcp_header->Rst) remove_connection(client_sp, FALSE, TRUE);
+                    else if (tcp_header->Fin) connection_fin(client_sp, TRUE, 2);
                     goto ipv6_send;
                 }
 
                 if (is_connection_tracked(sp, FALSE, TRUE))
                 {
-                    if (tcp_header->Fin || tcp_header->Rst) { remove_connection(sp, FALSE, TRUE); port_clear(sp); }
+                    if (tcp_header->Rst) { remove_connection(sp, FALSE, TRUE); port_clear(sp); }
+                    else if (tcp_header->Fin) connection_fin(sp, TRUE, 1);
                     tcp_header->DstPort = htons(g_local_relay_port);
 
                     static const UINT8 _lb6t[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
@@ -816,18 +841,22 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     addr.Outbound = FALSE;
                 }
 
-                if (tcp_header->Fin || tcp_header->Rst)
+                if (tcp_header->Rst)
                     remove_connection(dst_port, FALSE, FALSE);
+                else if (tcp_header->Fin)
+                    connection_fin(dst_port, FALSE, 2);
             }
             else if (is_connection_tracked(ntohs(tcp_header->SrcPort), FALSE, FALSE))
             {
                 UINT16 src_port = ntohs(tcp_header->SrcPort);
 
-                if (tcp_header->Fin || tcp_header->Rst)
+                if (tcp_header->Rst)
                 {
                     remove_connection(src_port, FALSE, FALSE);
                     port_clear(src_port);
                 }
+                else if (tcp_header->Fin)
+                    connection_fin(src_port, FALSE, 1);
 
                 tcp_header->DstPort = htons(g_local_relay_port);
 

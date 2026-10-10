@@ -54,6 +54,7 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
             existing->orig_dest_port = dest_port;
             existing->proxy_config_id = proxy_config_id;
             existing->is_tracked = TRUE;
+            existing->fin_flags = 0;
             existing->last_activity = GetTickCount64();
             rev_insert(existing);
             ReleaseSRWLockExclusive(&lock);
@@ -100,6 +101,7 @@ void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], co
             existing->orig_dest_port = dest_port;
             existing->proxy_config_id = proxy_config_id;
             existing->is_tracked = TRUE;
+            existing->fin_flags = 0;
             existing->last_activity = GetTickCount64();
             rev_insert(existing);
             ReleaseSRWLockExclusive(&lock);
@@ -367,6 +369,26 @@ void remove_connection(UINT16 src_port, BOOL is_udp, BOOL is_ipv6)
             break;
         }
         conn_ptr = &(*conn_ptr)->next;
+    }
+    ReleaseSRWLockExclusive(&lock);
+}
+
+void connection_fin(UINT16 src_port, BOOL is_ipv6, UINT8 bit)
+{
+    AcquireSRWLockExclusive(&lock);
+    CONNECTION_INFO **pp = &connection_hash_table[src_port % CONNECTION_HASH_SIZE];
+    while (*pp != NULL && !((*pp)->src_port == src_port && !(*pp)->is_udp && (*pp)->is_ipv6 == is_ipv6))
+        pp = &(*pp)->next;
+    CONNECTION_INFO *c = *pp;
+    if (c != NULL)
+    {
+        c->fin_flags |= bit;
+        if (c->fin_flags == 3)
+        {
+            *pp = c->next;
+            rev_unlink(c);
+            free(c);
+        }
     }
     ReleaseSRWLockExclusive(&lock);
 }
