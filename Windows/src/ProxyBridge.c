@@ -78,6 +78,24 @@ ConnectionCallback g_connection_callback = NULL;
 char  *g_pidtbl_buf = NULL;
 DWORD  g_pidtbl_cap = 0;
 
+// A fresh outbound SYN (SYN, no ACK) is a brand-new connection, so whatever we remember for
+// its source port belongs to an earlier one. Clean closes are cleared on FIN/RST, but many
+// connections end without an outbound FIN/RST (peer reset, connect timeout, app killed), and
+// Windows later reuses that ephemeral port. Without this the old decision survives until the
+// 30-minute sweep: a stale DIRECT bit lets the new connection bypass the proxy, and a stale
+// tracking entry redirects it to the previous connection's destination. The result is a proxy
+// that works at first and degrades over hours as the port range cycles. A retransmitted SYN
+// for a live connection just gets re-evaluated and re-tracked with the same answer.
+static void reset_stale_tcp_state(UINT16 sp, BOOL is_ipv6)
+{
+    if (sp == g_local_relay_port) return;   // never our own relay's port
+    if (port_is_decided(sp) || is_connection_tracked(sp, FALSE, is_ipv6))
+    {
+        remove_connection(sp, FALSE, is_ipv6);
+        port_clear(sp);
+    }
+}
+
 DWORD WINAPI packet_processor(LPVOID arg)
 {
     unsigned char packet[MAXBUF];
@@ -86,16 +104,31 @@ DWORD WINAPI packet_processor(LPVOID arg)
     PWINDIVERT_IPHDR ip_header;
     PWINDIVERT_TCPHDR tcp_header;
     PWINDIVERT_UDPHDR udp_header;
+    DWORD recv_fail_streak = 0;
 
     while (running)
     {
         if (!WinDivertRecv(windivert_handle, packet, sizeof(packet), &packet_len, &addr))
         {
-            if (GetLastError() == ERROR_INVALID_HANDLE)
+            DWORD err = GetLastError();
+            // Handle closed / shut down (ProxyBridge_Stop) - leave quietly.
+            if (!running || err == ERROR_INVALID_HANDLE || err == ERROR_NO_DATA || err == ERROR_OPERATION_ABORTED)
                 break;
-            log_message("Failed to receive packet (%lu)", GetLastError());
+
+            // Anything else: skip the bad packet, but don't spin or flood the log if the error
+            // is persistent. Log the first failure and then once per 1000, back off while it
+            // keeps failing, and say so loudly if capture is effectively dead - otherwise the
+            // app looks "running" while nothing is being proxied.
+            recv_fail_streak++;
+            if (recv_fail_streak == 1 || recv_fail_streak % 1000 == 0)
+                log_message("Failed to receive packet (%lu), %lu consecutive failures", err, recv_fail_streak);
+            if (recv_fail_streak == 5000)
+                log_message("Packet capture keeps failing (%lu) - traffic is not being redirected. Restart ProxyBridge.", err);
+            if (recv_fail_streak > 10)
+                Sleep(recv_fail_streak > 1000 ? 100 : 5);
             continue;
         }
+        recv_fail_streak = 0;
 
         PWINDIVERT_IPV6HDR ipv6_header = NULL;
         WinDivertHelperParsePacket(packet, packet_len, &ip_header, &ipv6_header, NULL,
@@ -276,6 +309,9 @@ DWORD WINAPI packet_processor(LPVOID arg)
             {
                 UINT16 sp = ntohs(tcp_header->SrcPort);
                 UINT16 dp = ntohs(tcp_header->DstPort);
+
+                if (tcp_header->Syn && !tcp_header->Ack)
+                    reset_stale_tcp_state(sp, TRUE);
 
                 if (port_is_decided(sp))
                 {
@@ -669,7 +705,10 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 // process instead of a stale one (prevents wrong-app rule matching for
                 // up to PID_CACHE_TTL_MS after a port is recycled).
                 if (tcp_header->Syn && !tcp_header->Ack)
+                {
                     remove_cached_pid(ip_header->SrcAddr, sp, FALSE);
+                    reset_stale_tcp_state(sp, FALSE);
+                }
 
                 if (port_is_decided(sp))
                 {
