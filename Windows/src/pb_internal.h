@@ -19,6 +19,7 @@
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "advapi32.lib")   // token elevation check for the firewall rule
 
 #define MAXBUF 0xFFFF
 #define LOCAL_PROXY_PORT 34010

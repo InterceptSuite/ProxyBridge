@@ -395,6 +395,23 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
     return 0;
 }
 
+// The relay is reached by packets ProxyBridge turns around so they look like they come from the
+// ORIGINAL destination, so the legitimate peer address of an accepted connection is exactly the
+// tracked flow's original destination (or a loopback address for local-to-local flows). The flow
+// used to be looked up by the peer's source PORT alone, which is only safe while a firewall keeps
+// outsiders away from the relay port; now that the relay is reachable on every network profile
+// (needed for VPN adapters), another host must not be able to claim a tracked flow just by
+// connecting from a matching source port.
+static BOOL relay_peer_ok_v4(UINT32 peer, UINT32 orig_dest)
+{
+    return ((peer & 0xFF) == 127) || peer == orig_dest;
+}
+static BOOL relay_peer_ok_v6(const struct in6_addr *peer, const UINT8 orig_dest6[16])
+{
+    static const UINT8 lb6[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+    return memcmp(peer, lb6, 16) == 0 || memcmp(peer, orig_dest6, 16) == 0;
+}
+
 DWORD WINAPI local_proxy_server(LPVOID arg)
 {
     WSADATA wsa_data;
@@ -516,7 +533,8 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                     conn_config->is_ipv6 = FALSE;
 
                     UINT16 client_port = ntohs(client_addr.sin_port);
-                    if (get_connection_full(client_port, FALSE, &conn_config->orig_dest_ip, &conn_config->orig_dest_port, &conn_config->proxy_config_id))
+                    if (get_connection_full(client_port, FALSE, &conn_config->orig_dest_ip, &conn_config->orig_dest_port, &conn_config->proxy_config_id) &&
+                        relay_peer_ok_v4(client_addr.sin_addr.s_addr, conn_config->orig_dest_ip))
                     {
                         HANDLE conn_thread = CreateThread(NULL, 1, connection_handler, (LPVOID)conn_config, 0, NULL);
                         if (conn_thread != NULL) { CloseHandle(conn_thread); }
@@ -543,7 +561,8 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                     conn_config->is_ipv6 = TRUE;
 
                     UINT16 client_port = ntohs(client_addr6.sin6_port);
-                    if (get_connection_full_v6(client_port, FALSE, conn_config->orig_dest_ip6, &conn_config->orig_dest_port, &conn_config->proxy_config_id))
+                    if (get_connection_full_v6(client_port, FALSE, conn_config->orig_dest_ip6, &conn_config->orig_dest_port, &conn_config->proxy_config_id) &&
+                        relay_peer_ok_v6(&client_addr6.sin6_addr, conn_config->orig_dest_ip6))
                     {
                         HANDLE conn_thread = CreateThread(NULL, 1, connection_handler, (LPVOID)conn_config, 0, NULL);
                         if (conn_thread != NULL) { CloseHandle(conn_thread); }

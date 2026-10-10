@@ -1062,6 +1062,69 @@ DWORD WINAPI cleanup_worker(LPVOID arg)
     return 0;
 }
 
+
+// Windows Firewall rule for the relay.
+//
+// Redirected connections reach the relay as *inbound* traffic on whichever interface the app used.
+// Windows only prompts to allow an app on the Private profile by default, so on an adapter that is
+// classified Public (VPN tunnels such as WireGuard/OpenVPN nearly always are) the firewall dropped
+// the redirected SYN: the Connections log looked normal, but the app timed out and the proxy never
+// saw it. Add an inbound allow rule for this executable on all profiles (the relay now verifies the
+// peer address, so this does not open it up to other hosts). Needs elevation; best effort.
+static DWORD fw_run(const wchar_t *args, DWORD wait_ms)
+{
+    wchar_t cmd[1400];
+    _snwprintf_s(cmd, 1400, _TRUNCATE, L"netsh.exe advfirewall firewall %s", args);
+    STARTUPINFOW si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+        return (DWORD)-1;
+    DWORD code = (DWORD)-1;
+    if (WaitForSingleObject(pi.hProcess, wait_ms) == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    return code;
+}
+
+static DWORD WINAPI fw_ensure_thread(LPVOID arg)
+{
+    (void)arg;
+    BOOL elevated = FALSE; HANDLE tok = NULL;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok))
+    {
+        TOKEN_ELEVATION te; DWORD n = 0;
+        if (GetTokenInformation(tok, TokenElevation, &te, sizeof(te), &n)) elevated = te.TokenIsElevated != 0;
+        CloseHandle(tok);
+    }
+    if (!elevated) return 0;
+
+    wchar_t exe[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return 0;
+
+    // One rule per executable path; the name carries a hash of the (lower-cased) path.
+    unsigned h = 2166136261u;
+    for (const wchar_t *p = exe; *p; p++) { wchar_t c = *p; if (c >= L'A' && c <= L'Z') c += 32; h = (h ^ (unsigned)c) * 16777619u; }
+    wchar_t name[96];
+    _snwprintf_s(name, 96, _TRUNCATE, L"ProxyBridge relay %08x", h);
+
+    wchar_t args[1300];
+    _snwprintf_s(args, 1300, _TRUNCATE, L"show rule name=\"%s\"", name);
+    if (fw_run(args, 8000) == 0) return 0;             // exit code 0 = the rule already exists
+
+    _snwprintf_s(args, 1300, _TRUNCATE,
+        L"add rule name=\"%s\" dir=in action=allow program=\"%s\" enable=yes profile=any "
+        L"description=\"Lets ProxyBridge's local relay receive redirected connections on every network profile (VPN adapters are Public).\"",
+        name, exe);
+    if (fw_run(args, 15000) == 0)
+        log_message("Windows Firewall: added an inbound allow rule for %ls on all network profiles "
+                    "(needed for VPN and Public networks)", exe);
+    else
+        log_message("Windows Firewall: could not add the inbound rule for the relay. If proxying stops working on a "
+                    "VPN or Public network, allow %ls through the firewall for all profiles.", exe);
+    return 0;
+}
+
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 {
     char filter[FILTER_BUFFER_SIZE];
@@ -1082,6 +1145,8 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     running = TRUE;
 
     relay_pool_start();   // optional: connections fall back to blocking relay threads without it
+
+    { HANDLE ft = CreateThread(NULL, 0, fw_ensure_thread, NULL, 0, NULL); if (ft) CloseHandle(ft); }
 
     proxy_thread = CreateThread(NULL, 1, local_proxy_server, NULL, 0, NULL);
     if (proxy_thread == NULL)

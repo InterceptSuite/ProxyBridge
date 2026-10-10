@@ -97,6 +97,10 @@ Section "MainSection" SEC01
   ; ProxyBridge app itself never needs administrator rights. The service ACL lets interactive
   ; users start it (never stop or reconfigure it), in case it was stopped.
   nsExec::ExecToLog 'sc delete ProxyBridgeSvc'
+  ; Remove the inbound firewall rules the engine added for its relay (one per executable).
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name=all program="$INSTDIR\ProxyBridgeSvc.exe"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name=all program="$INSTDIR\ProxyBridge.exe"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name=all program="$INSTDIR\ProxyBridge_CLI.exe"'
   nsExec::ExecToLog 'sc create ProxyBridgeSvc binPath= "\"$INSTDIR\ProxyBridgeSvc.exe\"" start= auto DisplayName= "ProxyBridge Service"'
   nsExec::ExecToLog 'sc description ProxyBridgeSvc "Privileged traffic-redirection engine for ProxyBridge. Lets the ProxyBridge app run without administrator rights."'
   nsExec::ExecToLog 'sc sdset ProxyBridgeSvc "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)"'
