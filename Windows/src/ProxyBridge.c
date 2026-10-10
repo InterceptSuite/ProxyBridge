@@ -384,8 +384,9 @@ DWORD WINAPI packet_processor(LPVOID arg)
 
                 if (port_is_decided(sp))
                 {
+                    BOOL was_direct = port_is_direct(sp);   // see the IPv4 path: clear on FIN/RST, then send untouched
                     if (tcp_header->Fin || tcp_header->Rst) port_clear(sp);
-                    if (port_is_direct(sp))
+                    if (was_direct)
                     {
                         WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                         continue;
@@ -436,6 +437,13 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         addr.Outbound = FALSE;
                     }
                     goto ipv6_send;
+                }
+
+                // Teardown of an untracked flow: nothing to decide (see the IPv4 path).
+                if (tcp_header->Fin || tcp_header->Rst)
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
                 }
 
                 // skip multicast/link-local
@@ -807,9 +815,13 @@ DWORD WINAPI packet_processor(LPVOID arg)
 
                 if (port_is_decided(sp))
                 {
+                    // A FIN/RST on a DIRECT flow ends that decision: clear it and send the packet
+                    // untouched. (Clearing first and then testing "is it direct?" used to fall through
+                    // to a fresh rule lookup that cached DIRECT again, so teardown never evicted anything.)
+                    BOOL was_direct = port_is_direct(sp);
                     if (tcp_header->Fin || tcp_header->Rst)
                         port_clear(sp);
-                    if (port_is_direct(sp))
+                    if (was_direct)
                     {
                         WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                         continue;
@@ -879,6 +891,15 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 UINT32 src_ip = ip_header->SrcAddr;
                 UINT32 orig_dest_ip = ip_header->DstAddr;
                 UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
+
+                // Teardown of a flow we are not tracking: a connection cannot start with FIN/RST, so
+                // there is nothing to decide - and the owner is usually already gone, which made this
+                // an expensive lookup that also re-cached a stale DIRECT verdict for the port.
+                if (tcp_header->Fin || tcp_header->Rst)
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
 
                 // avoid rule pocess and packet process if no rules
                 if (!g_has_active_rules && g_connection_callback == NULL)
