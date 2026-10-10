@@ -26,7 +26,12 @@ static BOOL AnotherInstanceRunning(void)
     return found;
 }
 
-// Run at Startup (schtasks logon task)
+// Run at Startup: HKCU\...\Run value. Per-user, so it needs no elevation (the engine lives in
+// the ProxyBridgeSvc service). Older versions used an elevated "ProxyBridge" logon task; it is
+// removed here when the setting is toggled (and by the uninstaller).
+#define PB_RUN_KEY   L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+#define PB_RUN_VALUE L"ProxyBridge"
+
 // Runs schtasks.exe hidden and returns its exit code (0 = success / task exists).
 static DWORD RunSchtasks(const wchar_t* args)
 {
@@ -44,23 +49,28 @@ static DWORD RunSchtasks(const wchar_t* args)
 }
 static BOOL StartupIsEnabled(void)
 {
-    return RunSchtasks(L"/Query /TN \"ProxyBridge\"") == 0;
+    HKEY k; BOOL on = FALSE;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, PB_RUN_KEY, 0, KEY_QUERY_VALUE, &k) == ERROR_SUCCESS)
+    {
+        on = RegQueryValueExW(k, PB_RUN_VALUE, NULL, NULL, NULL, NULL) == ERROR_SUCCESS;
+        RegCloseKey(k);
+    }
+    return on;
 }
 static void StartupSet(BOOL enable)
 {
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, PB_RUN_KEY, 0, NULL, 0, KEY_SET_VALUE, NULL, &k, NULL) != ERROR_SUCCESS) return;
     if (enable)
     {
         wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);
-        wchar_t args[1200];
-        // ONLOGON task launching the exe minimized, highest run level.
-        // The short delay lets the shell/tray come up first so the tray icon appears
-        _snwprintf_s(args, 1200, _TRUNCATE,
-                   L"/Create /F /TN \"ProxyBridge\" /TR \"\\\"%s\\\" --minimized\" /SC ONLOGON /DELAY 0000:15 /RL HIGHEST",
-                   exe);
-        args[1199] = 0;
-        RunSchtasks(args);
+        wchar_t cmd[MAX_PATH + 32];
+        _snwprintf_s(cmd, ARRAYSIZE(cmd), _TRUNCATE, L"\"%s\" --minimized", exe);
+        RegSetValueExW(k, PB_RUN_VALUE, 0, REG_SZ, (const BYTE*)cmd, (DWORD)((wcslen(cmd) + 1) * sizeof(wchar_t)));
     }
-    else RunSchtasks(L"/Delete /F /TN \"ProxyBridge\"");
+    else RegDeleteValueW(k, PB_RUN_VALUE);
+    RegCloseKey(k);
+    RunSchtasks(L"/Delete /F /TN \"ProxyBridge\"");   // legacy elevated logon task (no-op if absent / not admin)
 }
 
 #endif // PB_UI_STARTUP_H

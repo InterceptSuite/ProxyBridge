@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity version="4.0.13.0" processorArchitecture="*" name="InterceptSuite.ProxyBridge.NativeGUI" type="win32"/>
-  <!-- Require administrator: WinDivert needs elevation to load its kernel driver. -->
+  <!-- No elevation: the WinDivert-owning engine runs in the ProxyBridgeSvc service (installed
+       once by the setup program), and this GUI talks to it over a named pipe. -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>
   </trustInfo>

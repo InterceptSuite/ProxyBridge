@@ -264,6 +264,30 @@ if ($success) {
         Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
     }
 
+    # ── Build engine service ─────────────────────────────────────────────────
+    # ProxyBridgeSvc.exe runs as LocalSystem (registered by the installer) and owns
+    # ProxyBridgeCore.dll / WinDivert, so ProxyBridge.exe itself does not need admin.
+    Write-Host "`nBuilding service..." -ForegroundColor Green
+    if ($script:foundVcvarsPath -and (Test-Path $script:foundVcvarsPath)) {
+        $svcArgs = "/nologo /O2 /GL /Gy /W4 /MT /GS /guard:cf /sdl /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE " +
+                   "src\service\pb_service.c " +
+                   "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf /CETCOMPAT /SUBSYSTEM:CONSOLE " +
+                   "advapi32.lib " +
+                   "/OUT:ProxyBridgeSvc.exe"
+        $svcCmd = "`"$script:foundVcvarsPath`" $script:foundArch >nul && cl.exe $svcArgs"
+        $svcOut = cmd /c $svcCmd '2>&1'
+        if ($LASTEXITCODE -eq 0) {
+            Move-Item "ProxyBridgeSvc.exe" -Destination $OutputDir -Force
+            Write-Host "  Service built: ProxyBridgeSvc.exe" -ForegroundColor Gray
+            Remove-Item "*.obj" -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "  Service build failed!" -ForegroundColor Red
+            Write-Host $svcOut
+        }
+    } else {
+        Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
+    }
+
     if (-not $NoSign) {
         Write-Host "`nSigning binaries..." -ForegroundColor Green
         $filesToSign = Get-ChildItem $OutputDir -Include *.exe,*.dll -Recurse

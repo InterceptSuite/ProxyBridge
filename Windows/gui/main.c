@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include "res/resource.h"
 #include "api/pb_api.h"
+#include "api/pb_ipc.h"
 #include "profile/profile.h"
 #include "loc/loc.h"
 
@@ -920,6 +921,59 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 #include "ui/dialogs.h"
 
 
+// Connects to the engine. Normal path: the ProxyBridgeSvc service (installed once by setup)
+// so this process stays unprivileged. Fallback for a portable/unzipped copy with no service:
+// load ProxyBridgeCore.dll in-process, which needs elevation - relaunch elevated once.
+static BOOL IsElevated(void)
+{
+    BOOL elevated = FALSE; HANDLE tok = NULL;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok))
+    {
+        TOKEN_ELEVATION te; DWORD n = 0;
+        if (GetTokenInformation(tok, TokenElevation, &te, sizeof(te), &n)) elevated = te.TokenIsElevated != 0;
+        CloseHandle(tok);
+    }
+    return elevated;
+}
+
+static BOOL ConnectEngine(void)
+{
+    int rc = PB_LoadService(&g_api);
+    if (rc == PB_IPC_OK) return TRUE;
+
+    if (rc == PB_IPC_BUSY)
+    {
+        MessageBoxW(NULL, L"Another ProxyBridge window (possibly in a different user session) is already "
+                          L"connected to the ProxyBridge service.\nClose it and try again.",
+                    APP_TITLE, MB_OK | MB_ICONWARNING);
+        return FALSE;
+    }
+    if (rc == PB_IPC_BAD_VERSION)
+    {
+        MessageBoxW(NULL, L"The installed ProxyBridge service is a different version than this program.\n"
+                          L"Re-run the ProxyBridge installer.", APP_TITLE, MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+
+    // No service: portable mode.
+    if (!IsElevated())
+    {
+        wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);
+        SHELLEXECUTEINFOW sei; ZeroMemory(&sei, sizeof(sei));
+        sei.cbSize = sizeof(sei); sei.lpVerb = L"runas"; sei.lpFile = exe; sei.nShow = SW_SHOWNORMAL;
+        ShellExecuteExW(&sei);   // on UAC cancel just exit
+        return FALSE;
+    }
+    if (!PB_LoadDirect(&g_api))
+    {
+        MessageBoxW(NULL, L"Could not load ProxyBridgeCore.dll.\n"
+                          L"Make sure it is in the same folder as this executable.",
+                    APP_TITLE, MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 // entry point
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
 {
@@ -930,14 +984,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES | ICC_LINK_CLASS | ICC_PROGRESS_CLASS };
     InitCommonControlsEx(&icc);
 
-    if (!PB_Load(&g_api))
-    {
-        MessageBoxW(NULL, L"Could not load ProxyBridgeCore.dll.\n"
-                          L"Make sure it is in the same folder as this executable.",
-                    APP_TITLE, MB_OK | MB_ICONERROR);
-        return 1;
-    }
-
     // Load the active profile.
     PB_GetActiveProfile(g_activeProfile, PB_NAME_MAX);
     PB_ProfileLoad(g_activeProfile, &g_profile);
@@ -946,13 +992,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     g_closeToTray = g_profile.closeToTray;
     g_lang        = (_wcsicmp(g_profile.language, L"zh") == 0) ? 1 : 0;
 
-    // Refuse to start if another GUI or the CLI is already running - they'd both grab the
-    // WinDivert driver and the same relay ports.
+    // Refuse to start if another GUI or the CLI is already running - they'd both drive the
+    // same engine (the service accepts one client at a time) and the same relay ports.
     if (AnotherInstanceRunning())
     {
         MessageBoxW(NULL, T(S_ERR_RUNNING), APP_TITLE, MB_OK | MB_ICONWARNING);
         return 0;
     }
+
+    if (!ConnectEngine())
+        return 1;
 
     g_autoClear   = g_profile.autoClearLogs;
     g_startup     = StartupIsEnabled();

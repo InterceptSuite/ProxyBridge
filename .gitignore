@@ -101,3 +101,8 @@ Linux/src/libproxybridge.so
 Linux/src/ProxyBridge.o
 Android/**
 iOS/**
+# Windows build intermediates (MSVC import lib / export file / objects)
+Windows/*.exp
+Windows/*.lib
+Windows/*.obj
+Windows/**/*.obj

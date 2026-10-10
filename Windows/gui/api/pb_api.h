@@ -67,7 +67,9 @@ typedef struct {
 
 // Loads ProxyBridgeCore.dll (from the exe's directory) and resolves every export.
 // Returns TRUE only if the DLL and all required functions were found.
-static BOOL PB_Load(PBApi* api)
+// Used by ProxyBridgeSvc.exe (the service that owns the engine) and as the GUI's
+// elevated fallback when the service is not installed. See pb_ipc.h for the normal path.
+static BOOL PB_LoadDirect(PBApi* api)
 {
     ZeroMemory(api, sizeof(*api));
 
@@ -79,7 +81,9 @@ static BOOL PB_Load(PBApi* api)
     lstrcatW(path, L"ProxyBridgeCore.dll");
 
     api->dll = LoadLibraryW(path);
+#ifndef PB_NO_SEARCH_FALLBACK
     if (!api->dll) api->dll = LoadLibraryW(L"ProxyBridgeCore.dll"); // fallback to search path
+#endif
     if (!api->dll) return FALSE;
 
     #define PB_BIND(field, name) \
@@ -108,6 +112,12 @@ static BOOL PB_Load(PBApi* api)
     #undef PB_BIND
 
     return TRUE;
+}
+
+static void PB_UnloadDirect(PBApi* api)
+{
+    if (api->dll) FreeLibrary(api->dll);
+    ZeroMemory(api, sizeof(*api));
 }
 
 #endif // PB_API_H
