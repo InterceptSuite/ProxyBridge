@@ -1,4 +1,5 @@
 #include "pb_internal.h"
+#include <tlhelp32.h>
 
 // Process resolution: src-port -> PID lookups and the PID cache.
 
@@ -184,6 +185,29 @@ DWORD get_process_id_from_udp_connection_v6(const UINT8 src_ip6[16], UINT16 src_
     return pid;   // buffer is reused, not freed
 }
 
+// Basename of a running process from a toolhelp snapshot. Used when the process cannot be
+// opened (access denied, protected process) so the rule engine can still match it by name
+// instead of letting the connection fall through as DIRECT.
+static BOOL process_basename_from_snapshot(DWORD pid, char *name, DWORD name_size)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return FALSE;
+    PROCESSENTRY32W pe; pe.dwSize = sizeof(pe);
+    BOOL found = FALSE;
+    if (Process32FirstW(snap, &pe))
+    {
+        do {
+            if (pe.th32ProcessID == pid)
+            {
+                found = WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, name, (int)name_size, NULL, NULL) > 0;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
 BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
 {
     HANDLE hProcess;
@@ -206,7 +230,7 @@ BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
     hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (hProcess == NULL)
     {
-        return FALSE;
+        return process_basename_from_snapshot(pid, name, name_size);
     }
 
     if (QueryFullProcessImageNameW(hProcess, 0, full_path_w, &path_len))
@@ -218,7 +242,7 @@ BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
     }
 
     CloseHandle(hProcess);
-    return FALSE;
+    return process_basename_from_snapshot(pid, name, name_size);
 }
 
 //  cache pid
