@@ -150,7 +150,7 @@ Test-Path C:\WinDivert-2.2.2-A\include\windivert.h
 3. Builds the native C GUI (`ProxyBridge.exe`) with `cl.exe`
 4. Builds the native C CLI (`ProxyBridge_CLI.exe`) as a single executable
 5. Optionally signs all binaries (requires code signing certificate)
-6. Builds NSIS installer (`ProxyBridge-Setup-4.0.10-Beta.exe`) if NSIS is installed
+6. Builds NSIS installer (`ProxyBridge-Setup-4.1.0.exe`) if NSIS is installed
 
 **Output:**
 All compiled files are placed in `Windows/output/` directory:
@@ -158,7 +158,7 @@ All compiled files are placed in `Windows/output/` directory:
 - `ProxyBridge.exe` - Native C GUI application
 - `ProxyBridge_CLI.exe` - Native C CLI application
 - `WinDivert.dll`, `WinDivert64.sys` - WinDivert files
-- `ProxyBridge-Setup-4.0.10-Beta.exe` - Installer (if NSIS installed)
+- `ProxyBridge-Setup-4.1.0.exe` - Installer (if NSIS installed)
 
 **Project Structure:**
 - `Windows/src/` - C library core (ProxyBridge.c, ProxyBridge.h)
