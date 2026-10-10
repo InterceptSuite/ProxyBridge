@@ -86,6 +86,26 @@ DWORD  g_pidtbl_cap = 0;
 // tracking entry redirects it to the previous connection's destination. The result is a proxy
 // that works at first and degrades over hours as the port range cycles. A retransmitted SYN
 // for a live connection just gets re-evaluated and re-tracked with the same answer.
+// TRUE if dst is one of the configured proxy servers (IPv4). The relay's own upstream sockets
+// are ordinary outbound connections to that address and draw their local port from the same
+// ephemeral pool as the apps. If such a port matches a leftover tracking entry or DIRECT bit of
+// an earlier app flow, the relay's own connection to the proxy gets redirected back into the
+// relay (or mis-decided) - proxied apps then hang while the log still looks normal, and it
+// gets likelier the longer the ephemeral range has been cycling. Traffic to the proxy server
+// itself must never be redirected, so it is passed through before any per-port state is used.
+static BOOL is_proxy_server_endpoint(UINT32 dst_ip, UINT16 dst_port)
+{
+    int n = g_proxy_config_count;
+    if (n > MAX_PROXY_CONFIGS) n = MAX_PROXY_CONFIGS;
+    for (int i = 0; i < n; i++)
+    {
+        const PROXY_CONFIG *c = &g_proxy_configs[i];
+        if (c->config_id != 0 && c->port == dst_port && c->resolved_ip == dst_ip)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static void reset_stale_tcp_state(UINT16 sp, BOOL is_ipv6)
 {
     if (sp == g_local_relay_port) return;   // never our own relay's port
@@ -698,6 +718,14 @@ DWORD WINAPI packet_processor(LPVOID arg)
             // Part of this taken from Cluade to fix windivert packet error
             {
                 UINT16 sp = ntohs(tcp_header->SrcPort);
+
+                // Traffic to the proxy server itself (the relay's upstream sockets): never touch.
+                if (sp != g_local_relay_port &&
+                    is_proxy_server_endpoint(ip_header->DstAddr, ntohs(tcp_header->DstPort)))
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
 
                 // A fresh SYN starts a new connection that may be reusing an ephemeral
                 // port whose previous owner has closed. Evict any PID cached for this
