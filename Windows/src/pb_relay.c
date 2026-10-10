@@ -564,6 +564,17 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
     return 0;
 }
 
+// Abortive close (RST) for the app-side socket when the upstream handshake fails. The relay
+// has already completed the TCP handshake with the app, so a plain close() looks like a
+// normal connection that ended with no data; an RST tells the app the connection failed
+// right now, so it errors out (or retries another address) instead of waiting.
+static void reset_close(SOCKET s)
+{
+    struct linger lg = { 1, 0 };
+    setsockopt(s, SOL_SOCKET, SO_LINGER, (const char*)&lg, sizeof(lg));
+    closesocket(s);
+}
+
 DWORD WINAPI connection_handler(LPVOID arg)
 {
     CONNECTION_CONFIG *config = (CONNECTION_CONFIG *)arg;
@@ -648,7 +659,7 @@ DWORD WINAPI connection_handler(LPVOID arg)
         }
         if (rc != 0)
         {
-            closesocket(client_sock);
+            reset_close(client_sock);
             closesocket(socks_sock);
             return 0;
         }
@@ -660,7 +671,7 @@ DWORD WINAPI connection_handler(LPVOID arg)
             : http_connect(socks_sock, dest_ip, dest_port, proxy);
         if (rc != 0)
         {
-            closesocket(client_sock);
+            reset_close(client_sock);
             closesocket(socks_sock);
             return 0;
         }
