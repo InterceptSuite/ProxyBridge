@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winhttp.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,18 +85,101 @@ static volatile LONG g_running = 0;
 static int           g_verbose = 0;
 
 // Callbacks
+//
+// The engine invokes these on its packet-capture thread. That thread is the single path every
+// intercepted packet goes through, so it must never block: a printf() into a console that is
+// paused (QuickEdit selection, scrolled "Select" mode) or into a redirected pipe nobody is
+// draining (service wrapper, headless host) would stall it and, with it, all network traffic
+// the engine has captured. The callbacks therefore only enqueue; a writer thread does the
+// (possibly blocking) console output, and lines are dropped when the queue is full.
+#define OUTQ_LINES 2048
+#define OUTQ_LEN   512
+static char              g_outq[OUTQ_LINES][OUTQ_LEN];
+static int               g_outq_head = 0, g_outq_count = 0;
+static long              g_outq_dropped = 0;
+static CRITICAL_SECTION  g_outq_lock;
+static HANDLE            g_outq_evt = NULL, g_outq_thread = NULL;
+static volatile LONG     g_outq_quit = 0;
+
+static void outq_push(const char* line)
+{
+    EnterCriticalSection(&g_outq_lock);
+    if (g_outq_count < OUTQ_LINES)
+    {
+        int idx = (g_outq_head + g_outq_count) % OUTQ_LINES;
+        strncpy_s(g_outq[idx], OUTQ_LEN, line, _TRUNCATE);
+        g_outq_count++;
+    }
+    else g_outq_dropped++;
+    LeaveCriticalSection(&g_outq_lock);
+    SetEvent(g_outq_evt);
+}
+
+static DWORD WINAPI outq_writer(LPVOID arg)
+{
+    (void)arg;
+    static char batch[64][OUTQ_LEN];
+    for (;;)
+    {
+        WaitForSingleObject(g_outq_evt, 500);
+        for (;;)
+        {
+            int n = 0;
+            long dropped = 0;
+            EnterCriticalSection(&g_outq_lock);
+            while (n < 64 && g_outq_count > 0)
+            {
+                memcpy(batch[n++], g_outq[g_outq_head], OUTQ_LEN);
+                g_outq_head = (g_outq_head + 1) % OUTQ_LINES;
+                g_outq_count--;
+            }
+            dropped = g_outq_dropped; g_outq_dropped = 0;
+            LeaveCriticalSection(&g_outq_lock);
+            if (n == 0 && dropped == 0) break;
+            for (int i = 0; i < n; i++) fputs(batch[i], stdout);
+            if (dropped) printf("[%ld output line(s) dropped - console too slow]\n", dropped);
+            fflush(stdout);
+        }
+        if (InterlockedCompareExchange(&g_outq_quit, 0, 0)) break;
+    }
+    return 0;
+}
+
+static void outq_start(void)
+{
+    InitializeCriticalSection(&g_outq_lock);
+    g_outq_evt = CreateEventW(NULL, FALSE, FALSE, NULL);
+    g_outq_thread = CreateThread(NULL, 0, outq_writer, NULL, 0, NULL);
+}
+
+static void outq_stop(void)
+{
+    if (!g_outq_thread) return;
+    InterlockedExchange(&g_outq_quit, 1);
+    SetEvent(g_outq_evt);
+    WaitForSingleObject(g_outq_thread, 3000);
+}
+
 static void log_cb(const char* msg)
 {
     if (g_verbose == 1 || g_verbose == 3)
-        printf("[LOG]  %s\n", msg);
+    {
+        char line[OUTQ_LEN];
+        snprintf(line, sizeof(line), "[LOG]  %s\n", msg);
+        outq_push(line);
+    }
 }
 
 static void conn_cb(const char* process, DWORD pid,
                     const char* ip, uint16_t port, const char* proxy_info)
 {
     if (g_verbose == 2 || g_verbose == 3)
-        printf("[CONN] %s (PID:%lu) -> %s:%u via %s\n",
-               process, (unsigned long)pid, ip, (unsigned)port, proxy_info);
+    {
+        char line[OUTQ_LEN];
+        snprintf(line, sizeof(line), "[CONN] %s (PID:%lu) -> %s:%u via %s\n",
+                 process, (unsigned long)pid, ip, (unsigned)port, proxy_info);
+        outq_push(line);
+    }
 }
 
 // Banner
@@ -874,6 +958,7 @@ int main(int argc, char* argv[])
     printf("  DLL loaded.\n");
 
     // ── Configure callbacks ───────────────────────────────────────────────────
+    if (g_verbose != 0) outq_start();
     if (g_verbose == 1 || g_verbose == 3) g_SetLog(log_cb);
     if (g_verbose == 2 || g_verbose == 3) g_SetConn(conn_cb);
     g_SetLocalhost(prof.localhost_via_proxy);
@@ -973,6 +1058,7 @@ int main(int argc, char* argv[])
     while (InterlockedCompareExchange(&g_running, 0, 0) != 0)
         Sleep(200);
 
+    outq_stop();
     printf("ProxyBridge stopped.\n\n");
     FreeLibrary(g_hDll);
     return 0;
