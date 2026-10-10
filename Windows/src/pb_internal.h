@@ -371,6 +371,10 @@ DWORD WINAPI local_proxy_server(LPVOID arg);
 DWORD WINAPI connection_handler(LPVOID arg);
 DWORD WINAPI one_way_relay(LPVOID arg);
 DWORD WINAPI transfer_handler(LPVOID arg);
+BOOL relay_pool_start(void);                       // IOCP relay pool (pb_relay.c)
+void relay_pool_stop(void);
+BOOL relay_start(SOCKET client, SOCKET proxy);
+extern volatile LONG g_active_relays;
 
 // ---- ProxyBridge.c ----
 DWORD WINAPI packet_processor(LPVOID arg);

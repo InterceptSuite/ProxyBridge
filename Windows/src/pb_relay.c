@@ -621,8 +621,10 @@ DWORD WINAPI connection_handler(LPVOID arg)
     // the proxy's receive window fills up, which stalls the relay loop and
     // triggers TCP flow-control on the client side → massive upload throughput
     // loss.  4 MB gives plenty of headroom even at high bitrates / high RTT.
-    configure_tcp_socket(socks_sock, 4194304, 30000);  // 4 MB – proxy connection
-    configure_tcp_socket(client_sock, 4194304, 30000); // 4 MB – app connection
+    LONG ar = g_active_relays;   // socket buffers shrink as the number of live relays grows
+    int sockbuf = ar < 64 ? 4194304 : ar < 256 ? 1048576 : ar < 1024 ? 262144 : 65536;
+    configure_tcp_socket(socks_sock, sockbuf, 30000);  // 4 MB – proxy connection
+    configure_tcp_socket(client_sock, sockbuf, 30000); // 4 MB – app connection
 
     memset(&socks_addr, 0, sizeof(socks_addr));
     socks_addr.sin_family = AF_INET;
@@ -692,6 +694,10 @@ DWORD WINAPI connection_handler(LPVOID arg)
     DWORD bytes_returned = 0;
     WSAIoctl(socks_sock, SIO_KEEPALIVE_VALS, &keepalive_settings, sizeof(keepalive_settings), NULL, 0, &bytes_returned, NULL, NULL);
     WSAIoctl(client_sock, SIO_KEEPALIVE_VALS, &keepalive_settings, sizeof(keepalive_settings), NULL, 0, &bytes_returned, NULL, NULL);
+
+    // Preferred path: hand both sockets to the IOCP pool (no per-connection threads).
+    if (relay_start(client_sock, socks_sock))
+        return 0;
 
     TRANSFER_CONFIG *transfer_config = (TRANSFER_CONFIG *)malloc(sizeof(TRANSFER_CONFIG));
 
@@ -820,3 +826,187 @@ DWORD WINAPI transfer_handler(LPVOID arg)
     return 0;
 }
 
+// ============================================================================================
+// IOCP relay pool
+//
+// The data-transfer stage used to run two blocking threads (upload + download) and two 128 KB
+// buffers for every proxied connection. A BitTorrent-style workload with a thousand peers meant
+// 2,000+ threads, ~350 KB and ~9 handles per connection (issue #213: "over 1000 threads, machine
+// sluggish despite low CPU"). Here a fixed pool of worker threads drives overlapped WSARecv /
+// WSASend through an I/O completion port instead, so thread count no longer grows with the
+// number of connections and per-connection memory is two small buffers.
+//
+// Semantics are unchanged: each direction copies recv -> send; when either direction ends (EOF
+// or error) both sockets are shut down and closed once both directions have drained.
+// The blocking one_way_relay/transfer_handler path stays as the fallback if the pool cannot start.
+// ============================================================================================
+typedef struct RELAY_CONN RELAY_CONN;
+typedef struct {
+    OVERLAPPED  ov;          // must stay first: the completion hands back &ov
+    RELAY_CONN *rc;
+    SOCKET      src, dst;
+    char       *buf;
+    DWORD       cap, len, off;
+    BOOL        sending;
+} RELAY_DIR;
+struct RELAY_CONN {
+    SOCKET        s[2];
+    RELAY_DIR     dir[2];
+    volatile LONG refs;      // directions still alive
+    volatile LONG closing;
+    RELAY_CONN   *prev, *next;
+};
+
+volatile LONG g_active_relays = 0;
+static HANDLE            g_iocp = NULL;
+static HANDLE            g_relay_workers[16];
+static int               g_relay_nworkers = 0;
+static CRITICAL_SECTION  g_relay_lock;
+static BOOL              g_relay_lock_ready = FALSE;
+static RELAY_CONN       *g_relay_head = NULL;
+
+static void relay_abort(RELAY_CONN *rc)
+{
+    if (InterlockedCompareExchange(&rc->closing, 1, 0) == 0)
+    {
+        shutdown(rc->s[0], SD_BOTH);
+        shutdown(rc->s[1], SD_BOTH);
+        CancelIoEx((HANDLE)rc->s[0], NULL);      // completes the sibling's pending recv/send with an error
+        CancelIoEx((HANDLE)rc->s[1], NULL);
+    }
+}
+
+static void relay_release(RELAY_CONN *rc)
+{
+    if (InterlockedDecrement(&rc->refs) != 0) return;
+    EnterCriticalSection(&g_relay_lock);
+    if (rc->prev) rc->prev->next = rc->next; else g_relay_head = rc->next;
+    if (rc->next) rc->next->prev = rc->prev;
+    LeaveCriticalSection(&g_relay_lock);
+    closesocket(rc->s[0]);
+    closesocket(rc->s[1]);
+    free(rc->dir[0].buf);
+    free(rc->dir[1].buf);
+    free(rc);
+    InterlockedDecrement(&g_active_relays);
+}
+
+static void relay_dir_end(RELAY_DIR *d)
+{
+    RELAY_CONN *rc = d->rc;
+    relay_abort(rc);
+    relay_release(rc);
+}
+
+static BOOL relay_post_recv(RELAY_DIR *d)
+{
+    WSABUF wb; wb.len = d->cap; wb.buf = d->buf;
+    DWORD flags = 0;
+    ZeroMemory(&d->ov, sizeof(d->ov));
+    d->sending = FALSE;
+    return !(WSARecv(d->src, &wb, 1, NULL, &flags, &d->ov, NULL) == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING);
+}
+
+static BOOL relay_post_send(RELAY_DIR *d)
+{
+    WSABUF wb; wb.len = d->len - d->off; wb.buf = d->buf + d->off;
+    ZeroMemory(&d->ov, sizeof(d->ov));
+    d->sending = TRUE;
+    return !(WSASend(d->dst, &wb, 1, NULL, 0, &d->ov, NULL) == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING);
+}
+
+static DWORD WINAPI relay_worker(LPVOID arg)
+{
+    (void)arg;
+    for (;;)
+    {
+        DWORD n = 0; ULONG_PTR key = 0; OVERLAPPED *ov = NULL;
+        BOOL ok = GetQueuedCompletionStatus(g_iocp, &n, &key, &ov, INFINITE);
+        if (ov == NULL) break;                         // exit signal (or the port itself failed)
+        RELAY_DIR *d = (RELAY_DIR *)ov;
+        if (!ok || n == 0) { relay_dir_end(d); continue; }   // error / aborted / EOF
+        if (!d->sending)
+        {
+            d->len = n; d->off = 0;
+            if (!relay_post_send(d)) relay_dir_end(d);
+        }
+        else
+        {
+            d->off += n;
+            BOOL posted = (d->off < d->len) ? relay_post_send(d) : relay_post_recv(d);
+            if (!posted) relay_dir_end(d);
+        }
+    }
+    return 0;
+}
+
+BOOL relay_pool_start(void)
+{
+    if (g_iocp != NULL) return TRUE;
+    if (!g_relay_lock_ready) { InitializeCriticalSection(&g_relay_lock); g_relay_lock_ready = TRUE; }
+    g_iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+    if (g_iocp == NULL) return FALSE;
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    int n = (int)si.dwNumberOfProcessors / 2;
+    if (n < 2) n = 2;
+    if (n > 8) n = 8;
+    g_relay_nworkers = 0;
+    for (int i = 0; i < n; i++)
+    {
+        g_relay_workers[g_relay_nworkers] = CreateThread(NULL, 0, relay_worker, NULL, 0, NULL);
+        if (g_relay_workers[g_relay_nworkers] != NULL) g_relay_nworkers++;
+    }
+    if (g_relay_nworkers == 0) { CloseHandle(g_iocp); g_iocp = NULL; return FALSE; }
+    return TRUE;
+}
+
+void relay_pool_stop(void)
+{
+    if (g_iocp == NULL) return;
+    EnterCriticalSection(&g_relay_lock);
+    for (RELAY_CONN *rc = g_relay_head; rc != NULL; rc = rc->next) relay_abort(rc);
+    LeaveCriticalSection(&g_relay_lock);
+    for (int i = 0; i < 300 && g_active_relays > 0; i++) Sleep(10);    // let the workers drain the aborted relays
+    for (int i = 0; i < g_relay_nworkers; i++) PostQueuedCompletionStatus(g_iocp, 0, 0, NULL);
+    WaitForMultipleObjects(g_relay_nworkers, g_relay_workers, TRUE, 3000);
+    for (int i = 0; i < g_relay_nworkers; i++) CloseHandle(g_relay_workers[i]);
+    g_relay_nworkers = 0;
+    CloseHandle(g_iocp);
+    g_iocp = NULL;
+}
+
+// Takes over both (already handshaken) sockets. Returns FALSE if the pool is unavailable; the
+// caller then falls back to the blocking relay and still owns the sockets.
+BOOL relay_start(SOCKET client, SOCKET proxy)
+{
+    if (g_iocp == NULL || !running) return FALSE;
+    LONG active = g_active_relays;
+    DWORD cap = active < 128 ? 65536 : active < 512 ? 16384 : 8192;   // smaller buffers as connections pile up
+
+    RELAY_CONN *rc = (RELAY_CONN *)calloc(1, sizeof(*rc));
+    if (rc == NULL) return FALSE;
+    rc->dir[0].buf = (char *)malloc(cap);
+    rc->dir[1].buf = (char *)malloc(cap);
+    if (rc->dir[0].buf == NULL || rc->dir[1].buf == NULL ||
+        CreateIoCompletionPort((HANDLE)client, g_iocp, 0, 0) != g_iocp ||
+        CreateIoCompletionPort((HANDLE)proxy,  g_iocp, 0, 0) != g_iocp)
+    {
+        free(rc->dir[0].buf); free(rc->dir[1].buf); free(rc);
+        return FALSE;
+    }
+    rc->s[0] = client; rc->s[1] = proxy;
+    rc->refs = 2;
+    rc->dir[0].rc = rc; rc->dir[0].src = client; rc->dir[0].dst = proxy;  rc->dir[0].cap = cap;   // upload
+    rc->dir[1].rc = rc; rc->dir[1].src = proxy;  rc->dir[1].dst = client; rc->dir[1].cap = cap;   // download
+
+    EnterCriticalSection(&g_relay_lock);
+    rc->next = g_relay_head;
+    if (g_relay_head) g_relay_head->prev = rc;
+    g_relay_head = rc;
+    LeaveCriticalSection(&g_relay_lock);
+    InterlockedIncrement(&g_active_relays);
+
+    if (!relay_post_recv(&rc->dir[0])) relay_dir_end(&rc->dir[0]);
+    if (!relay_post_recv(&rc->dir[1])) relay_dir_end(&rc->dir[1]);
+    return TRUE;
+}

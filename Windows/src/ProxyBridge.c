@@ -1052,6 +1052,8 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 
     running = TRUE;
 
+    relay_pool_start();   // optional: connections fall back to blocking relay threads without it
+
     proxy_thread = CreateThread(NULL, 1, local_proxy_server, NULL, 0, NULL);
     if (proxy_thread == NULL)
     {
@@ -1263,6 +1265,10 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
         CloseHandle(udp_relay_thread);
         udp_relay_thread = NULL;
     }
+
+    // Close every live relay and stop the pool's worker threads (the accept loop has ended,
+    // so no new relays arrive). Must finish before the engine can be unloaded.
+    relay_pool_stop();
 
     AcquireSRWLockExclusive(&lock);
     for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
