@@ -51,6 +51,7 @@ typedef struct {
     int      trafficLogging;
     int      autoClearLogs;
     int      closeToTray;
+    int      fontZoom;            // UI/log text zoom in percent (60-300), 100 = DPI default
     wchar_t  language[8];         // "en" | "zh"
     PBConfig cfg[PB_MAX_CFG];   int cfgCount;
     PBRule   rule[PB_MAX_RULE]; int ruleCount;

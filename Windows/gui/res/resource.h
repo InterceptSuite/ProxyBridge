@@ -24,6 +24,9 @@
 #define IDM_SET_STARTUP             215
 #define IDM_SET_AUTOCLEAR           216
 #define IDM_LOG_FILTERS             217
+#define IDM_ZOOM_IN                 223
+#define IDM_ZOOM_OUT                224
+#define IDM_ZOOM_RESET              225
 #define IDM_PROFILE_RENAME          244
 
 // Log Filters (list) dialog

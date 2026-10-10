@@ -109,6 +109,13 @@ static LogStore g_connStore, g_actStore;
 #define TIMER_LOG 1                // batched log-flush timer
 static int g_idleTicks = 0;        // consecutive idle flushes (for working-set trim)
 static HFONT     g_hMono, g_hUi;
+
+// Text scale. g_dpi is the system DPI (the app is system-DPI aware, so nothing is scaled for
+// us); g_zoom is the user's extra text-size percentage (Settings > Text Size, Ctrl+wheel,
+// Ctrl +/-/0). Fonts and the main-window layout metrics go through Sc() so the UI stays
+// readable on high-DPI screens and can be enlarged on any screen.
+static int g_dpi = 96, g_zoom = 100;
+static int Sc(int px) { return MulDiv(px, g_dpi * g_zoom, 96 * 100); }
 static HINSTANCE g_hInst;
 static NOTIFYICONDATAW g_tray;
 static BOOL      g_trayAdded = FALSE;
@@ -161,6 +168,7 @@ static void RebuildProfileMenu(HWND hwnd);
 static void UpdateTitle(void);
 static void SyncMenuChecks(HWND hwnd);
 static void BuildMainMenu(HWND hwnd);
+static void ApplyZoom(HWND hwnd);
 static void RelocalizeUI(HWND hwnd);
 static UINT32 EngineAddRule(PBRule* r);
 static void EngineEditRule(PBRule* r);
@@ -290,6 +298,7 @@ static void SwitchToProfile(const wchar_t* name)
     g_trafficLog = g_profile.trafficLogging;
     g_closeToTray = g_profile.closeToTray;
     g_autoClear = g_profile.autoClearLogs;
+    if (g_profile.fontZoom != g_zoom) { g_zoom = g_profile.fontZoom; ApplyZoom(g_hMain); }
     ApplyFilterSnapshot();
     g_api.SetLocalhostViaProxy(g_localhost);
     g_api.SetTrafficLoggingEnabled(g_trafficLog);
@@ -350,6 +359,10 @@ static void BuildMainMenu(HWND hwnd)
     AppendMenuW(settings, MF_STRING, IDM_SET_CLOSETOTRAY, T(S_M_TRAY));
     AppendMenuW(settings, MF_STRING, IDM_SET_STARTUP,     T(S_M_STARTUP));
     AppendMenuW(settings, MF_STRING, IDM_SET_AUTOCLEAR,   T(S_M_AUTOCLEAR));
+    AppendMenuW(settings, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(settings, MF_STRING, IDM_ZOOM_IN,    T(S_M_ZOOM_IN));
+    AppendMenuW(settings, MF_STRING, IDM_ZOOM_OUT,   T(S_M_ZOOM_OUT));
+    AppendMenuW(settings, MF_STRING, IDM_ZOOM_RESET, T(S_M_ZOOM_RESET));
     AppendMenuW(settings, MF_SEPARATOR, 0, NULL);
     HMENU lang = CreatePopupMenu();
     AppendMenuW(lang, MF_STRING, IDM_LANG_EN, T(S_M_LANG_EN));
@@ -424,13 +437,85 @@ static void TrayAdd(HWND hwnd)
 static void TrayRemove(void) { if (g_trayAdded) { Shell_NotifyIconW(NIM_DELETE, &g_tray); g_trayAdded = FALSE; } }
 static void ShowMainWindow(HWND hwnd) { ShowWindow(hwnd, SW_SHOW); ShowWindow(hwnd, SW_RESTORE); SetForegroundWindow(hwnd); }
 
+// Creates the three main-window fonts at the current DPI * zoom. Existing handles are left
+// alone so the caller can swap them onto the controls first and delete the old ones after.
+static void MakeFonts(void)
+{
+    g_hUi   = CreateFontW(-Sc(16), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                          DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_hMono = CreateFontW(-Sc(16), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+                          FIXED_PITCH | FF_MODERN, L"Consolas");
+    g_hIcon = CreateFontW(-Sc(18), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                          DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
+}
+
+static void LayoutMain(HWND hwnd);
+static void DrawMenuBar2(HWND hwnd);
+static void SaveActive(void);
+
+// Applies g_zoom: new fonts onto every control, relayout, then free the old fonts.
+static void ApplyZoom(HWND hwnd)
+{
+    HFONT oUi = g_hUi, oMono = g_hMono, oIcon = g_hIcon;
+    MakeFonts();
+    SendMessageW(g_hTab,        WM_SETFONT, (WPARAM)g_hUi,   TRUE);
+    SendMessageW(g_hConnLog,    WM_SETFONT, (WPARAM)g_hMono, TRUE);
+    SendMessageW(g_hActLog,     WM_SETFONT, (WPARAM)g_hMono, TRUE);
+    SendMessageW(g_hConnSearch, WM_SETFONT, (WPARAM)g_hUi,   TRUE);
+    SendMessageW(g_hActSearch,  WM_SETFONT, (WPARAM)g_hUi,   TRUE);
+    SendMessageW(g_hConnClear,  WM_SETFONT, (WPARAM)g_hUi,   TRUE);
+    SendMessageW(g_hActClear,   WM_SETFONT, (WPARAM)g_hUi,   TRUE);
+    if (oUi)   DeleteObject(oUi);
+    if (oMono) DeleteObject(oMono);
+    if (oIcon) DeleteObject(oIcon);
+    LayoutMain(hwnd);
+    InvalidateRect(hwnd, NULL, TRUE);
+    RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
+    DrawMenuBar2(hwnd);
+}
+
+// pct: absolute percentage, clamped to 60..300.
+static void SetZoom(HWND hwnd, int pct)
+{
+    if (pct < 60) pct = 60;
+    if (pct > 300) pct = 300;
+    if (pct == g_zoom) return;
+    g_zoom = pct;
+    g_profile.fontZoom = pct;
+    ApplyZoom(hwnd);
+    SaveActive();
+}
+
+// Ctrl + mouse wheel / Ctrl + '+' '-' '0' on the log boxes and search fields.
+static LRESULT CALLBACK ZoomSubclass(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref)
+{
+    (void)id;
+    HWND main = (HWND)ref;
+    if (m == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(w) & MK_CONTROL))
+    {
+        int d = GET_WHEEL_DELTA_WPARAM(w);
+        if (d != 0) SetZoom(main, g_zoom + (d > 0 ? 10 : -10));
+        return 0;
+    }
+    if (m == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000))
+    {
+        if (w == VK_ADD || w == VK_OEM_PLUS)       { SetZoom(main, g_zoom + 10); return 0; }
+        if (w == VK_SUBTRACT || w == VK_OEM_MINUS) { SetZoom(main, g_zoom - 10); return 0; }
+        if (w == L'0' || w == VK_NUMPAD0)          { SetZoom(main, 100);         return 0; }
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+
 static void LayoutMain(HWND hwnd)
 {
     RECT rc; GetClientRect(hwnd, &rc);
-    int tabTop = 6, tabH = 32;               // small gap below the menu bar
+    int tabTop = Sc(6), tabH = Sc(32);       // small gap below the menu bar
     MoveWindow(g_hTab, 0, tabTop, rc.right, tabH, TRUE);
-    int top = tabTop + tabH + 6;
-    int barH = 30, clearW = 130, gap = 6;
+    int top = tabTop + tabH + Sc(6);
+    int barH = Sc(30), clearW = Sc(130), gap = Sc(6);
     int searchW = rc.right - 4 - clearW - gap - 4;
     int logTop = top + barH + 4;
     int logH = rc.bottom - logTop - 4; if (logH < 0) logH = 0;
@@ -544,12 +629,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
         ChangeWindowMessageFilterEx(hwnd, g_wmTaskbarCreated, MSGFLT_ALLOW, NULL);
-        g_hUi   = CreateFontW(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                              DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-        g_hMono = CreateFontW(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-                              FIXED_PITCH | FF_MODERN, L"Consolas");
+        MakeFonts();
         g_hTab = CreateWindowExW(0, WC_TABCONTROLW, NULL,
                                  WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED,
                                  0, 0, 0, 0, hwnd, NULL, g_hInst, NULL);
@@ -578,6 +658,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(g_hActClear,   WM_SETFONT, (WPARAM)g_hUi, TRUE);
         SendMessageW(g_hConnSearch, EM_SETCUEBANNER, TRUE, (LPARAM)T(S_SEARCH_CUE));
         SendMessageW(g_hActSearch,  EM_SETCUEBANNER, TRUE, (LPARAM)T(S_SEARCH_CUE));
+        SetWindowSubclass(g_hConnLog,    ZoomSubclass, 1, (DWORD_PTR)hwnd);
+        SetWindowSubclass(g_hActLog,     ZoomSubclass, 1, (DWORD_PTR)hwnd);
+        SetWindowSubclass(g_hConnSearch, ZoomSubclass, 1, (DWORD_PTR)hwnd);
+        SetWindowSubclass(g_hActSearch,  ZoomSubclass, 1, (DWORD_PTR)hwnd);
         LogStoreInit(&g_connStore, g_hConnLog);
         LogStoreInit(&g_actStore,  g_hActLog);
         SetTimer(hwnd, TIMER_LOG, 200, NULL);   // batch log updates ~5x/sec
@@ -585,9 +669,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         // Menu-bar quick-access icons are drawn on the (non-client) menu bar in WM_NCPAINT;
         // this is their glyph font. The menu-bar font is used to owner-draw the top-level
         // items so the menu row can be a bit taller.
-        g_hIcon = CreateFontW(-18, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                              DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
         NONCLIENTMETRICSW ncm; ncm.cbSize = sizeof(ncm);
         if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
             g_hMenuFont = CreateFontIndirectW(&ncm.lfMenuFont);
@@ -604,6 +685,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_SIZE:  LayoutMain(hwnd); DrawMenuBar2(hwnd); return 0;
+    case WM_MOUSEWHEEL:
+        if (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL)
+        {
+            int d = GET_WHEEL_DELTA_WPARAM(wp);
+            if (d != 0) SetZoom(hwnd, g_zoom + (d > 0 ? 10 : -10));
+            return 0;
+        }
+        break;
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX:
     case WM_CTLCOLORBTN:
@@ -802,6 +891,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_SET_AUTOCLEAR:
             g_autoClear = !g_autoClear; g_profile.autoClearLogs = g_autoClear;
             SaveActive(); SyncMenuChecks(hwnd); return 0;
+        case IDM_ZOOM_IN:    SetZoom(hwnd, g_zoom + 10); return 0;
+        case IDM_ZOOM_OUT:   SetZoom(hwnd, g_zoom - 10); return 0;
+        case IDM_ZOOM_RESET: SetZoom(hwnd, 100);         return 0;
         case IDM_LOG_FILTERS:
             if (DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_FILTERS), hwnd, FiltersDlgProc))
             {
@@ -981,6 +1073,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     g_hInst = hInst;
     BOOL startMinimized = (cmd && wcsstr(cmd, L"--minimized") != NULL);
 
+    {
+        HDC sdc = GetDC(NULL);
+        if (sdc) { int d = GetDeviceCaps(sdc, LOGPIXELSY); if (d >= 96) g_dpi = d; ReleaseDC(NULL, sdc); }
+    }
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES | ICC_LINK_CLASS | ICC_PROGRESS_CLASS };
     InitCommonControlsEx(&icc);
 
@@ -990,6 +1086,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     g_localhost   = g_profile.localhostViaProxy;
     g_trafficLog  = g_profile.trafficLogging;
     g_closeToTray = g_profile.closeToTray;
+    g_zoom        = g_profile.fontZoom;
     g_lang        = (_wcsicmp(g_profile.language, L"zh") == 0) ? 1 : 0;
 
     // Refuse to start if another GUI or the CLI is already running - they'd both drive the
@@ -1021,8 +1118,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     wc.lpszMenuName = NULL;   // menu is built programmatically (localizable)
     if (!RegisterClassExW(&wc)) return 1;
 
+    // Default window size scales with the system DPI (1200x820 at 100%) but never exceeds the
+    // work area, so it is not a postage stamp on a 3072x1920 screen or off-screen on a small one.
+    int winW = MulDiv(1200, g_dpi, 96), winH = MulDiv(820, g_dpi, 96);
+    {
+        RECT wa;
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0))
+        {
+            int maxW = (wa.right - wa.left) * 9 / 10, maxH = (wa.bottom - wa.top) * 9 / 10;
+            if (winW > maxW) winW = maxW;
+            if (winH > maxH) winH = maxH;
+        }
+    }
     g_hMain = CreateWindowExW(0, WND_CLASS, APP_TITLE, WS_OVERLAPPEDWINDOW,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 1200, 820, NULL, NULL, hInst, NULL);
+                              CW_USEDEFAULT, CW_USEDEFAULT, winW, winH, NULL, NULL, hInst, NULL);
     if (!g_hMain) return 1;
 
     // Center on the working area of the monitor the window landed on (CW_USEDEFAULT places

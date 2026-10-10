@@ -148,6 +148,7 @@ void PB_ProfileDefaults(PBProfile* p, const wchar_t* name)
     p->trafficLogging    = 1;
     p->autoClearLogs     = 1;
     p->closeToTray       = 1;
+    p->fontZoom          = 100;
     lstrcpynW(p->language, L"en", 8);
 }
 
@@ -164,6 +165,8 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
         p->trafficLogging    = json_bool(root, "IsTrafficLoggingEnabled", 1);
         p->autoClearLogs     = json_bool(root, "AutoClearConnectionLogs", 1);
         p->closeToTray       = json_bool(root, "CloseToTray", 1);
+        p->fontZoom          = (int)json_long(root, "FontZoom", 100);
+        if (p->fontZoom < 60 || p->fontZoom > 300) p->fontZoom = 100;
         u2w(json_str(root, "Language", "en"), p->language, 8);
 
         JVal* cfgs = json_get(root, "ProxyConfigs");
@@ -237,6 +240,7 @@ BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
     sb_put(&b, "  \"AutoClearConnectionLogs\": ");  sb_put(&b, p->autoClearLogs ? "true" : "false");     sb_put(&b, ",\n");
     put_kv_str(&b, "  ", "Language", p->language, ",\n");
     sb_put(&b, "  \"CloseToTray\": ");              sb_put(&b, p->closeToTray ? "true" : "false");       sb_put(&b, ",\n");
+    { char zb[32]; _snprintf_s(zb, sizeof(zb), _TRUNCATE, "  \"FontZoom\": %d,\n", p->fontZoom); sb_put(&b, zb); }
 
     sb_put(&b, "  \"ProxyConfigs\": [");
     for (int i = 0; i < p->cfgCount; i++)
