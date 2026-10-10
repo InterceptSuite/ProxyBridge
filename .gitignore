@@ -106,3 +106,4 @@ Windows/*.exp
 Windows/*.lib
 Windows/*.obj
 Windows/**/*.obj
+Windows/gui/*.res
