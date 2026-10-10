@@ -214,7 +214,7 @@ if ($success) {
                      "/Fe:ProxyBridge.exe " +
                      "/link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /RELEASE " +
                      "/DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf /CETCOMPAT " +
-                     "user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib winhttp.lib"
+                     "user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib winhttp.lib advapi32.lib"
 
         # Sources live in subfolders. rc runs from res\ so app.rc's relative paths
         # (resource.h, app.manifest, logo.ico) resolve; it writes app.res back to gui\.
