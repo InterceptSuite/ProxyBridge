@@ -239,7 +239,7 @@ static void ApplyConfigs(void)
         char h[256], u[256], p[256];
         W2Ux(c->host, h, sizeof(h)); W2Ux(c->user, u, sizeof(u)); W2Ux(c->pass, p, sizeof(p));
         c->nativeId = g_api.AddProxyConfig((PBProxyType)type, h, (unsigned short)_wtoi(c->port), u, p, c->sendDomain ? TRUE : FALSE);
-        if (c->storedId == 0) c->storedId = c->nativeId;
+        if (c->storedId == 0) c->storedId = PB_AllocConfigId(&g_profile);
     }
 }
 

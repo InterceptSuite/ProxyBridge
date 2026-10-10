@@ -46,12 +46,19 @@ typedef struct {
     wchar_t mode[16], proc[256], ip[64], port[16], proto[8], action[16];
 } PBFilter;
 
-typedef struct {
+// Stable ids for proxy configs. These are owned by the profile and are NOT the id the engine returns
+// from AddProxyConfig (that one is only valid for the current engine session and is remapped on load).
+// Never reused, so a rule can never silently start pointing at a proxy added after its own was deleted.
+typedef struct PBProfile PBProfile;
+UINT32 PB_AllocConfigId(PBProfile* p);
+
+typedef struct PBProfile {
     int      localhostViaProxy;
     int      trafficLogging;
     int      autoClearLogs;
     int      closeToTray;
     int      fontZoom;            // UI/log text zoom in percent (60-300), 100 = DPI default
+    UINT32   nextCfgId;           // next stable proxy-config id to hand out (persisted; ids are never reused)
     wchar_t  language[8];         // "en" | "zh"
     PBConfig cfg[PB_MAX_CFG];   int cfgCount;
     PBRule   rule[PB_MAX_RULE]; int ruleCount;

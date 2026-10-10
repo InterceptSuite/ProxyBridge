@@ -152,6 +152,31 @@ void PB_ProfileDefaults(PBProfile* p, const wchar_t* name)
     lstrcpynW(p->language, L"en", 8);
 }
 
+// Makes proxy-config ids unique and non-zero and positions the allocator past every id in use.
+// Older profiles stored the engine's per-session id here, so duplicates and gaps are possible; a
+// duplicate keeps its id for the first config (rules referencing it stay with that one) and the
+// later ones get fresh ids.
+static void normalize_cfg_ids(PBProfile* p)
+{
+    UINT32 hi = 0;
+    for (int i = 0; i < p->cfgCount; i++) if (p->cfg[i].storedId > hi) hi = p->cfg[i].storedId;
+    for (int i = 0; i < p->ruleCount; i++) if (p->rule[i].cfgStoredId > hi) hi = p->rule[i].cfgStoredId;
+    if (p->nextCfgId <= hi) p->nextCfgId = hi + 1;
+    if (p->nextCfgId == 0) p->nextCfgId = 1;
+    for (int j = 0; j < p->cfgCount; j++)
+    {
+        BOOL dup = (p->cfg[j].storedId == 0);
+        for (int i = 0; i < j && !dup; i++) if (p->cfg[i].storedId == p->cfg[j].storedId) dup = TRUE;
+        if (dup) p->cfg[j].storedId = p->nextCfgId++;
+    }
+}
+
+UINT32 PB_AllocConfigId(PBProfile* p)
+{
+    if (p->nextCfgId == 0) normalize_cfg_ids(p);
+    return p->nextCfgId++;
+}
+
 void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
 {
     PB_ProfileDefaults(p, name);
@@ -165,6 +190,7 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
         p->trafficLogging    = json_bool(root, "IsTrafficLoggingEnabled", 1);
         p->autoClearLogs     = json_bool(root, "AutoClearConnectionLogs", 1);
         p->closeToTray       = json_bool(root, "CloseToTray", 1);
+        p->nextCfgId         = (UINT32)json_long(root, "NextProxyConfigId", 0);
         p->fontZoom          = (int)json_long(root, "FontZoom", 100);
         if (p->fontZoom < 60 || p->fontZoom > 300) p->fontZoom = 100;
         u2w(json_str(root, "Language", "en"), p->language, 8);
@@ -201,6 +227,8 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
                 ru->enabled = json_bool(r, "IsEnabled", 1);
                 ru->cfgStoredId = (UINT32)json_long(r, "ProxyConfigId", 0);
             }
+
+        normalize_cfg_ids(p);
 
         JVal* filters = json_get(root, "LogFilters");
         if (filters && filters->type == J_ARR)
@@ -240,7 +268,8 @@ BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
     sb_put(&b, "  \"AutoClearConnectionLogs\": ");  sb_put(&b, p->autoClearLogs ? "true" : "false");     sb_put(&b, ",\n");
     put_kv_str(&b, "  ", "Language", p->language, ",\n");
     sb_put(&b, "  \"CloseToTray\": ");              sb_put(&b, p->closeToTray ? "true" : "false");       sb_put(&b, ",\n");
-    { char zb[32]; _snprintf_s(zb, sizeof(zb), _TRUNCATE, "  \"FontZoom\": %d,\n", p->fontZoom); sb_put(&b, zb); }
+    { char zb[48]; _snprintf_s(zb, sizeof(zb), _TRUNCATE, "  \"FontZoom\": %d,\n", p->fontZoom); sb_put(&b, zb); }
+    { char nb[64]; _snprintf_s(nb, sizeof(nb), _TRUNCATE, "  \"NextProxyConfigId\": %u,\n", (unsigned)(p->nextCfgId ? p->nextCfgId : 1)); sb_put(&b, nb); }
 
     sb_put(&b, "  \"ProxyConfigs\": [");
     for (int i = 0; i < p->cfgCount; i++)
