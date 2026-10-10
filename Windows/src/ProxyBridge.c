@@ -1143,6 +1143,10 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         return FALSE;
     }
 
+    // Socket-layer events give the owner PID of each new connection without a table scan.
+    // Optional: if it cannot be opened the lookups fall back to the table.
+    sockmap_start();
+
     // WINDIVERT_PARAM_QUEUE_LENGTH: max packets in queue (range 32–16384).
     // Under heavy upload the kernel enqueues bursts of outbound packets faster
     // than the 4 packet threads can drain them; a full queue drops arriving
@@ -1218,6 +1222,8 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
         return FALSE;
 
     running = FALSE;
+
+    sockmap_stop();
 
     if (windivert_handle != INVALID_HANDLE_VALUE)
     {

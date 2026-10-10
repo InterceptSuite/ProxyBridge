@@ -253,6 +253,12 @@ void base64_encode(const char* input, char* output, size_t output_size);
 
 // ---- pb_process.c ----
 void *pidtbl_reserve(DWORD need);
+
+// pb_sockmap.c - owner PID of new outbound TCP connections from WinDivert's SOCKET layer
+BOOL  sockmap_start(void);
+void  sockmap_stop(void);
+DWORD sockmap_lookup_tcp(UINT16 port);   // 0 = unknown, fall back to the table scan
+void  sockmap_note_scan(void);
 DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port);
 DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port);
 DWORD get_process_id_from_connection_v6(const UINT8 src_ip6[16], UINT16 src_port);

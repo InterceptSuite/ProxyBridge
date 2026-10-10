@@ -32,23 +32,37 @@ void *pidtbl_reserve(DWORD need)
 // silently treated as unowned (DIRECT, not logged). Add headroom and retry instead.
 static void *owner_table_fetch(BOOL udp, ULONG af)
 {
-    DWORD size = 0;
+    DWORD size = 0, rc;
+#define OWNER_CALL(buf, szp) (udp ? GetExtendedUdpTable((buf), (szp), FALSE, af, UDP_TABLE_OWNER_PID, 0) \
+                                  : GetExtendedTcpTable((buf), (szp), FALSE, af, TCP_TABLE_OWNER_PID_ALL, 0))
+    if (g_pidtbl_buf != NULL)
+    {
+        // Fast path: the scratch buffer from the previous lookup is normally big enough, which
+        // saves the separate sizing call (it walks the whole table too, so it costs about as
+        // much as the fetch itself).
+        size = g_pidtbl_cap;
+        rc = OWNER_CALL(g_pidtbl_buf, &size);
+        if (rc == NO_ERROR) return g_pidtbl_buf;
+        if (rc != ERROR_INSUFFICIENT_BUFFER) return NULL;
+    }
+    else
+    {
+        rc = OWNER_CALL(NULL, &size);
+        if (rc != ERROR_INSUFFICIENT_BUFFER && rc != NO_ERROR) return NULL;
+    }
     for (int attempt = 0; attempt < 4; attempt++)
     {
-        DWORD rc = udp ? GetExtendedUdpTable(NULL, &size, FALSE, af, UDP_TABLE_OWNER_PID, 0)
-                       : GetExtendedTcpTable(NULL, &size, FALSE, af, TCP_TABLE_OWNER_PID_ALL, 0);
-        if (rc != ERROR_INSUFFICIENT_BUFFER && rc != NO_ERROR) return NULL;
         size += size / 4 + 4096;
         void *t = pidtbl_reserve(size);
         if (t == NULL) return NULL;
         DWORD got = size;
-        rc = udp ? GetExtendedUdpTable(t, &got, FALSE, af, UDP_TABLE_OWNER_PID, 0)
-                 : GetExtendedTcpTable(t, &got, FALSE, af, TCP_TABLE_OWNER_PID_ALL, 0);
+        rc = OWNER_CALL(t, &got);
         if (rc == NO_ERROR) return t;
         if (rc != ERROR_INSUFFICIENT_BUFFER) return NULL;
         size = got;   // grew again: retry with the size it asked for
     }
     return NULL;
+#undef OWNER_CALL
 }
 
 DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
@@ -58,7 +72,13 @@ DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
     if (cached_pid != 0)
         return cached_pid;
 
-    DWORD pid = 0;
+    DWORD pid = sockmap_lookup_tcp(src_port);
+    if (pid != 0)
+    {
+        cache_pid(src_ip, src_port, pid, FALSE);
+        return pid;
+    }
+    sockmap_note_scan();
 
     MIB_TCPTABLE_OWNER_PID *tcp_table = (MIB_TCPTABLE_OWNER_PID *)owner_table_fetch(FALSE, AF_INET);
     if (tcp_table == NULL)
@@ -145,7 +165,9 @@ DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port)
 
 DWORD get_process_id_from_connection_v6(const UINT8 src_ip6[16], UINT16 src_port)
 {
-    DWORD pid = 0;
+    DWORD pid = sockmap_lookup_tcp(src_port);
+    if (pid != 0) return pid;
+    sockmap_note_scan();
 
     MIB_TCP6TABLE_OWNER_PID *tcp_table = (MIB_TCP6TABLE_OWNER_PID *)owner_table_fetch(FALSE, AF_INET6);
     if (!tcp_table) return 0;
