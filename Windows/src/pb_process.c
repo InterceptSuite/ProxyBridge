@@ -25,6 +25,31 @@ void *pidtbl_reserve(DWORD need)
     return g_pidtbl_buf;
 }
 
+// Fetches an owner-PID table into the shared scratch buffer. The table can grow between the
+// size query and the fetch (busy machine, many sockets); a single-shot size-then-fetch then
+// fails with ERROR_INSUFFICIENT_BUFFER, the lookup returns PID 0 and the connection is
+// silently treated as unowned (DIRECT, not logged). Add headroom and retry instead.
+static void *owner_table_fetch(BOOL udp, ULONG af)
+{
+    DWORD size = 0;
+    for (int attempt = 0; attempt < 4; attempt++)
+    {
+        DWORD rc = udp ? GetExtendedUdpTable(NULL, &size, FALSE, af, UDP_TABLE_OWNER_PID, 0)
+                       : GetExtendedTcpTable(NULL, &size, FALSE, af, TCP_TABLE_OWNER_PID_ALL, 0);
+        if (rc != ERROR_INSUFFICIENT_BUFFER && rc != NO_ERROR) return NULL;
+        size += size / 4 + 4096;
+        void *t = pidtbl_reserve(size);
+        if (t == NULL) return NULL;
+        DWORD got = size;
+        rc = udp ? GetExtendedUdpTable(t, &got, FALSE, af, UDP_TABLE_OWNER_PID, 0)
+                 : GetExtendedTcpTable(t, &got, FALSE, af, TCP_TABLE_OWNER_PID_ALL, 0);
+        if (rc == NO_ERROR) return t;
+        if (rc != ERROR_INSUFFICIENT_BUFFER) return NULL;
+        size = got;   // grew again: retry with the size it asked for
+    }
+    return NULL;
+}
+
 DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
 {
     // check cache first
@@ -32,30 +57,24 @@ DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port)
     if (cached_pid != 0)
         return cached_pid;
 
-    DWORD size = 0;
     DWORD pid = 0;
 
-    if (GetExtendedTcpTable(NULL, &size, FALSE, AF_INET,
-                            TCP_TABLE_OWNER_PID_ALL, 0) != ERROR_INSUFFICIENT_BUFFER)
-    {
-        return 0;
-    }
-
-    MIB_TCPTABLE_OWNER_PID *tcp_table = (MIB_TCPTABLE_OWNER_PID *)pidtbl_reserve(size);
+    MIB_TCPTABLE_OWNER_PID *tcp_table = (MIB_TCPTABLE_OWNER_PID *)owner_table_fetch(FALSE, AF_INET);
     if (tcp_table == NULL)
     {
         return 0;
     }
 
-    if (GetExtendedTcpTable(tcp_table, &size, FALSE, AF_INET,
-                            TCP_TABLE_OWNER_PID_ALL, 0) != NO_ERROR)
-    {
-        return 0;   // buffer is reused, not freed
-    }
-
     for (DWORD i = 0; i < tcp_table->dwNumEntries; i++)
     {
         MIB_TCPROW_OWNER_PID *row = &tcp_table->table[i];
+
+        // Skip rows with no owner. A closed connection in TIME_WAIT keeps its local
+        // address:port with PID 0; when Windows reuses that ephemeral port for a new
+        // connection both rows are listed, and taking the TIME_WAIT one made the new
+        // connection look unowned (-> DIRECT, never logged).
+        if (row->dwOwningPid == 0)
+            continue;
 
         if (row->dwLocalAddr == src_ip &&
             ntohs((UINT16)row->dwLocalPort) == src_port)
@@ -79,25 +98,12 @@ DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port)
     if (cached_pid != 0)
         return cached_pid;
 
-    DWORD size = 0;
     DWORD pid = 0;
 
-    if (GetExtendedUdpTable(NULL, &size, FALSE, AF_INET,
-                            UDP_TABLE_OWNER_PID, 0) != ERROR_INSUFFICIENT_BUFFER)
-    {
-        return 0;
-    }
-
-    MIB_UDPTABLE_OWNER_PID *udp_table = (MIB_UDPTABLE_OWNER_PID *)pidtbl_reserve(size);
+    MIB_UDPTABLE_OWNER_PID *udp_table = (MIB_UDPTABLE_OWNER_PID *)owner_table_fetch(TRUE, AF_INET);
     if (udp_table == NULL)
     {
         return 0;
-    }
-
-    if (GetExtendedUdpTable(udp_table, &size, FALSE, AF_INET,
-                            UDP_TABLE_OWNER_PID, 0) != NO_ERROR)
-    {
-        return 0;   // buffer is reused, not freed
     }
 
     // First pass: Try exact match (IP + port)
@@ -138,23 +144,19 @@ DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port)
 
 DWORD get_process_id_from_connection_v6(const UINT8 src_ip6[16], UINT16 src_port)
 {
-    DWORD size = 0, pid = 0;
+    DWORD pid = 0;
 
-    if (GetExtendedTcpTable(NULL, &size, FALSE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0) != ERROR_INSUFFICIENT_BUFFER)
-        return 0;
-    MIB_TCP6TABLE_OWNER_PID *tcp_table = (MIB_TCP6TABLE_OWNER_PID *)pidtbl_reserve(size);
+    MIB_TCP6TABLE_OWNER_PID *tcp_table = (MIB_TCP6TABLE_OWNER_PID *)owner_table_fetch(FALSE, AF_INET6);
     if (!tcp_table) return 0;
-    if (GetExtendedTcpTable(tcp_table, &size, FALSE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR)
+    for (DWORD i = 0; i < tcp_table->dwNumEntries; i++)
     {
-        for (DWORD i = 0; i < tcp_table->dwNumEntries; i++)
+        MIB_TCP6ROW_OWNER_PID *row = &tcp_table->table[i];
+        if (row->dwOwningPid == 0) continue;   // TIME_WAIT leftover of a reused port (see IPv4)
+        if (ntohs((UINT16)row->dwLocalPort) == src_port &&
+            memcmp(row->ucLocalAddr, src_ip6, 16) == 0)
         {
-            MIB_TCP6ROW_OWNER_PID *row = &tcp_table->table[i];
-            if (ntohs((UINT16)row->dwLocalPort) == src_port &&
-                memcmp(row->ucLocalAddr, src_ip6, 16) == 0)
-            {
-                pid = row->dwOwningPid;
-                break;
-            }
+            pid = row->dwOwningPid;
+            break;
         }
     }
     return pid;   // buffer is reused, not freed
@@ -162,13 +164,10 @@ DWORD get_process_id_from_connection_v6(const UINT8 src_ip6[16], UINT16 src_port
 
 DWORD get_process_id_from_udp_connection_v6(const UINT8 src_ip6[16], UINT16 src_port)
 {
-    DWORD size = 0, pid = 0;
+    DWORD pid = 0;
 
-    if (GetExtendedUdpTable(NULL, &size, FALSE, AF_INET6, UDP_TABLE_OWNER_PID, 0) != ERROR_INSUFFICIENT_BUFFER)
-        return 0;
-    MIB_UDP6TABLE_OWNER_PID *udp_table = (MIB_UDP6TABLE_OWNER_PID *)pidtbl_reserve(size);
-    if (!udp_table) return 0;
-    if (GetExtendedUdpTable(udp_table, &size, FALSE, AF_INET6, UDP_TABLE_OWNER_PID, 0) == NO_ERROR)
+    MIB_UDP6TABLE_OWNER_PID *udp_table = (MIB_UDP6TABLE_OWNER_PID *)owner_table_fetch(TRUE, AF_INET6);
+    if (udp_table)
     {
         for (DWORD i = 0; i < udp_table->dwNumEntries; i++)
         {
