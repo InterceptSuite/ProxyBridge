@@ -1051,7 +1051,9 @@ DWORD WINAPI cleanup_worker(LPVOID arg)
 {
     while (running)
     {
-        Sleep(30000);  // 30 seconds
+        // 30 seconds, but in short slices: ProxyBridge_Stop() only waits briefly for this thread, and a
+        // thread still sleeping inside the DLL when it is unloaded would crash the host process.
+        for (int i = 0; i < 300 && running; i++) Sleep(100);
         if (running)
         {
             cleanup_stale_connections();
@@ -1085,6 +1087,8 @@ static DWORD fw_run(const wchar_t *args, DWORD wait_ms)
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
     return code;
 }
+
+static HANDLE g_fw_thread = NULL;
 
 static DWORD WINAPI fw_ensure_thread(LPVOID arg)
 {
@@ -1146,7 +1150,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 
     relay_pool_start();   // optional: connections fall back to blocking relay threads without it
 
-    { HANDLE ft = CreateThread(NULL, 0, fw_ensure_thread, NULL, 0, NULL); if (ft) CloseHandle(ft); }
+    g_fw_thread = CreateThread(NULL, 0, fw_ensure_thread, NULL, 0, NULL);
 
     proxy_thread = CreateThread(NULL, 1, local_proxy_server, NULL, 0, NULL);
     if (proxy_thread == NULL)
@@ -1333,7 +1337,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
     {
         if (packet_thread[i] != NULL)
         {
-            WaitForSingleObject(packet_thread[i], 1000);  // 1 second timeout
+            WaitForSingleObject(packet_thread[i], 8000);  // generous: a thread outliving Stop would run code from an unloaded DLL
             CloseHandle(packet_thread[i]);
             packet_thread[i] = NULL;
         }
@@ -1341,23 +1345,34 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
 
     if (proxy_thread != NULL)
     {
-        WaitForSingleObject(proxy_thread, 1000);  // 1 second timeout
+        WaitForSingleObject(proxy_thread, 8000);  // generous: a thread outliving Stop would run code from an unloaded DLL
         CloseHandle(proxy_thread);
         proxy_thread = NULL;
     }
 
     if (cleanup_thread != NULL)
     {
-        WaitForSingleObject(cleanup_thread, 1000);  // 1 second timeout
+        WaitForSingleObject(cleanup_thread, 8000);  // generous: a thread outliving Stop would run code from an unloaded DLL
         CloseHandle(cleanup_thread);
         cleanup_thread = NULL;
     }
 
     if (udp_relay_thread != NULL)
     {
-        WaitForSingleObject(udp_relay_thread, 1000);  // 1 second timeout
+        WaitForSingleObject(udp_relay_thread, 8000);  // generous: a thread outliving Stop would run code from an unloaded DLL
         CloseHandle(udp_relay_thread);
         udp_relay_thread = NULL;
+    }
+
+    // Handshake threads (connect to the proxy + SOCKS/HTTP negotiation) can still be mid-flight.
+    for (int i = 0; i < 700 && g_handler_threads > 0; i++) Sleep(50);    // up to 35 s
+    if (g_handler_threads > 0) log_message("Stop: %ld connection thread(s) still running", (long)g_handler_threads);
+
+    if (g_fw_thread != NULL)
+    {
+        WaitForSingleObject(g_fw_thread, 20000);   // netsh calls are bounded (8 s + 15 s)
+        CloseHandle(g_fw_thread);
+        g_fw_thread = NULL;
     }
 
     // Close every live relay and stop the pool's worker threads (the accept loop has ended,

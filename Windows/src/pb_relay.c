@@ -500,24 +500,6 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
         if (select(0, &read_fds, NULL, NULL, &timeout) <= 0)
             continue;
 
-        // helper lambda-like macro to accept and dispatch a connection
-        #define ACCEPT_AND_DISPATCH(sock, saddr_type, addr_field) do { \
-            saddr_type ca; int cl = sizeof(ca); \
-            SOCKET cs = accept(sock, (struct sockaddr*)&ca, &cl); \
-            if (cs == INVALID_SOCKET) break; \
-            CONNECTION_CONFIG *cc = (CONNECTION_CONFIG*)malloc(sizeof(CONNECTION_CONFIG)); \
-            if (cc == NULL) { closesocket(cs); break; } \
-            cc->client_socket = cs; \
-            UINT16 cp = ntohs(((saddr_type*)&ca)->addr_field); \
-            BOOL ok = cc->is_ipv6 ? \
-                get_connection_full_v6(cp, FALSE, cc->orig_dest_ip6, &cc->orig_dest_port, &cc->proxy_config_id) : \
-                get_connection_full(cp, FALSE, &cc->orig_dest_ip, &cc->orig_dest_port, &cc->proxy_config_id); \
-            if (!ok) { closesocket(cs); free(cc); break; } \
-            HANDLE t = CreateThread(NULL, 1, connection_handler, (LPVOID)cc, 0, NULL); \
-            if (t == NULL) { closesocket(cs); free(cc); break; } \
-            CloseHandle(t); \
-        } while(0)
-
         if (FD_ISSET(listen_sock, &read_fds))
         {
             struct sockaddr_in client_addr;
@@ -536,9 +518,10 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                     if (get_connection_full(client_port, FALSE, &conn_config->orig_dest_ip, &conn_config->orig_dest_port, &conn_config->proxy_config_id) &&
                         relay_peer_ok_v4(client_addr.sin_addr.s_addr, conn_config->orig_dest_ip))
                     {
+                        InterlockedIncrement(&g_handler_threads);
                         HANDLE conn_thread = CreateThread(NULL, 1, connection_handler, (LPVOID)conn_config, 0, NULL);
                         if (conn_thread != NULL) { CloseHandle(conn_thread); }
-                        else { closesocket(client_sock); free(conn_config); }
+                        else { InterlockedDecrement(&g_handler_threads); closesocket(client_sock); free(conn_config); }
                     }
                     else { closesocket(client_sock); free(conn_config); }
                 }
@@ -564,9 +547,10 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                     if (get_connection_full_v6(client_port, FALSE, conn_config->orig_dest_ip6, &conn_config->orig_dest_port, &conn_config->proxy_config_id) &&
                         relay_peer_ok_v6(&client_addr6.sin6_addr, conn_config->orig_dest_ip6))
                     {
+                        InterlockedIncrement(&g_handler_threads);
                         HANDLE conn_thread = CreateThread(NULL, 1, connection_handler, (LPVOID)conn_config, 0, NULL);
                         if (conn_thread != NULL) { CloseHandle(conn_thread); }
-                        else { closesocket(client_sock6); free(conn_config); }
+                        else { InterlockedDecrement(&g_handler_threads); closesocket(client_sock6); free(conn_config); }
                     }
                     else { closesocket(client_sock6); free(conn_config); }
                 }
@@ -574,8 +558,6 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
             }
         }
     }
-
-    #undef ACCEPT_AND_DISPATCH
 
     closesocket(listen_sock);
     if (listen_sock6 != INVALID_SOCKET) closesocket(listen_sock6);
@@ -594,7 +576,21 @@ static void reset_close(SOCKET s)
     closesocket(s);
 }
 
+volatile LONG g_handler_threads = 0;
+
+static DWORD WINAPI connection_handler_impl(LPVOID arg);
+
+// Every handshake thread is counted from the moment it is created until it returns, so that
+// ProxyBridge_Stop() can wait for all of them. A thread still running inside the DLL when the DLL
+// is unloaded (the service reloads the engine for every GUI connection) crashes the process.
 DWORD WINAPI connection_handler(LPVOID arg)
+{
+    DWORD r = connection_handler_impl(arg);
+    InterlockedDecrement(&g_handler_threads);
+    return r;
+}
+
+static DWORD WINAPI connection_handler_impl(LPVOID arg)
 {
     CONNECTION_CONFIG *config = (CONNECTION_CONFIG *)arg;
     SOCKET client_sock = config->client_socket;

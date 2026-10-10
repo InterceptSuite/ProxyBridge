@@ -383,6 +383,7 @@ BOOL relay_pool_start(void);                       // IOCP relay pool (pb_relay.
 void relay_pool_stop(void);
 BOOL relay_start(SOCKET client, SOCKET proxy);
 extern volatile LONG g_active_relays;
+extern volatile LONG g_handler_threads;   // per-connection handshake threads still running (Stop waits for them)
 
 // ---- ProxyBridge.c ----
 DWORD WINAPI packet_processor(LPVOID arg);
