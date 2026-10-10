@@ -175,6 +175,85 @@ BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UI
     return found;
 }
 
+// ---- UDP flow validation + direct-decision cache (see pb_internal.h) ----
+BOOL udp_flow_validate(UINT16 src_port, BOOL is_ipv6, UINT32 dest_ip, const UINT8 dest_ip6[16], UINT16 dest_port)
+{
+    ULONGLONG now = GetTickCount64();
+    int hash = src_port % CONNECTION_HASH_SIZE;
+    BOOL need_write = FALSE, valid = FALSE;
+
+    AcquireSRWLockShared(&lock);
+    CONNECTION_INFO *c = connection_hash_table[hash];
+    while (c != NULL && !(c->src_port == src_port && c->is_udp && c->is_ipv6 == is_ipv6)) c = c->next;
+    if (c == NULL) { ReleaseSRWLockShared(&lock); return FALSE; }
+    BOOL same = (c->orig_dest_port == dest_port) &&
+                (is_ipv6 ? memcmp(c->orig_dest_ip6, dest_ip6, 16) == 0 : c->orig_dest_ip == dest_ip);
+    if (c->last_activity < now && now - c->last_activity > UDP_REEVAL_IDLE_MS) need_write = TRUE;   // evict (guard: another thread may have stamped a later tick)
+    else if (same) { InterlockedExchange64((LONGLONG volatile*)&c->last_activity, (LONGLONG)now); valid = TRUE; }
+    else need_write = TRUE;                                                   // retarget
+    ReleaseSRWLockShared(&lock);
+    if (!need_write) return valid;
+
+    AcquireSRWLockExclusive(&lock);
+    CONNECTION_INFO **pp = &connection_hash_table[hash];
+    while (*pp != NULL && !((*pp)->src_port == src_port && (*pp)->is_udp && (*pp)->is_ipv6 == is_ipv6)) pp = &(*pp)->next;
+    c = *pp;
+    if (c == NULL) { ReleaseSRWLockExclusive(&lock); return FALSE; }
+    if (c->last_activity < now && now - c->last_activity > UDP_REEVAL_IDLE_MS)
+    {
+        *pp = c->next;
+        rev_unlink(c);
+        free(c);
+        valid = FALSE;
+    }
+    else
+    {
+        rev_unlink(c);                       // dest changes: re-key the reverse index
+        c->orig_dest_port = dest_port;
+        if (is_ipv6) memcpy(c->orig_dest_ip6, dest_ip6, 16); else c->orig_dest_ip = dest_ip;
+        c->last_activity = now;
+        rev_insert(c);
+        valid = TRUE;
+    }
+    ReleaseSRWLockExclusive(&lock);
+    return valid;
+}
+
+#define UDP_DIRECT_SLOTS 4096
+typedef struct { UINT8 dst[16]; UINT16 sp, dp; BOOL v6; DWORD until; } UDP_DIRECT_ENTRY;
+static UDP_DIRECT_ENTRY g_udp_direct[UDP_DIRECT_SLOTS];
+
+static UDP_DIRECT_ENTRY *udp_direct_slot(BOOL v6, const void *dst, UINT16 sp, UINT16 dp, UINT8 key[16])
+{
+    memset(key, 0, 16);
+    memcpy(key, dst, v6 ? 16 : 4);
+    UINT32 h = ((UINT32)sp << 16) ^ dp ^ (v6 ? 0x9E3779B9u : 0);
+    for (int i = 0; i < 16; i++) h = h * 31u + key[i];
+    return &g_udp_direct[h % UDP_DIRECT_SLOTS];
+}
+
+BOOL udp_direct_cached(BOOL is_ipv6, const void *dst, UINT16 src_port, UINT16 dst_port)
+{
+    UINT8 key[16];
+    UDP_DIRECT_ENTRY *e = udp_direct_slot(is_ipv6, dst, src_port, dst_port, key);
+    return e->until != 0 && e->sp == src_port && e->dp == dst_port && e->v6 == is_ipv6 &&
+           memcmp(e->dst, key, 16) == 0 && (int)(e->until - GetTickCount()) > 0;
+}
+
+void udp_direct_remember(BOOL is_ipv6, const void *dst, UINT16 src_port, UINT16 dst_port)
+{
+    UINT8 key[16];
+    UDP_DIRECT_ENTRY *e = udp_direct_slot(is_ipv6, dst, src_port, dst_port, key);
+    memcpy(e->dst, key, 16); e->sp = src_port; e->dp = dst_port; e->v6 = is_ipv6;
+    DWORD u = GetTickCount() + UDP_DIRECT_TTL_MS;
+    e->until = u ? u : 1;
+}
+
+void udp_direct_reset(void)
+{
+    memset(g_udp_direct, 0, sizeof(g_udp_direct));
+}
+
 BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp, BOOL is_ipv6)
 {
     BOOL tracked = FALSE;

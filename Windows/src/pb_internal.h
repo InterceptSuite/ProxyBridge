@@ -150,7 +150,7 @@ typedef struct PID_CACHE_ENTRY {
     UINT32 src_ip;
     UINT16 src_port;
     DWORD pid;
-    DWORD timestamp;
+    ULONGLONG timestamp;     // GetTickCount64() - a 32-bit field breaks the TTL math after ~49.7 days of uptime
     BOOL is_udp;
     struct PID_CACHE_ENTRY *next;
 } PID_CACHE_ENTRY;
@@ -331,6 +331,24 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
 void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id);
 BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id);
 BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port);
+// UDP flow validation for the app->relay redirect. A UDP "connection" is keyed by source port
+// only, so it must be re-checked on every datagram: (a) if the destination changed (a socket
+// that moves to another server, e.g. a voice call migrating) the entry is retargeted, and
+// (b) if the flow has been idle longer than UDP_REEVAL_IDLE_MS the source port may belong to a
+// different socket now, so the entry is dropped and the caller re-evaluates the rules.
+// Returns TRUE if a valid entry exists (and was refreshed), FALSE if not tracked / evicted.
+#define UDP_REEVAL_IDLE_MS 20000
+BOOL udp_flow_validate(UINT16 src_port, BOOL is_ipv6, UINT32 dest_ip, const UINT8 dest_ip6[16], UINT16 dest_port);
+
+// Short-lived cache of DIRECT decisions for UDP, keyed by (src port, destination). UDP has no
+// SYN to decide once per connection, so every datagram of a direct flow used to repeat the
+// full process/rule lookup (OpenProcess per packet) on the single capture thread.
+// Capture-thread only (NUM_PACKET_THREADS == 1), so no locking.
+#define UDP_DIRECT_TTL_MS 5000
+BOOL udp_direct_cached(BOOL is_ipv6, const void *dst, UINT16 src_port, UINT16 dst_port);
+void udp_direct_remember(BOOL is_ipv6, const void *dst, UINT16 src_port, UINT16 dst_port);
+void udp_direct_reset(void);
+
 BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port);
 BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id);

@@ -106,6 +106,24 @@ static BOOL is_proxy_server_endpoint(UINT32 dst_ip, UINT16 dst_port)
     return FALSE;
 }
 
+// UDP counterpart: the datagrams between the relay and the proxy's UDP relay (SOCKS5 UDP
+// ASSOCIATE) in either direction. The relay's send socket draws its local port from the same
+// pool as the apps, so without this a port collision with a tracked app flow redirects the
+// relay's own packets back into the relay and breaks all proxied UDP until restart.
+static BOOL is_proxy_udp_endpoint(UINT32 ip, UINT16 port_host)
+{
+    int n = g_proxy_config_count;
+    if (n > MAX_PROXY_CONFIGS) n = MAX_PROXY_CONFIGS;
+    for (int i = 0; i < n; i++)
+    {
+        const PROXY_CONFIG *c = &g_proxy_configs[i];
+        if (c->config_id != 0 && c->udp_connected &&
+            c->udp_relay_addr.sin_addr.s_addr == ip && ntohs(c->udp_relay_addr.sin_port) == port_host)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static void reset_stale_tcp_state(UINT16 sp, BOOL is_ipv6)
 {
     if (sp == g_local_relay_port) return;   // never our own relay's port
@@ -185,7 +203,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         goto ipv6u_send;
                     }
 
-                    if (is_connection_tracked(sp, TRUE, TRUE))
+                    if (udp_flow_validate(sp, TRUE, 0, (const UINT8*)ipv6_header->DstAddr, dp))
                     {
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
                         static const UINT8 _lb6u2[16]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
@@ -213,10 +231,18 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         continue;
                     }
 
+                    if (udp_direct_cached(TRUE, ipv6_header->DstAddr, sp, dp))
+                    {
+                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                        continue;
+                    }
+
                     RuleAction action6u;
                     DWORD pid6u = 0;
                     UINT32 pcid6u = 0;
                     action6u = check_process_rule_v6((const UINT8*)ipv6_header->SrcAddr, sp, (const UINT8*)ipv6_header->DstAddr, dp, TRUE, &pid6u, &pcid6u);
+                    if (action6u == RULE_ACTION_DIRECT && pid6u > 0)
+                        udp_direct_remember(TRUE, ipv6_header->DstAddr, sp, dp);
 
                     if (action6u == RULE_ACTION_PROXY && !g_localhost_via_proxy)
                     {
@@ -541,7 +567,14 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         continue;
                     }
                 }
-                else if (is_connection_tracked(ntohs(udp_header->SrcPort), TRUE, FALSE))
+                else if (is_proxy_udp_endpoint(ip_header->DstAddr, ntohs(udp_header->DstPort)) ||
+                         is_proxy_udp_endpoint(ip_header->SrcAddr, ntohs(udp_header->SrcPort)))
+                {
+                    // relay <-> proxy UDP relay traffic: never redirect or evaluate
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
+                else if (udp_flow_validate(ntohs(udp_header->SrcPort), FALSE, ip_header->DstAddr, NULL, ntohs(udp_header->DstPort)))
                 {
                     UINT16 src_port = ntohs(udp_header->SrcPort);
                     udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
@@ -575,11 +608,20 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         continue;
                     }
 
+                    // Known DIRECT flow (decided within the last few seconds): skip the lookup.
+                    if (udp_direct_cached(FALSE, &dest_ip, src_port, dest_port))
+                    {
+                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                        continue;
+                    }
+
                     RuleAction action;
                     DWORD pid = 0;
                     UINT32 proxy_config_id = 0;
 
                     action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, &pid, &proxy_config_id);
+                    if (action == RULE_ACTION_DIRECT && pid > 0)
+                        udp_direct_remember(FALSE, &dest_ip, src_port, dest_port);
 
                     // override PROXY to DIRECT if localhost proxy is disabled and destination is localhost
                     BYTE dest_first_octet = (dest_ip >> 0) & 0xFF;
@@ -1001,6 +1043,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 
     InitializeSRWLock(&lock);
     dns_cache_init();
+    udp_direct_reset();
 
     // If domain rules were configured before start, flush the OS DNS cache so the very
     // first connections re-resolve on the wire and populate our IP->hostname snoop cache.
