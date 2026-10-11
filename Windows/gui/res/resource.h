@@ -7,10 +7,10 @@
 // <assemblyIdentity version="..."> when bumping.
 #define PB_VER_MAJOR 4
 #define PB_VER_MINOR 1
-#define PB_VER_PATCH 0
+#define PB_VER_PATCH 1
 #define PB_VER_BUILD 0
-#define PB_VER_STR   "4.1.0"     // narrow, for the .rc VERSIONINFO strings
-#define PB_VER_STRW  L"4.1.0"    // wide, for the C/About UI
+#define PB_VER_STR   "4.1.1"     // narrow, for the .rc VERSIONINFO strings
+#define PB_VER_STRW  L"4.1.1"    // wide, for the C/About UI
 
 #define IDI_APPICON                 101
 
