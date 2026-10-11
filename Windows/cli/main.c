@@ -513,7 +513,7 @@ static bool load_dll(void)
 
     // use only the resolved absolute path no bare-name fallback to prevent
     // DLL hijacking via current working directory.
-    g_hDll = LoadLibraryExA(dll_path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    g_hDll = LoadLibraryExA(dll_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!g_hDll)
     {
         fprintf(stderr, "ERROR: Cannot load ProxyBridgeCore.dll (error %lu)\n",

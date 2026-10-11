@@ -277,13 +277,14 @@ static void ServeClient(void)
 static DWORD WINAPI WorkerMain(LPVOID arg)
 {
     (void)arg;
-    BOOL first = TRUE;
+    // Every pipe instance is created with FILE_FLAG_FIRST_PIPE_INSTANCE: if another process already
+    // owns the pipe name (squatting), creation fails and we retry instead of serving next to it.
+    const BOOL first = TRUE;
     while (!g_stop)
     {
         g_ctl = MakePipe(PB_PIPE_CTL, first, PIPE_ACCESS_DUPLEX);
         g_evt = MakePipe(PB_PIPE_EVT, first, PIPE_ACCESS_OUTBOUND);
         if (g_ctl == INVALID_HANDLE_VALUE || g_evt == INVALID_HANDLE_VALUE) { ClosePipes(); Sleep(1000); continue; }
-        first = FALSE;
 
         if (!ConnectNamedPipe(g_ctl, NULL) && GetLastError() != ERROR_PIPE_CONNECTED) { ClosePipes(); continue; }
         if (g_stop) { ClosePipes(); break; }

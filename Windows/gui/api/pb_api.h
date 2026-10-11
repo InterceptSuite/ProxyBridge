@@ -80,10 +80,9 @@ static BOOL PB_LoadDirect(PBApi* api)
     for (DWORD i = n; i > 0; i--) { if (path[i - 1] == L'\\') { path[i] = 0; break; } }
     lstrcatW(path, L"ProxyBridgeCore.dll");
 
-    api->dll = LoadLibraryW(path);
-#ifndef PB_NO_SEARCH_FALLBACK
-    if (!api->dll) api->dll = LoadLibraryW(L"ProxyBridgeCore.dll"); // fallback to search path
-#endif
+    // Absolute path only, and its dependencies (WinDivert.dll) come from that folder or System32:
+    // never from the current directory or PATH (DLL planting).
+    api->dll = LoadLibraryExW(path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!api->dll) return FALSE;
 
     #define PB_BIND(field, name) \

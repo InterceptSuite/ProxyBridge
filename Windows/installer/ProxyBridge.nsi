@@ -87,6 +87,11 @@ Section "MainSection" SEC01
   File "..\output\WinDivert.dll"
   File "..\output\WinDivert64.sys"
 
+  ; The service runs as SYSTEM from this folder, so ordinary users must never be able to modify it
+  ; (a folder chosen outside Program Files, e.g. D:\Tools, is usually writable by every user).
+  ; SYSTEM and Administrators: full control; Users: read/execute. SIDs, so it works on any language.
+  nsExec::ExecToLog 'icacls "$INSTDIR" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"'
+
   ; Remove leftover native libraries from the old C#/Avalonia GUI. The native C GUI
   ; does not use them; without this an upgrade would keep these stale DLLs behind.
   Delete "$INSTDIR\av_libglesv2.dll"
