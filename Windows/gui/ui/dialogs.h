@@ -330,7 +330,7 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 char h[256], u[256], p[256]; W2Ux(c.host, h, sizeof(h)); W2Ux(c.user, u, sizeof(u)); W2Ux(c.pass, p, sizeof(p));
                 UINT32 id = g_api.AddProxyConfig((_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
                                                  h, (unsigned short)_wtoi(c.port), u, p, c.sendDomain ? TRUE : FALSE);
-                if (id > 0) { c.nativeId = id; c.storedId = id; g_profile.cfg[g_profile.cfgCount++] = c; SaveActive(); RefreshServerList(lv); }
+                if (id > 0) { c.nativeId = id; c.storedId = PB_AllocConfigId(&g_profile); g_profile.cfg[g_profile.cfgCount++] = c; SaveActive(); RefreshServerList(lv); }
                 else MessageBoxW(dlg, T(S_ERR_ADDCFG), APP_TITLE, MB_OK | MB_ICONERROR);
             }
             return TRUE;

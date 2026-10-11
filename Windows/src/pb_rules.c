@@ -18,6 +18,26 @@ BOOL is_ipv6_multicast_or_linklocal(const UINT8 ip6[16])
     return FALSE;
 }
 
+// A just-created outbound TCP connection can be missing from the owner-PID table for a moment
+// when the SYN reaches us. Treating that as "no owner" sends the connection DIRECT, unlogged
+// and unproxied, so retry briefly. The capture layer only sees traffic to/from this host (no
+// forwarded/NAT traffic), so a persistent miss is rare and the worst case is ~1.5 ms once.
+static DWORD retry_tcp_pid(DWORD pid, BOOL ipv6, UINT32 src_ip, const UINT8 *src_ip6, UINT16 src_port)
+{
+    LARGE_INTEGER freq, t0, now;
+    QueryPerformanceFrequency(&freq);
+    for (int attempt = 0; attempt < 3 && pid == 0; attempt++)
+    {
+        SwitchToThread();
+        QueryPerformanceCounter(&t0);
+        do { YieldProcessor(); QueryPerformanceCounter(&now); }
+        while ((now.QuadPart - t0.QuadPart) * 1000000 / freq.QuadPart < 500);
+        pid = ipv6 ? get_process_id_from_connection_v6(src_ip6, src_port)
+                   : get_process_id_from_connection(src_ip, src_port);
+    }
+    return pid;
+}
+
 RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id)
 {
     DWORD pid;
@@ -25,6 +45,8 @@ RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const
 
     pid = is_udp ? get_process_id_from_udp_connection_v6(src_ip6, src_port)
                  : get_process_id_from_connection_v6(src_ip6, src_port);
+    if (pid == 0 && !is_udp)
+        pid = retry_tcp_pid(pid, TRUE, 0, src_ip6, src_port);
     if (out_pid) *out_pid = pid;
     if (pid == 0) return RULE_ACTION_DIRECT;
     if (pid == g_current_process_id) return RULE_ACTION_DIRECT;
@@ -719,6 +741,8 @@ RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UI
     pid = is_udp ? get_process_id_from_udp_connection(src_ip, src_port) : get_process_id_from_connection(src_ip, src_port);
     if (pid == 0 && is_udp)
         pid = get_process_id_from_connection(src_ip, src_port);
+    if (pid == 0 && !is_udp)
+        pid = retry_tcp_pid(pid, FALSE, src_ip, NULL, src_port);
 
         // this may cause issues - need to find alternative
     if (out_pid != NULL)

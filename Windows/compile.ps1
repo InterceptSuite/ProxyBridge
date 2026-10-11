@@ -10,7 +10,7 @@ param(
 $WinDivertPath = "C:\WinDivert-2.2.2-A"
 $SourcePath = "src"
 # Core split across modular translation units (see src\pb_internal.h).
-$SourceFile = "ProxyBridge.c pb_util.c pb_process.c pb_rules.c pb_proxy.c pb_dns.c pb_socks5.c pb_http.c pb_conntrack.c pb_relay.c"
+$SourceFile = "ProxyBridge.c pb_util.c pb_process.c pb_rules.c pb_proxy.c pb_dns.c pb_socks5.c pb_http.c pb_conntrack.c pb_relay.c pb_sockmap.c"
 $SourceFiles = ($SourceFile.Split(' ') | ForEach-Object { "$SourcePath\$_" }) -join ' '
 $OutputDLL = "ProxyBridgeCore.dll"
 $OutputDir = "output"
@@ -214,7 +214,7 @@ if ($success) {
                      "/Fe:ProxyBridge.exe " +
                      "/link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /RELEASE " +
                      "/DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf /CETCOMPAT " +
-                     "user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib winhttp.lib"
+                     "user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib winhttp.lib advapi32.lib"
 
         # Sources live in subfolders. rc runs from res\ so app.rc's relative paths
         # (resource.h, app.manifest, logo.ico) resolve; it writes app.res back to gui\.
@@ -259,6 +259,30 @@ if ($success) {
         } else {
             Write-Host "  CLI build failed!" -ForegroundColor Red
             Write-Host $cliOut
+        }
+    } else {
+        Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
+    }
+
+    # ── Build engine service ─────────────────────────────────────────────────
+    # ProxyBridgeSvc.exe runs as LocalSystem (registered by the installer) and owns
+    # ProxyBridgeCore.dll / WinDivert, so ProxyBridge.exe itself does not need admin.
+    Write-Host "`nBuilding service..." -ForegroundColor Green
+    if ($script:foundVcvarsPath -and (Test-Path $script:foundVcvarsPath)) {
+        $svcArgs = "/nologo /O2 /GL /Gy /W4 /MT /GS /guard:cf /sdl /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE " +
+                   "src\service\pb_service.c " +
+                   "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf /CETCOMPAT /SUBSYSTEM:CONSOLE " +
+                   "advapi32.lib " +
+                   "/OUT:ProxyBridgeSvc.exe"
+        $svcCmd = "`"$script:foundVcvarsPath`" $script:foundArch >nul && cl.exe $svcArgs"
+        $svcOut = cmd /c $svcCmd '2>&1'
+        if ($LASTEXITCODE -eq 0) {
+            Move-Item "ProxyBridgeSvc.exe" -Destination $OutputDir -Force
+            Write-Host "  Service built: ProxyBridgeSvc.exe" -ForegroundColor Gray
+            Remove-Item "*.obj" -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "  Service build failed!" -ForegroundColor Red
+            Write-Host $svcOut
         }
     } else {
         Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
