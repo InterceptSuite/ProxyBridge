@@ -29,6 +29,9 @@
 // never allowed (PIPE_REJECT_REMOTE_CLIENTS). The group is looked up every time a pipe is
 // created, so membership/SID changes need no service restart (members must sign in again).
 #define PB_USERS_GROUP L"ProxyBridge Users"
+// A group membership only reaches a user's token at the next sign-in, so the user who ran the
+// installer is also remembered by SID (one value name per SID) and gets access immediately.
+#define PB_SIDS_KEY L"SOFTWARE\\ProxyBridge\\AllowedSids"
 
 static SERVICE_STATUS_HANDLE g_ssh = NULL;
 static SERVICE_STATUS        g_status;
@@ -186,9 +189,24 @@ static void ClosePipes(void)
     if (g_ctl != INVALID_HANDLE_VALUE) { DisconnectNamedPipe(g_ctl); CloseHandle(g_ctl); g_ctl = INVALID_HANDLE_VALUE; }
 }
 
+static BOOL LooksLikeSid(const wchar_t *p)
+{
+    if (p[0] != L'S' || p[1] != L'-' || wcslen(p) > 80) return FALSE;
+    for (; *p; p++) if (!((*p >= L'0' && *p <= L'9') || *p == L'-' || *p == L'S')) return FALSE;
+    return TRUE;
+}
+
 static void BuildPipeSddl(wchar_t *out, size_t cap)
 {
     wcscpy_s(out, cap, L"D:(A;;GA;;;SY)(A;;GA;;;BA)");
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, PB_SIDS_KEY, 0, KEY_READ, &k) == ERROR_SUCCESS)
+    {
+        wchar_t nm[128];
+        for (DWORD i = 0, n = 128; i < 8 && RegEnumValueW(k, i, nm, &n, NULL, NULL, NULL, NULL) == ERROR_SUCCESS; i++, n = 128)
+            if (LooksLikeSid(nm)) { wcscat_s(out, cap, L"(A;;GRGW;;;"); wcscat_s(out, cap, nm); wcscat_s(out, cap, L")"); }
+        RegCloseKey(k);
+    }
     BYTE sid[SECURITY_MAX_SID_SIZE]; DWORD sidLen = sizeof(sid);
     wchar_t dom[256]; DWORD domLen = 256; SID_NAME_USE use;
     if (!LookupAccountNameW(NULL, PB_USERS_GROUP, sid, &sidLen, dom, &domLen, &use) || use != SidTypeAlias)
@@ -205,7 +223,7 @@ static void BuildPipeSddl(wchar_t *out, size_t cap)
 
 static HANDLE MakePipe(const wchar_t *name, BOOL first, DWORD openMode)
 {
-    wchar_t sddl[256]; BuildPipeSddl(sddl, 256);
+    wchar_t sddl[1024]; BuildPipeSddl(sddl, 1024);
     SECURITY_ATTRIBUTES sa; ZeroMemory(&sa, sizeof(sa)); sa.nLength = sizeof(sa);
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL))
         return INVALID_HANDLE_VALUE;
@@ -337,6 +355,22 @@ static int SetupUsers(void)
     if (domain && domain[0]) swprintf(full, 512, L"%s\\%s", domain, user); else wcscpy_s(full, 512, user);
     if (domain) WTSFreeMemory(domain);
     WTSFreeMemory(user);
+
+    // remember the user by SID so access works before the next sign-in (see PB_SIDS_KEY)
+    {
+        BYTE sid[SECURITY_MAX_SID_SIZE]; DWORD sl = sizeof(sid); wchar_t d2[256]; DWORD dl = 256; SID_NAME_USE use;
+        LPWSTR str = NULL;
+        if (LookupAccountNameW(NULL, full, sid, &sl, d2, &dl, &use) && use == SidTypeUser && ConvertSidToStringSidW(sid, &str))
+        {
+            HKEY k;
+            if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, PB_SIDS_KEY, 0, NULL, 0, KEY_WRITE, NULL, &k, NULL) == ERROR_SUCCESS)
+            {
+                DWORD one = 1; RegSetValueExW(k, str, 0, REG_DWORD, (const BYTE *)&one, sizeof(one));
+                RegCloseKey(k);
+            }
+            LocalFree(str);
+        }
+    }
 
     LOCALGROUP_MEMBERS_INFO_3 mi; mi.lgrmi3_domainandname = full;
     st = NetLocalGroupAddMembers(NULL, PB_USERS_GROUP, 3, (LPBYTE)&mi, 1);

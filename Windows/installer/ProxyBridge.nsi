@@ -151,6 +151,8 @@ Section Uninstall
   Sleep 1500
   nsExec::ExecToLog 'sc delete ProxyBridgeSvc'
   nsExec::ExecToLog 'net localgroup "ProxyBridge Users" /delete'
+  DeleteRegKey HKLM "SOFTWARE\ProxyBridge\AllowedSids"
+  DeleteRegKey /ifempty HKLM "SOFTWARE\ProxyBridge"
   nsExec::ExecToLog 'schtasks /Delete /F /TN "ProxyBridge"'
   ; The per-user Run entry is removed for the account running the uninstaller; other users'
   ; entries just point at a missing exe and are harmless.
