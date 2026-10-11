@@ -16,9 +16,18 @@
 
 #include <windows.h>
 
+// Names. The standalone product uses ProxyBridge*; an application that bundles its own copy of
+// the engine (built with /DPB_EMBEDDED) uses different ones, so both can be installed side by side
+// without sharing a service or a pipe.
+#ifdef PB_EMBEDDED
+#define PB_SERVICE_NAME  L"InterceptSuiteRedirect"
+#define PB_PIPE_CTL      L"\\\\.\\pipe\\InterceptSuiteRedirectCtl"
+#define PB_PIPE_EVT      L"\\\\.\\pipe\\InterceptSuiteRedirectEvt"
+#else
 #define PB_SERVICE_NAME  L"ProxyBridgeSvc"
 #define PB_PIPE_CTL      L"\\\\.\\pipe\\ProxyBridgeCtl"
 #define PB_PIPE_EVT      L"\\\\.\\pipe\\ProxyBridgeEvt"
+#endif
 #define PB_PROTO_VERSION 1
 #define PB_MSG_MAX       (64u * 1024u)
 #define PB_STR_MAX       (32u * 1024u)
