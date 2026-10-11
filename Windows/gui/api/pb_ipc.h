@@ -13,7 +13,7 @@
 #include "pb_api.h"
 #include "../../src/service/pb_proto.h"
 
-enum { PB_IPC_OK = 0, PB_IPC_NO_SERVICE, PB_IPC_BUSY, PB_IPC_BAD_VERSION };
+enum { PB_IPC_OK = 0, PB_IPC_NO_SERVICE, PB_IPC_BUSY, PB_IPC_BAD_VERSION, PB_IPC_DENIED };
 
 static HANDLE           g_ipcCtl = INVALID_HANDLE_VALUE;
 static HANDLE           g_ipcEvt = INVALID_HANDLE_VALUE;
@@ -192,10 +192,10 @@ static int PB_LoadService(PBApi* api)
         ctl = PbIpcOpen(PB_PIPE_CTL, GENERIC_READ | GENERIC_WRITE, &err);
     }
     if (ctl == INVALID_HANDLE_VALUE)
-        return (err == ERROR_PIPE_BUSY) ? PB_IPC_BUSY : PB_IPC_NO_SERVICE;
+        return (err == ERROR_PIPE_BUSY) ? PB_IPC_BUSY : (err == ERROR_ACCESS_DENIED) ? PB_IPC_DENIED : PB_IPC_NO_SERVICE;
 
     HANDLE evt = PbIpcOpen(PB_PIPE_EVT, GENERIC_READ, &err);
-    if (evt == INVALID_HANDLE_VALUE) { CloseHandle(ctl); return (err == ERROR_PIPE_BUSY) ? PB_IPC_BUSY : PB_IPC_NO_SERVICE; }
+    if (evt == INVALID_HANDLE_VALUE) { CloseHandle(ctl); return (err == ERROR_PIPE_BUSY) ? PB_IPC_BUSY : (err == ERROR_ACCESS_DENIED) ? PB_IPC_DENIED : PB_IPC_NO_SERVICE; }
 
     g_ipcCtl = ctl; g_ipcEvt = evt;
     {

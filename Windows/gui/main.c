@@ -1047,6 +1047,16 @@ static BOOL ConnectEngine(void)
         return FALSE;
     }
 
+    if (rc == PB_IPC_DENIED)
+    {
+        // The service refuses this account. Offer the elevated stand-alone mode as a fallback.
+        if (MessageBoxW(NULL, L"Your account is not allowed to use the ProxyBridge service.\n\n"
+                              L"Ask an administrator to add you to the local group \"ProxyBridge Users\" "
+                              L"(then sign out and back in).\n\nRun ProxyBridge as administrator instead?",
+                        APP_TITLE, MB_YESNO | MB_ICONWARNING) != IDYES)
+            return FALSE;
+    }
+
     // No service: portable mode.
     if (!IsElevated())
     {

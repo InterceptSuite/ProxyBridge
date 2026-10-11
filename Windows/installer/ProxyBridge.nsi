@@ -104,6 +104,8 @@ Section "MainSection" SEC01
   nsExec::ExecToLog 'sc create ProxyBridgeSvc binPath= "\"$INSTDIR\ProxyBridgeSvc.exe\"" start= auto DisplayName= "ProxyBridge Service"'
   nsExec::ExecToLog 'sc description ProxyBridgeSvc "Privileged traffic-redirection engine for ProxyBridge. Lets the ProxyBridge app run without administrator rights."'
   nsExec::ExecToLog 'sc sdset ProxyBridgeSvc "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)"'
+  ; Local group that may drive the service; the signed-in user is added to it.
+  nsExec::ExecToLog '"$INSTDIR\ProxyBridgeSvc.exe" --setup-users'
   nsExec::ExecToLog 'sc start ProxyBridgeSvc'
 
   CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
@@ -148,6 +150,7 @@ Section Uninstall
   nsExec::ExecToLog 'sc stop ProxyBridgeSvc'
   Sleep 1500
   nsExec::ExecToLog 'sc delete ProxyBridgeSvc'
+  nsExec::ExecToLog 'net localgroup "ProxyBridge Users" /delete'
   nsExec::ExecToLog 'schtasks /Delete /F /TN "ProxyBridge"'
   ; The per-user Run entry is removed for the account running the uninstaller; other users'
   ; entries just point at a missing exe and are harmless.
