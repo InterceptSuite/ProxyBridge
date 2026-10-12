@@ -11,16 +11,27 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <sddl.h>
+#include <lm.h>
+#include <wtsapi32.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "pb_proto.h"
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "netapi32.lib")
+#pragma comment(lib, "wtsapi32.lib")
 #define PB_NO_SEARCH_FALLBACK   // SYSTEM service: load the engine only from our own directory
 #include "../../gui/api/pb_api.h"
 
-// pipe access: SYSTEM + Administrators full, interactive (logged-on, local) users read/write.
-// Network logons are not in this list, and PIPE_REJECT_REMOTE_CLIENTS blocks remote access too.
-#define PB_PIPE_SDDL L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+// Who may drive the engine: SYSTEM and Administrators, plus members of the local group below
+// (the installer adds the installing user; an administrator can add or remove others with the
+// normal Windows tools). Everyone else gets "access denied" on the pipe. Network logons are
+// never allowed (PIPE_REJECT_REMOTE_CLIENTS). The group is looked up every time a pipe is
+// created, so membership/SID changes need no service restart (members must sign in again).
+#define PB_USERS_GROUP L"ProxyBridge Users"
+// A group membership only reaches a user's token at the next sign-in, so the user who ran the
+// installer is also remembered by SID (one value name per SID) and gets access immediately.
+#define PB_SIDS_KEY L"SOFTWARE\\ProxyBridge\\AllowedSids"
 
 static SERVICE_STATUS_HANDLE g_ssh = NULL;
 static SERVICE_STATUS        g_status;
@@ -178,10 +189,43 @@ static void ClosePipes(void)
     if (g_ctl != INVALID_HANDLE_VALUE) { DisconnectNamedPipe(g_ctl); CloseHandle(g_ctl); g_ctl = INVALID_HANDLE_VALUE; }
 }
 
+static BOOL LooksLikeSid(const wchar_t *p)
+{
+    if (p[0] != L'S' || p[1] != L'-' || wcslen(p) > 80) return FALSE;
+    for (; *p; p++) if (!((*p >= L'0' && *p <= L'9') || *p == L'-' || *p == L'S')) return FALSE;
+    return TRUE;
+}
+
+static void BuildPipeSddl(wchar_t *out, size_t cap)
+{
+    wcscpy_s(out, cap, L"D:(A;;GA;;;SY)(A;;GA;;;BA)");
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, PB_SIDS_KEY, 0, KEY_READ, &k) == ERROR_SUCCESS)
+    {
+        wchar_t nm[128];
+        for (DWORD i = 0, n = 128; i < 8 && RegEnumValueW(k, i, nm, &n, NULL, NULL, NULL, NULL) == ERROR_SUCCESS; i++, n = 128)
+            if (LooksLikeSid(nm)) { wcscat_s(out, cap, L"(A;;GRGW;;;"); wcscat_s(out, cap, nm); wcscat_s(out, cap, L")"); }
+        RegCloseKey(k);
+    }
+    BYTE sid[SECURITY_MAX_SID_SIZE]; DWORD sidLen = sizeof(sid);
+    wchar_t dom[256]; DWORD domLen = 256; SID_NAME_USE use;
+    if (!LookupAccountNameW(NULL, PB_USERS_GROUP, sid, &sidLen, dom, &domLen, &use) || use != SidTypeAlias)
+        return;                                            // no group: administrators only
+    LPWSTR str = NULL;
+    if (ConvertSidToStringSidW(sid, &str))
+    {
+        wcscat_s(out, cap, L"(A;;GRGW;;;");
+        wcscat_s(out, cap, str);
+        wcscat_s(out, cap, L")");
+        LocalFree(str);
+    }
+}
+
 static HANDLE MakePipe(const wchar_t *name, BOOL first, DWORD openMode)
 {
+    wchar_t sddl[1024]; BuildPipeSddl(sddl, 1024);
     SECURITY_ATTRIBUTES sa; ZeroMemory(&sa, sizeof(sa)); sa.nLength = sizeof(sa);
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(PB_PIPE_SDDL, SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL))
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL))
         return INVALID_HANDLE_VALUE;
     HANDLE h = CreateNamedPipeW(name,
         openMode | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
@@ -292,8 +336,51 @@ static void WINAPI SvcMain(DWORD argc, LPWSTR *argv)
     SetState(SERVICE_STOPPED, 0);
 }
 
-int wmain(void)
+// "ProxyBridgeSvc.exe --setup-users" (run by the installer, elevated): create the local group
+// and add the user who is signed in at the console. Returns 0 on success.
+static int SetupUsers(void)
 {
+    LOCALGROUP_INFO_1 gi; gi.lgrpi1_name = (LPWSTR)PB_USERS_GROUP;
+    gi.lgrpi1_comment = L"Users allowed to control the ProxyBridge engine service";
+    NET_API_STATUS st = NetLocalGroupAdd(NULL, 1, (LPBYTE)&gi, NULL);
+    if (st != NERR_Success && st != NERR_GroupExists && st != ERROR_ALIAS_EXISTS) return 2;
+
+    DWORD sess = WTSGetActiveConsoleSessionId();
+    if (sess == 0xFFFFFFFF) return 0;                      // nobody signed in: group only
+    LPWSTR user = NULL, domain = NULL; DWORD n = 0;
+    if (!WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, sess, WTSUserName, &user, &n) || !user || !user[0])
+        { if (user) WTSFreeMemory(user); return 0; }
+    WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, sess, WTSDomainName, &domain, &n);
+    wchar_t full[512];
+    if (domain && domain[0]) swprintf(full, 512, L"%s\\%s", domain, user); else wcscpy_s(full, 512, user);
+    if (domain) WTSFreeMemory(domain);
+    WTSFreeMemory(user);
+
+    // remember the user by SID so access works before the next sign-in (see PB_SIDS_KEY)
+    {
+        BYTE sid[SECURITY_MAX_SID_SIZE]; DWORD sl = sizeof(sid); wchar_t d2[256]; DWORD dl = 256; SID_NAME_USE use;
+        LPWSTR str = NULL;
+        if (LookupAccountNameW(NULL, full, sid, &sl, d2, &dl, &use) && use == SidTypeUser && ConvertSidToStringSidW(sid, &str))
+        {
+            HKEY k;
+            if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, PB_SIDS_KEY, 0, NULL, 0, KEY_WRITE, NULL, &k, NULL) == ERROR_SUCCESS)
+            {
+                DWORD one = 1; RegSetValueExW(k, str, 0, REG_DWORD, (const BYTE *)&one, sizeof(one));
+                RegCloseKey(k);
+            }
+            LocalFree(str);
+        }
+    }
+
+    LOCALGROUP_MEMBERS_INFO_3 mi; mi.lgrmi3_domainandname = full;
+    st = NetLocalGroupAddMembers(NULL, PB_USERS_GROUP, 3, (LPBYTE)&mi, 1);
+    return (st == NERR_Success || st == ERROR_MEMBER_IN_ALIAS) ? 0 : 3;
+}
+
+int wmain(int argc, wchar_t **argv)
+{
+    if (argc >= 2 && wcscmp(argv[1], L"--setup-users") == 0)
+        return SetupUsers();
     // The engine DLL is loaded from our own directory by absolute path (PB_LoadDirect), and the
     // service must never search the CWD / PATH for it.
     SetDllDirectoryW(L"");
