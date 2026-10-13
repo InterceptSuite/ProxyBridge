@@ -4,7 +4,7 @@
 // Application icon (reuse the shared logo)
 IDI_APPICON ICON "logo.ico"
 
-// Embedded manifest (admin + Common Controls v6 + DPI)
+// Embedded manifest (asInvoker + Common Controls v6 + DPI)
 1 24 "app.manifest"
 
 // Version info (exe Properties → Details); numbers come from resource.h

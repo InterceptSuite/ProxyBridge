@@ -38,10 +38,15 @@ static DWORD retry_tcp_pid(DWORD pid, BOOL ipv6, UINT32 src_ip, const UINT8 *src
     return pid;
 }
 
-RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id)
+RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port,
+                                 const UINT8 dest_ip6[16], UINT16 dest_port,
+                                 BOOL is_udp, ULONGLONG packet_qpc,
+                                 char hostname[256], DWORD *out_pid,
+                                 UINT32 *out_proxy_config_id)
 {
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
+    if (hostname) hostname[0] = '\0';
 
     pid = is_udp ? get_process_id_from_udp_connection_v6(src_ip6, src_port)
                  : get_process_id_from_connection_v6(src_ip6, src_port);
@@ -53,16 +58,53 @@ RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const
     if (!get_process_name_from_pid(pid, process_name, sizeof(process_name)))
         return RULE_ACTION_DIRECT;
 
+    BOOL needs_hostname = FALSE;
     UINT32 proxy_config_id = 0;
-    RuleAction action = match_rule_v6(process_name, dest_ip6, dest_port, is_udp, &proxy_config_id);
+    RuleAction action = match_rule_v6(process_name, dest_ip6, dest_port, is_udp, NULL,
+                                      &needs_hostname, &proxy_config_id);
+    BOOL hostname_checked = FALSE;
+    if (needs_hostname && hostname)
+    {
+        // Flush ETW on its worker and bound capture-thread waiting to the decision budget.
+        dns_etw_lookup(pid, TRUE, 0, dest_ip6, packet_qpc, TRUE, hostname, 256);
+        hostname_checked = TRUE;
+        if (hostname[0])
+            action = match_rule_v6(process_name, dest_ip6, dest_port, is_udp, hostname,
+                                   NULL, &proxy_config_id);
+    }
 
     if (action == RULE_ACTION_PROXY)
     {
         PROXY_CONFIG *cfg = find_proxy_config(proxy_config_id);
         if (cfg == NULL || cfg->host[0] == '\0' || cfg->port == 0)
-            return RULE_ACTION_DIRECT;
+        {
+            if (hostname) hostname[0] = '\0';
+            return RULE_ACTION_DIRECT;  // No proxy configured
+        }
         if (is_udp && cfg->type == PROXY_TYPE_HTTP)
+        {
+            if (hostname) hostname[0] = '\0';
             return RULE_ACTION_DIRECT;
+        }
+    }
+
+    // The recovered name is surfaced only for connections whose proxy resolves DNS
+    // itself (send hostname). It is an internal heuristic tied to that feature, so
+    // Direct traffic and plain socks5 proxies log the IP, not the name.
+    BOOL expose_hostname = FALSE;
+    if (action == RULE_ACTION_PROXY)
+    {
+        PROXY_CONFIG *cfg = find_proxy_config(proxy_config_id);
+        if (cfg && cfg->send_domain_to_proxy) expose_hostname = TRUE;
+    }
+    if (expose_hostname)
+    {
+        if (!hostname_checked && hostname)
+            dns_etw_lookup(pid, TRUE, 0, dest_ip6, packet_qpc, TRUE, hostname, 256);
+    }
+    else if (hostname)
+    {
+        hostname[0] = '\0';
     }
     if (out_proxy_config_id) *out_proxy_config_id = proxy_config_id;
     return action;
@@ -534,17 +576,17 @@ BOOL is_broadcast_or_multicast(UINT32 ip)
 // Matches rules by process name, IP, port, and protocol
 // Inner matcher - caller MUST hold g_rules_lock (shared) for the whole traversal so
 // rules_list and the strings it points to cannot be freed/edited mid-match.
-RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
+RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 dest_port,
+                            BOOL is_udp, const char *hostname,
+                            BOOL *out_needs_hostname,
+                            UINT32 *out_proxy_config_id)
 {
     PROCESS_RULE *rule = rules_list;
     PROCESS_RULE *wildcard_rule = NULL;  // Save fully wildcard rule for last
 
-    // Resolve the destination hostname once (only when domain rules exist) from the
-    // DNS-snoop cache. Reused for every rule's domain filter below. Cache miss -> unknown.
-    char domain[256];
-    const char *dst_domain = NULL;
-    if (g_has_domain_rules && dns_cache_lookup(dest_ip, domain, sizeof(domain)))
-        dst_domain = domain;
+    const char *dst_domain = hostname && hostname[0] ? hostname : NULL;
+    // Used by the first pass to avoid waiting for unrelated domain rules.
+    if (out_needs_hostname) *out_needs_hostname = FALSE;
 
     while (rule != NULL)
     {
@@ -584,12 +626,16 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
             {
                 // Filtered wildcard - check if it matches
                 if (match_ip_list(rule->target_hosts, dest_ip) &&
-                    match_port_list(rule->target_ports, dest_port) &&
-                    match_domain_filter(rule, dst_domain))
+                    match_port_list(rule->target_ports, dest_port))
                 {
-                    // Matched! Return this rule's action
-                    if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
-                    return rule->action;
+                    if (has_domain_filter && !dst_domain && out_needs_hostname)
+                        *out_needs_hostname = TRUE;
+                    if (match_domain_filter(rule, dst_domain))
+                    {
+                        // Matched! Return this rule's action
+                        if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
+                        return rule->action;
+                    }
                 }
                 // Didn't match, continue
                 rule = rule->next;
@@ -610,12 +656,16 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
         {
             // Process matched! Check IP, port and domain filters
             if (match_ip_list(rule->target_hosts, dest_ip) &&
-                match_port_list(rule->target_ports, dest_port) &&
-                match_domain_filter(rule, dst_domain))
+                match_port_list(rule->target_ports, dest_port))
             {
-                // All filters matched! Return this rule's action
-                if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
-                return rule->action;
+                if (rule_has_domain_filter(rule) && !dst_domain && out_needs_hostname)
+                    *out_needs_hostname = TRUE;
+                if (match_domain_filter(rule, dst_domain))
+                {
+                    // All filters matched! Return this rule's action
+                    if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
+                    return rule->action;
+                }
             }
         }
 
@@ -636,10 +686,13 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
 
 // Public matcher - takes the shared rules lock so a concurrent AddRule/EditRule/
 // DeleteRule/MoveRule from the GUI thread cannot free a node/string mid-match.
-RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
+RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port,
+                      BOOL is_udp, const char *hostname, BOOL *out_needs_hostname,
+                      UINT32 *out_proxy_config_id)
 {
     AcquireSRWLockShared(&g_rules_lock);
-    RuleAction action = match_rule_inner(process_name, dest_ip, dest_port, is_udp, out_proxy_config_id);
+    RuleAction action = match_rule_inner(process_name, dest_ip, dest_port, is_udp,
+                                         hostname, out_needs_hostname, out_proxy_config_id);
     ReleaseSRWLockShared(&g_rules_lock);
     return action;
 }
@@ -648,17 +701,17 @@ RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port
 // Supports exact addresses ("::1"), CIDR ("2001:db8::/32"), and wildcards ("*").
 // IPv4-format patterns in target_hosts are silently skipped for IPv6 traffic.
 // Caller MUST hold g_rules_lock (shared) - see match_rule_v6 wrapper below.
-RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
+RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16],
+                               UINT16 dest_port, BOOL is_udp, const char *hostname,
+                               BOOL *out_needs_hostname,
+                               UINT32 *out_proxy_config_id)
 {
     PROCESS_RULE *rule = rules_list;
     PROCESS_RULE *wildcard_rule = NULL;
 
-    // Resolve the destination hostname once (only when domain rules exist) from the
-    // IPv6 DNS-snoop cache. Reused for every rule's domain filter below.
-    char domain[256];
-    const char *dst_domain = NULL;
-    if (g_has_domain_rules && dns_cache_lookup_v6(dest_ip6, domain, sizeof(domain)))
-        dst_domain = domain;
+    const char *dst_domain = hostname && hostname[0] ? hostname : NULL;
+    // Used by the first pass to avoid waiting for unrelated domain rules.
+    if (out_needs_hostname) *out_needs_hostname = FALSE;
 
     while (rule != NULL)
     {
@@ -685,11 +738,15 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
             if (has_ip_filter || has_port_filter || has_domain_filter)
             {
                 if (match_ip_list_v6(rule->target_hosts, dest_ip6) &&
-                    match_port_list(rule->target_ports, dest_port) &&
-                    match_domain_filter(rule, dst_domain))
+                    match_port_list(rule->target_ports, dest_port))
                 {
-                    if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
-                    return rule->action;
+                    if (has_domain_filter && !dst_domain && out_needs_hostname)
+                        *out_needs_hostname = TRUE;
+                    if (match_domain_filter(rule, dst_domain))
+                    {
+                        if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
+                        return rule->action;
+                    }
                 }
                 rule = rule->next;
                 continue;
@@ -704,11 +761,15 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
         if (match_process_list(rule->process_name, process_name))
         {
             if (match_ip_list_v6(rule->target_hosts, dest_ip6) &&
-                match_port_list(rule->target_ports, dest_port) &&
-                match_domain_filter(rule, dst_domain))
+                match_port_list(rule->target_ports, dest_port))
             {
-                if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
-                return rule->action;
+                if (rule_has_domain_filter(rule) && !dst_domain && out_needs_hostname)
+                    *out_needs_hostname = TRUE;
+                if (match_domain_filter(rule, dst_domain))
+                {
+                    if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
+                    return rule->action;
+                }
             }
         }
 
@@ -725,18 +786,26 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
     return RULE_ACTION_DIRECT;
 }
 
-RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
+RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16],
+                         UINT16 dest_port, BOOL is_udp, const char *hostname,
+                         BOOL *out_needs_hostname,
+                         UINT32 *out_proxy_config_id)
 {
     AcquireSRWLockShared(&g_rules_lock);
-    RuleAction action = match_rule_v6_inner(process_name, dest_ip6, dest_port, is_udp, out_proxy_config_id);
+    RuleAction action = match_rule_v6_inner(process_name, dest_ip6, dest_port, is_udp,
+                                            hostname, out_needs_hostname, out_proxy_config_id);
     ReleaseSRWLockShared(&g_rules_lock);
     return action;
 }
 
-RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id)
+RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip,
+                              UINT16 dest_port, BOOL is_udp, ULONGLONG packet_qpc,
+                              char hostname[256], DWORD *out_pid,
+                              UINT32 *out_proxy_config_id)
 {
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
+    if (hostname) hostname[0] = '\0';
 
     pid = is_udp ? get_process_id_from_udp_connection(src_ip, src_port) : get_process_id_from_connection(src_ip, src_port);
     if (pid == 0 && is_udp)
@@ -758,20 +827,56 @@ RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UI
     if (!get_process_name_from_pid(pid, process_name, sizeof(process_name)))
         return RULE_ACTION_DIRECT;
 
-    // Use unified rule matching function
+    BOOL needs_hostname = FALSE;
     UINT32 proxy_config_id = 0;
-    RuleAction action = match_rule(process_name, dest_ip, dest_port, is_udp, &proxy_config_id);
+    RuleAction action = match_rule(process_name, dest_ip, dest_port, is_udp, NULL,
+                                   &needs_hostname, &proxy_config_id);
+    BOOL hostname_checked = FALSE;
+    if (needs_hostname && hostname)
+    {
+        // Flush ETW on its worker and bound capture-thread waiting to the decision budget.
+        dns_etw_lookup(pid, FALSE, dest_ip, NULL, packet_qpc, TRUE, hostname, 256);
+        hostname_checked = TRUE;
+        if (hostname[0])
+            action = match_rule(process_name, dest_ip, dest_port, is_udp, hostname,
+                                NULL, &proxy_config_id);
+    }
 
     // Additional checks for proxy configuration
     if (action == RULE_ACTION_PROXY)
     {
         PROXY_CONFIG *cfg = find_proxy_config(proxy_config_id);
         if (cfg == NULL || cfg->host[0] == '\0' || cfg->port == 0)
+        {
+            if (hostname) hostname[0] = '\0';
             return RULE_ACTION_DIRECT;  // No proxy configured
+        }
 
         // UDP: HTTP proxy doesn't support UDP - use per-rule proxy config type
         if (is_udp && cfg->type == PROXY_TYPE_HTTP)
+        {
+            if (hostname) hostname[0] = '\0';
             return RULE_ACTION_DIRECT;
+        }
+    }
+
+    // The recovered name is surfaced only for connections whose proxy resolves DNS
+    // itself (send hostname). It is an internal heuristic tied to that feature, so
+    // Direct traffic and plain socks5 proxies log the IP, not the name.
+    BOOL expose_hostname = FALSE;
+    if (action == RULE_ACTION_PROXY)
+    {
+        PROXY_CONFIG *cfg = find_proxy_config(proxy_config_id);
+        if (cfg && cfg->send_domain_to_proxy) expose_hostname = TRUE;
+    }
+    if (expose_hostname)
+    {
+        if (!hostname_checked && hostname)
+            dns_etw_lookup(pid, FALSE, dest_ip, NULL, packet_qpc, TRUE, hostname, 256);
+    }
+    else if (hostname)
+    {
+        hostname[0] = '\0';
     }
 
     if (out_proxy_config_id != NULL)
@@ -1167,7 +1272,6 @@ PROXYBRIDGE_API BOOL ProxyBridge_MoveRuleToPosition(UINT32 rule_id, UINT32 new_p
 void update_has_active_rules(void)
 {
     BOOL has_active = FALSE;
-    BOOL has_domain = FALSE;
 
     AcquireSRWLockShared(&g_rules_lock);
     PROCESS_RULE *rule = rules_list;
@@ -1176,22 +1280,12 @@ void update_has_active_rules(void)
         if (rule->enabled)
         {
             has_active = TRUE;
-            if (rule_has_domain_filter(rule))
-            {
-                has_domain = TRUE;
-                break;  // both flags are now known
-            }
+            break;
         }
         rule = rule->next;
     }
     ReleaseSRWLockShared(&g_rules_lock);
 
     g_has_active_rules = has_active;
-
-    // Edge trigger: when domain rules first become active, flush the OS DNS cache so
-    // subsequent connections re-resolve and populate our snoop cache.
-    if (has_domain && !g_has_domain_rules && running)
-        flush_dns_resolver_cache();
-    g_has_domain_rules = has_domain;
 }
 

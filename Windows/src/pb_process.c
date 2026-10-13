@@ -3,6 +3,22 @@
 
 // Process resolution: src-port -> PID lookups and the PID cache.
 
+BOOL get_process_identity(DWORD pid, FILETIME *created, HANDLE *process_handle)
+{
+    if (!pid || !created || !process_handle) return FALSE;
+    HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    FILETIME exited, kernel, user;
+    if (!process) return FALSE;
+    if (!GetProcessTimes(process, created, &exited, &kernel, &user) ||
+        WaitForSingleObject(process, 0) != WAIT_TIMEOUT)
+    {
+        CloseHandle(process);
+        return FALSE;
+    }
+    *process_handle = process;
+    return TRUE;
+}
+
 // Reusable grow-only scratch buffer for the TCP/UDP owner-PID tables. These lookups run
 // only on the single packet-processor thread (NUM_PACKET_THREADS == 1) and each call
 // finishes scanning before the next one, so one shared buffer is safe and lets us skip a

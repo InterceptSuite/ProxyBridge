@@ -2,6 +2,11 @@
 
 // Relay: TCP/UDP relay servers and per-connection worker threads.
 
+static void relay_report_connection(DWORD process_id, BOOL is_ipv6, UINT32 dest_ip,
+                                    const UINT8 dest_ip6[16], UINT16 dest_port,
+                                    const char *hostname, const PROXY_CONFIG *proxy,
+                                    const char *failure_reason);
+
 DWORD WINAPI udp_relay_server(LPVOID arg)
 {
     WSADATA wsa_data;
@@ -166,9 +171,11 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                 UINT32 dest_ip;
                 UINT16 dest_port;
 
-                if (get_connection(from_port, TRUE, &dest_ip, &dest_port))
+                char hostname[256] = {0};
+                UINT32 proxy_config_id = 0;
+                if (get_connection_full(from_port, TRUE, &dest_ip, &dest_port,
+                                        &proxy_config_id, hostname, sizeof(hostname), NULL, NULL))
                 {
-                    UINT32 proxy_config_id = get_connection_proxy_id(from_port, TRUE);
                     PROXY_CONFIG *cfg = find_proxy_config(proxy_config_id);
 
                     if (cfg == NULL || cfg->type != PROXY_TYPE_SOCKS5)
@@ -190,19 +197,34 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                         assoc_replaced = 1;   // new sockets created - read_fds is stale
                     }
 
-                    send_buf[0] = 0;
-                    send_buf[1] = 0;
-                    send_buf[2] = 0;
-                    send_buf[3] = SOCKS5_ATYP_IPV4;
-                    send_buf[4] = (dest_ip >> 0) & 0xFF;
-                    send_buf[5] = (dest_ip >> 8) & 0xFF;
-                    send_buf[6] = (dest_ip >> 16) & 0xFF;
-                    send_buf[7] = (dest_ip >> 24) & 0xFF;
-                    send_buf[8] = (dest_port >> 8) & 0xFF;
-                    send_buf[9] = (dest_port >> 0) & 0xFF;
-                    memcpy(&send_buf[10], recv_buf, recv_len);
+                    size_t header_len = 10;
+                    send_buf[0] = 0; send_buf[1] = 0; send_buf[2] = 0;
+                    if (cfg->send_domain_to_proxy && hostname[0] &&
+                        strnlen_s(hostname, sizeof(hostname)) <= 255)
+                    {
+                        size_t host_len = strlen(hostname);
+                        header_len = 7 + host_len;
+                        if (recv_len > MAXBUF - header_len) continue;
+                        send_buf[3] = SOCKS5_ATYP_DOMAIN;
+                        send_buf[4] = (unsigned char)host_len;
+                        memcpy(&send_buf[5], hostname, host_len);
+                        send_buf[5 + host_len] = (dest_port >> 8) & 0xFF;
+                        send_buf[6 + host_len] = dest_port & 0xFF;
+                    }
+                    else
+                    {
+                        if (recv_len > MAXBUF - header_len) continue;
+                        send_buf[3] = SOCKS5_ATYP_IPV4;
+                        send_buf[4] = (dest_ip >> 0) & 0xFF;
+                        send_buf[5] = (dest_ip >> 8) & 0xFF;
+                        send_buf[6] = (dest_ip >> 16) & 0xFF;
+                        send_buf[7] = (dest_ip >> 24) & 0xFF;
+                        send_buf[8] = (dest_port >> 8) & 0xFF;
+                        send_buf[9] = dest_port & 0xFF;
+                    }
+                    memcpy(&send_buf[header_len], recv_buf, recv_len);
 
-                    int sent = sendto(cfg->udp_send_sock, (char*)send_buf, 10 + recv_len, 0,
+                    int sent = sendto(cfg->udp_send_sock, (char*)send_buf, (int)(header_len + recv_len), 0,
                           (struct sockaddr *)&cfg->udp_relay_addr, sizeof(cfg->udp_relay_addr));
 
                     if (sent == SOCKET_ERROR) {
@@ -215,7 +237,7 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                         // lose at most one packet during a proxy reconnect event.
                         if (establish_udp_associate_for_config(cfg))
                         {
-                            sendto(cfg->udp_send_sock, (char*)send_buf, 10 + recv_len, 0,
+                            sendto(cfg->udp_send_sock, (char*)send_buf, (int)(header_len + recv_len), 0,
                                    (struct sockaddr *)&cfg->udp_relay_addr, sizeof(cfg->udp_relay_addr));
                         }
                         assoc_replaced = 1;   // sockets replaced - read_fds is stale
@@ -261,7 +283,7 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
             if (recv_len > 0)
             {
                 // Packet from SOCKS5 proxy - decapsulate and forward to original sender
-                if (recv_len < 10) continue;
+                if (recv_len < 4) continue;
 
                 // SOCKS5 UDP: RSV(2) + FRAG(1) + ATYP(1) + DST.ADDR + DST.PORT(2) + DATA
                 if (recv_buf[2] != 0x00) continue;  // FRAG must be 0
@@ -340,6 +362,52 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                                (struct sockaddr*)&t6, sizeof(t6));
                     }
                 }
+                else if (recv_buf[3] == SOCKS5_ATYP_DOMAIN && recv_len >= 8)
+                {
+                    size_t host_len = recv_buf[4];
+                    size_t payload_offset = 7 + host_len;
+                    if (!host_len || (size_t)recv_len < payload_offset) continue;
+
+                    char hostname[256] = {0};
+                    memcpy(hostname, &recv_buf[5], host_len);
+                    if (memchr(hostname, '\0', host_len)) continue;
+                    UINT16 domain_port = ((UINT16)recv_buf[5 + host_len] << 8) |
+                                         recv_buf[6 + host_len];
+                    BOOL is_ipv6 = FALSE;
+                    UINT32 client_ip = 0;
+                    UINT8 client_ip6[16] = {0};
+                    UINT16 client_port = 0;
+                    if (!find_unique_udp_sender_by_domain(hostname, domain_port, cfg->config_id, &is_ipv6,
+                                                          &client_ip, client_ip6, &client_port))
+                    {
+                        log_message("[UDP RELAY] No unique session for proxy domain response %s:%u - dropped",
+                                    hostname, domain_port);
+                        continue;
+                    }
+
+                    if (is_ipv6 && udp_relay_socket6 != INVALID_SOCKET)
+                    {
+                        struct sockaddr_in6 target_addr6;
+                        memset(&target_addr6, 0, sizeof(target_addr6));
+                        target_addr6.sin6_family = AF_INET6;
+                        memcpy(&target_addr6.sin6_addr, client_ip6, 16);
+                        target_addr6.sin6_port = htons(client_port);
+                        sendto(udp_relay_socket6, (char*)&recv_buf[payload_offset],
+                               (int)(recv_len - payload_offset), 0,
+                               (struct sockaddr*)&target_addr6, sizeof(target_addr6));
+                    }
+                    else if (!is_ipv6 && udp_relay_socket != INVALID_SOCKET)
+                    {
+                        struct sockaddr_in target_addr;
+                        memset(&target_addr, 0, sizeof(target_addr));
+                        target_addr.sin_family = AF_INET;
+                        target_addr.sin_addr.s_addr = client_ip;
+                        target_addr.sin_port = htons(client_port);
+                        sendto(udp_relay_socket, (char*)&recv_buf[payload_offset],
+                               (int)(recv_len - payload_offset), 0,
+                               (struct sockaddr*)&target_addr, sizeof(target_addr));
+                    }
+                }
             }
         }
 
@@ -357,7 +425,9 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                 UINT16 dest_port = 0;
                 UINT32 proxy_config_id = 0;
 
-                if (get_connection_full_v6(from_port, TRUE, dest_ip6, &dest_port, &proxy_config_id))
+                char hostname[256] = {0};
+                if (get_connection_full_v6(from_port, TRUE, dest_ip6, &dest_port,
+                                           &proxy_config_id, hostname, sizeof(hostname), NULL, NULL))
                 {
                     PROXY_CONFIG *cfg = find_proxy_config(proxy_config_id);
                     if (cfg != NULL && cfg->type == PROXY_TYPE_SOCKS5)
@@ -365,13 +435,30 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                         if (!cfg->udp_connected) establish_udp_associate_for_config(cfg);
                         if (cfg->udp_connected)
                         {
+                            size_t header_len = 22;
                             send_buf[0] = 0; send_buf[1] = 0; send_buf[2] = 0;
-                            send_buf[3] = SOCKS5_ATYP_IPV6;
-                            memcpy(&send_buf[4], dest_ip6, 16);
-                            send_buf[20] = (dest_port>>8)&0xFF;
-                            send_buf[21] = (dest_port>>0)&0xFF;
-                            memcpy(&send_buf[22], recv_buf, recv_len);
-                            sendto(cfg->udp_send_sock, (char*)send_buf, 22+recv_len, 0,
+                            if (cfg->send_domain_to_proxy && hostname[0] &&
+                                strnlen_s(hostname, sizeof(hostname)) <= 255)
+                            {
+                                size_t host_len = strlen(hostname);
+                                header_len = 7 + host_len;
+                                if (recv_len > MAXBUF - header_len) continue;
+                                send_buf[3] = SOCKS5_ATYP_DOMAIN;
+                                send_buf[4] = (unsigned char)host_len;
+                                memcpy(&send_buf[5], hostname, host_len);
+                                send_buf[5 + host_len] = (dest_port >> 8) & 0xFF;
+                                send_buf[6 + host_len] = dest_port & 0xFF;
+                            }
+                            else
+                            {
+                                if (recv_len > MAXBUF - header_len) continue;
+                                send_buf[3] = SOCKS5_ATYP_IPV6;
+                                memcpy(&send_buf[4], dest_ip6, 16);
+                                send_buf[20] = (dest_port >> 8) & 0xFF;
+                                send_buf[21] = dest_port & 0xFF;
+                            }
+                            memcpy(&send_buf[header_len], recv_buf, recv_len);
+                            sendto(cfg->udp_send_sock, (char*)send_buf, (int)(header_len + recv_len), 0,
                                    (struct sockaddr*)&cfg->udp_relay_addr, sizeof(cfg->udp_relay_addr));
                         }
                     }
@@ -513,19 +600,56 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                 {
                     conn_config->client_socket = client_sock;
                     conn_config->is_ipv6 = FALSE;
+                    conn_config->process_id = 0;
+                    conn_config->log_pending = FALSE;
 
                     UINT16 client_port = ntohs(client_addr.sin_port);
-                    if (get_connection_full(client_port, FALSE, &conn_config->orig_dest_ip, &conn_config->orig_dest_port, &conn_config->proxy_config_id) &&
-                        relay_peer_ok_v4(client_addr.sin_addr.s_addr, conn_config->orig_dest_ip))
+                    BOOL mapped = get_connection_full(client_port, FALSE, &conn_config->orig_dest_ip,
+                                                      &conn_config->orig_dest_port, &conn_config->proxy_config_id,
+                                                      conn_config->hostname, sizeof(conn_config->hostname),
+                                                      &conn_config->process_id, &conn_config->log_pending);
+                    BOOL trusted_peer = mapped && relay_peer_ok_v4(client_addr.sin_addr.s_addr,
+                                                                   conn_config->orig_dest_ip);
+                    if (trusted_peer)
                     {
                         InterlockedIncrement(&g_handler_threads);
                         HANDLE conn_thread = CreateThread(NULL, 1, connection_handler, (LPVOID)conn_config, 0, NULL);
                         if (conn_thread != NULL) { CloseHandle(conn_thread); }
-                        else { InterlockedDecrement(&g_handler_threads); closesocket(client_sock); free(conn_config); }
+                        else
+                        {
+                            DWORD error = GetLastError();
+                            InterlockedDecrement(&g_handler_threads);
+                            if (conn_config->log_pending)
+                                relay_report_connection(conn_config->process_id, FALSE,
+                                                        conn_config->orig_dest_ip, NULL,
+                                                        conn_config->orig_dest_port, conn_config->hostname,
+                                                        find_proxy_config(conn_config->proxy_config_id),
+                                                        "relay handler could not start");
+                            log_message("[RELAY] Could not start handler for IPv4 port %u (%lu)",
+                                        client_port, error);
+                            closesocket(client_sock);
+                            free(conn_config);
+                        }
                     }
-                    else { closesocket(client_sock); free(conn_config); }
+                    else
+                    {
+                        if (!mapped)
+                            log_message("[RELAY] No connection metadata for IPv4 port %u", client_port);
+                        else
+                        {
+                            log_message("[RELAY] Rejected untrusted IPv4 peer for tracked port %u", client_port);
+                            if (conn_config->log_pending)
+                                relay_report_connection(conn_config->process_id, FALSE,
+                                                        conn_config->orig_dest_ip, NULL,
+                                                        conn_config->orig_dest_port, conn_config->hostname,
+                                                        find_proxy_config(conn_config->proxy_config_id),
+                                                        "untrusted relay peer");
+                        }
+                        closesocket(client_sock);
+                        free(conn_config);
+                    }
                 }
-                else { closesocket(client_sock); }
+                else { log_message("[RELAY] Could not allocate IPv4 connection context"); closesocket(client_sock); }
             }
         }
 
@@ -542,19 +666,56 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                 {
                     conn_config->client_socket = client_sock6;
                     conn_config->is_ipv6 = TRUE;
+                    conn_config->process_id = 0;
+                    conn_config->log_pending = FALSE;
 
                     UINT16 client_port = ntohs(client_addr6.sin6_port);
-                    if (get_connection_full_v6(client_port, FALSE, conn_config->orig_dest_ip6, &conn_config->orig_dest_port, &conn_config->proxy_config_id) &&
-                        relay_peer_ok_v6(&client_addr6.sin6_addr, conn_config->orig_dest_ip6))
+                    BOOL mapped = get_connection_full_v6(client_port, FALSE, conn_config->orig_dest_ip6,
+                                                         &conn_config->orig_dest_port, &conn_config->proxy_config_id,
+                                                         conn_config->hostname, sizeof(conn_config->hostname),
+                                                         &conn_config->process_id, &conn_config->log_pending);
+                    BOOL trusted_peer = mapped && relay_peer_ok_v6(&client_addr6.sin6_addr,
+                                                                   conn_config->orig_dest_ip6);
+                    if (trusted_peer)
                     {
                         InterlockedIncrement(&g_handler_threads);
                         HANDLE conn_thread = CreateThread(NULL, 1, connection_handler, (LPVOID)conn_config, 0, NULL);
                         if (conn_thread != NULL) { CloseHandle(conn_thread); }
-                        else { InterlockedDecrement(&g_handler_threads); closesocket(client_sock6); free(conn_config); }
+                        else
+                        {
+                            DWORD error = GetLastError();
+                            InterlockedDecrement(&g_handler_threads);
+                            if (conn_config->log_pending)
+                                relay_report_connection(conn_config->process_id, TRUE, 0,
+                                                        conn_config->orig_dest_ip6,
+                                                        conn_config->orig_dest_port, conn_config->hostname,
+                                                        find_proxy_config(conn_config->proxy_config_id),
+                                                        "relay handler could not start");
+                            log_message("[RELAY] Could not start handler for IPv6 port %u (%lu)",
+                                        client_port, error);
+                            closesocket(client_sock6);
+                            free(conn_config);
+                        }
                     }
-                    else { closesocket(client_sock6); free(conn_config); }
+                    else
+                    {
+                        if (!mapped)
+                            log_message("[RELAY] No connection metadata for IPv6 port %u", client_port);
+                        else
+                        {
+                            log_message("[RELAY] Rejected untrusted IPv6 peer for tracked port %u", client_port);
+                            if (conn_config->log_pending)
+                                relay_report_connection(conn_config->process_id, TRUE, 0,
+                                                        conn_config->orig_dest_ip6,
+                                                        conn_config->orig_dest_port, conn_config->hostname,
+                                                        find_proxy_config(conn_config->proxy_config_id),
+                                                        "untrusted relay peer");
+                        }
+                        closesocket(client_sock6);
+                        free(conn_config);
+                    }
                 }
-                else { closesocket(client_sock6); }
+                else { log_message("[RELAY] Could not allocate IPv6 connection context"); closesocket(client_sock6); }
             }
         }
     }
@@ -580,6 +741,90 @@ volatile LONG g_handler_threads = 0;
 
 static DWORD WINAPI connection_handler_impl(LPVOID arg);
 
+// Text form of a redirected flow's original destination, matching the packet reader's
+// formatting so both producers of a connection log line look identical.
+static void relay_format_dest(BOOL is_ipv6, UINT32 dest_ip, const UINT8 dest_ip6[16],
+                              char *out, size_t out_size)
+{
+    if (is_ipv6)
+    {
+        struct in6_addr addr6;
+        memcpy(&addr6, dest_ip6, 16);
+        if (inet_ntop(AF_INET6, &addr6, out, (DWORD)out_size) == NULL)
+            _snprintf_s(out, out_size, _TRUNCATE, "::");
+    }
+    else
+    {
+        _snprintf_s(out, out_size, _TRUNCATE, "%u.%u.%u.%u",
+                    (unsigned)((dest_ip >> 0) & 0xFF), (unsigned)((dest_ip >> 8) & 0xFF),
+                    (unsigned)((dest_ip >> 16) & 0xFF), (unsigned)((dest_ip >> 24) & 0xFF));
+    }
+}
+
+// Emit the connection log line that ProxyBridge.c left to the relay (log_pending). The name
+// is whatever was recovered by the time the flow reached us - possibly still nothing, in
+// which case the line shows the address exactly like a plain socks5 proxy does.
+static void relay_report_connection(DWORD process_id, BOOL is_ipv6, UINT32 dest_ip,
+                                    const UINT8 dest_ip6[16], UINT16 dest_port,
+                                    const char *hostname, const PROXY_CONFIG *proxy,
+                                    const char *failure_reason)
+{
+    char process_name[MAX_PROCESS_NAME] = { 0 };
+    const char *display_name = "?";
+    if (process_id != 0 && get_process_name_from_pid(process_id, process_name, sizeof(process_name)))
+        display_name = extract_filename(process_name);
+
+    char ip_str[64];
+    relay_format_dest(is_ipv6, dest_ip, dest_ip6, ip_str, sizeof(ip_str));
+
+    char proxy_info[128];
+    if (failure_reason != NULL)
+        snprintf(proxy_info, sizeof(proxy_info), "Proxy failed: %s", failure_reason);
+    else if (proxy != NULL)
+        snprintf(proxy_info, sizeof(proxy_info), "Proxy %s://%s:%u",
+                 proxy->type == PROXY_TYPE_HTTP ? "HTTP" : "SOCKS5", proxy->host, proxy->port);
+    else
+        snprintf(proxy_info, sizeof(proxy_info), "Proxy");
+
+    pb_report_connection(display_name, process_id, ip_str, hostname, dest_port, proxy_info);
+
+    if (!failure_reason && g_traffic_logging_enabled && process_id != 0)
+    {
+        UINT32 dedup_ip = dest_ip;
+        if (is_ipv6)
+        {
+            UINT32 words[4];
+            memcpy(words, dest_ip6, sizeof(words));
+            dedup_ip = words[0] ^ words[1] ^ words[2] ^ words[3];
+        }
+        add_logged_connection(process_id, dedup_ip, dest_port, RULE_ACTION_PROXY);
+    }
+}
+
+// The application resolved this destination somehow, but nothing ProxyBridge can observe saw
+// the answer: the address came out of the app's own cache, so there was no DNS query on the
+// wire and no DNS Client event carrying results. The TLS ClientHello the app is sending right
+// now still names the site, so read it (peek only - the relay must still forward those bytes).
+// SNI is connection-local evidence: do not reuse it for later rule decisions.
+static void relay_learn_hostname_from_sni(SOCKET client_sock, DWORD process_id, BOOL is_ipv6,
+                                          UINT32 dest_ip, const UINT8 dest_ip6[16],
+                                          UINT16 dest_port, char hostname[256])
+{
+    char sni[256];
+    if (!sni_peek_from_socket(client_sock, sni, sizeof(sni))) return;
+
+    strncpy_s(hostname, 256, sni, _TRUNCATE);
+
+    static volatile LONG learned_logged = 0;
+    if (InterlockedIncrement(&learned_logged) <= 20)
+    {
+        char ip_str[64];
+        relay_format_dest(is_ipv6, dest_ip, dest_ip6, ip_str, sizeof(ip_str));
+        log_message("[HOSTNAME] %s:%u -> %s (PID:%lu) - read from the TLS ClientHello",
+                    ip_str, dest_port, sni, (unsigned long)process_id);
+    }
+}
+
 // Every handshake thread is counted from the moment it is created until it returns, so that
 // ProxyBridge_Stop() can wait for all of them. A thread still running inside the DLL when the DLL
 // is unloaded (the service reloads the engine for every GUI connection) crashes the process.
@@ -597,9 +842,13 @@ static DWORD WINAPI connection_handler_impl(LPVOID arg)
     UINT32 dest_ip = config->orig_dest_ip;
     UINT16 dest_port = config->orig_dest_port;
     UINT32 proxy_config_id = config->proxy_config_id;
+    char hostname[256];
+    strncpy_s(hostname, sizeof(hostname), config->hostname, _TRUNCATE);
     BOOL is_ipv6 = config->is_ipv6;
     UINT8 dest_ip6[16];
     if (is_ipv6) memcpy(dest_ip6, config->orig_dest_ip6, 16);
+    DWORD process_id = config->process_id;
+    BOOL log_pending = config->log_pending;
     SOCKET socks_sock;
     struct sockaddr_in socks_addr;
 
@@ -610,9 +859,22 @@ static DWORD WINAPI connection_handler_impl(LPVOID arg)
     if (proxy == NULL || proxy->host[0] == '\0' || proxy->port == 0)
     {
         log_message("[RELAY] No proxy config (id=%u) - dropping connection", proxy_config_id);
+        if (log_pending)
+            relay_report_connection(process_id, is_ipv6, dest_ip, dest_ip6, dest_port, hostname,
+                                    NULL, "proxy configuration unavailable");
         closesocket(client_sock);
         return 1;
     }
+
+    // This flow's connection log belongs to the relay (see log_pending in ProxyBridge.c):
+    // nothing could name the destination when the first packet was classified, but the
+    // client's ClientHello - which does name it - is arriving on client_sock right now.
+    if (log_pending && hostname[0] == '\0')
+        relay_learn_hostname_from_sni(client_sock, process_id, is_ipv6, dest_ip, dest_ip6,
+                                      dest_port, hostname);
+    if (log_pending)
+        relay_report_connection(process_id, is_ipv6, dest_ip, dest_ip6, dest_port, hostname,
+                                proxy, NULL);
 
     // Connect to proxy, use cached resolved IP to avoid DNS per connection
     UINT32 proxy_ip = proxy->resolved_ip ? proxy->resolved_ip : resolve_hostname(proxy->host);
@@ -657,20 +919,19 @@ static DWORD WINAPI connection_handler_impl(LPVOID arg)
     if (proxy->type == PROXY_TYPE_SOCKS5)
     {
         int rc;
-        char cached_domain[256];
         // Per-config: only hand the hostname to the proxy (socks5h) when this config
         // opts in; otherwise send the locally-resolved IP (socks5).
         if (is_ipv6)
         {
-            if (proxy->send_domain_to_proxy && dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
-                rc = socks5_connect_domain(socks_sock, cached_domain, dest_port, proxy);
+            if (proxy->send_domain_to_proxy && hostname[0])
+                rc = socks5_connect_domain(socks_sock, hostname, dest_port, proxy);
             else
                 rc = socks5_connect_v6(socks_sock, dest_ip6, dest_port, proxy);
         }
         else
         {
-            if (proxy->send_domain_to_proxy && dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
-                rc = socks5_connect_domain(socks_sock, cached_domain, dest_port, proxy);
+            if (proxy->send_domain_to_proxy && hostname[0])
+                rc = socks5_connect_domain(socks_sock, hostname, dest_port, proxy);
             else
                 rc = socks5_connect(socks_sock, dest_ip, dest_port, proxy);
         }
@@ -684,8 +945,8 @@ static DWORD WINAPI connection_handler_impl(LPVOID arg)
     else if (proxy->type == PROXY_TYPE_HTTP)
     {
         int rc = is_ipv6
-            ? http_connect_v6(socks_sock, dest_ip6, dest_port, proxy)
-            : http_connect(socks_sock, dest_ip, dest_port, proxy);
+            ? http_connect_v6(socks_sock, dest_ip6, dest_port, proxy, hostname)
+            : http_connect(socks_sock, dest_ip, dest_port, proxy, hostname);
         if (rc != 0)
         {
             reset_close(client_sock);

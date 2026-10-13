@@ -65,6 +65,9 @@ typedef struct PROCESS_RULE {
 #define SOCKS5_ATYP_DOMAIN 0x03  // send hostname to proxy rfc 1928
 #define SOCKS5_AUTH_NONE   0x00
 
+// Where a hostname association came from. Recorded per entry so diagnostics can tell a
+// wire-observed answer from one read out of a TLS ClientHello.
+
 // Idle timeout before a connection-tracking entry is reaped. Clean closes are removed
 // immediately on FIN/RST, so this only sweeps entries whose FIN/RST was missed. It MUST
 // exceed the relay's TCP keepalive interval (5 min) and real idle periods (IMAP IDLE,
@@ -72,26 +75,24 @@ typedef struct PROCESS_RULE {
 // gets reaped mid-session and silently breaks until restart (issue: hours-long degradation).
 #define CONNECTION_STALE_TIMEOUT_MS 1800000  // 30 minutes
 
-// DNS snooping cache: maps intercepted A-record answers to their hostnames so
-// that SOCKS5 conect can forward ATYP_DOMAIN instead of ATYP_IPV4, letting
-// proxy servers that do their own name-resolution (e.g. mihomo) see the
-// original hostname rather than a bare IP.  (Resolves issue #138.)
-#define DNS_CACHE_BUCKETS 1024
-#define DNS_CACHE_TTL_MS  300000  // 5 minutes
-
-typedef struct DNS_CACHE_ENTRY {
-    UINT32 ip;              // network-byte-order IPv4 
-    char   domain[256];
-    ULONGLONG expire_tick;
-    struct DNS_CACHE_ENTRY *next;
-} DNS_CACHE_ENTRY;
-
-typedef struct DNS_CACHE_ENTRY_V6 {
-    UINT8  ip6[16];         // raw IPv6 address
-    char   domain[256];
-    ULONGLONG expire_tick;
-    struct DNS_CACHE_ENTRY_V6 *next;
-} DNS_CACHE_ENTRY_V6;
+// Process-scoped hostname records populated by DNS Client ETW. Timestamps use QPC so
+// they can be compared with WinDivert's packet timestamp when the clocks are confirmed.
+typedef struct DNS_PROCESS_ENTRY DNS_PROCESS_ENTRY;
+typedef struct DNS_HOST_ENTRY {
+    DNS_PROCESS_ENTRY *process;
+    BOOL is_ipv6;
+    UINT32 ip;
+    UINT8 ip6[16];
+    char domain[256];
+    UINT16 source_event_id;
+    DWORD source_ttl_seconds;
+    BOOL has_source_ttl;
+    ULONGLONG event_qpc;
+    ULONGLONG consumed_qpc;
+    volatile LONG64 last_used;
+    struct DNS_HOST_ENTRY *next;
+    struct DNS_HOST_ENTRY *hash_next;
+} DNS_HOST_ENTRY;
 
 typedef struct CONNECTION_INFO {
     UINT16 src_port;
@@ -102,6 +103,13 @@ typedef struct CONNECTION_INFO {
     BOOL   is_tracked;
     ULONGLONG last_activity;
     UINT32 proxy_config_id;
+    char hostname[256];
+    // TRUE when the connection log for this flow was handed to the relay because the proxy
+    // resolves DNS itself and no hostname was known yet at SYN time (see ProxyBridge.c).
+    BOOL   log_pending;
+    DWORD process_id;           // Preserve the observed PID for logs; has_process_identity gates lifecycle cleanup.
+    FILETIME process_created;
+    BOOL has_process_identity;
     BOOL   is_ipv6;
     UINT8  src_ip6[16];        // raw IPv6 src (only valid when is_ipv6)
     UINT8  orig_dest_ip6[16];  // raw IPv6 dest (only valid when is_ipv6)
@@ -109,6 +117,9 @@ typedef struct CONNECTION_INFO {
     struct CONNECTION_INFO *rev_next;  // chain in the reverse table (keyed by orig_dest)
     UINT32 rev_bucket;                 // reverse bucket this entry is currently linked in
     BOOL   in_rev;                     // TRUE while linked in the reverse table
+    struct CONNECTION_INFO *domain_rev_next;
+    UINT32 domain_rev_bucket;
+    BOOL   in_domain_rev;
     UINT8  fin_flags;                  // TCP: 1 = app sent FIN, 2 = relay sent FIN (entry dropped when both seen)
 } CONNECTION_INFO;
 
@@ -119,6 +130,9 @@ typedef struct {
     UINT32 proxy_config_id;
     BOOL   is_ipv6;
     UINT8  orig_dest_ip6[16];
+    char hostname[256];
+    DWORD  process_id;     // owner of the flow, so the relay can name it in the log
+    BOOL   log_pending;    // this flow's connection log is the relay's to emit
 } CONNECTION_CONFIG;
 
 typedef struct {
@@ -195,21 +209,18 @@ extern HANDLE udp_relay_thread;
 extern HANDLE cleanup_thread;
 extern PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE];
 extern volatile BOOL g_has_active_rules;
-extern volatile BOOL g_has_domain_rules;
 extern SOCKET udp_relay_socket;
 extern SOCKET udp_relay_socket6;
 extern volatile BOOL running;
 extern DWORD g_current_process_id;
 extern BOOL g_traffic_logging_enabled;
-extern DNS_CACHE_ENTRY    *g_dns_cache[DNS_CACHE_BUCKETS];
-extern DNS_CACHE_ENTRY_V6 *g_dns_cache_v6[DNS_CACHE_BUCKETS];
-extern SRWLOCK             g_dns_cache_lock;
 extern volatile LONG port_decided_bitmap[2048];  // 8 KB
 extern volatile LONG port_direct_bitmap[2048];  // 8 KB
 extern UINT16 g_local_relay_port;
 extern BOOL g_localhost_via_proxy;  // default disabled for security - most proxy server block localhost for ssrf and also many app might not work if localhost trafic goes to remote server if proxy server is on diffrent machine
 extern LogCallback g_log_callback;
 extern ConnectionCallback g_connection_callback;
+extern ConnectionCallbackEx g_connection_callback_ex;
 extern char  *g_pidtbl_buf;
 extern DWORD  g_pidtbl_cap;
 
@@ -265,6 +276,7 @@ DWORD get_process_id_from_connection(UINT32 src_ip, UINT16 src_port);
 DWORD get_process_id_from_udp_connection(UINT32 src_ip, UINT16 src_port);
 DWORD get_process_id_from_connection_v6(const UINT8 src_ip6[16], UINT16 src_port);
 DWORD get_process_id_from_udp_connection_v6(const UINT8 src_ip6[16], UINT16 src_port);
+BOOL get_process_identity(DWORD pid, FILETIME *created, HANDLE *process_handle);
 BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size);
 UINT32 pid_cache_hash(UINT32 src_ip, UINT16 src_port, BOOL is_udp);
 DWORD get_cached_pid(UINT32 src_ip, UINT16 src_port, BOOL is_udp);
@@ -275,7 +287,7 @@ void cleanup_stale_pid_cache(void);
 
 // ---- pb_rules.c ----
 BOOL is_ipv6_multicast_or_linklocal(const UINT8 ip6[16]);
-RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id);
+RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, ULONGLONG packet_qpc, char hostname[256], DWORD *out_pid, UINT32 *out_proxy_config_id);
 BOOL match_ip_pattern(const char *pattern, UINT32 ip);
 BOOL match_port_pattern(const char *pattern, UINT16 port);
 BOOL ip_match_wrapper(const char *token, const void *data);
@@ -293,11 +305,11 @@ BOOL match_domain_list(const char *domain_list, const char *domain);
 BOOL rule_has_domain_filter(const PROCESS_RULE *rule);
 BOOL match_domain_filter(const PROCESS_RULE *rule, const char *domain);
 BOOL is_broadcast_or_multicast(UINT32 ip);
-RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
-RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
-RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
-RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id);
-RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id);
+RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, const char *hostname, BOOL *out_needs_hostname, UINT32 *out_proxy_config_id);
+RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, const char *hostname, BOOL *out_needs_hostname, UINT32 *out_proxy_config_id);
+RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, const char *hostname, BOOL *out_needs_hostname, UINT32 *out_proxy_config_id);
+RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, const char *hostname, BOOL *out_needs_hostname, UINT32 *out_proxy_config_id);
+RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, ULONGLONG packet_qpc, char hostname[256], DWORD *out_pid, UINT32 *out_proxy_config_id);
 void update_has_active_rules(void);
 
 // ---- pb_proxy.c ----
@@ -306,17 +318,44 @@ BOOL any_socks5_config(void);
 BOOL is_proxy_config_referenced(UINT32 config_id);
 
 // ---- pb_dns.c ----
-void dns_cache_init(void);
-UINT32 dns_bucket(UINT32 ip);
-void dns_cache_store(UINT32 ip, const char *domain);
-BOOL dns_cache_lookup(UINT32 ip, char *out_domain, size_t out_size);
-UINT32 dns_bucket_v6(const UINT8 ip6[16]);
-void dns_cache_store_v6(const UINT8 ip6[16], const char *domain);
-BOOL dns_cache_lookup_v6(const UINT8 ip6[16], char *out_domain, size_t out_size);
 BOOL dns_parse_name(const UINT8 *msg, int msg_len, int *offset, char *dst, int dst_len);
-void snoop_dns_response(const UINT8 *payload, int payload_len);
-void cleanup_stale_dns_cache(void);
-void flush_dns_resolver_cache(void);
+void dns_network_observe_udp(BOOL outbound, BOOL is_ipv6, const UINT8 *src_ip,
+                             const UINT8 *dst_ip, UINT16 src_port, UINT16 dst_port,
+                             const UINT8 *payload, int payload_len, ULONGLONG packet_qpc);
+void dns_network_observe_tcp(BOOL is_ipv6, const UINT8 *src_ip, const UINT8 *dst_ip,
+                             UINT16 src_port, UINT16 dst_port, UINT32 seq, UINT8 flags,
+                             const UINT8 *payload, int payload_len, ULONGLONG packet_qpc);
+void dns_network_query_reset(void);
+void dns_process_cache_init(void);
+void dns_process_cache_begin_session(void);
+void dns_process_cache_clear(void);
+void dns_process_cache_cleanup(void);
+BOOL dns_process_cache_snapshot_tick(BOOL final_snapshot);
+void dns_process_cache_end_session(void);
+void dns_process_cache_note_gap(ULONGLONG count);
+BOOL dns_process_cache_store(DWORD pid, const FILETIME *expected_created, BOOL is_ipv6, UINT32 ip, const UINT8 ip6[16], const char *domain, UINT16 source_event_id, ULONGLONG event_qpc, ULONGLONG consumed_qpc, BOOL has_ttl, DWORD ttl_seconds);
+BOOL dns_process_cache_lookup(DWORD pid, BOOL is_ipv6, UINT32 ip, const UINT8 ip6[16], ULONGLONG before_qpc, char *out_domain, size_t out_size);
+ULONGLONG dns_process_cache_gap_count(void);
+BOOL dns_etw_start(void);
+BOOL dns_etw_lookup(DWORD pid, BOOL is_ipv6, UINT32 ip, const UINT8 ip6[16], ULONGLONG before_qpc, BOOL wait_for_flush, char *out_domain, size_t out_size);
+void dns_etw_stop(void);
+
+// ---- pb_sni.c ----
+// Result of scanning a TLS record stream for the ClientHello SNI extension.
+typedef enum {
+    SNI_NOT_TLS = 0,    // not a TLS handshake, or a complete ClientHello carrying no SNI
+    SNI_NEED_MORE = 1,  // truncated ClientHello - feed more bytes and retry
+    SNI_FOUND = 2
+} SNI_RESULT;
+
+SNI_RESULT sni_parse_client_hello(const UINT8 *data, size_t length, char *out, size_t out_size);
+BOOL sni_peek_from_socket(SOCKET sock, char *out, size_t out_size);
+
+// ---- ProxyBridge.c: connection log ----
+// Emit one connection-log line through the registered callback. The packet reader uses it,
+// and so does the relay when it is the one that ends up knowing the destination name.
+void pb_report_connection(const char *process_name, DWORD pid, const char *ip,
+                          const char *hostname, UINT16 port, const char *info);
 
 // ---- pb_socks5.c ----
 int socks5_read_connect_reply(SOCKET s, int *reply);
@@ -327,21 +366,26 @@ int socks5_udp_associate_with_config(SOCKET s, struct sockaddr_in *relay_addr, c
 BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg);
 
 // ---- pb_http.c ----
-int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg);
-int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg);
+int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg, const char *hostname);
+int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg, const char *hostname);
 
 // ---- pb_conntrack.c ----
 UINT32 rev_hash_v4(UINT32 dest_ip, UINT16 dest_port);
 UINT32 rev_hash_v6(const UINT8 dest_ip6[16], UINT16 dest_port);
 void rev_insert(CONNECTION_INFO *c);
 void rev_unlink(CONNECTION_INFO *c);
-void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id);
-void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id);
-BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id);
+void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id, const char *hostname, DWORD process_id, BOOL log_pending);
+void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id, const char *hostname, DWORD process_id, BOOL log_pending);
+BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id, char *hostname, size_t hostname_size, DWORD *process_id, BOOL *log_pending);
 BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port);
+BOOL find_unique_udp_sender_by_domain(const char *hostname, UINT16 dest_port,
+                                      UINT32 proxy_config_id,
+                                      BOOL *is_ipv6, UINT32 *client_ip, UINT8 client_ip6[16],
+                                      UINT16 *client_port);
 // UDP flow validation for the app->relay redirect. A UDP "connection" is keyed by source port
 // only, so it must be re-checked on every datagram: (a) if the destination changed (a socket
-// that moves to another server, e.g. a voice call migrating) the entry is retargeted, and
+// that moves to another server, e.g. a voice call migrating) the old entry is removed and rules
+// and hostname association are evaluated again, and
 // (b) if the flow has been idle longer than UDP_REEVAL_IDLE_MS the source port may belong to a
 // different socket now, so the entry is dropped and the caller re-evaluates the rules.
 // Returns TRUE if a valid entry exists (and was refreshed), FALSE if not tracked / evicted.
@@ -365,9 +409,10 @@ void connection_fin(UINT16 src_port, BOOL is_ipv6, UINT8 bit);
 
 BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port);
-BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id);
+BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id, char *hostname, size_t hostname_size, DWORD *process_id, BOOL *log_pending);
 UINT32 get_connection_proxy_id(UINT16 src_port, BOOL is_udp);
 void remove_connection(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
+void remove_connections_for_process(DWORD process_id, const FILETIME *process_created);
 void cleanup_stale_connections(void);
 BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);

@@ -2,6 +2,20 @@
 
 // Connection tracking: forward table, reverse index, logged connections.
 
+static CONNECTION_INFO *g_domain_rev_table[CONNECTION_HASH_SIZE];
+
+static UINT32 rev_hash_domain(const char *hostname, UINT16 port)
+{
+    UINT32 hash = 5381u ^ port;
+    for (const unsigned char *p = (const unsigned char *)hostname; *p; p++)
+    {
+        unsigned char c = *p;
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        hash = ((hash << 5) + hash) ^ c;
+    }
+    return hash % CONNECTION_HASH_SIZE;
+}
+
 // Reverse-index helpers. Keyed by the ORIGINAL destination (what the app connected to) -
 // an inbound relay reply carries that as its source. All callers hold `lock` exclusively.
 UINT32 rev_hash_v4(UINT32 dest_ip, UINT16 dest_port)
@@ -25,20 +39,87 @@ void rev_insert(CONNECTION_INFO *c)
     c->rev_next = connection_rev_table[b];
     connection_rev_table[b] = c;
     c->in_rev = TRUE;
+    if (c->is_udp && c->hostname[0])
+    {
+        c->domain_rev_bucket = rev_hash_domain(c->hostname, c->orig_dest_port);
+        c->domain_rev_next = g_domain_rev_table[c->domain_rev_bucket];
+        g_domain_rev_table[c->domain_rev_bucket] = c;
+        c->in_domain_rev = TRUE;
+    }
 }
 
 void rev_unlink(CONNECTION_INFO *c)
 {
-    if (!c->in_rev) return;
-    CONNECTION_INFO **pp = &connection_rev_table[c->rev_bucket];
-    while (*pp) { if (*pp == c) { *pp = c->rev_next; break; } pp = &(*pp)->rev_next; }
-    c->in_rev = FALSE;
-    c->rev_next = NULL;
+    if (c->in_rev)
+    {
+        CONNECTION_INFO **pp = &connection_rev_table[c->rev_bucket];
+        while (*pp) { if (*pp == c) { *pp = c->rev_next; break; } pp = &(*pp)->rev_next; }
+        c->in_rev = FALSE;
+        c->rev_next = NULL;
+    }
+    if (c->in_domain_rev)
+    {
+        CONNECTION_INFO **pp = &g_domain_rev_table[c->domain_rev_bucket];
+        while (*pp) { if (*pp == c) { *pp = c->domain_rev_next; break; } pp = &(*pp)->domain_rev_next; }
+        c->in_domain_rev = FALSE;
+        c->domain_rev_next = NULL;
+    }
 }
 
-void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id)
+static BOOL connection_capture_process(DWORD pid, FILETIME *created, HANDLE *process)
 {
+    return get_process_identity(pid, created, process);
+}
+
+BOOL find_unique_udp_sender_by_domain(const char *hostname, UINT16 dest_port,
+                                      UINT32 proxy_config_id,
+                                      BOOL *is_ipv6, UINT32 *client_ip, UINT8 client_ip6[16],
+                                      UINT16 *client_port)
+{
+    if (!hostname || !hostname[0] || !is_ipv6 || !client_ip || !client_ip6 || !client_port)
+        return FALSE;
+
+    CONNECTION_INFO *match = NULL;
+    AcquireSRWLockShared(&lock);
+    for (CONNECTION_INFO *c = g_domain_rev_table[rev_hash_domain(hostname, dest_port)];
+         c; c = c->domain_rev_next)
+    {
+        PROXY_CONFIG *cfg = find_proxy_config(c->proxy_config_id);
+        if (c->is_udp && cfg && cfg->config_id == proxy_config_id &&
+            c->orig_dest_port == dest_port &&
+            _stricmp(c->hostname, hostname) == 0)
+        {
+            if (match) { match = NULL; break; } // Ambiguous: never route a reply to an arbitrary client.
+            match = c;
+        }
+    }
+    if (match)
+    {
+        *is_ipv6 = match->is_ipv6;
+        *client_ip = match->src_ip;
+        if (match->is_ipv6) memcpy(client_ip6, match->src_ip6, 16);
+        *client_port = match->src_port;
+        InterlockedExchange64((LONGLONG volatile*)&match->last_activity, (LONGLONG)GetTickCount64());
+    }
+    ReleaseSRWLockShared(&lock);
+    return match != NULL;
+}
+
+void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
+                    UINT16 dest_port, UINT32 proxy_config_id, const char *hostname,
+                    DWORD process_id, BOOL log_pending)
+{
+    FILETIME process_created = {0};
+    HANDLE process = NULL;
+    BOOL has_process_identity = connection_capture_process(process_id, &process_created, &process);
+    const char *conn_hostname = hostname;
     AcquireSRWLockExclusive(&lock);
+    if (has_process_identity && WaitForSingleObject(process, 0) != WAIT_TIMEOUT)
+    {
+        ReleaseSRWLockExclusive(&lock);
+        CloseHandle(process);
+        return;
+    }
 
     int hash = src_port % CONNECTION_HASH_SIZE;
     CONNECTION_INFO *existing = connection_hash_table[hash];
@@ -53,11 +134,18 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
             existing->orig_dest_ip = dest_ip;
             existing->orig_dest_port = dest_port;
             existing->proxy_config_id = proxy_config_id;
+            strncpy_s(existing->hostname, sizeof(existing->hostname),
+                      conn_hostname ? conn_hostname : "", _TRUNCATE);
+            existing->log_pending = log_pending;
+            existing->process_id = process_id;
+            existing->process_created = process_created;
+            existing->has_process_identity = has_process_identity;
             existing->is_tracked = TRUE;
             existing->fin_flags = 0;
             existing->last_activity = GetTickCount64();
             rev_insert(existing);
             ReleaseSRWLockExclusive(&lock);
+            if (process) CloseHandle(process);
             return;
         }
         existing = existing->next;
@@ -66,6 +154,7 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
     CONNECTION_INFO *conn = (CONNECTION_INFO *)calloc(1, sizeof(CONNECTION_INFO));
     if (conn == NULL) {
         ReleaseSRWLockExclusive(&lock);
+        if (process) CloseHandle(process);
         return;
     }
 
@@ -75,6 +164,11 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
     conn->orig_dest_ip = dest_ip;
     conn->orig_dest_port = dest_port;
     conn->proxy_config_id = proxy_config_id;
+    strncpy_s(conn->hostname, sizeof(conn->hostname), conn_hostname ? conn_hostname : "", _TRUNCATE);
+    conn->log_pending = log_pending;
+    conn->process_id = process_id;
+    conn->process_created = process_created;
+    conn->has_process_identity = has_process_identity;
     conn->is_tracked = TRUE;
     conn->is_ipv6 = FALSE;
     conn->last_activity = GetTickCount64();
@@ -83,11 +177,25 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
     connection_hash_table[hash] = conn;
     rev_insert(conn);
     ReleaseSRWLockExclusive(&lock);
+    if (process) CloseHandle(process);
 }
 
-void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id)
+void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16],
+                       const UINT8 dest_ip6[16], UINT16 dest_port,
+                       UINT32 proxy_config_id, const char *hostname, DWORD process_id,
+                       BOOL log_pending)
 {
+    FILETIME process_created = {0};
+    HANDLE process = NULL;
+    BOOL has_process_identity = connection_capture_process(process_id, &process_created, &process);
+    const char *conn_hostname = hostname;
     AcquireSRWLockExclusive(&lock);
+    if (has_process_identity && WaitForSingleObject(process, 0) != WAIT_TIMEOUT)
+    {
+        ReleaseSRWLockExclusive(&lock);
+        CloseHandle(process);
+        return;
+    }
 
     int hash = src_port % CONNECTION_HASH_SIZE;
     CONNECTION_INFO *existing = connection_hash_table[hash];
@@ -100,11 +208,18 @@ void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], co
             memcpy(existing->orig_dest_ip6, dest_ip6, 16);
             existing->orig_dest_port = dest_port;
             existing->proxy_config_id = proxy_config_id;
+            strncpy_s(existing->hostname, sizeof(existing->hostname),
+                      conn_hostname ? conn_hostname : "", _TRUNCATE);
+            existing->log_pending = log_pending;
+            existing->process_id = process_id;
+            existing->process_created = process_created;
+            existing->has_process_identity = has_process_identity;
             existing->is_tracked = TRUE;
             existing->fin_flags = 0;
             existing->last_activity = GetTickCount64();
             rev_insert(existing);
             ReleaseSRWLockExclusive(&lock);
+            if (process) CloseHandle(process);
             return;
         }
         existing = existing->next;
@@ -113,6 +228,7 @@ void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], co
     CONNECTION_INFO *conn = (CONNECTION_INFO *)calloc(1, sizeof(CONNECTION_INFO));
     if (conn == NULL) {
         ReleaseSRWLockExclusive(&lock);
+        if (process) CloseHandle(process);
         return;
     }
 
@@ -125,15 +241,24 @@ void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], co
     memcpy(conn->orig_dest_ip6, dest_ip6, 16);
     conn->orig_dest_port = dest_port;
     conn->proxy_config_id = proxy_config_id;
+    strncpy_s(conn->hostname, sizeof(conn->hostname), conn_hostname ? conn_hostname : "", _TRUNCATE);
+    conn->log_pending = log_pending;
+    conn->process_id = process_id;
+    conn->process_created = process_created;
+    conn->has_process_identity = has_process_identity;
     conn->is_tracked = TRUE;
     conn->last_activity = GetTickCount64();
     conn->next = connection_hash_table[hash];
     connection_hash_table[hash] = conn;
     rev_insert(conn);
     ReleaseSRWLockExclusive(&lock);
+    if (process) CloseHandle(process);
 }
 
-BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id)
+BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16],
+                            UINT16 *dest_port, UINT32 *proxy_config_id,
+                            char *hostname, size_t hostname_size,
+                            DWORD *process_id, BOOL *log_pending)
 {
     BOOL found = FALSE;
     AcquireSRWLockShared(&lock);
@@ -144,6 +269,10 @@ BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UI
             memcpy(dest_ip6, conn->orig_dest_ip6, 16);
             *dest_port = conn->orig_dest_port;
             if (proxy_config_id != NULL) *proxy_config_id = conn->proxy_config_id;
+            if (hostname && hostname_size)
+                strncpy_s(hostname, hostname_size, conn->hostname, _TRUNCATE);
+            if (process_id != NULL) *process_id = conn->process_id;
+            if (log_pending != NULL) *log_pending = conn->log_pending;
             InterlockedExchange64((LONGLONG volatile*)&conn->last_activity, (LONGLONG)GetTickCount64());
             found = TRUE;
             break;
@@ -201,7 +330,11 @@ BOOL udp_flow_validate(UINT16 src_port, BOOL is_ipv6, UINT32 dest_ip, const UINT
     while (*pp != NULL && !((*pp)->src_port == src_port && (*pp)->is_udp && (*pp)->is_ipv6 == is_ipv6)) pp = &(*pp)->next;
     c = *pp;
     if (c == NULL) { ReleaseSRWLockExclusive(&lock); return FALSE; }
-    if (c->last_activity < now && now - c->last_activity > UDP_REEVAL_IDLE_MS)
+    BOOL still_same = (c->orig_dest_port == dest_port) &&
+                      (is_ipv6 ? memcmp(c->orig_dest_ip6, dest_ip6, 16) == 0
+                               : c->orig_dest_ip == dest_ip);
+    if ((c->last_activity < now && now - c->last_activity > UDP_REEVAL_IDLE_MS) ||
+        !still_same)
     {
         *pp = c->next;
         rev_unlink(c);
@@ -210,11 +343,7 @@ BOOL udp_flow_validate(UINT16 src_port, BOOL is_ipv6, UINT32 dest_ip, const UINT
     }
     else
     {
-        rev_unlink(c);                       // dest changes: re-key the reverse index
-        c->orig_dest_port = dest_port;
-        if (is_ipv6) memcpy(c->orig_dest_ip6, dest_ip6, 16); else c->orig_dest_ip = dest_ip;
         c->last_activity = now;
-        rev_insert(c);
         valid = TRUE;
     }
     ReleaseSRWLockExclusive(&lock);
@@ -301,7 +430,10 @@ BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_
     return found;
 }
 
-BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id)
+BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip,
+                         UINT16 *dest_port, UINT32 *proxy_config_id,
+                         char *hostname, size_t hostname_size,
+                         DWORD *process_id, BOOL *log_pending)
 {
     BOOL found = FALSE;
 
@@ -317,6 +449,10 @@ BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *
             *dest_ip = conn->orig_dest_ip;
             *dest_port = conn->orig_dest_port;
             if (proxy_config_id != NULL) *proxy_config_id = conn->proxy_config_id;
+            if (hostname && hostname_size)
+                strncpy_s(hostname, hostname_size, conn->hostname, _TRUNCATE);
+            if (process_id != NULL) *process_id = conn->process_id;
+            if (log_pending != NULL) *log_pending = conn->log_pending;
             InterlockedExchange64((LONGLONG volatile*)&conn->last_activity, (LONGLONG)GetTickCount64());
             found = TRUE;
             break;
@@ -369,6 +505,29 @@ void remove_connection(UINT16 src_port, BOOL is_udp, BOOL is_ipv6)
             break;
         }
         conn_ptr = &(*conn_ptr)->next;
+    }
+    ReleaseSRWLockExclusive(&lock);
+}
+
+void remove_connections_for_process(DWORD process_id, const FILETIME *process_created)
+{
+    if (!process_id || !process_created) return;
+    AcquireSRWLockExclusive(&lock);
+    for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
+    {
+        CONNECTION_INFO **link = &connection_hash_table[i];
+        while (*link)
+        {
+            CONNECTION_INFO *c = *link;
+            if (c->has_process_identity && c->process_id == process_id &&
+                CompareFileTime(&c->process_created, process_created) == 0)
+            {
+                *link = c->next;
+                rev_unlink(c);
+                free(c);
+            }
+            else link = &c->next;
+        }
     }
     ReleaseSRWLockExclusive(&lock);
 }

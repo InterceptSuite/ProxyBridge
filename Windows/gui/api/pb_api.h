@@ -18,6 +18,9 @@ typedef void (*PBLogCallback)(const char* message);
 typedef void (*PBConnectionCallback)(const char* process_name, DWORD pid,
                                      const char* dest_ip, unsigned short dest_port,
                                      const char* proxy_info);
+typedef void (*PBConnectionCallbackEx)(const char* process_name, DWORD pid,
+                                       const char* dest_ip, const char* hostname,
+                                       unsigned short dest_port, const char* proxy_info);
 
 // exported function pointer typedefs
 typedef UINT32 (*PFN_AddProxyConfig)(PBProxyType, const char*, unsigned short, const char*, const char*, BOOL);
@@ -36,6 +39,7 @@ typedef UINT32 (*PFN_GetRulePosition)(UINT32);
 typedef void   (*PFN_SetLocalhostViaProxy)(BOOL);
 typedef void   (*PFN_SetLogCallback)(PBLogCallback);
 typedef void   (*PFN_SetConnectionCallback)(PBConnectionCallback);
+typedef void   (*PFN_SetConnectionCallbackEx)(PBConnectionCallbackEx);
 typedef void   (*PFN_SetTrafficLoggingEnabled)(BOOL);
 typedef void   (*PFN_ClearConnectionLogs)(void);
 typedef BOOL   (*PFN_Start)(void);
@@ -59,6 +63,7 @@ typedef struct {
     PFN_SetLocalhostViaProxy      SetLocalhostViaProxy;
     PFN_SetLogCallback            SetLogCallback;
     PFN_SetConnectionCallback     SetConnectionCallback;
+    PFN_SetConnectionCallbackEx  SetConnectionCallbackEx;
     PFN_SetTrafficLoggingEnabled  SetTrafficLoggingEnabled;
     PFN_ClearConnectionLogs       ClearConnectionLogs;
     PFN_Start                     Start;
@@ -105,6 +110,7 @@ static BOOL PB_LoadDirect(PBApi* api)
     PB_BIND(SetLocalhostViaProxy,     "SetLocalhostViaProxy");
     PB_BIND(SetLogCallback,           "SetLogCallback");
     PB_BIND(SetConnectionCallback,    "SetConnectionCallback");
+    api->SetConnectionCallbackEx = (PFN_SetConnectionCallbackEx)(void*)GetProcAddress(api->dll, "ProxyBridge_SetConnectionCallbackEx");
     PB_BIND(SetTrafficLoggingEnabled, "SetTrafficLoggingEnabled");
     PB_BIND(ClearConnectionLogs,      "ClearConnectionLogs");
     PB_BIND(Start,                    "Start");

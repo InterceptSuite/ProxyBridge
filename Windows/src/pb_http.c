@@ -2,7 +2,8 @@
 
 // HTTP proxy: CONNECT tunnels (IPv4/IPv6).
 
-int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const PROXY_CONFIG *cfg)
+int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port,
+                    const PROXY_CONFIG *cfg, const char *hostname)
 {
     char request[HTTP_BUFFER_SIZE];
     char response[4096];
@@ -13,14 +14,12 @@ int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const 
     char addr_str[64];
     inet_ntop(AF_INET6, dest_ip6, addr_str, sizeof(addr_str));
 
-    // Use the cached hostname only if this config opts to let the proxy resolve DNS.
-    char cached_domain[256];
     const char *host_part;
     char host_buf[270];  // big enough for [ipv6]:port or domain
-    if (cfg->send_domain_to_proxy && dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
+    if (cfg->send_domain_to_proxy && hostname && hostname[0])
     {
-        host_part = cached_domain;
-        strncpy_s(host_buf, sizeof(host_buf), cached_domain, _TRUNCATE);
+        host_part = hostname;
+        strncpy_s(host_buf, sizeof(host_buf), hostname, _TRUNCATE);
     }
     else
     {
@@ -54,7 +53,8 @@ int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const 
     return 0;
 }
 
-int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG *cfg)
+int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port,
+                 const PROXY_CONFIG *cfg, const char *hostname)
 {
     char request[HTTP_BUFFER_SIZE];
     char response[4096];
@@ -63,13 +63,11 @@ int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG 
     int status_code;
     BOOL use_auth = (cfg != NULL && cfg->username[0] != '\0');
 
-    // Use the cached hostname only if this config opts to let the proxy resolve DNS.
-    char cached_domain[256];
     char ip_str[32];
     const char *host_part;
-    if (cfg->send_domain_to_proxy && dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
+    if (cfg->send_domain_to_proxy && hostname && hostname[0])
     {
-        host_part = cached_domain;
+        host_part = hostname;
     }
     else
     {

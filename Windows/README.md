@@ -39,9 +39,13 @@ Universal proxy client for Windows applications - route any application through 
 2. Run the installer with Administrator privileges
 3. The installer will:
    - Install ProxyBridge to `C:\Program Files\ProxyBridge`
+   - Install and start the `ProxyBridgeSvc` Windows service as `LocalSystem`
+   - Authorize the installing user to control the engine through the service
    - Add the install directory to your system PATH (GUI, CLI, and DLL all accessible)
    - Create Start Menu shortcuts for the GUI application
    - Include all required dependencies (WinDivert driver)
+
+The installer needs Administrator privileges to register the service and WinDivert driver. After installation, the GUI can be launched normally without elevation; it controls the engine over the service's authenticated named pipes.
 
 
 
@@ -50,7 +54,7 @@ Universal proxy client for Windows applications - route any application through 
 
 ### GUI Application
 
-Launch `ProxyBridge.exe` with Administrator privileges for an intuitive graphical interface.
+Launch `ProxyBridge.exe` normally for the graphical interface. The GUI uses `ProxyBridgeSvc` for packet capture, so it does not need Administrator privileges after installation. The standalone CLI and portable fallback still need elevation to start WinDivert directly.
 
 #### Proxy Settings
 
@@ -401,7 +405,7 @@ Case 2: Packet match with proxy rule
 ### Requirements
 
 - Windows 7 or later (64-bit)
-- Administrator privileges (required for WinDivert driver)
+- Administrator privileges for the one-time service/WinDivert installation; direct engine or CLI runs also need elevation
 - Visual Studio 2019 or later (MSVC - recommended) **or** MinGW-w64 (GCC)
 - WinDivert 2.2.2-A or later
 
@@ -425,9 +429,11 @@ The script automatically:
 # From a Visual Studio Developer Command Prompt
 cl /O2 /GL /W4 /D_WIN32_WINNT=0x0601 /DNDEBUG /GS /guard:cf ^
    /I"path\to\windivert\include" ^
-   ProxyBridge.c /LD ^
+   src\ProxyBridge.c src\pb_util.c src\pb_process.c src\pb_rules.c src\pb_proxy.c ^
+   src\pb_dns.c src\pb_dns_etw.c src\pb_socks5.c src\pb_http.c src\pb_conntrack.c ^
+   src\pb_relay.c src\pb_sockmap.c src\pb_sni.c /LD ^
    /link /LTCG /OPT:REF /RELEASE /DYNAMICBASE /NXCOMPAT ^
-   WinDivert.lib ws2_32.lib iphlpapi.lib ^
+   WinDivert.lib ws2_32.lib iphlpapi.lib tdh.lib shell32.lib advapi32.lib ^
    /OUT:ProxyBridgeCore.dll
 ```
 
@@ -436,8 +442,10 @@ cl /O2 /GL /W4 /D_WIN32_WINNT=0x0601 /DNDEBUG /GS /guard:cf ^
 ```powershell
 gcc -O2 -Wall -D_WIN32_WINNT=0x0601 -shared ^
     -I"C:\WinDivert-2.2.2-A\include" ^
-    ProxyBridge.c ^
-    -L"C:\WinDivert-2.2.2-A\x64" -lWinDivert -lws2_32 -liphlpapi ^
+    src\ProxyBridge.c src\pb_util.c src\pb_process.c src\pb_rules.c src\pb_proxy.c ^
+    src\pb_dns.c src\pb_dns_etw.c src\pb_socks5.c src\pb_http.c src\pb_conntrack.c ^
+    src\pb_relay.c src\pb_sockmap.c src\pb_sni.c ^
+    -L"C:\WinDivert-2.2.2-A\x64" -lWinDivert -lws2_32 -liphlpapi -ltdh -lshell32 -ladvapi32 ^
     -o ProxyBridgeCore.dll
 ```
 

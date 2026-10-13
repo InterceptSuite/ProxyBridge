@@ -10,7 +10,7 @@ param(
 $WinDivertPath = "C:\WinDivert-2.2.2-A"
 $SourcePath = "src"
 # Core split across modular translation units (see src\pb_internal.h).
-$SourceFile = "ProxyBridge.c pb_util.c pb_process.c pb_rules.c pb_proxy.c pb_dns.c pb_socks5.c pb_http.c pb_conntrack.c pb_relay.c pb_sockmap.c"
+$SourceFile = "ProxyBridge.c pb_util.c pb_process.c pb_rules.c pb_proxy.c pb_dns.c pb_dns_etw.c pb_socks5.c pb_http.c pb_conntrack.c pb_relay.c pb_sockmap.c pb_sni.c"
 $SourceFiles = ($SourceFile.Split(' ') | ForEach-Object { "$SourcePath\$_" }) -join ' '
 $OutputDLL = "ProxyBridgeCore.dll"
 $OutputDir = "output"
@@ -69,7 +69,7 @@ function Compile-MSVC {
               "/LD " +
               "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /NXCOMPAT " +
               "/LIBPATH:`"$WinDivertPath\$Arch`" " +
-              "WinDivert.lib ws2_32.lib iphlpapi.lib " +
+              "WinDivert.lib ws2_32.lib iphlpapi.lib tdh.lib shell32.lib advapi32.lib " +
               "/OUT:$OutputDLL"
 
     $cmd = "`"$vcvarsPath`" $Arch >nul && cl.exe $clArgs"
@@ -99,7 +99,7 @@ function Compile-GCC {
            "-I`"$WinDivertPath\include`" " +
            "$SourcePath\$SourceFile " +
            "-L`"$WinDivertPath\$Arch`" " +
-           "-lWinDivert -lws2_32 -liphlpapi " +
+           "-lWinDivert -lws2_32 -liphlpapi -ltdh -lshell32 -ladvapi32 " +
            "-o $OutputDLL"
 
     Write-Host "Command: $cmd" -ForegroundColor Gray

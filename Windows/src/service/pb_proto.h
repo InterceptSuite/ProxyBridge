@@ -19,13 +19,13 @@
 #define PB_SERVICE_NAME  L"ProxyBridgeSvc"
 #define PB_PIPE_CTL      L"\\\\.\\pipe\\ProxyBridgeCtl"
 #define PB_PIPE_EVT      L"\\\\.\\pipe\\ProxyBridgeEvt"
-#define PB_PROTO_VERSION 1
+#define PB_PROTO_VERSION 2
 #define PB_MSG_MAX       (64u * 1024u)
 #define PB_STR_MAX       (32u * 1024u)
 #define PB_NULL_STR      0xFFFFFFFFu
 
 enum {
-    PBOP_HELLO = 1,           // () -> PB_PROTO_VERSION
+    PBOP_HELLO = 1,           // optional client version -> negotiated protocol version
     PBOP_ADD_PROXY,           // type, ip, port, user, pass, sendDomain -> id
     PBOP_EDIT_PROXY,          // id, type, ip, port, user, pass, sendDomain -> bool
     PBOP_DELETE_PROXY,        // id -> bool
@@ -46,7 +46,7 @@ enum {
 
 enum {
     PBEVT_LOG = 1,            // str message
-    PBEVT_CONN,               // str process, u32 pid, str ip, u32 port, str info
+    PBEVT_CONN,               // v1 fields: str process, u32 pid, str ip, u32 port, str info; v2 appends str hostname
     PBEVT_TEST_LINE,          // str line
     PBEVT_TEST_DONE           // u32 result (int)
 };

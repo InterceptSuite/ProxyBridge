@@ -17,6 +17,7 @@ extern "C" {
 
 typedef void (*LogCallback)(const char* message);
 typedef void (*ConnectionCallback)(const char* process_name, DWORD pid, const char* dest_ip, UINT16 dest_port, const char* proxy_info);
+typedef void (*ConnectionCallbackEx)(const char* process_name, DWORD pid, const char* dest_ip, const char* hostname, UINT16 dest_port, const char* proxy_info);
 
 typedef enum {
     PROXY_TYPE_HTTP = 0,
@@ -51,7 +52,8 @@ PROXYBRIDGE_API int    ProxyBridge_TestProxyConfigEx(UINT32 config_id, const cha
 
 // Rule management - proxy_config_id selects which proxy config the rule uses (0 = first available)
 // target_domains: semicolon/comma separated domain patterns ("*", "google.com", "*.google.com"); NULL/"" = no domain restriction.
-// Domain matching relies on DNS snooping of the app's own resolutions; unencrypted DNS only (DoH/DoT bypasses it).
+// Domain matching uses process-scoped DNS Client ETW results plus observed UDP DNS transactions;
+// application-managed encrypted DNS and DNS over TCP may leave the hostname unavailable.
 PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id);
 PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id);
 PROXYBRIDGE_API BOOL ProxyBridge_DisableRule(UINT32 rule_id);
@@ -62,6 +64,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_GetRulePosition(UINT32 rule_id);  // Get curr
 PROXYBRIDGE_API void ProxyBridge_SetLocalhostViaProxy(BOOL enable);
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback);
 PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
+PROXYBRIDGE_API void ProxyBridge_SetConnectionCallbackEx(ConnectionCallbackEx callback);
 PROXYBRIDGE_API void ProxyBridge_SetTrafficLoggingEnabled(BOOL enable);
 PROXYBRIDGE_API void ProxyBridge_ClearConnectionLogs(void);  // Clear connection history from memory
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void);

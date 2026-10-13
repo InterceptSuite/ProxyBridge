@@ -25,6 +25,8 @@ static HANDLE           g_ipcTestDone = NULL;
 static volatile LONG    g_ipcTestResult = -1;
 static PBLogCallback        g_ipcLogCb = NULL;
 static PBConnectionCallback g_ipcConnCb = NULL;
+static PBConnectionCallbackEx g_ipcConnCbEx = NULL;
+static DWORD                g_ipcProtoVersion = 1;
 static PBTestLogCallback    g_ipcTestCb = NULL;
 static void*                g_ipcTestUser = NULL;
 
@@ -39,7 +41,7 @@ static DWORD WINAPI PbIpcReader(LPVOID arg)
         if (!ReadFile(g_ipcEvt, buf, sizeof(buf), &n, NULL)) break;
         PbR r; PbR_Init(&r, buf, n);
         UINT32 type = PbR_U32(&r);
-        char a[8192], b[8192], c[8192];
+        char a[8192], b[8192], c[8192], d[8192] = {0};
         if (type == PBEVT_LOG)
         {
             PbR_Str(&r, a, sizeof(a), NULL);
@@ -50,7 +52,12 @@ static DWORD WINAPI PbIpcReader(LPVOID arg)
             PbR_Str(&r, a, sizeof(a), NULL); UINT32 pid = PbR_U32(&r);
             PbR_Str(&r, b, sizeof(b), NULL); UINT32 port = PbR_U32(&r);
             PbR_Str(&r, c, sizeof(c), NULL);
-            if (r.ok && g_ipcConnCb) g_ipcConnCb(a, pid, b, (unsigned short)port, c);
+            if (r.ok && g_ipcProtoVersion >= 2 && r.pos < r.len)
+                PbR_Str(&r, d, sizeof(d), NULL);
+            if (r.ok && g_ipcConnCbEx)
+                g_ipcConnCbEx(a, pid, b, d, (unsigned short)port, c);
+            else if (r.ok && g_ipcConnCb)
+                g_ipcConnCb(a, pid, b, (unsigned short)port, c);
         }
         else if (type == PBEVT_TEST_LINE)
         {
@@ -131,6 +138,7 @@ static void IpcSetTrafficLog(BOOL v)  { PBIPC_BEGIN(PBOP_SET_TRAFFIC_LOG); PbW_U
 static void IpcClearConnLogs(void)    { PBIPC_BEGIN(PBOP_CLEAR_CONN_LOGS); PbIpcCall(_b, _w.len); }
 static void IpcSetLogCallback(PBLogCallback cb)               { g_ipcLogCb = cb; }
 static void IpcSetConnectionCallback(PBConnectionCallback cb) { g_ipcConnCb = cb; }
+static void IpcSetConnectionCallbackEx(PBConnectionCallbackEx cb) { g_ipcConnCbEx = cb; }
 static BOOL IpcStart(void) { PBIPC_BEGIN(PBOP_START); PBIPC_END(); }
 static BOOL IpcStop(void)  { PBIPC_BEGIN(PBOP_STOP);  PBIPC_END(); }
 
@@ -199,13 +207,15 @@ static int PB_LoadService(PBApi* api)
 
     g_ipcCtl = ctl; g_ipcEvt = evt;
     {
-        PBIPC_BEGIN(PBOP_HELLO);
-        if (PbIpcCall(_b, _w.len) != PB_PROTO_VERSION)
+        PBIPC_BEGIN(PBOP_HELLO); PbW_U32(&_w, PB_PROTO_VERSION);
+        UINT32 selected = PbIpcCall(_b, _w.len);
+        if (selected == 0 || selected > PB_PROTO_VERSION)
         {
             CloseHandle(g_ipcCtl); g_ipcCtl = INVALID_HANDLE_VALUE;
             CloseHandle(g_ipcEvt); g_ipcEvt = INVALID_HANDLE_VALUE;
             return PB_IPC_BAD_VERSION;
         }
+        g_ipcProtoVersion = selected;
     }
     g_ipcReader = CreateThread(NULL, 0, PbIpcReader, NULL, 0, NULL);
 
@@ -218,6 +228,7 @@ static int PB_LoadService(PBApi* api)
     api->MoveRuleToPosition = IpcMoveRule;         api->GetRulePosition = IpcGetRulePos;
     api->SetLocalhostViaProxy = IpcSetLocalhost;   api->SetLogCallback = IpcSetLogCallback;
     api->SetConnectionCallback = IpcSetConnectionCallback;
+    api->SetConnectionCallbackEx = IpcSetConnectionCallbackEx;
     api->SetTrafficLoggingEnabled = IpcSetTrafficLog;
     api->ClearConnectionLogs = IpcClearConnLogs;   api->Start = IpcStart; api->Stop = IpcStop;
     return PB_IPC_OK;

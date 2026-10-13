@@ -197,9 +197,11 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char* ta
 
     int result;
     if (cfg->type == PROXY_TYPE_SOCKS5)
-        result = socks5_connect(sock, dest_ip, target_port, cfg);
+        result = cfg->send_domain_to_proxy
+               ? socks5_connect_domain(sock, target_host, target_port, cfg)
+               : socks5_connect(sock, dest_ip, target_port, cfg);
     else
-        result = http_connect(sock, dest_ip, target_port, cfg);
+        result = http_connect(sock, dest_ip, target_port, cfg, target_host);
 
     closesocket(sock);
 
@@ -278,8 +280,11 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char* 
     else
     {
         ULONGLONG h0 = GetTickCount64();
-        int rc = is_socks ? socks5_connect(s, dest_ip, target_port, cfg)
-                          : http_connect(s, dest_ip, target_port, cfg);
+        int rc = is_socks
+               ? (cfg->send_domain_to_proxy
+                  ? socks5_connect_domain(s, target_host, target_port, cfg)
+                  : socks5_connect(s, dest_ip, target_port, cfg))
+               : http_connect(s, dest_ip, target_port, cfg, target_host);
         ULONGLONG h1 = GetTickCount64();
         if (rc != 0)
         {

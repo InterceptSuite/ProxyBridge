@@ -194,30 +194,47 @@ static void PBLogCb(const char* message)
     free(body);
 }
 
-static void PBConnCb(const char* proc, DWORD pid, const char* ip, unsigned short port, const char* info)
+static void PBConnCbEx(const char* proc, DWORD pid, const char* ip, const char* hostname,
+                       unsigned short port, const char* info)
 {
     if (!g_hMain || !g_trafficLog) return;
-    wchar_t *wp = U2Wdup(proc), *wi = U2Wdup(ip), *wf = U2Wdup(info);
+    const char *display = hostname && hostname[0] ? hostname : ip;
+    wchar_t *wp = U2Wdup(proc), *wi = U2Wdup(display), *wf = U2Wdup(info);
     // Connection-log filters: derive protocol/action from the proxy_info and drop non-matches.
     if (g_fltCount > 0)
     {
         wchar_t wport[16]; _snwprintf_s(wport, 16, _TRUNCATE, L"%u", port);
+        wchar_t destination[640];
+        wchar_t *wip = U2Wdup(ip);
+        _snwprintf_s(destination, 640, _TRUNCATE, L"%s %s",
+                     wi ? wi : L"", wip ? wip : L"");
         const wchar_t* proto  = (info && strstr(info, "(UDP)")) ? L"UDP" : L"TCP";
         const wchar_t* action = (info && _strnicmp(info, "Direct", 6) == 0) ? L"Direct"
                               : (info && _strnicmp(info, "Block",  5) == 0) ? L"Blocked" : L"Proxy";
-        if (!PassesLogFilters(wp ? wp : L"", wi ? wi : L"", wport, proto, action))
-        { free(wp); free(wi); free(wf); return; }
+        BOOL pass = PassesLogFilters(wp ? wp : L"", destination, wport, proto, action);
+        free(wip);
+        if (!pass) { free(wp); free(wi); free(wf); return; }
     }
     wchar_t ts[16]; GetTimePrefix(ts, 16);
     size_t n = 64 + (wp ? wcslen(wp) : 0) + (wi ? wcslen(wi) : 0) + (wf ? wcslen(wf) : 0);
     wchar_t* line = (wchar_t*)malloc(n * sizeof(wchar_t));
     if (line)
     {
-        _snwprintf_s(line, n, _TRUNCATE, L"%s%s (PID:%lu) -> %s:%u  via %s\r\n",
-                   ts, wp ? wp : L"?", pid, wi ? wi : L"?", port, wf ? wf : L"?");
+        if (display && strchr(display, ':'))
+            _snwprintf_s(line, n, _TRUNCATE, L"%s%s (PID:%lu) -> [%s]:%u  via %s\r\n",
+                         ts, wp ? wp : L"?", pid, wi ? wi : L"?", port, wf ? wf : L"?");
+        else
+            _snwprintf_s(line, n, _TRUNCATE, L"%s%s (PID:%lu) -> %s:%u  via %s\r\n",
+                         ts, wp ? wp : L"?", pid, wi ? wi : L"?", port, wf ? wf : L"?");
         LogStoreQueue(&g_connStore, line);
     }
     free(wp); free(wi); free(wf);
+}
+
+static void PBConnCb(const char* proc, DWORD pid, const char* ip,
+                     unsigned short port, const char* info)
+{
+    PBConnCbEx(proc, pid, ip, NULL, port, info);
 }
 
 // profile apply / persist
@@ -1171,7 +1188,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     g_api.SetLocalhostViaProxy(g_localhost);
     g_api.SetTrafficLoggingEnabled(g_trafficLog);
     g_api.SetLogCallback(PBLogCb);
-    g_api.SetConnectionCallback(PBConnCb);
+    if (g_api.SetConnectionCallbackEx)
+        g_api.SetConnectionCallbackEx(PBConnCbEx);
+    else
+        g_api.SetConnectionCallback(PBConnCb);
     ApplyConfigs();
     g_started = g_api.Start();
     if (g_started) { ApplyRules(); LogStoreAdd(&g_actStore, T(S_STARTED)); }

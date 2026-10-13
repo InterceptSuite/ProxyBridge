@@ -40,6 +40,7 @@ static HANDLE                g_worker = NULL;     // thread running the accept/s
 
 static HANDLE   g_ctl = INVALID_HANDLE_VALUE;
 static HANDLE   g_evt = INVALID_HANDLE_VALUE;
+static DWORD    g_evt_proto_version = 1;
 static PBApi    g_api;
 static CRITICAL_SECTION g_evt_lock;               // serialises event writes from engine threads
 static volatile LONG g_evt_live = 0;              // 1 while an event pipe client is attached
@@ -82,6 +83,16 @@ static void OnConn(const char *proc, DWORD pid, const char *ip, unsigned short p
     if (w.ok) SendEvent(b, w.len);
 }
 
+static void OnConnEx(const char *proc, DWORD pid, const char *ip, const char *hostname,
+                     unsigned short port, const char *info)
+{
+    BYTE b[8192]; PbW w; PbW_Init(&w, b, sizeof(b));
+    PbW_U32(&w, PBEVT_CONN); PbW_Str(&w, proc); PbW_U32(&w, pid);
+    PbW_Str(&w, ip); PbW_U32(&w, port); PbW_Str(&w, info);
+    if (g_evt_proto_version >= 2) PbW_Str(&w, hostname);
+    if (w.ok) SendEvent(b, w.len);
+}
+
 // proxy test runs on its own thread so the request that started it returns immediately
 static volatile LONG g_test_busy = 0;
 typedef struct { UINT32 id; char host[512]; unsigned short port; } TestJob;
@@ -120,7 +131,13 @@ static BOOL Dispatch(const BYTE *req, DWORD reqLen, PbW *resp)
 
     switch (op)
     {
-    case PBOP_HELLO: ret = PB_PROTO_VERSION; break;
+    case PBOP_HELLO: {
+        if (reqLen != 4 && reqLen != 8) return FALSE;
+        UINT32 client_version = r.pos < reqLen ? PbR_U32(&r) : 1;
+        if (!r.ok || client_version == 0) return FALSE;
+        g_evt_proto_version = client_version < PB_PROTO_VERSION ? client_version : PB_PROTO_VERSION;
+        ret = g_evt_proto_version;
+        break; }
 
     case PBOP_ADD_PROXY: {
         UINT32 type = PbR_U32(&r); PbR_Str(&r, ip, sizeof(ip), NULL); UINT32 port = PbR_U32(&r);
@@ -253,7 +270,10 @@ static void ServeClient(void)
     // fresh engine for every client
     if (!PB_LoadDirect(&g_api)) return;
     g_api.SetLogCallback(OnLog);
-    g_api.SetConnectionCallback(OnConn);
+    if (g_api.SetConnectionCallbackEx)
+        g_api.SetConnectionCallbackEx(OnConnEx);
+    else
+        g_api.SetConnectionCallback(OnConn);
     InterlockedExchange(&g_evt_live, 1);
 
     for (;;)
@@ -270,7 +290,10 @@ static void ServeClient(void)
     InterlockedExchange(&g_evt_live, 0);
     if (g_api.Stop) g_api.Stop();
     if (g_api.SetLogCallback) g_api.SetLogCallback(NULL);
-    if (g_api.SetConnectionCallback) g_api.SetConnectionCallback(NULL);
+    if (g_api.SetConnectionCallbackEx)
+        g_api.SetConnectionCallbackEx(NULL);
+    else if (g_api.SetConnectionCallback)
+        g_api.SetConnectionCallback(NULL);
     PB_UnloadDirect(&g_api);
 }
 

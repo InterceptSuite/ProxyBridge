@@ -31,19 +31,12 @@ HANDLE udp_relay_thread = NULL;
 HANDLE cleanup_thread = NULL;
 PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE] = {NULL};
 volatile BOOL g_has_active_rules = FALSE;
-// Set when at least one enabled rule carries a domain filter. Gates the DNS-cache
-// lookup in match_rule so setups without domain rules pay zero extra cost.
-volatile BOOL g_has_domain_rules = FALSE;
 SOCKET udp_relay_socket = INVALID_SOCKET;
 SOCKET udp_relay_socket6 = INVALID_SOCKET;
 volatile BOOL running = FALSE;
 DWORD g_current_process_id = 0;
 
 BOOL g_traffic_logging_enabled = TRUE;
-
-DNS_CACHE_ENTRY    *g_dns_cache[DNS_CACHE_BUCKETS];
-DNS_CACHE_ENTRY_V6 *g_dns_cache_v6[DNS_CACHE_BUCKETS];
-SRWLOCK             g_dns_cache_lock;
 
 // per src port decision cache.
 //
@@ -74,6 +67,29 @@ UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
 BOOL g_localhost_via_proxy = FALSE;  // default disabled for security - most proxy server block localhost for ssrf and also many app might not work if localhost trafic goes to remote server if proxy server is on diffrent machine
 LogCallback g_log_callback = NULL;
 ConnectionCallback g_connection_callback = NULL;
+ConnectionCallbackEx g_connection_callback_ex = NULL;
+
+static BOOL connection_callback_active(void)
+{
+    return g_connection_callback != NULL || g_connection_callback_ex != NULL;
+}
+
+static void report_connection(const char *process_name, DWORD pid, const char *ip,
+                              const char *hostname, UINT16 port, const char *info)
+{
+    if (g_connection_callback_ex)
+        g_connection_callback_ex(process_name, pid, ip, hostname, port, info);
+    else if (g_connection_callback)
+        g_connection_callback(process_name, pid, ip, port, info);
+}
+
+// Same line, callable from the relay threads. The relay is the only place that knows the
+// destination name for a connection the DNS cache could not name at SYN time.
+void pb_report_connection(const char *process_name, DWORD pid, const char *ip,
+                          const char *hostname, UINT16 port, const char *info)
+{
+    report_connection(process_name, pid, ip, hostname, port, info);
+}
 
 char  *g_pidtbl_buf = NULL;
 DWORD  g_pidtbl_cap = 0;
@@ -157,6 +173,37 @@ static BOOL pb_divert_send(HANDLE h, PVOID pkt, UINT len, const WINDIVERT_ADDRES
 }
 #define WinDivertSend(h, p, l, s, a) pb_divert_send((h), (p), (l), (a))
 
+static void observe_tcp_dns_packet(BYTE *packet, UINT packet_len,
+                                   PWINDIVERT_IPHDR ip_header, PWINDIVERT_IPV6HDR ipv6_header,
+                                   PWINDIVERT_TCPHDR tcp_header, ULONGLONG packet_qpc)
+{
+    if (!tcp_header ||
+        (ntohs(tcp_header->SrcPort) != 53 && ntohs(tcp_header->DstPort) != 53))
+        return;
+
+    size_t tcp_header_len = (size_t)tcp_header->HdrLength * 4;
+    size_t payload_offset = (size_t)((BYTE *)tcp_header - packet) + tcp_header_len;
+    if (tcp_header_len < sizeof(WINDIVERT_TCPHDR) || payload_offset > packet_len)
+        return;
+
+    UINT8 tcp_flags = (tcp_header->Fin ? 0x01 : 0) |
+                      (tcp_header->Syn ? 0x02 : 0) |
+                      (tcp_header->Ack ? 0x10 : 0) |
+                      (tcp_header->Rst ? 0x04 : 0);
+    const UINT8 *payload = packet + payload_offset;
+    int payload_len = (int)(packet_len - payload_offset);
+    if (ip_header)
+        dns_network_observe_tcp(FALSE,
+            (const UINT8 *)&ip_header->SrcAddr, (const UINT8 *)&ip_header->DstAddr,
+            ntohs(tcp_header->SrcPort), ntohs(tcp_header->DstPort),
+            ntohl(tcp_header->SeqNum), tcp_flags, payload, payload_len, packet_qpc);
+    else if (ipv6_header)
+        dns_network_observe_tcp(TRUE,
+            (const UINT8 *)ipv6_header->SrcAddr, (const UINT8 *)ipv6_header->DstAddr,
+            ntohs(tcp_header->SrcPort), ntohs(tcp_header->DstPort),
+            ntohl(tcp_header->SeqNum), tcp_flags, payload, payload_len, packet_qpc);
+}
+
 DWORD WINAPI packet_processor(LPVOID arg)
 {
     unsigned char packet[MAXBUF];
@@ -195,6 +242,29 @@ DWORD WINAPI packet_processor(LPVOID arg)
         WinDivertHelperParsePacket(packet, packet_len, &ip_header, &ipv6_header, NULL,
             NULL, NULL, &tcp_header, &udp_header, NULL, NULL, NULL, NULL);
 
+        if (udp_header && ntohs(udp_header->Length) >= sizeof(WINDIVERT_UDPHDR))
+        {
+            size_t payload_offset = (size_t)((BYTE *)udp_header - packet) + sizeof(WINDIVERT_UDPHDR);
+            size_t udp_payload_len = ntohs(udp_header->Length) - sizeof(WINDIVERT_UDPHDR);
+            if (payload_offset <= packet_len && udp_payload_len <= packet_len - payload_offset)
+            {
+                const UINT8 *payload = packet + payload_offset;
+                if (ip_header)
+                    dns_network_observe_udp(addr.Outbound, FALSE,
+                        (const UINT8 *)&ip_header->SrcAddr, (const UINT8 *)&ip_header->DstAddr,
+                        ntohs(udp_header->SrcPort), ntohs(udp_header->DstPort), payload,
+                        (int)udp_payload_len, (ULONGLONG)addr.Timestamp);
+                else if (ipv6_header)
+                    dns_network_observe_udp(addr.Outbound, TRUE,
+                        (const UINT8 *)ipv6_header->SrcAddr, (const UINT8 *)ipv6_header->DstAddr,
+                        ntohs(udp_header->SrcPort), ntohs(udp_header->DstPort), payload,
+                        (int)udp_payload_len, (ULONGLONG)addr.Timestamp);
+            }
+        }
+
+        observe_tcp_dns_packet(packet, packet_len, ip_header, ipv6_header, tcp_header,
+                               (ULONGLONG)addr.Timestamp);
+
         if (ip_header == NULL)
         {
             if (ipv6_header == NULL) { continue; }
@@ -212,10 +282,21 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     {
                         UINT16 client_sp = ntohs(udp_header->DstPort);
                         UINT8  orig_dst6[16]; UINT16 orig_dp = 0; UINT32 dummy = 0;
-                        if (get_connection_full_v6(client_sp, TRUE, orig_dst6, &orig_dp, &dummy))
+                        if (get_connection_full_v6(client_sp, TRUE, orig_dst6, &orig_dp, &dummy,
+                                                   NULL, 0, NULL, NULL))
                         {
                             memcpy(ipv6_header->SrcAddr, orig_dst6, 16);
                             udp_header->SrcPort = htons(orig_dp);
+                            if (ntohs(udp_header->Length) >= sizeof(WINDIVERT_UDPHDR))
+                            {
+                                size_t payload_offset = (size_t)((BYTE *)udp_header - packet) + sizeof(WINDIVERT_UDPHDR);
+                                size_t udp_payload_len = ntohs(udp_header->Length) - sizeof(WINDIVERT_UDPHDR);
+                                if (payload_offset <= packet_len && udp_payload_len <= packet_len - payload_offset)
+                                    dns_network_observe_udp(FALSE, TRUE,
+                                        (const UINT8 *)ipv6_header->SrcAddr, (const UINT8 *)ipv6_header->DstAddr,
+                                        orig_dp, client_sp, packet + payload_offset,
+                                        (int)udp_payload_len, (ULONGLONG)addr.Timestamp);
+                            }
                         }
                         // ::1 loopback: keep OUTBOUND so the loopback adapter echo
                         // delivers reliably (same reasoning as IPv4 path below).
@@ -248,7 +329,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         continue;
                     }
 
-                    if (!g_has_active_rules && g_connection_callback == NULL)
+                    if (!g_has_active_rules && !connection_callback_active())
                     {
                         WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                         continue;
@@ -263,9 +344,8 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     RuleAction action6u;
                     DWORD pid6u = 0;
                     UINT32 pcid6u = 0;
-                    action6u = check_process_rule_v6((const UINT8*)ipv6_header->SrcAddr, sp, (const UINT8*)ipv6_header->DstAddr, dp, TRUE, &pid6u, &pcid6u);
-                    if (action6u == RULE_ACTION_DIRECT && pid6u > 0)
-                        udp_direct_remember(TRUE, ipv6_header->DstAddr, sp, dp);
+                    char hostname6u[256] = {0};
+                    action6u = check_process_rule_v6((const UINT8*)ipv6_header->SrcAddr, sp, (const UINT8*)ipv6_header->DstAddr, dp, TRUE, (ULONGLONG)addr.Timestamp, hostname6u, &pid6u, &pcid6u);
 
                     if (action6u == RULE_ACTION_PROXY && !g_localhost_via_proxy)
                     {
@@ -280,7 +360,14 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     if (action6u == RULE_ACTION_PROXY && (dp == 546 || dp == 547))
                         action6u = RULE_ACTION_DIRECT;
 
-                    if (g_connection_callback != NULL && pid6u > 0)
+                    if (action6u != RULE_ACTION_PROXY)
+                    {
+                        hostname6u[0] = '\0';
+                        if (action6u == RULE_ACTION_DIRECT && pid6u > 0)
+                            udp_direct_remember(TRUE, ipv6_header->DstAddr, sp, dp);
+                    }
+
+                    if (connection_callback_active() && pid6u > 0)
                     {
                         // Fold the 128-bit destination into a 32-bit key so the log-dedup
                         // table distinguishes different IPv6 hosts. Passing 0 (as before)
@@ -300,7 +387,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                                 if (action6u==RULE_ACTION_PROXY){PROXY_CONFIG*pc=find_proxy_config(pcid6u);if(pc)snprintf(pinfo,sizeof(pinfo),"Proxy %s://%s:%d (UDP)",pc->type==PROXY_TYPE_HTTP?"HTTP":"SOCKS5",pc->host,pc->port);else snprintf(pinfo,sizeof(pinfo),"Proxy (UDP)");}
                                 else if(action6u==RULE_ACTION_DIRECT) snprintf(pinfo,sizeof(pinfo),"Direct (UDP)");
                                 else snprintf(pinfo,sizeof(pinfo),"Blocked (UDP)");
-                                g_connection_callback(extract_filename(pname),pid6u,dstr,dp,pinfo);
+                                report_connection(extract_filename(pname), pid6u, dstr, hostname6u, dp, pinfo);
                                 if(g_traffic_logging_enabled) add_logged_connection(pid6u,v6key,dp,action6u);
                             }
                         }
@@ -316,7 +403,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                             // HTTP proxy can't relay UDP - drop
                             continue;
                         }
-                        add_connection_v6(sp, TRUE, (const UINT8*)ipv6_header->SrcAddr, (const UINT8*)ipv6_header->DstAddr, dp, pcid6u);
+                        add_connection_v6(sp, TRUE, (const UINT8*)ipv6_header->SrcAddr, (const UINT8*)ipv6_header->DstAddr, dp, pcid6u, hostname6u, pid6u, FALSE);
 
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
                         static const UINT8 _lb6up[16]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
@@ -344,18 +431,10 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         continue;
                     }
                 }
-                else
+                    else
                 {
                     if (udp_header->DstPort != htons(LOCAL_UDP_RELAY_PORT))
                     {
-                        // Snoop IPv6 DNS responses (AAAA records) for the domain cache.
-                        if (ntohs(udp_header->SrcPort) == 53)
-                        {
-                            const UINT8 *udp_payload6 = (const UINT8 *)udp_header + sizeof(WINDIVERT_UDPHDR);
-                            int udp_payload6_len = (int)(ntohs(udp_header->Length) - sizeof(WINDIVERT_UDPHDR));
-                            if (udp_payload6_len > 0)
-                                snoop_dns_response(udp_payload6, udp_payload6_len);
-                        }
                         WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                         continue;
                     }
@@ -400,7 +479,8 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     UINT8  orig_dst6[16];
                     UINT16 orig_dst_port = 0;
                     UINT32 dummy_cfg = 0;
-                    get_connection_full_v6(client_sp, FALSE, orig_dst6, &orig_dst_port, &dummy_cfg);
+                    get_connection_full_v6(client_sp, FALSE, orig_dst6, &orig_dst_port, &dummy_cfg,
+                                           NULL, 0, NULL, NULL);
                     if (orig_dst_port) tcp_header->SrcPort = htons(orig_dst_port);
 
                     static const UINT8 _lb6[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
@@ -414,6 +494,8 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         memcpy(ipv6_header->SrcAddr, tmp, 16);
                         addr.Outbound = FALSE;
                     }
+                    observe_tcp_dns_packet(packet, packet_len, NULL, ipv6_header, tcp_header,
+                                           (ULONGLONG)addr.Timestamp);
                     if (tcp_header->Rst) remove_connection(client_sp, FALSE, TRUE);
                     else if (tcp_header->Fin) connection_fin(client_sp, TRUE, 2);
                     goto ipv6_send;
@@ -453,7 +535,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     continue;
                 }
 
-                if (!g_has_active_rules && g_connection_callback == NULL)
+                if (!g_has_active_rules && !connection_callback_active())
                 {
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
@@ -462,7 +544,8 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 RuleAction action6;
                 DWORD pid6 = 0;
                 UINT32 proxy_config_id6 = 0;
-                action6 = check_process_rule_v6((const UINT8*)ipv6_header->SrcAddr, sp, (const UINT8*)ipv6_header->DstAddr, dp, FALSE, &pid6, &proxy_config_id6);
+                char hostname6[256] = {0};
+                action6 = check_process_rule_v6((const UINT8*)ipv6_header->SrcAddr, sp, (const UINT8*)ipv6_header->DstAddr, dp, FALSE, (ULONGLONG)addr.Timestamp, hostname6, &pid6, &proxy_config_id6);
 
                 // ::1 IPv6 loopback - use  same "Localhost via Proxy" toggle as IPv4 127.
                 if (action6 == RULE_ACTION_PROXY && !g_localhost_via_proxy)
@@ -477,7 +560,21 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         action6 = RULE_ACTION_DIRECT;
                 }
 
-                if (g_connection_callback != NULL && tcp_header->Syn && !tcp_header->Ack && pid6 > 0)
+                if (action6 != RULE_ACTION_PROXY)
+                {
+                    hostname6[0] = '\0';
+                }
+
+                // See the IPv4 path: a proxied connection whose proxy resolves DNS itself is
+                // logged by the relay, which is where the destination name becomes known.
+                BOOL defer_connection_log6 = FALSE;
+                if (action6 == RULE_ACTION_PROXY && hostname6[0] == '\0')
+                {
+                    PROXY_CONFIG *pcfg6 = find_proxy_config(proxy_config_id6);
+                    defer_connection_log6 = (pcfg6 != NULL && pcfg6->send_domain_to_proxy);
+                }
+
+                if (connection_callback_active() && tcp_header->Syn && !tcp_header->Ack && pid6 > 0)
                 {
                     // Fold the 128-bit destination into a 32-bit dedup key so different
                     // IPv6 hosts aren't collapsed into one entry (see IPv6 UDP path).
@@ -510,9 +607,10 @@ DWORD WINAPI packet_processor(LPVOID arg)
                                 snprintf(proxy_info, sizeof(proxy_info), "Blocked");
 
                             const char *display_name = extract_filename(process_name);
-                            g_connection_callback(display_name, pid6, dest_ip_str, dp, proxy_info);
+                            if (!defer_connection_log6)
+                                report_connection(display_name, pid6, dest_ip_str, hostname6, dp, proxy_info);
 
-                            if (g_traffic_logging_enabled)
+                            if (g_traffic_logging_enabled && !defer_connection_log6)
                                 add_logged_connection(pid6, v6key, dp, action6);
                         }
                     }
@@ -531,7 +629,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 }
                 else if (action6 == RULE_ACTION_PROXY)
                 {
-                    add_connection_v6(sp, FALSE, (const UINT8*)ipv6_header->SrcAddr, (const UINT8*)ipv6_header->DstAddr, dp, proxy_config_id6);
+                    add_connection_v6(sp, FALSE, (const UINT8*)ipv6_header->SrcAddr, (const UINT8*)ipv6_header->DstAddr, dp, proxy_config_id6, hostname6, pid6, defer_connection_log6);
                     port_set_decided(sp);
                     tcp_header->DstPort = htons(g_local_relay_port);
 
@@ -580,6 +678,16 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         // Restore both source IP and port to original destination
                         ip_header->SrcAddr = orig_dest_ip;
                         udp_header->SrcPort = htons(orig_dest_port);
+                        if (ntohs(udp_header->Length) >= sizeof(WINDIVERT_UDPHDR))
+                        {
+                            size_t payload_offset = (size_t)((BYTE *)udp_header - packet) + sizeof(WINDIVERT_UDPHDR);
+                            size_t udp_payload_len = ntohs(udp_header->Length) - sizeof(WINDIVERT_UDPHDR);
+                            if (payload_offset <= packet_len && udp_payload_len <= packet_len - payload_offset)
+                                dns_network_observe_udp(FALSE, FALSE,
+                                    (const UINT8 *)&ip_header->SrcAddr, (const UINT8 *)&ip_header->DstAddr,
+                                    orig_dest_port, dst_port, packet + payload_offset,
+                                    (int)udp_payload_len, (ULONGLONG)addr.Timestamp);
+                        }
 
                         // loopback need outbound injection inbound dont work on windows loopback
                         // bcz fast path skip the recive layer we inject into
@@ -634,7 +742,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     UINT16 dest_port = ntohs(udp_header->DstPort);
 
                     // if no rule configuree all connection direct with no checks avoid unwanted memory and pocessing whcich could delay
-                    if (!g_has_active_rules && g_connection_callback == NULL)
+                    if (!g_has_active_rules && !connection_callback_active())
                     {
                         // No rules and no logging - pass through immediately (no checksum needed for unmodified packets)
                         WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
@@ -652,9 +760,8 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     DWORD pid = 0;
                     UINT32 proxy_config_id = 0;
 
-                    action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, &pid, &proxy_config_id);
-                    if (action == RULE_ACTION_DIRECT && pid > 0)
-                        udp_direct_remember(FALSE, &dest_ip, src_port, dest_port);
+                    char hostname[256] = {0};
+                    action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, (ULONGLONG)addr.Timestamp, hostname, &pid, &proxy_config_id);
 
                     // override PROXY to DIRECT if localhost proxy is disabled and destination is localhost
                     BYTE dest_first_octet = (dest_ip >> 0) & 0xFF;
@@ -669,10 +776,17 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     if (action == RULE_ACTION_PROXY && (dest_port == 67 || dest_port == 68))
                         action = RULE_ACTION_DIRECT;
 
+                    if (action != RULE_ACTION_PROXY)
+                    {
+                        hostname[0] = '\0';
+                        if (action == RULE_ACTION_DIRECT && pid > 0)
+                            udp_direct_remember(FALSE, &dest_ip, src_port, dest_port);
+                    }
+
                     // only log if callback is set
                     // reuse pid from check_process_rule
                     // CLI use no log flag
-                    if (g_connection_callback != NULL && pid > 0)
+                    if (connection_callback_active() && pid > 0)
                     {
                         char process_name[MAX_PROCESS_NAME];
 
@@ -704,7 +818,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                                 }
 
                                 const char* display_name = extract_filename(process_name);
-                                g_connection_callback(display_name, pid, dest_ip_str, dest_port, proxy_info);
+                                report_connection(display_name, pid, dest_ip_str, hostname, dest_port, proxy_info);
 
                                 if (g_traffic_logging_enabled)
                                 {
@@ -721,7 +835,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
 
                     if (action == RULE_ACTION_PROXY)
                     {
-                        add_connection(src_port, TRUE, src_ip, dest_ip, dest_port, proxy_config_id);
+                        add_connection(src_port, TRUE, src_ip, dest_ip, dest_port, proxy_config_id, hostname, pid, FALSE);
 
                         // redirect to UDP relay server at 127.0.0.1:34011
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
@@ -758,16 +872,6 @@ DWORD WINAPI packet_processor(LPVOID arg)
             {
                 if (udp_header->DstPort != htons(LOCAL_UDP_RELAY_PORT))
                 {
-                    // Snoop DNS responses to build the IP→hostname cache used by
-                    // socks5_connect_domain() so that SOCKS5 proxies receive the
-                    // original hostname instead of a bare IP (issue #138).
-                    if (ntohs(udp_header->SrcPort) == 53)
-                    {
-                        const UINT8 *udp_payload = (const UINT8 *)udp_header + sizeof(WINDIVERT_UDPHDR);
-                        int udp_payload_len = (int)(ntohs(udp_header->Length) - sizeof(WINDIVERT_UDPHDR));
-                        if (udp_payload_len > 0)
-                            snoop_dns_response(udp_payload, udp_payload_len);
-                    }
                     // Unmodified packet no checksum needed
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
@@ -852,6 +956,8 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     ip_header->SrcAddr = temp_addr;
                     addr.Outbound = FALSE;
                 }
+                observe_tcp_dns_packet(packet, packet_len, ip_header, NULL, tcp_header,
+                                       (ULONGLONG)addr.Timestamp);
 
                 if (tcp_header->Rst)
                     remove_connection(dst_port, FALSE, FALSE);
@@ -902,7 +1008,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 }
 
                 // avoid rule pocess and packet process if no rules
-                if (!g_has_active_rules && g_connection_callback == NULL)
+                if (!g_has_active_rules && !connection_callback_active())
                 {
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
                     continue;
@@ -912,7 +1018,8 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 DWORD pid = 0;
                 UINT32 proxy_config_id = 0;
 
-                action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, &pid, &proxy_config_id);
+                char hostname[256] = {0};
+                action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, (ULONGLONG)addr.Timestamp, hostname, &pid, &proxy_config_id);
 
                 BYTE orig_dest_first_octet = (orig_dest_ip >> 0) & 0xFF;
                 if (action == RULE_ACTION_PROXY && !g_localhost_via_proxy && orig_dest_first_octet == 127)
@@ -922,8 +1029,25 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(orig_dest_ip))
                     action = RULE_ACTION_DIRECT;
 
+                if (action != RULE_ACTION_PROXY)
+                {
+                    hostname[0] = '\0';
+                }
+
+                // A proxied connection whose proxy resolves DNS itself (send hostname) is
+                // logged by the relay instead of here: no name is known at SYN time - the app
+                // may be reusing an address from its own cache without resolving anything -
+                // and the relay learns it from the DNS cache, or from the TLS ClientHello the
+                // app sends right after the handshake. See log_pending in add_connection().
+                BOOL defer_connection_log = FALSE;
+                if (action == RULE_ACTION_PROXY && hostname[0] == '\0')
+                {
+                    PROXY_CONFIG *pcfg = find_proxy_config(proxy_config_id);
+                    defer_connection_log = (pcfg != NULL && pcfg->send_domain_to_proxy);
+                }
+
                 // only new TCP/SYN inital fist packet
-                if (g_connection_callback != NULL && tcp_header->Syn && !tcp_header->Ack && pid > 0)
+                if (connection_callback_active() && tcp_header->Syn && !tcp_header->Ack && pid > 0)
                 {
                     char process_name[MAX_PROCESS_NAME];
                     if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
@@ -956,9 +1080,10 @@ DWORD WINAPI packet_processor(LPVOID arg)
                             }
 
                             const char* display_name = extract_filename(process_name);
-                            g_connection_callback(display_name, pid, dest_ip_str, orig_dest_port, proxy_info);
+                            if (!defer_connection_log)
+                                report_connection(display_name, pid, dest_ip_str, hostname, orig_dest_port, proxy_info);
 
-                            if (g_traffic_logging_enabled)
+                            if (g_traffic_logging_enabled && !defer_connection_log)
                             {
                                 add_logged_connection(pid, orig_dest_ip, orig_dest_port, action);
                             }
@@ -983,7 +1108,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 }
                 else if (action == RULE_ACTION_PROXY)
             {
-                add_connection(src_port, FALSE, src_ip, orig_dest_ip, orig_dest_port, proxy_config_id);
+                add_connection(src_port, FALSE, src_ip, orig_dest_ip, orig_dest_port, proxy_config_id, hostname, pid, defer_connection_log);
                 // Mark this port as decided (not direct) so subsequent packets from
                 // the same source port skip the rule check.  The is_connection_tracked
                 // branch above handles the actual per-packet redirect.
@@ -1052,6 +1177,11 @@ PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callba
     g_connection_callback = callback;
 }
 
+PROXYBRIDGE_API void ProxyBridge_SetConnectionCallbackEx(ConnectionCallbackEx callback)
+{
+    g_connection_callback_ex = callback;
+}
+
 PROXYBRIDGE_API void ProxyBridge_SetTrafficLoggingEnabled(BOOL enable)
 {
     g_traffic_logging_enabled = enable;
@@ -1074,12 +1204,16 @@ DWORD WINAPI cleanup_worker(LPVOID arg)
     {
         // 30 seconds, but in short slices: ProxyBridge_Stop() only waits briefly for this thread, and a
         // thread still sleeping inside the DLL when it is unloaded would crash the host process.
-        for (int i = 0; i < 300 && running; i++) Sleep(100);
+        for (int i = 0; i < 300 && running; i++)
+        {
+            Sleep(100);
+            if (running) dns_process_cache_snapshot_tick(FALSE);
+        }
         if (running)
         {
             cleanup_stale_connections();
             cleanup_stale_pid_cache();
-            cleanup_stale_dns_cache();
+            dns_process_cache_cleanup();
         }
     }
     return 0;
@@ -1150,6 +1284,13 @@ static DWORD WINAPI fw_ensure_thread(LPVOID arg)
     return 0;
 }
 
+static void dns_process_cache_abort_start(void)
+{
+    dns_process_cache_end_session();
+    dns_process_cache_clear();
+    dns_network_query_reset();
+}
+
 PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 {
     char filter[FILTER_BUFFER_SIZE];
@@ -1159,13 +1300,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         return FALSE;
 
     InitializeSRWLock(&lock);
-    dns_cache_init();
+    dns_process_cache_init();
+    dns_network_query_reset();
     udp_direct_reset();
-
-    // If domain rules were configured before start, flush the OS DNS cache so the very
-    // first connections re-resolve on the wire and populate our IP->hostname snoop cache.
-    if (g_has_domain_rules)
-        flush_dns_resolver_cache();
 
     running = TRUE;
 
@@ -1177,6 +1314,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     if (proxy_thread == NULL)
     {
         running = FALSE;
+        dns_process_cache_abort_start();
         return FALSE;
     }
 
@@ -1188,6 +1326,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         WaitForSingleObject(proxy_thread, INFINITE);
         CloseHandle(proxy_thread);
         proxy_thread = NULL;
+        dns_process_cache_abort_start();
         return FALSE;
     }
 
@@ -1203,6 +1342,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
             WaitForSingleObject(proxy_thread, INFINITE);
             CloseHandle(proxy_thread);
             proxy_thread = NULL;
+            dns_process_cache_abort_start();
             return FALSE;
         }
     }
@@ -1223,6 +1363,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         "(udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)) and "
             "udp.SrcPort != 67 and udp.DstPort != 67 and udp.SrcPort != 68 and udp.DstPort != 68) or "
         "(udp and not outbound and udp.SrcPort == 53) or "
+        "(tcp and not outbound and tcp.SrcPort == 53) or "
+        "(ipv6 and udp and not outbound and udp.SrcPort == 53) or "
+        "(ipv6 and tcp and not outbound and tcp.SrcPort == 53) or "
         "(ipv6 and udp and not outbound and udp.SrcPort == 53) or "
         "(ipv6 and tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
         "(ipv6 and udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)) and "
@@ -1258,14 +1401,28 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
                 break;
         }
         running = FALSE;
+        if (cleanup_thread != NULL)
+        {
+            WaitForSingleObject(cleanup_thread, 8000);
+            CloseHandle(cleanup_thread);
+            cleanup_thread = NULL;
+        }
+        if (udp_relay_thread != NULL)
+        {
+            WaitForSingleObject(udp_relay_thread, 8000);
+            CloseHandle(udp_relay_thread);
+            udp_relay_thread = NULL;
+        }
         WaitForSingleObject(proxy_thread, INFINITE);
         CloseHandle(proxy_thread);
         proxy_thread = NULL;
+        dns_process_cache_abort_start();
         return FALSE;
     }
 
     // Socket-layer events give the owner PID of each new connection without a table scan.
     // Optional: if it cannot be opened the lookups fall back to the table.
+    dns_process_cache_begin_session();
     sockmap_start();
 
     // WINDIVERT_PARAM_QUEUE_LENGTH: max packets in queue (range 32–16384).
@@ -1281,6 +1438,14 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     // WINDIVERT_PARAM_QUEUE_SIZE: max total bytes in queue (range 65535–33553920).
     // Raise to the maximum so a burst of large packets never hits a byte cap.
     WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_SIZE, 33553920);
+
+    // Do not flush the OS resolver cache to manufacture observable queries. If DNS
+    // evidence is unavailable, hostname recovery records a gap and uses the IP target.
+    update_has_active_rules();
+
+    // Start DNS observation before the packet reader so resolutions at engine startup
+    // are less likely to race the first captured connection.
+    dns_etw_start();
 
     for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
@@ -1299,6 +1464,14 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
             }
             WinDivertClose(windivert_handle);
             windivert_handle = INVALID_HANDLE_VALUE;
+            dns_etw_stop();
+            if (cleanup_thread != NULL)
+            {
+                WaitForSingleObject(cleanup_thread, 8000);
+                CloseHandle(cleanup_thread);
+                cleanup_thread = NULL;
+            }
+            dns_process_cache_abort_start();
             WaitForSingleObject(proxy_thread, INFINITE);
             CloseHandle(proxy_thread);
             proxy_thread = NULL;
@@ -1364,6 +1537,10 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
         }
     }
 
+    // Drain and stop DNS observation after the packet loop is gone, before releasing
+    // process handles and their lifecycle waits.
+    dns_etw_stop();
+
     if (proxy_thread != NULL)
     {
         WaitForSingleObject(proxy_thread, 8000);  // generous: a thread outliving Stop would run code from an unloaded DLL
@@ -1407,6 +1584,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
         {
             CONNECTION_INFO *to_free = connection_hash_table[i];
             connection_hash_table[i] = connection_hash_table[i]->next;
+            rev_unlink(to_free);
             free(to_free);
         }
     }
@@ -1419,6 +1597,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
     clear_logged_connections();
 
     clear_pid_cache();
+    dns_process_cache_end_session();
+    dns_process_cache_clear();
+    dns_network_query_reset();
 
     // Release the reusable owner-PID table scratch buffer (packet thread has stopped).
     free(g_pidtbl_buf);
