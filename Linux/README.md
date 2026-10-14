@@ -34,7 +34,7 @@ curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/
 This script will:
 - Download the latest release from GitHub automatically
 - Detect your Linux distribution
-- Install all required dependencies (libbpf, GTK3)
+- Install all required dependencies (libelf, zlib, GTK3)
 - Install ProxyBridge CLI, GUI, and library to system paths
 - Update library cache (ldconfig)
 - Verify installation
@@ -63,7 +63,7 @@ This script will:
    ```
 
 The setup script will:
-- Install runtime dependencies (libbpf, GTK3)
+- Install runtime dependencies (libelf, zlib, GTK3)
 - Copy binaries to `/usr/local/bin` (ProxyBridge CLI and GUI)
 - Copy library to `/usr/local/lib` (libproxybridge.so)
 - Update library cache
@@ -382,9 +382,14 @@ ProxyBridge hooks the **socket calls** (`connect()`, `sendmsg()`, `recvmsg()`) w
 
 - Linux kernel 5.11+ with BTF and cgroup v2 (to run); GCC, Make, **clang** and **bpftool** (to build the eBPF object and skeleton)
 - Development libraries:
-  - libbpf-dev (Debian/Ubuntu) or libbpf-devel (Fedora/RHEL)
+  - libelf-dev + zlib1g-dev (Debian/Ubuntu) or elfutils-libelf-devel + zlib-devel (Fedora/RHEL). libbpf itself is built from a pinned
+    release and linked statically, so it is not needed at run time
+  - curl (fetches the pinned libbpf source on first build)
   - libgtk-3-dev (optional, for GUI) or gtk3-devel (Fedora/RHEL)
   - pkg-config
+
+Binaries are built against a glibc 2.34 baseline (Ubuntu 22.04, Debian 12, RHEL 9 and newer run them), with LTO, FORTIFY_SOURCE=3,
+full RELRO, BIND_NOW, PIE, stack protector and CET flags; `Linux/tests/check_binaries.sh` audits this on every build (issue #146).
 
 ### Building
 
@@ -394,19 +399,19 @@ ProxyBridge hooks the **socket calls** (`connect()`, `sendmsg()`, `recvmsg()`) w
    ```bash
    sudo apt-get update
    sudo apt-get install build-essential gcc make clang bpftool \
-       libbpf-dev libgtk-3-dev pkg-config
+       libelf-dev zlib1g-dev curl libgtk-3-dev pkg-config
    ```
 
    **Fedora:**
    ```bash
    sudo dnf install gcc make clang bpftool \
-       libbpf-devel gtk3-devel pkg-config
+       elfutils-libelf-devel zlib-devel curl gtk3-devel pkg-config
    ```
 
    **Arch/Manjaro:**
    ```bash
    sudo pacman -S base-devel gcc make clang bpf \
-       libbpf gtk3 pkg-config
+       libelf zlib curl gtk3 pkg-config
    ```
 
 2. **Clone or download ProxyBridge source code:**

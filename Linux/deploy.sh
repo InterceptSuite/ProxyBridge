@@ -150,35 +150,35 @@ install_dependencies() {
         ubuntu|debian|linuxmint|pop|elementary|zorin|kali|raspbian|mx|antix|deepin|lmde)
             echo "Using apt package manager..."
             apt-get update -qq
-            apt-get install -y libbpf1 libgtk-3-0
+            apt-get install -y libelf1 zlib1g libgtk-3-0
             ;;
         fedora)
             echo "Using dnf package manager..."
-            dnf install -y libbpf gtk3
+            dnf install -y elfutils-libelf zlib gtk3
             ;;
         rhel|centos|rocky|almalinux)
             echo "Using yum package manager..."
-            yum install -y libbpf gtk3
+            yum install -y elfutils-libelf zlib gtk3
             ;;
         arch|manjaro|endeavouros|garuda)
             echo "Using pacman package manager..."
-            pacman -Sy --noconfirm libbpf gtk3
+            pacman -Sy --noconfirm libelf zlib gtk3
             ;;
         opensuse*|sles)
             echo "Using zypper package manager..."
-            zypper install -y libbpf1 gtk3
+            zypper install -y libelf1 libz1 gtk3
             ;;
         void)
             echo "Using xbps package manager..."
-            xbps-install -Sy libbpf gtk3
+            xbps-install -Sy libelf zlib gtk3
             ;;
         *)
             echo "WARNING: Unknown distribution '$DISTRO' (family: '$DISTRO_LIKE')"
             echo ""
             echo "Please manually install the following packages:"
-            echo "  Debian/Ubuntu: sudo apt install libbpf1 libgtk-3-0"
-            echo "  Fedora:        sudo dnf install libbpf gtk3"
-            echo "  Arch:          sudo pacman -S libbpf gtk3"
+            echo "  Debian/Ubuntu: sudo apt install libelf1 zlib1g libgtk-3-0"
+            echo "  Fedora:        sudo dnf install elfutils-libelf zlib gtk3"
+            echo "  Arch:          sudo pacman -S libelf zlib gtk3"
             echo ""
             read -p "Continue anyway? (y/n) " -n 1 -r
             echo
