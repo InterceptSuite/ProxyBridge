@@ -137,7 +137,7 @@ echo "== lifecycle"
 kill -INT "$PB_PID"; wait "$PB_PID" 2>/dev/null
 out=$(curl -s -m 3 http://192.0.2.7/ 2>&1; echo "rc=$?")
 [[ "$out" != *hello-from* ]] && ok "after stop traffic is no longer redirected" || bad "still redirected after stop"
-bpftool prog show 2>/dev/null | grep -q pb_connect && bad "BPF programs left behind" || ok "BPF programs detached"
+"${BPFTOOL:-bpftool}" prog show 2>/dev/null | grep -q pb_connect && bad "BPF programs left behind" || ok "BPF programs detached"
 ss -ltn 2>/dev/null | grep -qE ":2401[0-9]" && bad "relay ports still listening" || ok "relay ports released"
 
 echo

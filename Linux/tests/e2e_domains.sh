@@ -64,7 +64,7 @@ grep -q "192.0.2.77 (app.example.test)" "$WORK/pb.out" && ok "connection log sho
 echo "== lifecycle"
 kill -INT "$PB_PID"; wait "$PB_PID" 2>/dev/null
 out=$(dig @$DNSIP app.example.test +short +time=3 +tries=1 | head -1); has "DNS still works after ProxyBridge stops" "$out" "192.0.2.77"
-bpftool prog show 2>/dev/null | grep -q pb_connect && bad "BPF programs left behind" || ok "BPF programs detached"
+"${BPFTOOL:-bpftool}" prog show 2>/dev/null | grep -q pb_connect && bad "BPF programs left behind" || ok "BPF programs detached"
 
 echo; echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" = 0 ] || { echo "---- dns log"; cat "$DLOG"; echo "---- proxy log"; cat "$PLOG"; echo "---- pb output"; tail -30 "$WORK/pb.out"; exit 1; }

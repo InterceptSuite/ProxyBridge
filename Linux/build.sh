@@ -18,7 +18,9 @@ need() {  # command, install hint
 need gcc     "Install: sudo apt install build-essential | sudo dnf install gcc"
 need make    "Install: sudo apt install make | sudo dnf install make"
 need clang   "Needed to compile the eBPF program. Install: sudo apt install clang | sudo dnf install clang"
-need bpftool "Needed to generate the eBPF skeleton. Install: sudo apt install bpftool | sudo dnf install bpftool"
+BPFTOOL="${BPFTOOL:-bpftool}"   # set BPFTOOL=/path/to/bpftool if it is not on PATH (e.g. /usr/lib/linux-tools/*/bpftool on Ubuntu)
+export BPFTOOL
+need "$BPFTOOL" "Needed to generate the eBPF skeleton. Install: sudo apt install linux-tools-generic (Ubuntu) | sudo apt install bpftool (Debian) | sudo dnf install bpftool"
 if [ ! -f /usr/include/bpf/libbpf.h ] && ! pkg-config --exists libbpf 2>/dev/null; then
     echo "ERROR: libbpf development files not found. Install: sudo apt install libbpf-dev | sudo dnf install libbpf-devel"
     exit 1

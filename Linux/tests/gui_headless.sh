@@ -52,7 +52,7 @@ chmod 600 "$WORK/cfg/config.ini"
 run_gui() { # active profile
   write_cfg "$1"
   GDK_BACKEND=broadway BROADWAY_DISPLAY=:9 PROXYBRIDGE_CONFIG_DIR="$WORK/cfg" LD_LIBRARY_PATH="$LIBDIR" "$GUI" > "$WORK/gui.out" 2>&1 & GUI_PID=$!
-  for _ in $(seq 60); do bpftool prog show 2>/dev/null | grep -q pb_connect4 && break; kill -0 $GUI_PID 2>/dev/null || break; sleep 0.25; done
+  for _ in $(seq 60); do "${BPFTOOL:-bpftool}" prog show 2>/dev/null | grep -q pb_connect4 && break; kill -0 $GUI_PID 2>/dev/null || break; sleep 0.25; done
   sleep 1
 }
 stop_gui() {
@@ -64,7 +64,7 @@ stop_gui() {
 echo "== profile Default"
 run_gui Default
 kill -0 $GUI_PID 2>/dev/null && ok "GUI started under Broadway" || { bad "GUI died: $(head -5 "$WORK/gui.out")"; }
-bpftool prog show 2>/dev/null | grep -q pb_connect4 && ok "engine started by the GUI (eBPF programs attached)" || bad "no eBPF programs"
+"${BPFTOOL:-bpftool}" prog show 2>/dev/null | grep -q pb_connect4 && ok "engine started by the GUI (eBPF programs attached)" || bad "no eBPF programs"
 out=$(curl -s -m 5 http://192.0.2.7/);        has "rule 1 from the config file: curl -> proxy a" "$out" "hello-from-A dst=192.0.2.7:80"
 out=$(curl -s -m 5 http://198.51.100.7/);     has "rule 2: curl -> proxy b (with credentials from the config)" "$out" "hello-from-B dst=198.51.100.7:80"
 out=$(curl -s -m 5 http://203.0.114.7/ 2>&1; echo "rc=$?"); has "rule 3: BLOCK" "$out" "rc=7"
@@ -72,7 +72,7 @@ out=$(curl -s -m 2 http://203.0.113.7/ 2>&1; echo "rc=$?"); [[ "$out" != *hello-
 ip4=$(dig @$DNSIP app.example.test +short +time=3 +tries=1 | head -1)
 out=$(curl -s -m 5 http://$ip4/);             has "domain rule from the config (*.example.test -> b) after a real DNS lookup" "$out" "hello-from-B dst=192.0.2.77:80"
 stop_gui
-bpftool prog show 2>/dev/null | grep -q pb_connect && bad "BPF programs left after GUI exit" || ok "programs detached after GUI exit"
+"${BPFTOOL:-bpftool}" prog show 2>/dev/null | grep -q pb_connect && bad "BPF programs left after GUI exit" || ok "programs detached after GUI exit"
 
 echo "== profile Alt (same GUI, different active profile)"
 run_gui Alt

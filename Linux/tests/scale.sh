@@ -14,7 +14,7 @@ sleep 1
 stdbuf -oL "$PB_DIR/ProxyBridge" --proxy a=socks5://127.0.0.1:19080 --rule "python3*:192.0.2.0/24:*:TCP:PROXY=a" > $WORK/pb.out 2>&1 & PB=$!
 for _ in $(seq 40); do grep -q "ProxyBridge started" $WORK/pb.out && break; sleep 0.25; done
 rss() { awk '/VmRSS/{print $2}' /proc/$PB/status; }
-maps_kb() { bpftool map show 2>/dev/null | grep -oE 'memlock [0-9]+' | awk '{s+=$2} END{printf "%d", s/1024}'; }
+maps_kb() { "${BPFTOOL:-bpftool}" map show 2>/dev/null | grep -oE 'memlock [0-9]+' | awk '{s+=$2} END{printf "%d", s/1024}'; }
 echo "baseline: ProxyBridge RSS=$(( $(rss) / 1024 )) MB  BPF maps=$(maps_kb) KB  threads=$(ls /proc/$PB/task | wc -l)"
 CPU0=$(awk '{print $14+$15}' /proc/$PB/stat)
 rm -f /tmp/pb_scale_ready /tmp/pb_scale_go
