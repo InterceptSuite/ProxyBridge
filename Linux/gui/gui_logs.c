@@ -1,49 +1,65 @@
 #include "gui.h"
+#include "gui_events.h"
+#include <time.h>
 
-// filter logs based on search
-static void filter_text_view(GtkTextBuffer *buffer, const char *text) {
-    if (!buffer) return;
+#define RING_CAPACITY 4096
+#define SLOT_SIZE 512
+#define DRAIN_MAX 2000
+#define DRAIN_BUF_SIZE (256 * 1024)
+#define DRAIN_INTERVAL_MS 100
+#define CONN_HISTORY 2000
+#define LOG_HISTORY 1000
 
-    GtkTextIter start, end;
-    gtk_text_buffer_get_bounds(buffer, &start, &end);
-    gtk_text_buffer_remove_tag_by_name(buffer, "hidden", &start, &end);
+typedef struct {
+    GtkTextBuffer **buffer;
+    EventRing *ring;
+    int max_lines;
+    char *filter;       // lowercase, NULL = show all
+    bool paused;
+} View;
 
-    if (!text || strlen(text) == 0) return;
+static View conn_view = {&conn_buffer, NULL, CONN_HISTORY, NULL, false};
+static View log_view = {&log_buffer, NULL, LOG_HISTORY, NULL, false};
+static char *drain_buf = NULL;
+static guint drain_source = 0;
 
-    GtkTextIter line_start = start;
+static void filter_from_line(GtkTextBuffer *buffer, int first_line, const char *lower_search) {
+    GtkTextIter line_start, buf_end;
+    gtk_text_buffer_get_iter_at_line(buffer, &line_start, first_line);
+    gtk_text_buffer_get_end_iter(buffer, &buf_end);
+    gtk_text_buffer_remove_tag_by_name(buffer, "hidden", &line_start, &buf_end);
+    if (!lower_search) return;
+
     while (!gtk_text_iter_is_end(&line_start)) {
         GtkTextIter line_end = line_start;
         if (!gtk_text_iter_ends_line(&line_end))
             gtk_text_iter_forward_to_line_end(&line_end);
 
         char *line_text = gtk_text_buffer_get_text(buffer, &line_start, &line_end, FALSE);
-
-        // search case insensitive
         char *lower_line = g_utf8_strdown(line_text, -1);
-        char *lower_search = g_utf8_strdown(text, -1);
-
         if (!strstr(lower_line, lower_search)) {
-             GtkTextIter next_line = line_end;
-             gtk_text_iter_forward_char(&next_line); // include newline
-             gtk_text_buffer_apply_tag_by_name(buffer, "hidden", &line_start, &next_line);
+            GtkTextIter next_line = line_end;
+            gtk_text_iter_forward_char(&next_line);
+            gtk_text_buffer_apply_tag_by_name(buffer, "hidden", &line_start, &next_line);
         }
-
         g_free(lower_line);
-        g_free(lower_search);
         g_free(line_text);
-
         gtk_text_iter_forward_line(&line_start);
     }
 }
 
+static void set_filter(View *v, const char *text) {
+    g_free(v->filter);
+    v->filter = (text && *text) ? g_utf8_strdown(text, -1) : NULL;
+    if (*v->buffer) filter_from_line(*v->buffer, 0, v->filter);
+}
+
 void on_search_conn_changed(GtkSearchEntry *entry, gpointer user_data) {
-    const char *text = gtk_entry_get_text(GTK_ENTRY(entry));
-    filter_text_view(conn_buffer, text);
+    set_filter(&conn_view, gtk_entry_get_text(GTK_ENTRY(entry)));
 }
 
 void on_search_log_changed(GtkSearchEntry *entry, gpointer user_data) {
-    const char *text = gtk_entry_get_text(GTK_ENTRY(entry));
-    filter_text_view(log_buffer, text);
+    set_filter(&log_view, gtk_entry_get_text(GTK_ENTRY(entry)));
 }
 
 void on_clear_conn_clicked(GtkButton *button, gpointer user_data) {
@@ -54,73 +70,114 @@ void on_clear_log_clicked(GtkButton *button, gpointer user_data) {
     if (log_buffer) gtk_text_buffer_set_text(log_buffer, "", 0);
 }
 
-static void free_connection_data(ConnectionData *data) {
-    if (data) {
-        free(data->process_name);
-        free(data->dest_ip);
-        free(data->proxy_info);
-        free(data->timestamp);
-        free(data);
-    }
+void on_pause_conn_toggled(GtkToggleButton *button, gpointer user_data) {
+    conn_view.paused = gtk_toggle_button_get_active(button);
 }
 
-// update logs from main thread
-static gboolean update_log_gui(gpointer user_data) {
-    LogData *data = (LogData *)user_data;
-    if (!data) return FALSE;
+// one insert, one filter pass over the new lines and one trim per batch
+static void append_batch(View *v, const char *text, uint64_t dropped) {
+    GtkTextBuffer *buffer = *v->buffer;
+    if (!buffer) return;
+
+    GString *batch = g_string_new(text);
+    if (dropped) g_string_append_printf(batch, "[%" G_GUINT64_FORMAT " events skipped]\n", dropped);
+    if (!g_utf8_validate(batch->str, -1, NULL)) {
+        char *fixed = g_utf8_make_valid(batch->str, -1);
+        g_string_assign(batch, fixed);
+        g_free(fixed);
+    }
 
     GtkTextIter end;
-    gtk_text_buffer_get_end_iter(log_buffer, &end);
+    gtk_text_buffer_get_end_iter(buffer, &end);
+    int first_line = gtk_text_iter_get_line(&end);
+    gtk_text_buffer_insert(buffer, &end, batch->str, (gint)batch->len);
+    g_string_free(batch, TRUE);
 
-    char *time_str = get_current_time_str();
-    char full_msg[1200];
-    snprintf(full_msg, sizeof(full_msg), "%s %s\n", time_str, data->message);
-    free(time_str);
+    if (v->filter) filter_from_line(buffer, first_line, v->filter);
 
-    gtk_text_buffer_insert(log_buffer, &end, full_msg, -1);
-
-    trim_buffer_lines(log_buffer, 100);
-
-    free(data->message);
-    free(data);
-    return FALSE; // done
+    int excess = gtk_text_buffer_get_line_count(buffer) - 1 - v->max_lines;
+    if (excess > 0) {
+        GtkTextIter start, cut;
+        gtk_text_buffer_get_start_iter(buffer, &start);
+        gtk_text_buffer_get_iter_at_line(buffer, &cut, excess);
+        gtk_text_buffer_delete(buffer, &start, &cut);
+    }
 }
 
-// update conn info
-static gboolean update_connection_gui_append(gpointer user_data) {
-    ConnectionData *data = (ConnectionData *)user_data;
-    if (!data) return FALSE;
+static void drain_view(View *v) {
+    if (v->paused || !v->ring) return;
+    uint64_t dropped = 0;
+    size_t n = event_ring_drain(v->ring, drain_buf, DRAIN_BUF_SIZE, DRAIN_MAX, &dropped);
+    if (n || dropped) append_batch(v, drain_buf, dropped);
+}
 
-    if (conn_buffer) {
-        GtkTextIter end;
-        gtk_text_buffer_get_end_iter(conn_buffer, &end);
+static gboolean drain_tick(gpointer user_data) {
+    drain_view(&conn_view);
+    drain_view(&log_view);
+    return G_SOURCE_CONTINUE;
+}
 
-        char line_buffer[1024];
-        snprintf(line_buffer, sizeof(line_buffer), "%s %s (PID:%u) -> %s:%u via %s\n",
-                 data->timestamp, data->process_name, data->pid, data->dest_ip, data->dest_port, data->proxy_info);
+void gui_logs_init() {
+    drain_buf = g_malloc(DRAIN_BUF_SIZE);
+    conn_view.ring = event_ring_new(RING_CAPACITY, SLOT_SIZE);
+    log_view.ring = event_ring_new(RING_CAPACITY, SLOT_SIZE);
+    drain_source = g_timeout_add(DRAIN_INTERVAL_MS, drain_tick, NULL);
+}
 
-        gtk_text_buffer_insert(conn_buffer, &end, line_buffer, -1);
+void gui_logs_stop_timers() {
+    if (drain_source) g_source_remove(drain_source);
+    drain_source = 0;
+}
 
-        trim_buffer_lines(conn_buffer, 100);
-    }
+// call after the engine stopped, library threads push into the rings until then
+void gui_logs_free() {
+    gui_logs_stop_timers();
+    event_ring_free(conn_view.ring);
+    event_ring_free(log_view.ring);
+    conn_view.ring = log_view.ring = NULL;
+    g_free(conn_view.filter);
+    g_free(log_view.filter);
+    conn_view.filter = log_view.filter = NULL;
+    g_free(drain_buf);
+    drain_buf = NULL;
+}
 
-    free_connection_data(data);
-    return FALSE;
+uint64_t gui_conn_event_count() {
+    uint64_t pushed = 0;
+    if (conn_view.ring) event_ring_stats(conn_view.ring, &pushed, NULL, NULL);
+    return pushed;
+}
+
+static void push_line(View *v, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
+
+static void push_line(View *v, const char *fmt, ...) {
+    if (!v->ring) return;
+    char line[SLOT_SIZE];
+    time_t now = time(NULL);
+    struct tm tm_now;
+    size_t off = 0;
+    if (localtime_r(&now, &tm_now)) off = strftime(line, sizeof(line), "[%H:%M:%S] ", &tm_now);
+    va_list args;
+    va_start(args, fmt);
+    g_vsnprintf(line + off, sizeof(line) - off, fmt, args);
+    va_end(args);
+    event_ring_push(v->ring, line);
 }
 
 void lib_log_callback(const char *message) {
-    LogData *data = malloc(sizeof(LogData));
-    data->message = strdup(message);
-    g_idle_add(update_log_gui, data);
+    push_line(&log_view, "%s", message ? message : "");
+}
+
+void gui_log(const char *format, ...) {
+    char msg[SLOT_SIZE];
+    va_list args;
+    va_start(args, format);
+    g_vsnprintf(msg, sizeof(msg), format, args);
+    va_end(args);
+    lib_log_callback(msg);
 }
 
 void lib_connection_callback(const char *process_name, uint32_t pid, const char *dest_ip, uint16_t dest_port, const char *proxy_info) {
-    ConnectionData *data = malloc(sizeof(ConnectionData));
-    data->process_name = strdup(process_name);
-    data->pid = pid;
-    data->dest_ip = strdup(dest_ip);
-    data->dest_port = dest_port;
-    data->proxy_info = strdup(proxy_info);
-    data->timestamp = get_current_time_str();
-    g_idle_add(update_connection_gui_append, data);
+    push_line(&conn_view, "%s (PID:%u) -> %s:%u via %s", process_name ? process_name : "", pid,
+              dest_ip ? dest_ip : "", dest_port, proxy_info ? proxy_info : "");
 }

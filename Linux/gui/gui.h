@@ -6,38 +6,20 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
-#include <pthread.h>
-#include <signal.h>
+#include <stdarg.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include "ProxyBridge.h"
-typedef struct {
-    char *process_name;
-    uint32_t pid;
-    char *dest_ip;
-    uint16_t dest_port;
-    char *proxy_info;
-    char *timestamp;
-} ConnectionData;
 
 typedef struct {
-    char *message;
-} LogData;
-
-typedef struct {
-    GtkWidget *dialog;
-    GtkWidget *ip_entry;
-    GtkWidget *port_entry;
-    GtkWidget *type_combo;
-    GtkWidget *user_entry;
-    GtkWidget *pass_entry;
-    GtkWidget *test_host;
-    GtkWidget *test_port;
-    GtkTextBuffer *output_buffer;
-    GtkWidget *test_btn;
-} ConfigInfo;
+    uint32_t id;            // library id, 0 = not registered
+    char *name;             // unique key, rules and config refer to it
+    ProxyType type;
+    char *host;
+    uint16_t port;
+    char *username;
+    char *password;
+} ProxyData;
 
 typedef struct {
     uint32_t id;
@@ -46,21 +28,20 @@ typedef struct {
     char *target_ports;
     RuleProtocol protocol;
     RuleAction action;
+    char *proxy_name;       // NULL or "" = default proxy
     bool enabled;
     bool selected;
 } RuleData;
 
-struct TestRunnerData {
-    char *host;
-    uint16_t port;
-    ConfigInfo *ui_info;
-};
-
+// lists are only current while the profile is inactive, see profile_sync_active
 typedef struct {
-    char *result_text;
-    GtkTextBuffer *buffer;
-    GtkWidget *btn;
-} TestResultData;
+    char *name;
+    GList *proxies;
+    char *default_proxy;
+    GList *rules;
+} Profile;
+
+typedef void (*RuleImportCb)(const RuleData *rule, int index, void *ud);
 
 extern GtkWidget *window;
 extern GtkTextBuffer *conn_buffer;
@@ -68,37 +49,58 @@ extern GtkTextBuffer *log_buffer;
 extern GtkWidget *status_bar;
 extern guint status_context_id;
 
-extern char g_proxy_ip[256];
-extern uint16_t g_proxy_port;
-extern ProxyType g_proxy_type;
-extern char g_proxy_user[256];
-extern char g_proxy_pass[256];
+// avoids libc strto*/atoi, glibc 2.38 redirects them to symbols old systems lack
+static inline long parse_long(const char *s) {
+    return s ? (long)g_ascii_strtoll(s, NULL, 10) : 0;
+}
 
+extern GList *g_profiles;
+extern char *g_active_profile;
+extern GList *g_proxies_list;   // working copy of the active profile
+extern char *g_default_proxy;
 extern GList *g_rules_list;
 extern bool g_chk_logging;
 extern bool g_chk_dns;
 
-long safe_strtol(const char *nptr);
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...);
-void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines);
-char* get_current_time_str();
-char *escape_json_string(const char *src);
-char *extract_sub_json_str(const char *json, const char *key);
-bool extract_sub_json_bool(const char *json, const char *key);
+GtkWidget *combo_new(const char *first, ...) G_GNUC_NULL_TERMINATED;
+GtkWidget *hint_label(const char *text);
+void set_error_label(GtkWidget *label, const char *msg);
+void grid_row(GtkWidget *grid, int row, const char *label, GtkWidget *widget);
 
-// config storage
+char *extract_sub_json_str(const char *json, const char *key);
+int rules_from_json(const char *json, RuleImportCb cb, void *ud);
+char *rules_to_json(GList *rules, bool only_selected);
+
 void save_config();
 void load_config();
+void config_free_all();
+Profile *profile_find(const char *name);
+Profile *profile_create(const char *name, bool copy_active);
+bool profile_rename(Profile *p, const char *new_name);
+bool profile_activate(const char *name);
+bool profile_delete(Profile *p);
 
-// settings
 void on_proxy_configure(GtkWidget *widget, gpointer data);
+void on_profiles_clicked(GtkWidget *widget, gpointer data);
+ProxyData *find_proxy_by_name(const char *name);
+uint32_t resolve_proxy_id(const char *name);
+void free_proxy_data(ProxyData *p);
+void apply_proxies_to_lib();
 
-// rules section
 void on_proxy_rules_clicked(GtkWidget *widget, gpointer data);
+void free_rule_data(RuleData *rule);
+void apply_rules_to_lib();
+void refresh_rules_window();
 
-// Logs
+void gui_log(const char *format, ...);
 void lib_log_callback(const char *message);
 void lib_connection_callback(const char *process_name, uint32_t pid, const char *dest_ip, uint16_t dest_port, const char *proxy_info);
+void gui_logs_init();
+void gui_logs_stop_timers();
+void gui_logs_free();
+uint64_t gui_conn_event_count();
+void on_pause_conn_toggled(GtkToggleButton *button, gpointer user_data);
 void on_search_conn_changed(GtkSearchEntry *entry, gpointer user_data);
 void on_search_log_changed(GtkSearchEntry *entry, gpointer user_data);
 void on_clear_conn_clicked(GtkButton *button, gpointer user_data);
