@@ -229,8 +229,7 @@ main() {
     fi
     echo "  sudo ProxyBridge --proxy socks5://IP:PORT --rule \"app:*:*:TCP:PROXY\""
     echo ""
-    echo "For cleanup after crash:"
-    echo "  sudo ProxyBridge --cleanup"
+    echo "No cleanup is needed after a crash: the kernel detaches the eBPF programs automatically."
     echo ""
 }
 
