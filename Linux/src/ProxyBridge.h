@@ -1,7 +1,7 @@
 #ifndef PROXYBRIDGE_H
 #define PROXYBRIDGE_H
 
-#define PROXYBRIDGE_VERSION "4.0.0"
+#define PROXYBRIDGE_VERSION "4.0.0-Beta"
 
 #include <stddef.h>
 #include <stdint.h>
