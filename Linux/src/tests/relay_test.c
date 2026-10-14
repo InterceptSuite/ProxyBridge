@@ -490,6 +490,7 @@ static uint16_t udpecho_start(void)
 // ---------------------------------------------------------------------------------------------
 // Client helpers
 // ---------------------------------------------------------------------------------------------
+static int g_last_connect_errno;   // errno of the last failed relay_connect()
 static int relay_connect(uint16_t src)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -497,6 +498,7 @@ static int relay_connect(uint16_t src)
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = htons(src) };
     if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) {
+        g_last_connect_errno = errno;
         printf("      relay_connect: bind(127.0.0.1:%u) failed: %s\n", src, strerror(errno));
         close(fd); return -1;
     }
@@ -504,7 +506,11 @@ static int relay_connect(uint16_t src)
     struct timeval tv = { 10, 0 };
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);     // bounds connect()
     if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) {
-        printf("      relay_connect: connect(src port %u -> relay port %u) failed: %s\n", src, pb_relay_tcp_port(), strerror(errno));
+        g_last_connect_errno = errno;
+        // an ECONNRESET here is legitimate for flows the relay aborts (BLOCK, cap): on a fast loopback the RST can arrive
+        // before connect() returns. Callers that expect a close accept it through closed_by_relay().
+        if (errno != ECONNRESET)
+            printf("      relay_connect: connect(src port %u -> relay port %u) failed: %s\n", src, pb_relay_tcp_port(), strerror(errno));
         close(fd); return -1;
     }
     tv.tv_sec = 30;
@@ -566,6 +572,14 @@ static bool expect_closed(int fd, int timeout_ms)
     bool ok = r == 0 || (r < 0 && e != EAGAIN);
     if (!ok) printf("      expect_closed(fd=%d): poll=%d revents=0x%x recv=%zd errno=%d\n", fd, pr, p.revents, r, e);
     return ok;
+}
+
+// True when the relay closed the connection: either connect() itself was reset (the relay aborted the flow before connect()
+// returned, which happens on a fast loopback) or the client sees EOF/RST afterwards.
+static bool closed_by_relay(int fd, int timeout_ms)
+{
+    if (fd < 0) return g_last_connect_errno == ECONNRESET;
+    return expect_closed(fd, timeout_ms);
 }
 
 static int relay_up(int tcp_idle, int udp_idle, int maxc, int hs)
@@ -682,7 +696,7 @@ static void test_tcp_basic(void)
     set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_BLOCK, 0);
     fd = relay_connect(src);
     send(fd, "x", 1, MSG_NOSIGNAL);
-    CHECK(fd >= 0 && expect_closed(fd, 3000), "TCP BLOCK closes client");
+    CHECK(closed_by_relay(fd, 3000), "TCP BLOCK closes client");
     CHECK(g_ev_block == 1, "flow_event BLOCK");
     close(fd);
 
@@ -695,12 +709,12 @@ static void test_tcp_basic(void)
     src = new_src();
     set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_DECIDE, 0);
     fd = relay_connect(src);
-    CHECK(fd >= 0 && expect_closed(fd, 3000), "TCP DECIDE -> BLOCK");
+    CHECK(closed_by_relay(fd, 3000), "TCP DECIDE -> BLOCK");
     close(fd);
 
     // no orig entry
     fd = relay_connect(new_src());
-    CHECK(fd >= 0 && expect_closed(fd, 3000), "TCP without original destination is closed");
+    CHECK(closed_by_relay(fd, 3000), "TCP without original destination is closed");
     close(fd);
 
     // domain-name target through test helper is covered separately; IPv6 original destination (no v6 proxy server: direct to ::1)
@@ -714,7 +728,7 @@ static void test_tcp_bad_proxy(void)
     uint16_t src = new_src();
     set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_PROXY, 6);
     int fd = relay_connect(src);
-    CHECK(fd >= 0 && expect_closed(fd, 5000) && log_has("refused"), "bad proxy (connection refused): client closed + logged");
+    CHECK(closed_by_relay(fd, 5000) && log_has("refused"), "bad proxy (connection refused): client closed + logged");
     close(fd);
 
     log_clear();
@@ -722,7 +736,7 @@ static void test_tcp_bad_proxy(void)
     src = new_src();
     set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_PROXY, 7);
     fd = relay_connect(src);
-    CHECK(fd >= 0 && expect_closed(fd, 5000) && log_has("authentication failed"), "SOCKS5 wrong password: client closed + logged");
+    CHECK(closed_by_relay(fd, 5000) && log_has("authentication failed"), "SOCKS5 wrong password: client closed + logged");
     close(fd);
 
     log_clear();
@@ -730,14 +744,14 @@ static void test_tcp_bad_proxy(void)
     src = new_src();
     set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_PROXY, 8);
     fd = relay_connect(src);
-    CHECK(fd >= 0 && expect_closed(fd, 5000) && log_has("407"), "HTTP 407: client closed + logged");
+    CHECK(closed_by_relay(fd, 5000) && log_has("407"), "HTTP 407: client closed + logged");
     close(fd);
 
     log_clear();
     src = new_src();
     set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_PROXY, 12);   // unknown proxy id
     fd = relay_connect(src);
-    CHECK(fd >= 0 && expect_closed(fd, 5000) && log_has("no proxy configured"), "unknown proxy id: client closed + logged");
+    CHECK(closed_by_relay(fd, 5000) && log_has("no proxy configured"), "unknown proxy id: client closed + logged");
     close(fd);
 
     // dead target through a working proxy -> SOCKS5 REP 5
@@ -745,7 +759,7 @@ static void test_tcp_bad_proxy(void)
     src = new_src();
     set_tcp(src, "127.0.0.1", dead, PB_ACT_PROXY, 1);
     fd = relay_connect(src);
-    CHECK(fd >= 0 && expect_closed(fd, 5000) && log_has("connection refused by target"), "SOCKS5 REP code mapped in log");
+    CHECK(closed_by_relay(fd, 5000) && log_has("connection refused by target"), "SOCKS5 REP code mapped in log");
     close(fd);
 }
 
@@ -986,7 +1000,7 @@ static void test_tcp_cap(void)
     set_tcp(s, "127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0);
     int extra = relay_connect(s);
     send(extra, "x", 1, MSG_NOSIGNAL);
-    CHECK(expect_closed(extra, 3000), "6th connection closed immediately (cap)");
+    CHECK(closed_by_relay(extra, 3000), "6th connection closed immediately (cap)");
     close(extra);
     close(fds[0]);
     bool freed = false;
@@ -1424,7 +1438,7 @@ static void test_hostname(void)
     uint16_t src = new_src();
     set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_PROXY, 13);
     int fd = relay_connect(src);
-    CHECK(fd >= 0 && expect_closed(fd, 8000) && log_has("cannot resolve"), "relay TCP with unresolvable proxy: client closed + logged");
+    CHECK(closed_by_relay(fd, 8000) && log_has("cannot resolve"), "relay TCP with unresolvable proxy: client closed + logged");
     close(fd);
 }
 
