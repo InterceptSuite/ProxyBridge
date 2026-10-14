@@ -92,9 +92,6 @@ int main(void)
     r = R("", "github.com;*.github.com", ""); CHECK(r.ndomains == 2); pb_rule_free(&r);
     CHECK(pb_domain_match("a?c.com", "abc.com")); CHECK(!pb_domain_match("a?c.com", "abbc.com")); CHECK(pb_domain_match("*", "x.y"));
     CHECK(bad("", "bad name.com", ""));
-    {
-        struct pb_rule c; r = R("curl", "*.example.com", "80"); CHECK(pb_rule_clone(&c, &r) && c.ndomains == 1 && !strcmp(c.domains[0], "*.example.com")); pb_rule_free(&c); pb_rule_free(&r);
-    }
     printf(fails ? "RULES TESTS FAILED (%d)\n" : "rules tests passed\n", fails);
     return fails != 0;
 }

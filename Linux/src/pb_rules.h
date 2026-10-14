@@ -39,7 +39,6 @@ struct pb_rule {
 // On failure returns false and writes a human readable reason to err. On success the caller must pb_rule_free().
 bool pb_rule_parse(struct pb_rule *out, const char *process, const char *hosts, const char *ports, char *err, size_t errlen);
 void pb_rule_free(struct pb_rule *r);
-bool pb_rule_clone(struct pb_rule *dst, const struct pb_rule *src);   // deep copy
 
 bool pb_glob_match(const char *pattern, const char *str);
 bool pb_rule_match_process(const struct pb_rule *r, const char *exe_path);

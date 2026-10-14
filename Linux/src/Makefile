@@ -7,6 +7,9 @@ MULTIARCH := $(shell $(CC) -print-multiarch)
 # build.sh points it at a temporary directory; a plain `make` builds in place for quick development.
 BUILD_DIR ?= .
 
+# EXTRA_CFLAGS / EXTRA_LDFLAGS: e.g. -fsanitize=address,undefined (use STRIP_FLAG= to keep symbols for the report).
+STRIP_FLAG ?= -s
+
 CFLAGS = -Wall -Wextra -O2 -fPIC -D_GNU_SOURCE -I$(BUILD_DIR) \
 	-fstack-protector-strong \
 	-D_FORTIFY_SOURCE=2 \
@@ -15,11 +18,11 @@ CFLAGS = -Wall -Wextra -O2 -fPIC -D_GNU_SOURCE -I$(BUILD_DIR) \
 	-Werror=format-security \
 	-fno-strict-overflow \
 	-fno-delete-null-pointer-checks \
-	-fwrapv
-LDFLAGS = -shared -Wl,-z,relro,-z,now -Wl,-z,noexecstack -s
+	-fwrapv -fvisibility=hidden -ffunction-sections -fdata-sections $(EXTRA_CFLAGS)
+LDFLAGS = -shared -Wl,-z,relro,-z,now -Wl,-z,noexecstack -Wl,--gc-sections $(STRIP_FLAG) $(EXTRA_LDFLAGS)
 LIBS = -lpthread -lbpf
 
-SOURCES = ProxyBridge.c pb_rules.c pb_dns.c pb_bpf.c pb_relay.c
+SOURCES = ProxyBridge.c pb_rules.c pb_dns.c pb_proc.c pb_bpf.c pb_relay.c
 OBJECTS = $(addprefix $(BUILD_DIR)/,$(SOURCES:.c=.o))
 TARGET = $(BUILD_DIR)/libproxybridge.so
 BPF_OBJ = $(BUILD_DIR)/proxybridge.bpf.o
@@ -34,7 +37,7 @@ $(BPF_OBJ): bpf/proxybridge.bpf.c bpf/pb_bpf_shared.h | $(BUILD_DIR)
 	$(CLANG) -O2 -g -target bpf -D__BPF__ -I/usr/include/$(MULTIARCH) -c $< -o $@
 
 $(SKEL): $(BPF_OBJ)
-	$(BPFTOOL) gen skeleton $< > $@
+	$(BPFTOOL) gen skeleton $< > $@.tmp && mv $@.tmp $@
 
 $(BUILD_DIR)/pb_bpf.o: $(SKEL)
 

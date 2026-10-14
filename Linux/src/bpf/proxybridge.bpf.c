@@ -1,12 +1,11 @@
-// ProxyBridge eBPF datapath: cgroup socket-address hooks that redirect selected processes' connect()/sendmsg() to the
-// userspace relay and remember the original destination.
+// cgroup socket-address hooks: redirect selected processes' connect()/sendmsg() to the userspace relay.
 #include <linux/types.h>
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 #include "pb_bpf_shared.h"
 
-// Minimal kernel type stubs (CO-RE relocated against the running kernel's BTF; avoids shipping a 160k-line vmlinux.h).
+// Minimal kernel types, relocated against the running kernel's BTF (CO-RE).
 #pragma clang attribute push(__attribute__((preserve_access_index)), apply_to = record)
 struct super_block { __u32 s_dev; };
 struct inode { struct super_block *i_sb; unsigned long i_ino; };
@@ -39,49 +38,28 @@ struct pb_orig {
     __u64 exe_ino;
 };
 
-struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, PB_CFG_SLOTS);
-         __type(key, __u32); __type(value, __u32); } cfg SEC(".maps");
-struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 16384);
-         __type(key, struct pb_exe_key); __type(value, __u32); } exe2class SEC(".maps");
-struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, PB_MAX_CLASSES);
-         __type(key, __u32); __type(value, struct pb_bclass); } classes SEC(".maps");
-struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, PB_MAX_RULES);
-         __type(key, __u32); __type(value, struct pb_brule); } brules SEC(".maps");
-struct { __uint(type, BPF_MAP_TYPE_LRU_HASH); __uint(max_entries, 32768);
-         __type(key, __u64); __type(value, struct pb_orig); } by_cookie SEC(".maps");
-struct { __uint(type, BPF_MAP_TYPE_LRU_HASH); __uint(max_entries, 32768);
-         __type(key, __u32); __type(value, struct pb_orig); } by_port SEC(".maps");
-struct { __uint(type, BPF_MAP_TYPE_LRU_HASH); __uint(max_entries, 32768);
-         __type(key, __u32); __type(value, struct pb_orig); } flows SEC(".maps");
-struct { __uint(type, BPF_MAP_TYPE_LRU_HASH); __uint(max_entries, 65536);
-         __type(key, struct pb_dom_key); __type(value, __u8); } dom_hit SEC(".maps");   // (rule, ip) pairs whose DNS name matches the rule
+volatile struct pb_cfg cfg;
+
+#define MAP(name, kind, entries, key_t, val_t) \
+    struct { __uint(type, kind); __uint(max_entries, entries); __type(key, key_t); __type(value, val_t); } name SEC(".maps")
+
+MAP(exe2class, BPF_MAP_TYPE_HASH, 16384, struct pb_exe_key, __u32);
+MAP(classes, BPF_MAP_TYPE_ARRAY, PB_MAX_CLASSES, __u32, struct pb_bclass);
+MAP(brules, BPF_MAP_TYPE_ARRAY, PB_MAX_RULES, __u32, struct pb_brule);
+MAP(exempt, BPF_MAP_TYPE_HASH, 64, __u32, __u8);
+MAP(by_cookie, BPF_MAP_TYPE_LRU_HASH, 32768, __u64, struct pb_orig);
+MAP(by_port, BPF_MAP_TYPE_LRU_HASH, 32768, struct pb_port_key, struct pb_orig);
+MAP(flows, BPF_MAP_TYPE_LRU_HASH, 32768, __u32, struct pb_orig);
+MAP(dom_hit, BPF_MAP_TYPE_LRU_HASH, 65536, struct pb_dom_key, __u8);
 struct { __uint(type, BPF_MAP_TYPE_RINGBUF); __uint(max_entries, 256 * 1024); } events SEC(".maps");
-struct { __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 8);
-         __type(key, __u32); __type(value, __u64); } stats SEC(".maps");   // 0 redirected 1 blocked 2 decide 3 evt dropped
 
-static __always_inline void stat_inc(__u32 k)
-{
-    __u64 *v = bpf_map_lookup_elem(&stats, &k);
-    if (v) (*v)++;
-}
-
-static __always_inline __u32 cfg_get(__u32 k)
-{
-    __u32 *v = bpf_map_lookup_elem(&cfg, &k);
-    return v ? *v : 0;
-}
-
-// Containers/other network namespaces have their own loopback: redirecting them to our relay would break them.
 static __always_inline int foreign_netns(void *ctx)
 {
-    __u64 want = ((__u64)cfg_get(PB_CFG_NETNS_HI) << 32) | cfg_get(PB_CFG_NETNS_LO);
+    __u64 want = cfg.netns;
     return want && bpf_get_netns_cookie(ctx) != want;
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
-// rule evaluation
-// ---------------------------------------------------------------------------------------------------------------------
-static __always_inline int rule_match(const struct pb_brule *r, __u32 ri, __u8 fam, __u32 ip4_host, __u16 port)
+static __always_inline int rule_match(const struct pb_brule *r, __u32 ri, __u8 fam, __u32 ip4, __u16 port)
 {
     int port_res = M_YES;
     if (!(r->flags & PB_RF_ANY_PORT)) {
@@ -103,10 +81,10 @@ static __always_inline int rule_match(const struct pb_brule *r, __u32 ri, __u8 f
         #pragma unroll
         for (int i = 0; i < PB_BPF_MAX_V4; i++) {
             if (i >= r->n_v4) break;
-            if (ip4_host >= r->v4[i].lo && ip4_host <= r->v4[i].hi) { host_res = M_YES; break; }
+            if (ip4 >= r->v4[i].lo && ip4 <= r->v4[i].hi) { host_res = M_YES; break; }
         }
         if (host_res == M_NO && (r->flags & PB_RF_DOMAINS)) {
-            struct pb_dom_key dk = { .rule = ri, .ip = ip4_host };
+            struct pb_dom_key dk = { .rule = ri, .ip = ip4 };
             if (bpf_map_lookup_elem(&dom_hit, &dk)) host_res = M_YES;
         }
     }
@@ -114,51 +92,49 @@ static __always_inline int rule_match(const struct pb_brule *r, __u32 ri, __u8 f
     return (host_res == M_MAYBE || port_res == M_MAYBE) ? M_MAYBE : M_YES;
 }
 
-static __always_inline int implicit_direct(__u8 fam, const __u8 *a, __u16 port, __u8 proto)
+static __always_inline int implicit_direct(const struct pb_orig *o)
 {
-    if (fam == AF_INET) {
+    const __u8 *a = o->addr;
+    if (o->family == AF_INET) {
         if (a[12] == 127 || a[12] == 0 || a[12] >= 224) return 1;
     } else {
-        if (a[0] == 0xff) return 1;
-        if (a[0] == 0xfe && (a[1] & 0xc0) == 0x80) return 1;
-        int lo = 1;
+        if (a[0] == 0xff || (a[0] == 0xfe && (a[1] & 0xc0) == 0x80)) return 1;
+        int loopback = a[15] == 1;
         #pragma unroll
-        for (int i = 0; i < 15; i++) if (a[i]) lo = 0;
-        if (lo && a[15] == 1) return 1;
+        for (int i = 0; i < 15; i++) if (a[i]) loopback = 0;
+        if (loopback) return 1;
     }
-    if (proto == IPPROTO_UDP && (port == 67 || port == 68)) return 1;
-    if (port == 53 && !cfg_get(PB_CFG_DNS_VIA_PROXY)) return 1;
-    return 0;
+    if (o->proto == IPPROTO_UDP && (o->port == 67 || o->port == 68)) return 1;
+    return o->port == 53 && !cfg.dns_via_proxy;
 }
 
-// Returns an ACT_*; for ACT_PROXY *proxy_id is set.
-static __always_inline int decide(struct pb_orig *o, __u16 *proxy_id)
+// Sets o->proxy_id for ACT_PROXY.
+static __always_inline int decide(struct pb_orig *o)
 {
-    if (!cfg_get(PB_CFG_ENABLED)) return ACT_DIRECT;
-    if (o->pid == cfg_get(PB_CFG_SELF_TGID)) return ACT_DIRECT;
-    int tap = o->port == 53 && cfg_get(PB_CFG_DNS_TAP);
-    if (!tap && implicit_direct(o->family, o->addr, o->port, o->proto)) return ACT_DIRECT;
+    if (!cfg.enabled || o->pid == cfg.self_tgid) return ACT_DIRECT;
+    if (cfg.n_exempt && bpf_map_lookup_elem(&exempt, &o->pid)) return ACT_DIRECT;
+    int tap = o->port == 53 && cfg.dns_tap;
+    if (!tap && implicit_direct(o)) return ACT_DIRECT;
 
-    struct task_struct *t = bpf_get_current_task_btf();
-    struct mm_struct *mm = t->mm;
-    if (!mm) return ACT_DIRECT;                         // kernel thread
+    struct mm_struct *mm = bpf_get_current_task_btf()->mm;
+    if (!mm) return ACT_DIRECT;
     struct pb_exe_key key = {};
     key.dev = mm->exe_file->f_inode->i_sb->s_dev;
     key.ino = mm->exe_file->f_inode->i_ino;
-    o->exe_dev = key.dev; o->exe_ino = key.ino;       // lets userspace learn the exact kernel-side key
+    o->exe_dev = key.dev;
+    o->exe_ino = key.ino;
     if (!key.ino) return ACT_DECIDE;
 
     __u32 *cid = bpf_map_lookup_elem(&exe2class, &key);
-    if (!cid) return ACT_DECIDE;                        // binary not seen yet: relay classifies it
+    if (!cid) return ACT_DECIDE;
     struct pb_bclass *c = bpf_map_lookup_elem(&classes, cid);
     if (!c || c->n > PB_RULES_PER_CLASS) return ACT_DECIDE;
     if (tap) {
-        // a domain rule covers this binary: its DNS answers must pass through the relay so names can be learned
         if (c->tap) return ACT_DECIDE;
-        if (implicit_direct(o->family, o->addr, o->port, o->proto)) return ACT_DIRECT;
+        if (implicit_direct(o)) return ACT_DIRECT;
     }
 
-    __u32 ip4 = (o->family == AF_INET) ? bpf_ntohl(*(const __u32 *)(o->addr + 12)) : 0;
+    __u32 ip4 = o->family == AF_INET ? bpf_ntohl(*(const __u32 *)(o->addr + 12)) : 0;
     __u8 pbit = o->proto == IPPROTO_TCP ? 1 : 2;
     #pragma unroll
     for (int i = 0; i < PB_RULES_PER_CLASS; i++) {
@@ -170,47 +146,48 @@ static __always_inline int decide(struct pb_orig *o, __u16 *proxy_id)
         int m = rule_match(r, ri, o->family, ip4, o->port);
         if (m == M_NO) continue;
         if (m == M_MAYBE) return ACT_DECIDE;
-        if (r->action == ACT_PROXY) {
-            if (o->proto == IPPROTO_UDP && (r->flags & PB_RF_UDP_DIRECT)) return ACT_DIRECT;
-            *proxy_id = r->proxy_id;
-        }
-        return r->action;
+        if (r->action != ACT_PROXY) return r->action;
+        if (o->proto == IPPROTO_UDP && (r->flags & PB_RF_UDP_DIRECT)) return ACT_DIRECT;
+        o->proxy_id = r->proxy_id;
+        return ACT_PROXY;
     }
     return ACT_DIRECT;
 }
 
-static __always_inline void emit(const struct pb_orig *o, int action, __u16 proxy_id)
+static __always_inline void emit(const struct pb_orig *o, int action)
 {
-    if (!cfg_get(PB_CFG_LOG)) return;
+    if (!cfg.log) return;
     struct pb_event *e = bpf_ringbuf_reserve(&events, sizeof *e, 0);
-    if (!e) { stat_inc(3); return; }
+    if (!e) return;
     e->pid = o->pid;
     bpf_get_current_comm(e->comm, sizeof e->comm);
     __builtin_memcpy(e->addr, o->addr, 16);
-    e->port = o->port; e->proxy_id = proxy_id;
-    e->family = o->family; e->proto = o->proto; e->action = action; e->pad = 0;
+    e->port = o->port;
+    e->proxy_id = o->proxy_id;
+    e->family = o->family;
+    e->proto = o->proto;
+    e->action = action;
+    e->pad = 0;
     bpf_ringbuf_submit(e, 0);
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
-// flow handling
-// ---------------------------------------------------------------------------------------------------------------------
 static __always_inline void set_mapped_v4(__u32 *ip6, __u32 ip4_be)
 {
     ip6[0] = 0; ip6[1] = 0; ip6[2] = bpf_htonl(0x0000ffff); ip6[3] = ip4_be;
 }
 
-// Fills o from a sockaddr as seen in the hook. For v6 sockets a v4-mapped address is an IPv4 destination.
 static __always_inline void orig_from_v4(struct pb_orig *o, __u32 ip_be, __u16 port_be, __u8 proto)
 {
     __builtin_memset(o, 0, sizeof *o);
     o->addr[10] = 0xff; o->addr[11] = 0xff;
     __builtin_memcpy(o->addr + 12, &ip_be, 4);
     o->port = bpf_ntohs(port_be);
-    o->family = AF_INET; o->proto = proto;
+    o->family = AF_INET;
+    o->proto = proto;
     o->pid = bpf_get_current_pid_tgid() >> 32;
 }
 
+// A v4-mapped address on an IPv6 socket is an IPv4 destination.
 static __always_inline void orig_from_v6(struct pb_orig *o, const __u32 ip6[4], __u16 port_be, __u8 proto)
 {
     __builtin_memset(o, 0, sizeof *o);
@@ -218,11 +195,10 @@ static __always_inline void orig_from_v6(struct pb_orig *o, const __u32 ip6[4], 
     o->port = bpf_ntohs(port_be);
     o->proto = proto;
     o->pid = bpf_get_current_pid_tgid() >> 32;
-    if (ip6[0] == 0 && ip6[1] == 0 && ip6[2] == bpf_htonl(0x0000ffff)) o->family = AF_INET;
-    else o->family = AF_INET6;
+    o->family = (ip6[0] == 0 && ip6[1] == 0 && ip6[2] == bpf_htonl(0x0000ffff)) ? AF_INET : AF_INET6;
 }
 
-// Deterministic loopback flow address (127.1-255.x.y) for a UDP destination; collisions are probed linearly.
+// Loopback flow address 127.1-255.x.y standing for one UDP destination; the relay recovers the destination from it.
 static __always_inline __u32 udp_flow_addr(struct pb_orig *o)
 {
     const __u32 *w = (const __u32 *)o->addr;
@@ -236,58 +212,42 @@ static __always_inline __u32 udp_flow_addr(struct pb_orig *o)
         addr = bpf_htonl(0x7f000000 | (((h + i) & 0x00ffffff) | 0x00010000));
         struct pb_orig *ex = bpf_map_lookup_elem(&flows, &addr);
         if (!ex) { bpf_map_update_elem(&flows, &addr, o, BPF_NOEXIST); break; }
-        if (__builtin_memcmp(ex->addr, o->addr, 16) == 0 && ex->port == o->port && ex->proxy_id == o->proxy_id &&
+        if (!__builtin_memcmp(ex->addr, o->addr, 16) && ex->port == o->port && ex->proxy_id == o->proxy_id &&
             ex->action == o->action && (o->action != ACT_DECIDE || ex->pid == o->pid)) break;
     }
     return addr;
 }
 
-// 0 = leave the socket call untouched, 1 = it was redirected, -1 = block
-static __always_inline int route(struct pb_orig *o, __u16 *proxy_id_out)
+// 0: leave the call untouched, 1: redirected to the relay, -1: block.
+static __always_inline int route(struct pb_orig *o)
 {
-    __u16 pid16 = 0;
-    int act = decide(o, &pid16);
-    switch (act) {
-    case ACT_DIRECT:
-        emit(o, ACT_DIRECT, 0);
-        return 0;
-    case ACT_BLOCK:
-        emit(o, ACT_BLOCK, 0);
-        stat_inc(1);
-        return -1;
-    case ACT_PROXY:
-        o->action = ACT_PROXY; o->proxy_id = pid16;
-        emit(o, ACT_PROXY, pid16);
-        stat_inc(0);
-        break;
-    default:
-        o->action = ACT_DECIDE; o->proxy_id = 0;
-        stat_inc(2);
-        break;
+    int act = decide(o);
+    if (act == ACT_DIRECT || act == ACT_BLOCK) {
+        emit(o, act);
+        return act == ACT_BLOCK ? -1 : 0;
     }
-    *proxy_id_out = o->proxy_id;
+    o->action = act;
+    if (act == ACT_PROXY) emit(o, ACT_PROXY);
+    else o->proxy_id = 0;
     return 1;
 }
 
-// ---- TCP / connected UDP: connect4 / connect6 ------------------------------------------------------------------------
 SEC("cgroup/connect4")
 int pb_connect4(struct bpf_sock_addr *ctx)
 {
-    if (foreign_netns(ctx)) return 1;
-    if (ctx->protocol != IPPROTO_TCP && ctx->protocol != IPPROTO_UDP) return 1;
-    struct pb_orig o; __u16 pid;
+    if (foreign_netns(ctx) || (ctx->protocol != IPPROTO_TCP && ctx->protocol != IPPROTO_UDP)) return 1;
+    struct pb_orig o;
     orig_from_v4(&o, ctx->user_ip4, ctx->user_port, ctx->protocol);
-    int r = route(&o, &pid);
-    if (r < 0) return 0;
-    if (r == 0) return 1;
+    int r = route(&o);
+    if (r <= 0) return r == 0;
     if (ctx->protocol == IPPROTO_TCP) {
         __u64 ck = bpf_get_socket_cookie(ctx);
         bpf_map_update_elem(&by_cookie, &ck, &o, BPF_ANY);
         ctx->user_ip4 = bpf_htonl(0x7f000001);
-        ctx->user_port = bpf_htons((__u16)cfg_get(PB_CFG_TCP_PORT));
+        ctx->user_port = bpf_htons(cfg.tcp_port);
     } else {
         ctx->user_ip4 = udp_flow_addr(&o);
-        ctx->user_port = bpf_htons((__u16)cfg_get(PB_CFG_UDP_PORT));
+        ctx->user_port = bpf_htons(cfg.udp_port);
     }
     return 1;
 }
@@ -295,69 +255,59 @@ int pb_connect4(struct bpf_sock_addr *ctx)
 SEC("cgroup/connect6")
 int pb_connect6(struct bpf_sock_addr *ctx)
 {
-    if (foreign_netns(ctx)) return 1;
-    if (ctx->protocol != IPPROTO_TCP && ctx->protocol != IPPROTO_UDP) return 1;
+    if (foreign_netns(ctx) || (ctx->protocol != IPPROTO_TCP && ctx->protocol != IPPROTO_UDP)) return 1;
     __u32 ip6[4] = { ctx->user_ip6[0], ctx->user_ip6[1], ctx->user_ip6[2], ctx->user_ip6[3] };
-    struct pb_orig o; __u16 pid;
+    struct pb_orig o;
     orig_from_v6(&o, ip6, ctx->user_port, ctx->protocol);
-    int r = route(&o, &pid);
-    if (r < 0) return 0;
-    if (r == 0) return 1;
+    int r = route(&o);
+    if (r <= 0) return r == 0;
     if (ctx->protocol == IPPROTO_TCP) {
         __u64 ck = bpf_get_socket_cookie(ctx);
         bpf_map_update_elem(&by_cookie, &ck, &o, BPF_ANY);
         set_mapped_v4(ctx->user_ip6, bpf_htonl(0x7f000001));
-        ctx->user_port = bpf_htons((__u16)cfg_get(PB_CFG_TCP_PORT));
+        ctx->user_port = bpf_htons(cfg.tcp_port);
     } else {
         set_mapped_v4(ctx->user_ip6, udp_flow_addr(&o));
-        ctx->user_port = bpf_htons((__u16)cfg_get(PB_CFG_UDP_PORT));
+        ctx->user_port = bpf_htons(cfg.udp_port);
     }
     return 1;
 }
 
-// ---- unconnected UDP --------------------------------------------------------------------------------------------------
 SEC("cgroup/sendmsg4")
 int pb_sendmsg4(struct bpf_sock_addr *ctx)
 {
-    if (foreign_netns(ctx)) return 1;
-    if (ctx->protocol != IPPROTO_UDP) return 1;
-    struct pb_orig o; __u16 pid;
+    if (foreign_netns(ctx) || ctx->protocol != IPPROTO_UDP) return 1;
+    struct pb_orig o;
     orig_from_v4(&o, ctx->user_ip4, ctx->user_port, IPPROTO_UDP);
-    int r = route(&o, &pid);
-    if (r < 0) return 0;
-    if (r == 0) return 1;
+    int r = route(&o);
+    if (r <= 0) return r == 0;
     ctx->user_ip4 = udp_flow_addr(&o);
-    ctx->user_port = bpf_htons((__u16)cfg_get(PB_CFG_UDP_PORT));
+    ctx->user_port = bpf_htons(cfg.udp_port);
     return 1;
 }
 
+// udpv6_sendmsg refuses a hook that rewrites a native IPv6 destination to a v4-mapped address and loopback has only ::1, so
+// a native IPv6 flow that must be proxied fails closed (EPERM); the application falls back to IPv4 or TCP.
 SEC("cgroup/sendmsg6")
 int pb_sendmsg6(struct bpf_sock_addr *ctx)
 {
-    if (foreign_netns(ctx)) return 1;
-    if (ctx->protocol != IPPROTO_UDP) return 1;
+    if (foreign_netns(ctx) || ctx->protocol != IPPROTO_UDP) return 1;
     __u32 ip6[4] = { ctx->user_ip6[0], ctx->user_ip6[1], ctx->user_ip6[2], ctx->user_ip6[3] };
-    struct pb_orig o; __u16 pid;
+    struct pb_orig o;
     orig_from_v6(&o, ip6, ctx->user_port, IPPROTO_UDP);
-    int r = route(&o, &pid);
-    if (r < 0) return 0;
-    if (r == 0) return 1;
-    // The kernel (udpv6_sendmsg) refuses a sendmsg6 program that rewrites a native IPv6 destination to a v4-mapped address,
-    // and loopback has only ::1 so a flow id cannot be encoded in the address. A flow that must be proxied therefore fails
-    // closed (EPERM; applications fall back to IPv4/TCP). Flows that merely need a userspace decision pass untouched.
-    if (o.action == ACT_PROXY) { stat_inc(1); return 0; }
-    return 1;
+    int r = route(&o);
+    if (r <= 0) return r == 0;
+    return o.action != ACT_PROXY;
 }
 
-// Replies arrive from the flow address; show the application the real peer.
+// Replies come from the flow address; show the application the real peer.
 SEC("cgroup/recvmsg4")
 int pb_recvmsg4(struct bpf_sock_addr *ctx)
 {
-    if (ctx->protocol != IPPROTO_UDP || ctx->user_port != bpf_htons((__u16)cfg_get(PB_CFG_UDP_PORT))) return 1;
+    if (ctx->protocol != IPPROTO_UDP || ctx->user_port != bpf_htons(cfg.udp_port)) return 1;
     __u32 key = ctx->user_ip4;
     struct pb_orig *o = bpf_map_lookup_elem(&flows, &key);
-    if (!o) return 1;
-    if (o->family == AF_INET) {
+    if (o && o->family == AF_INET) {
         ctx->user_ip4 = *(__u32 *)(o->addr + 12);
         ctx->user_port = bpf_htons(o->port);
     }
@@ -367,7 +317,7 @@ int pb_recvmsg4(struct bpf_sock_addr *ctx)
 SEC("cgroup/recvmsg6")
 int pb_recvmsg6(struct bpf_sock_addr *ctx)
 {
-    if (ctx->protocol != IPPROTO_UDP || ctx->user_port != bpf_htons((__u16)cfg_get(PB_CFG_UDP_PORT))) return 1;
+    if (ctx->protocol != IPPROTO_UDP || ctx->user_port != bpf_htons(cfg.udp_port)) return 1;
     if (ctx->user_ip6[0] || ctx->user_ip6[1] || ctx->user_ip6[2] != bpf_htonl(0x0000ffff)) return 1;
     __u32 key = ctx->user_ip6[3];
     struct pb_orig *o = bpf_map_lookup_elem(&flows, &key);
@@ -378,7 +328,7 @@ int pb_recvmsg6(struct bpf_sock_addr *ctx)
     return 1;
 }
 
-// getpeername() on a redirected socket shows the original destination
+// getpeername() on a redirected socket reports the original destination.
 SEC("cgroup/getpeername4")
 int pb_getpeername4(struct bpf_sock_addr *ctx)
 {
@@ -417,7 +367,7 @@ int pb_getpeername6(struct bpf_sock_addr *ctx)
     return 1;
 }
 
-// Hand the original destination to the relay, keyed by the client's local port.
+// Hands the original destination to the relay, keyed by the client's source address and port.
 SEC("sockops")
 int pb_sockops(struct bpf_sock_ops *s)
 {
@@ -425,8 +375,10 @@ int pb_sockops(struct bpf_sock_ops *s)
     __u64 ck = bpf_get_socket_cookie(s);
     struct pb_orig *o = bpf_map_lookup_elem(&by_cookie, &ck);
     if (!o) return 1;
-    __u32 lp = s->local_port;
-    bpf_map_update_elem(&by_port, &lp, o, BPF_ANY);
+    struct pb_port_key k = { .ip = s->local_ip4, .port = s->local_port };
+    if (s->family == AF_INET6 && !s->local_ip6[0] && !s->local_ip6[1] && s->local_ip6[2] == bpf_htonl(0x0000ffff))
+        k.ip = s->local_ip6[3];
+    bpf_map_update_elem(&by_port, &k, o, BPF_ANY);
     return 1;
 }
 

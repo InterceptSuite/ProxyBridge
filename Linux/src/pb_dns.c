@@ -95,7 +95,6 @@ static void add_mapping(uint32_t ip, char names[][256], int nn, struct pb_dns_re
     }
 }
 
-// ---- wire format -----------------------------------------------------------------------------------------------------
 
 // Reads a (possibly compressed) name at *off into out (lower-case, dotted). Advances *off past the name as stored at that
 // position. Returns false on malformed data.
@@ -150,7 +149,6 @@ int pb_dns_observe(const uint8_t *m, size_t len, struct pb_dns_result *res)
     }
 
     uint32_t ips[64]; int nips = 0;
-    // first pass collects the chain of names (CNAME owners/targets and A owners), second pass assigns them to every address
     struct { size_t rdata; uint16_t type, rdlen; char owner[256]; } rr[128];
     int nrr = 0;
     for (int i = 0; i < an; i++) {
@@ -163,12 +161,10 @@ int pb_dns_observe(const uint8_t *m, size_t len, struct pb_dns_result *res)
         off = rd + rdlen;
     }
     for (int i = 0; i < nrr; i++) {
-        bool addname = false;
         char target[256];
         if (rr[i].type == 5) {                                  // CNAME: owner and target are both names of the final address
             size_t o2 = rr[i].rdata;
             if (read_name(m, len, &o2, target, sizeof target)) {
-                addname = true;
                 for (int pass = 0; pass < 2; pass++) {
                     const char *nm = pass ? target : rr[i].owner;
                     bool dup = false;
@@ -184,7 +180,6 @@ int pb_dns_observe(const uint8_t *m, size_t len, struct pb_dns_result *res)
                 if (!dup && nn < PB_DNS_MAX_NAMES) strcpy(names[nn++], rr[i].owner);
             }
         }
-        (void)addname;
     }
     if (!nips || !nn) return 0;
 

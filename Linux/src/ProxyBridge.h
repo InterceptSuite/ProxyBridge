@@ -11,6 +11,8 @@
 extern "C" {
 #endif
 
+#define PB_API __attribute__((visibility("default")))
+
 typedef void (*LogCallback)(const char* message);
 typedef void (*ConnectionCallback)(const char* process_name, uint32_t pid, const char* dest_ip, uint16_t dest_port, const char* proxy_info);
 
@@ -34,14 +36,14 @@ typedef enum {
 /* ---- Proxy configurations -------------------------------------------------------------------------------------------
  * Any number of proxies can be registered. Ids are non-zero and stable until the proxy is deleted.
  * Returns 0 on failure (the reason is written to err, if given). */
-uint32_t ProxyBridge_AddProxy(const char* name, ProxyType type, const char* host, uint16_t port,
+PB_API uint32_t ProxyBridge_AddProxy(const char* name, ProxyType type, const char* host, uint16_t port,
                               const char* username, const char* password, char* err, size_t err_size);
-bool     ProxyBridge_EditProxy(uint32_t proxy_id, const char* name, ProxyType type, const char* host, uint16_t port,
+PB_API bool     ProxyBridge_EditProxy(uint32_t proxy_id, const char* name, ProxyType type, const char* host, uint16_t port,
                                const char* username, const char* password, char* err, size_t err_size);
-bool     ProxyBridge_DeleteProxy(uint32_t proxy_id);   /* rules that used it fall back to the default proxy */
-void     ProxyBridge_ClearProxies(void);
+PB_API bool     ProxyBridge_DeleteProxy(uint32_t proxy_id);   /* rules that used it fall back to the default proxy */
+PB_API void     ProxyBridge_ClearProxies(void);
 /* Which proxy a rule with proxy_id == 0 uses. 0 = the first proxy added. */
-void     ProxyBridge_SetDefaultProxy(uint32_t proxy_id);
+PB_API void     ProxyBridge_SetDefaultProxy(uint32_t proxy_id);
 
 /* ---- Rules ----------------------------------------------------------------------------------------------------------
  * Rules are evaluated in list order, first match wins. process_name: ';' or ',' separated globs matched against the
@@ -50,33 +52,33 @@ void     ProxyBridge_SetDefaultProxy(uint32_t proxy_id);
  * ("80;443;8000-9000", "" or "*" = any).
  * proxy_id applies when action == RULE_ACTION_PROXY; 0 = default proxy.
  * AddRule returns the new rule id, or 0 on validation failure (reason in err). */
-uint32_t ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports,
+PB_API uint32_t ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports,
                              RuleProtocol protocol, RuleAction action, uint32_t proxy_id, char* err, size_t err_size);
-bool     ProxyBridge_EditRule(uint32_t rule_id, const char* process_name, const char* target_hosts, const char* target_ports,
+PB_API bool     ProxyBridge_EditRule(uint32_t rule_id, const char* process_name, const char* target_hosts, const char* target_ports,
                               RuleProtocol protocol, RuleAction action, uint32_t proxy_id, char* err, size_t err_size);
-bool     ProxyBridge_EnableRule(uint32_t rule_id);
-bool     ProxyBridge_DisableRule(uint32_t rule_id);
-bool     ProxyBridge_DeleteRule(uint32_t rule_id);
-bool     ProxyBridge_MoveRule(uint32_t rule_id, int new_index);   /* reorder: priority = position */
-void     ProxyBridge_ClearRules(void);
+PB_API bool     ProxyBridge_EnableRule(uint32_t rule_id);
+PB_API bool     ProxyBridge_DisableRule(uint32_t rule_id);
+PB_API bool     ProxyBridge_DeleteRule(uint32_t rule_id);
+PB_API bool     ProxyBridge_MoveRule(uint32_t rule_id, int new_index);   /* reorder: priority = position */
+PB_API void     ProxyBridge_ClearRules(void);
 /* Validates a rule without adding it; returns true if valid, otherwise writes the reason to err. */
-bool     ProxyBridge_ValidateRule(const char* process_name, const char* target_hosts, const char* target_ports,
+PB_API bool     ProxyBridge_ValidateRule(const char* process_name, const char* target_hosts, const char* target_ports,
                                   char* err, size_t err_size);
 
 /* ---- Legacy single-proxy helper -------------------------------------------------------------------------------------
  * Sets (creating on first use) the default proxy. Equivalent to Add/EditProxy on the "default" entry. */
-bool ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, uint16_t proxy_port, const char* username, const char* password);
+PB_API bool ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, uint16_t proxy_port, const char* username, const char* password);
 
 /* ---- Runtime --------------------------------------------------------------------------------------------------------- */
-void ProxyBridge_SetDnsViaProxy(bool enable);
-void ProxyBridge_SetLogCallback(LogCallback callback);
-void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
-void ProxyBridge_SetTrafficLoggingEnabled(bool enable);
-void ProxyBridge_ClearConnectionLogs(void);
-bool ProxyBridge_Start(void);   /* needs root (CAP_BPF/CAP_SYS_ADMIN) and a BTF kernel >= 5.11; returns false and logs why on failure */
-bool ProxyBridge_Stop(void);    /* keeps rules and proxies; Start() may be called again */
-int  ProxyBridge_TestConnection(const char* target_host, uint16_t target_port, char* result_buffer, size_t buffer_size);
-int  ProxyBridge_TestProxy(uint32_t proxy_id, const char* target_host, uint16_t target_port, char* result_buffer, size_t buffer_size);
+PB_API void ProxyBridge_SetDnsViaProxy(bool enable);
+PB_API void ProxyBridge_SetLogCallback(LogCallback callback);
+PB_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
+PB_API void ProxyBridge_SetTrafficLoggingEnabled(bool enable);
+PB_API void ProxyBridge_ClearConnectionLogs(void);
+PB_API bool ProxyBridge_Start(void);   /* needs root (CAP_BPF/CAP_SYS_ADMIN) and a BTF kernel >= 5.11; returns false and logs why on failure */
+PB_API bool ProxyBridge_Stop(void);    /* keeps rules and proxies; Start() may be called again */
+PB_API int  ProxyBridge_TestConnection(const char* target_host, uint16_t target_port, char* result_buffer, size_t buffer_size);
+PB_API int  ProxyBridge_TestProxy(uint32_t proxy_id, const char* target_host, uint16_t target_port, char* result_buffer, size_t buffer_size);
 
 #ifdef __cplusplus
 }

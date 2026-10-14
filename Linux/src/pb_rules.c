@@ -18,8 +18,6 @@ static void set_err(char *err, size_t n, const char *fmt, ...)
     va_end(ap);
 }
 
-// ---- tokenising ------------------------------------------------------------------------------------------------------
-
 // Splits on ';' or ',' and trims whitespace. Returns the number of tokens (<= max) or -1 if there are more than max.
 static int split_list(const char *s, char tokens[][256], int max)
 {
@@ -42,8 +40,6 @@ static int split_list(const char *s, char tokens[][256], int max)
     return n;
 }
 
-// ---- glob ------------------------------------------------------------------------------------------------------------
-
 bool pb_glob_match(const char *p, const char *s)
 {
     const char *star = NULL, *ss = s;
@@ -56,8 +52,6 @@ bool pb_glob_match(const char *p, const char *s)
     while (*p == '*') p++;
     return *p == 0;
 }
-
-// ---- parsing helpers -------------------------------------------------------------------------------------------------
 
 static bool parse_uint(const char *s, size_t len, unsigned max, unsigned *out)
 {
@@ -75,7 +69,6 @@ static bool parse_uint(const char *s, size_t len, unsigned max, unsigned *out)
 static bool parse_ipv4(const char *s, uint32_t *out)
 {
     struct in_addr a;
-    // inet_pton rejects leading garbage / short forms, which is what we want for validation
     if (inet_pton(AF_INET, s, &a) != 1) return false;
     *out = ntohl(a.s_addr);
     return true;
@@ -111,7 +104,6 @@ static bool v6_prefix_range(const uint8_t *base, unsigned prefix, uint8_t *lo, u
 
 static bool looks_like_domain(const char *tok)
 {
-    // anything that is not purely IP-ish: contains a letter (other than none), '?' or a '*' attached to letters
     for (const char *c = tok; *c; c++)
         if (isalpha((unsigned char)*c) || *c == '_' || *c == '?') return true;
     return false;
@@ -147,7 +139,7 @@ bool pb_domain_match(const char *pattern, const char *name)
 static bool parse_host_token(const char *tok, struct pb_host_pat *p, char *err, size_t errlen)
 {
     memset(p, 0, sizeof *p);
-    if (strchr(tok, ':')) {                                   // ---- IPv6
+    if (strchr(tok, ':')) {
         char buf[256];
         snprintf(buf, sizeof buf, "%s", tok);
         char *slash = strchr(buf, '/'), *dash = strchr(buf, '-');
@@ -176,7 +168,7 @@ bad6:
     const char *slash = strchr(tok, '/'), *dash = strchr(tok, '-');
     uint32_t a, b;
     char buf[256];
-    if (slash) {                                              // ---- IPv4 CIDR
+    if (slash) {
         snprintf(buf, sizeof buf, "%.*s", (int)(slash - tok), tok);
         unsigned pre;
         if (!parse_ipv4(buf, &a) || !parse_uint(slash + 1, strlen(slash + 1), 32, &pre)) goto bad4;
@@ -186,14 +178,13 @@ bad6:
     }
     int dots_before = 0;
     for (const char *c = tok; dash && c < dash; c++) dots_before += *c == '.';
-    if (dash && dots_before == 3) {                           // ---- IPv4 a.b.c.d-e.f.g.h
+    if (dash && dots_before == 3) {
         snprintf(buf, sizeof buf, "%.*s", (int)(dash - tok), tok);
         if (!parse_ipv4(buf, &a) || !parse_ipv4(dash + 1, &b)) goto bad4;
         if (a > b) { set_err(err, errlen, "IPv4 range '%s' has start > end", tok); return false; }
         p->kind = PB_HOST_V4_RANGE; p->lo4 = a; p->hi4 = b;
         return true;
     }
-    // ---- IPv4 with per-octet '*' or 'lo-hi'
     const char *s = tok;
     for (int i = 0; i < 4; i++) {
         const char *e = strchr(s, '.');
@@ -202,10 +193,10 @@ bad6:
         if (!parse_octet(s, len, &p->box_lo[i], &p->box_hi[i])) goto bad4;
         s = e ? e + 1 : s + len;
     }
-    // exact address or a contiguous prefix box collapses to a numeric range
+    // a box whose wildcard octets form a suffix collapses to a numeric range
     {
         int i = 0;
-        while (i < 4 && p->box_lo[i] == p->box_hi[i]) i++;           // leading fixed octets
+        while (i < 4 && p->box_lo[i] == p->box_hi[i]) i++; 
         bool contiguous = true;
         if (i < 4) {
             for (int j = i + 1; j < 4; j++)
@@ -248,31 +239,11 @@ static bool parse_port_token(const char *tok, struct pb_port_range *r, char *err
     return true;
 }
 
-// ---- public: parse / free / clone ------------------------------------------------------------------------------------
-
 void pb_rule_free(struct pb_rule *r)
 {
     free(r->procs); free(r->hosts); free(r->ports); free(r->domains);
     r->procs = NULL; r->hosts = NULL; r->ports = NULL; r->domains = NULL;
     r->nprocs = r->nhosts = r->nports = r->ndomains = 0;
-}
-
-bool pb_rule_clone(struct pb_rule *dst, const struct pb_rule *src)
-{
-    *dst = *src;
-    dst->procs = NULL; dst->hosts = NULL; dst->ports = NULL; dst->domains = NULL;
-    if (src->nprocs && !(dst->procs = malloc(sizeof(*dst->procs) * (size_t)src->nprocs))) goto oom;
-    if (src->nhosts && !(dst->hosts = malloc(sizeof(*dst->hosts) * (size_t)src->nhosts))) goto oom;
-    if (src->nports && !(dst->ports = malloc(sizeof(*dst->ports) * (size_t)src->nports))) goto oom;
-    if (src->ndomains && !(dst->domains = malloc(sizeof(*dst->domains) * (size_t)src->ndomains))) goto oom;
-    if (src->nprocs) memcpy(dst->procs, src->procs, sizeof(*dst->procs) * (size_t)src->nprocs);
-    if (src->nhosts) memcpy(dst->hosts, src->hosts, sizeof(*dst->hosts) * (size_t)src->nhosts);
-    if (src->nports) memcpy(dst->ports, src->ports, sizeof(*dst->ports) * (size_t)src->nports);
-    if (src->ndomains) memcpy(dst->domains, src->domains, sizeof(*dst->domains) * (size_t)src->ndomains);
-    return true;
-oom:
-    pb_rule_free(dst);
-    return false;
 }
 
 static bool is_any(const char *s)
@@ -299,7 +270,6 @@ bool pb_rule_parse(struct pb_rule *out, const char *process, const char *hosts, 
     char (*tok)[256] = malloc(sizeof(char[256]) * PB_MAX_PATTERNS);
     if (!tok) { set_err(err, errlen, "out of memory"); return false; }
 
-    // process
     if (is_any(process)) out->any_proc = true;
     else {
         int n = split_list(process, tok, PB_MAX_PATTERNS);
@@ -313,7 +283,6 @@ bool pb_rule_parse(struct pb_rule *out, const char *process, const char *hosts, 
         if (out->any_proc) { free(out->procs); out->procs = NULL; out->nprocs = 0; }
     }
 
-    // hosts
     if (is_any(hosts)) out->any_host = true;
     else {
         int n = split_list(hosts, tok, PB_MAX_PATTERNS);
@@ -334,7 +303,6 @@ bool pb_rule_parse(struct pb_rule *out, const char *process, const char *hosts, 
         if (out->any_host) { free(out->hosts); free(out->domains); out->hosts = NULL; out->domains = NULL; out->nhosts = out->ndomains = 0; }
     }
 
-    // ports
     if (is_any(ports)) out->any_port = true;
     else {
         int n = split_list(ports, tok, PB_MAX_PATTERNS);
@@ -357,8 +325,6 @@ fail:
     pb_rule_free(out);
     return false;
 }
-
-// ---- matching --------------------------------------------------------------------------------------------------------
 
 bool pb_rule_match_process(const struct pb_rule *r, const char *exe_path)
 {
