@@ -27,6 +27,9 @@
 #include <net/if.h>
 #include <sched.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
 
 #include "../pb_internal.h"
 
@@ -136,6 +139,25 @@ static void ev_clear(void) { g_ev = g_ev_proxy = g_ev_direct = g_ev_block = 0; }
 // Test plumbing
 // ---------------------------------------------------------------------------------------------
 static int g_pass, g_fail;
+static const char *volatile g_cur = "startup";
+static void watchdog(int sig)
+{
+    (void)sig;
+    static const char m1[] = "\nFATAL: watchdog expired while running: ";
+    if (write(2, m1, sizeof m1 - 1) < 0) {}
+    const char *c = g_cur;
+    if (write(2, c, strlen(c)) < 0) {}
+    if (write(2, "\n", 1) < 0) {}
+    _exit(3);
+}
+static void arm_watchdog(void)
+{
+    const char *e = getenv("PB_TEST_WATCHDOG");
+    int secs = e ? atoi(e) : 300;
+    signal(SIGALRM, watchdog);
+    alarm((unsigned)(secs > 0 ? secs : 300));
+}
+#define RUN(fn) do { g_cur = #fn; printf("---- %s\n", #fn); fn(); } while (0)
 #define CHECK(cond, ...) do { if (cond) { g_pass++; printf("PASS  "); } else { g_fail++; printf("FAIL  "); } \
                               printf(__VA_ARGS__); printf("\n"); fflush(stdout); } while (0)
 
@@ -459,9 +481,12 @@ static int relay_connect(uint16_t src)
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = htons(src) };
     if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) { close(fd); return -1; }
     a.sin_port = htons(pb_relay_tcp_port());
+    struct timeval tv = { 10, 0 };
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);     // bounds connect()
     if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) { close(fd); return -1; }
-    struct timeval tv = { 30, 0 };
+    tv.tv_sec = 30;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     return fd;
 }
 static uint16_t new_src(void) { return (uint16_t)atomic_fetch_add(&g_next_port, 1); }
@@ -844,22 +869,26 @@ static void test_tcp_10k(void)
     int base_fds = count_fds();
     long rss0 = rss_kb();
     int *fds = malloc(N * sizeof *fds);
-    int opened = 0;
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < N; i++) fds[i] = -1;
+    int opened = 0, consec_fail = 0;
+    bool stalled = false;
+    for (int i = 0; i < N && !stalled; i++) {
         fds[i] = -1;
         for (int tries = 0; tries < 5 && fds[i] < 0; tries++) {
             uint16_t src = new_src();
             set_tcp(src, "127.0.0.1", 9, PB_ACT_PROXY, 10);
             fds[i] = relay_connect(src);
         }
-        if (fds[i] >= 0) opened++;
+        if (fds[i] >= 0) { opened++; consec_fail = 0; }
+        else if (++consec_fail >= 20) { printf("      10k test: 20 consecutive connect failures at i=%d (%s), giving up\n", i, strerror(errno)); stalled = true; }
         if (i % 100 == 99) {            // pace so the bounded handshake queue is not what we measure
             int64_t t0 = now_ms();
             while (atomic_load(&g_hold_ready) < i - 200 && now_ms() - t0 < 30000) msleep(2);
+            if (atomic_load(&g_hold_ready) < i - 200) { printf("      10k test: handshakes stalled at i=%d (ready=%d), giving up\n", i, (int)g_hold_ready); stalled = true; }
         }
     }
     int64_t t0 = now_ms();
-    while (atomic_load(&g_hold_ready) < N && now_ms() - t0 < 60000) msleep(20);
+    while (!stalled && atomic_load(&g_hold_ready) < N && now_ms() - t0 < 60000) msleep(20);
     msleep(500);
     long rss1 = rss_kb();
     int alive = 0;
@@ -1106,7 +1135,25 @@ static void test_proxy_helper(void)
 // ---------------------------------------------------------------------------------------------
 // Network namespace so that we can bind port 53 without real root
 // ---------------------------------------------------------------------------------------------
-static bool g_have53;
+static bool loopback_ok(void)
+{
+    int l = socket(AF_INET, SOCK_STREAM, 0), c = socket(AF_INET, SOCK_STREAM, 0);
+    bool ok = false;
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    struct timeval tv = { 3, 0 };
+    setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    if (l >= 0 && c >= 0 && bind(l, (struct sockaddr *)&a, sizeof a) == 0 && listen(l, 1) == 0) {
+        socklen_t al = sizeof a;
+        getsockname(l, (struct sockaddr *)&a, &al);
+        if (connect(c, (struct sockaddr *)&a, sizeof a) == 0) {
+            struct pollfd p = { l, POLLIN, 0 };
+            ok = poll(&p, 1, 3000) == 1;
+        }
+    }
+    if (l >= 0) close(l);
+    if (c >= 0) close(c);
+    return ok;
+}
 static bool can_bind53(void)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -1115,12 +1162,14 @@ static bool can_bind53(void)
     close(fd);
     return ok;
 }
-static void setup_netns(void)
+// Runs in the forked DNS child only: gets a private netns where port 53 is bindable. Returns false if impossible.
+static bool isolate_for_port53(void)
 {
-    if (can_bind53()) { g_have53 = true; return; }
+    bool force_no_lo = getenv("PB_TEST_FORCE_NO_LO") != NULL;
+    if (!force_no_lo && can_bind53() && loopback_ok()) return true;     // already privileged enough
     uid_t uid = getuid();
     gid_t gid = getgid();
-    if (unshare(CLONE_NEWUSER | CLONE_NEWNET) != 0) { printf("NOTE  unshare(user+net) failed: %s\n", strerror(errno)); return; }
+    if (unshare(CLONE_NEWUSER | CLONE_NEWNET) != 0) { printf("NOTE  DNS child: unshare failed: %s\n", strerror(errno)); return false; }
     int fd = open("/proc/self/setgroups", O_WRONLY);
     if (fd >= 0) { if (write(fd, "deny", 4) < 0) {} close(fd); }
     char b[64];
@@ -1128,16 +1177,22 @@ static void setup_netns(void)
     if (fd >= 0) { int n = snprintf(b, sizeof b, "0 %u 1", uid); if (write(fd, b, (size_t)n) < 0) {} close(fd); }
     fd = open("/proc/self/gid_map", O_WRONLY);
     if (fd >= 0) { int n = snprintf(b, sizeof b, "0 %u 1", gid); if (write(fd, b, (size_t)n) < 0) {} close(fd); }
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
-    struct ifreq ifr;
-    memset(&ifr, 0, sizeof ifr);
-    snprintf(ifr.ifr_name, IFNAMSIZ, "lo");
-    ifr.ifr_flags = IFF_UP | IFF_RUNNING;
-    ioctl(s, SIOCSIFFLAGS, &ifr);
-    close(s);
-    g_have53 = can_bind53();
-    printf("NOTE  using private network namespace (port 53 bindable: %s)\n", g_have53 ? "yes" : "no");
+    if (!force_no_lo) {
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        struct ifreq ifr;
+        memset(&ifr, 0, sizeof ifr);
+        snprintf(ifr.ifr_name, IFNAMSIZ, "lo");
+        ifr.ifr_flags = IFF_UP | IFF_RUNNING;
+        if (s >= 0) { if (ioctl(s, SIOCSIFFLAGS, &ifr) < 0) printf("NOTE  DNS child: cannot bring lo up: %s\n", strerror(errno)); close(s); }
+    }
+    if (!loopback_ok()) { printf("NOTE  DNS child: loopback unusable in the new namespace\n"); return false; }
+    if (!can_bind53()) { printf("NOTE  DNS child: port 53 not bindable in the new namespace\n"); return false; }
+    return true;
 }
+
+// Shared with the forked DNS child.
+struct shared { int pass, fail, status; };      // status: 0 = not run, 1 = ran, 3 = cannot isolate
+static struct shared *g_shared;
 
 // ---------------------------------------------------------------------------------------------
 // DNS tap tests
@@ -1224,7 +1279,6 @@ static bool dns_tcp_case(const char *name, int action, uint32_t px, int mode, in
 static void test_dns(void)
 {
     CHECK(g_obs_n == 0, "no DNS observe calls for non-port-53 flows so far (%d)", (int)g_obs_n);
-    if (!g_have53) { printf("SKIP  DNS tests (cannot bind port 53)\n"); return; }
     struct srv *d = srv_start_p(dns_tcp_handler, NULL, 53);
     int ufd = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = htons(53) };
@@ -1421,10 +1475,8 @@ static void test_udp_odd(void)
     close(c);
 }
 
-int main(void)
+static void init_world(void)
 {
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    setup_netns();
     struct srvcfg c = { 0 };
     g_echo = srv_start(echo_handler, NULL);
     g_s5 = srv_start(socks_handler, &c);
@@ -1448,25 +1500,70 @@ int main(void)
     set_proxy(4, PROXY_TYPE_HTTP, g_httpauth->port, "alice", "secret");
     set_proxy(5, PROXY_TYPE_HTTP, g_httpleft->port, NULL, NULL);
     g_default_px = 1;
+}
 
+// The port-53 tests run in a forked child (before any thread exists) so that a private network namespace never
+// affects the main process. Status/counters come back through shared memory.
+static void run_dns_child(void)
+{
+    arm_watchdog();
+    if (!isolate_for_port53()) { g_shared->status = 3; _exit(0); }
+    init_world();
+    if (relay_up(300, 60, 0, 5) != 0) { printf("FAIL  DNS child: pb_relay_start\n"); g_shared->fail = 1; g_shared->status = 1; _exit(0); }
+    RUN(test_dns);
+    pb_relay_stop();
+    g_shared->pass = g_pass;
+    g_shared->fail = g_fail;
+    g_shared->status = 1;
+    fflush(stdout);
+    _exit(0);
+}
+
+int main(void)
+{
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    if (!loopback_ok()) {
+        fprintf(stderr, "FATAL: 127.0.0.1 loopback is not usable in this environment (bind+connect failed)\n");
+        return 2;
+    }
+    g_shared = mmap(NULL, sizeof *g_shared, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (g_shared == MAP_FAILED) { perror("mmap"); return 2; }
+    memset(g_shared, 0, sizeof *g_shared);
+    g_cur = "dns child";
+    pid_t pid = fork();
+    if (pid == 0) run_dns_child();
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) < 0) st = -1;
+    arm_watchdog();
+    if (g_shared->status == 1 && WIFEXITED(st) && WEXITSTATUS(st) == 0) {
+        g_pass += g_shared->pass;
+        g_fail += g_shared->fail;
+    } else if (g_shared->status == 3) {
+        printf("SKIP  DNS tests: cannot isolate a private network namespace with port 53 here\n");
+    } else {
+        g_fail++;
+        printf("FAIL  DNS child crashed or timed out (wait status 0x%x)\n", st);
+    }
+
+    init_world();
+    g_cur = "pb_relay_start";
     CHECK(relay_up(300, 60, 0, 5) == 0, "pb_relay_start");
-    test_tcp_basic();
-    test_tcp_bad_proxy();
-    test_tcp_halfclose();
-    test_udp();
-    test_proxy_helper();
-    test_udp_odd();
-    test_hostname();
-    test_latency();
-    test_dns();
-    test_tcp_large();
-    test_throughput();
-    test_tcp_10k();
-    test_tcp_idle();
-    test_tcp_cap();
-    test_handshake_timeout();
-    test_udp_idle();
-    test_start_stop();
+    RUN(test_tcp_basic);
+    RUN(test_tcp_bad_proxy);
+    RUN(test_tcp_halfclose);
+    RUN(test_udp);
+    RUN(test_proxy_helper);
+    RUN(test_udp_odd);
+    RUN(test_hostname);
+    RUN(test_latency);
+    RUN(test_tcp_large);
+    RUN(test_throughput);
+    RUN(test_tcp_10k);
+    RUN(test_tcp_idle);
+    RUN(test_tcp_cap);
+    RUN(test_handshake_timeout);
+    RUN(test_udp_idle);
+    RUN(test_start_stop);
     pb_relay_stop();
     printf("\nRESULT: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
