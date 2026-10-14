@@ -17,7 +17,7 @@ typedef struct {
     char target_ports[256];
     RuleProtocol protocol;
     RuleAction action;
-    char proxy_ref[64];     /* name or 1-based index of a --proxy; empty = first proxy */
+    char proxy_ref[64];     /* proxy name or 1-based index; empty = default */
 } ProxyRule;
 
 typedef struct {
@@ -53,7 +53,7 @@ static void connection_callback(const char* process_name, uint32_t pid, const ch
 static void signal_handler(int sig)
 {
     (void)sig;
-    keep_running = false;   /* async-signal-safe: the main loop does the shutdown */
+    keep_running = false;
 }
 
 static void show_banner(void)
@@ -64,7 +64,7 @@ static void show_banner(void)
     printf(" | |_) | '__/ _ \\ \\/ / | | | |  _ \\| '__| |/ _` |/ _` |/ _ \\\n");
     printf(" |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/\n");
     printf(" |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|\n");
-    printf("                      |___/                      |___/  V4.0\n");
+    printf("                      |___/                      |___/  V%s\n", PROXYBRIDGE_VERSION);
     printf("\n");
     printf("  Universal proxy client for Linux applications\n");
     printf("\n");
@@ -198,13 +198,11 @@ static bool parse_rule(const char* rule_str, ProxyRule* rule)
         fprintf(stderr, "Expected format: process:hosts:ports:protocol:action[=proxy]\n");
         return false;
     }
-    /* after trimming: buffer = process ':' hosts ':' ports ; protocol = second_last+1 ; action = last+1 */
     *third_last = '\0';
     const char* ports = third_last + 1;
     const char* protocol = second_last + 1;
     const char* action = last + 1;
 
-    /* process = up to the first ':' ; hosts = between first ':' and third_last */
     char* sep = strchr(buffer, ':');
     if (!sep)
     {
@@ -307,7 +305,7 @@ static bool parse_proxy_spec(const char* spec, ProxyEntry* p)
 static uint32_t find_proxy(const ProxyEntry* proxies, int n, const char* ref)
 {
     if (!ref[0])
-        return 0;                            /* default proxy */
+        return 0;
     char* endp = NULL;
     long idx = strtol(ref, &endp, 10);
     if (!*endp && idx >= 1 && idx <= n)
@@ -356,6 +354,7 @@ int main(int argc, char *argv[])
             }
             if (!parse_proxy_spec(argv[++i], &proxies[num_proxies]))
                 return 1;
+            memset(argv[i], 0, strlen(argv[i]));     /* keep credentials out of `ps` */
             num_proxies++;
         }
         else if (strcmp(argv[i], "--rule") == 0 && i + 1 < argc)
