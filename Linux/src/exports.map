@@ -1,0 +1,6 @@
+{
+    global:
+        ProxyBridge_*;
+    local:
+        *;
+};

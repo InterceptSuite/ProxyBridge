@@ -10,6 +10,40 @@
 
 #define MAX_INODES 8
 
+static bool parse_number(const char *s, unsigned base, unsigned long long *out, const char **end)
+{
+    unsigned long long v = 0;
+    const char *p = s;
+    for (;; p++) {
+        unsigned d = (unsigned)(*p - '0');
+        if (*p >= 'a' && *p <= 'f') d = (unsigned)(*p - 'a') + 10;
+        else if (*p >= 'A' && *p <= 'F') d = (unsigned)(*p - 'A') + 10;
+        if (d >= base) break;
+        v = v * base + d;
+    }
+    if (p == s) return false;
+    *out = v;
+    if (end) *end = p;
+    return true;
+}
+
+// Fields of a /proc/net/tcp row: sl, local, remote, state, queues, timer, retrans, uid, timeout, inode.
+static bool parse_tcp_row(char *line, uint32_t *addr, uint32_t *port, unsigned *state, unsigned long long *inode)
+{
+    char *fields[10], *save = NULL;
+    size_t n = 0;
+    for (char *t = strtok_r(line, " \t\n", &save); t && n < 10; t = strtok_r(NULL, " \t\n", &save)) fields[n++] = t;
+    if (n < 10) return false;
+    unsigned long long a, p, st;
+    const char *colon;
+    if (!parse_number(fields[1], 16, &a, &colon) || *colon != ':' || !parse_number(colon + 1, 16, &p, NULL)) return false;
+    if (!parse_number(fields[3], 16, &st, NULL) || !parse_number(fields[9], 10, inode, NULL)) return false;
+    *addr = (uint32_t)a;
+    *port = (uint32_t)p;
+    *state = (unsigned)st;
+    return true;
+}
+
 static size_t listen_inodes(uint32_t ip_be, uint16_t port, uint64_t *inodes)
 {
     FILE *f = fopen("/proc/net/tcp", "r");
@@ -18,10 +52,10 @@ static size_t listen_inodes(uint32_t ip_be, uint16_t port, uint64_t *inodes)
     size_t n = 0;
     if (!fgets(line, sizeof line, f)) { fclose(f); return 0; }
     while (n < MAX_INODES && fgets(line, sizeof line, f)) {
-        unsigned addr, lport, state;
+        uint32_t addr, lport;
+        unsigned state;
         unsigned long long inode;
-        // sl local rem st tx:rx tr:when retrnsmt uid timeout inode
-        if (sscanf(line, " %*d: %x:%x %*x:%*x %x %*x:%*x %*x:%*x %*x %*d %*d %llu", &addr, &lport, &state, &inode) != 4) continue;
+        if (!parse_tcp_row(line, &addr, &lport, &state, &inode)) continue;
         if (state == 0x0A && lport == port && inode && (addr == ip_be || addr == 0)) inodes[n++] = inode;
     }
     fclose(f);
@@ -58,7 +92,11 @@ size_t pb_proc_listeners(uint32_t ip_be, uint16_t port, uint32_t *tgids, size_t 
     while (n < max && (de = readdir(d))) {
         if (de->d_name[0] < '1' || de->d_name[0] > '9') continue;
         for (size_t i = 0; i < ni; i++)
-            if (pid_has_socket(de->d_name, inodes[i])) { tgids[n++] = (uint32_t)strtoul(de->d_name, NULL, 10); break; }
+            if (pid_has_socket(de->d_name, inodes[i])) {
+                unsigned long long pid;
+                if (parse_number(de->d_name, 10, &pid, NULL)) tgids[n++] = (uint32_t)pid;
+                break;
+            }
     }
     closedir(d);
     return n;
