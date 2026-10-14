@@ -1,23 +1,56 @@
 #include "gui.h"
 
+static GtkWidget *rules_window = NULL;
 static GtkWidget *rules_list_box = NULL;
 static GtkWidget *btn_select_all_header = NULL;
 
 // forward
 static void refresh_rules_ui();
 
-static void free_rule_data(RuleData *rule) {
+void free_rule_data(RuleData *rule) {
     if (rule) {
-        if (rule->process_name) free(rule->process_name);
-        if (rule->target_hosts) free(rule->target_hosts);
-        if (rule->target_ports) free(rule->target_ports);
-        free(rule);
+        g_free(rule->process_name);
+        g_free(rule->target_hosts);
+        g_free(rule->target_ports);
+        g_free(rule->proxy_name);
+        g_free(rule);
+    }
+}
+
+// position of the rule in the library list. rules the library rejected (id 0) are not in it
+static int lib_index_of(RuleData *rule) {
+    int idx = 0;
+    for (GList *l = g_rules_list; l != NULL; l = l->next) {
+        if (l->data == rule) break;
+        if (((RuleData *)l->data)->id != 0) idx++;
+    }
+    return idx;
+}
+
+static uint32_t rule_proxy_id(RuleAction action, const char *proxy_name) {
+    return action == RULE_ACTION_PROXY ? resolve_proxy_id(proxy_name) : 0;
+}
+
+// push the stored rules to the library, call after the proxies were added and before ProxyBridge_Start
+void apply_rules_to_lib() {
+    ProxyBridge_ClearRules();
+    int n = 1;
+    for (GList *l = g_rules_list; l != NULL; l = l->next, n++) {
+        RuleData *r = (RuleData *)l->data;
+        char err[256] = "";
+        r->id = ProxyBridge_AddRule(r->process_name, r->target_hosts, r->target_ports, r->protocol, r->action,
+                                    rule_proxy_id(r->action, r->proxy_name), err, sizeof(err));
+        if (r->id == 0) {
+            gui_log("Rule #%d (%s) not loaded: %s", n, r->process_name, err[0] ? err : "rejected");
+            continue;
+        }
+        if (!r->enabled) ProxyBridge_DisableRule(r->id);
     }
 }
 
 static void on_rule_delete(GtkWidget *widget, gpointer data) {
     RuleData *rule = (RuleData *)data;
-    ProxyBridge_DeleteRule(rule->id);
+    if (rule->id != 0) ProxyBridge_DeleteRule(rule->id);
     g_rules_list = g_list_remove(g_rules_list, rule);
     free_rule_data(rule);
     save_config();
@@ -27,52 +60,32 @@ static void on_rule_delete(GtkWidget *widget, gpointer data) {
 static void on_rule_toggle(GtkToggleButton *btn, gpointer data) {
     RuleData *rule = (RuleData *)data;
     rule->enabled = gtk_toggle_button_get_active(btn);
-    if (rule->enabled) ProxyBridge_EnableRule(rule->id);
-    else ProxyBridge_DisableRule(rule->id);
-    save_config();
-}
-
-static void on_save_rule(GtkWidget *widget, gpointer data) {
-    GtkWidget **widgets = (GtkWidget **)data;
-    GtkWidget *dialog = widgets[0];
-    RuleData *edit_rule = (RuleData *)widgets[6]; // existing rule if present
-
-    const char *proc = gtk_entry_get_text(GTK_ENTRY(widgets[1]));
-    const char *hosts = gtk_entry_get_text(GTK_ENTRY(widgets[2]));
-    const char *ports = gtk_entry_get_text(GTK_ENTRY(widgets[3]));
-    RuleProtocol proto = gtk_combo_box_get_active(GTK_COMBO_BOX(widgets[4]));
-    RuleAction action = gtk_combo_box_get_active(GTK_COMBO_BOX(widgets[5]));
-
-    if (strlen(proc) == 0) return; // need process name
-
-    if (edit_rule) {
-        // update backend and local copy
-        ProxyBridge_EditRule(edit_rule->id, proc, hosts, ports, proto, action);
-
-        free(edit_rule->process_name); edit_rule->process_name = strdup(proc);
-        free(edit_rule->target_hosts); edit_rule->target_hosts = strdup(hosts);
-        free(edit_rule->target_ports); edit_rule->target_ports = strdup(ports);
-        edit_rule->protocol = proto;
-        edit_rule->action = action;
-    } else {
-        // add new rule
-        uint32_t new_id = ProxyBridge_AddRule(proc, hosts, ports, proto, action);
-        RuleData *new_rule = malloc(sizeof(RuleData));
-        new_rule->id = new_id;
-        new_rule->process_name = strdup(proc);
-        new_rule->target_hosts = strdup(hosts);
-        new_rule->target_ports = strdup(ports);
-        new_rule->protocol = proto;
-        new_rule->action = action;
-        new_rule->enabled = true;
-        new_rule->selected = false;
-        g_rules_list = g_list_append(g_rules_list, new_rule);
+    if (rule->id != 0) {
+        if (rule->enabled) ProxyBridge_EnableRule(rule->id);
+        else ProxyBridge_DisableRule(rule->id);
     }
     save_config();
-    refresh_rules_ui();
-    gtk_widget_destroy(dialog);
-    free(widgets);
 }
+
+static void on_rule_move(RuleData *rule, int dir) {
+    GList *link = g_list_find(g_rules_list, rule);
+    if (!link) return;
+    GList *other = dir < 0 ? link->prev : link->next;
+    if (!other) return;
+
+    // swap the data pointers, keeps the list head valid
+    gpointer tmp = link->data;
+    link->data = other->data;
+    other->data = tmp;
+
+    if (rule->id != 0 && !ProxyBridge_MoveRule(rule->id, lib_index_of(rule)))
+        gui_log("Could not reorder rule %u in the engine", rule->id);
+    save_config();
+    refresh_rules_ui();
+}
+
+static void on_rule_move_up(GtkWidget *widget, gpointer data) { on_rule_move((RuleData *)data, -1); }
+static void on_rule_move_down(GtkWidget *widget, gpointer data) { on_rule_move((RuleData *)data, 1); }
 
 static void on_browse_clicked(GtkWidget *widget, gpointer data) {
     GtkWidget *entry = (GtkWidget *)data;
@@ -84,18 +97,25 @@ static void on_browse_clicked(GtkWidget *widget, gpointer data) {
                                       NULL);
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-        char *base = g_path_get_basename(filename);
-        gtk_entry_set_text(GTK_ENTRY(entry), base);
-        g_free(base);
-        g_free(filename);
+        if (filename) {
+            char *base = g_path_get_basename(filename);
+            gtk_entry_set_text(GTK_ENTRY(entry), base);
+            g_free(base);
+            g_free(filename);
+        }
     }
     gtk_widget_destroy(dialog);
+}
+
+// proxy combo only matters for PROXY rules
+static void on_action_changed(GtkComboBox *combo, gpointer data) {
+    gtk_widget_set_sensitive(GTK_WIDGET(data), gtk_combo_box_get_active(combo) == RULE_ACTION_PROXY);
 }
 
 static void open_rule_dialog(RuleData *rule) {
     GtkWidget *dialog = gtk_dialog_new();
     gtk_window_set_title(GTK_WINDOW(dialog), rule ? "Edit Rule" : "Add Rule");
-    gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(window));
+    gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(rules_window ? rules_window : window));
     gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
     gtk_window_set_default_size(GTK_WINDOW(dialog), 500, 400);
 
@@ -112,6 +132,7 @@ static void open_rule_dialog(RuleData *rule) {
     GtkWidget *proc_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_pack_start(GTK_BOX(proc_box), proc_entry, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(proc_box), browse_btn, FALSE, FALSE, 0);
+    gtk_widget_set_hexpand(proc_box, TRUE);
 
     GtkWidget *host_entry = gtk_entry_new();
     GtkWidget *port_entry = gtk_entry_new();
@@ -127,6 +148,18 @@ static void open_rule_dialog(RuleData *rule) {
     gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(action_combo), "PROXY");
     gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(action_combo), "DIRECT");
     gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(action_combo), "BLOCK");
+
+    // proxy list: entry 0 = default proxy, then one per configured proxy (same order as g_proxies_list)
+    GtkWidget *proxy_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(proxy_combo), "Default proxy");
+    int proxy_sel = 0, pi = 1;
+    for (GList *l = g_proxies_list; l != NULL; l = l->next, pi++) {
+        ProxyData *p = (ProxyData *)l->data;
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(proxy_combo), p->name);
+        if (rule && rule->proxy_name && p->name && strcmp(rule->proxy_name, p->name) == 0) proxy_sel = pi;
+    }
+    gtk_combo_box_set_active(GTK_COMBO_BOX(proxy_combo), proxy_sel);
+    g_signal_connect(action_combo, "changed", G_CALLBACK(on_action_changed), proxy_combo);
 
     if (rule) {
         gtk_entry_set_text(GTK_ENTRY(proc_entry), rule->process_name);
@@ -153,7 +186,9 @@ static void open_rule_dialog(RuleData *rule) {
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Target Host:"), 0, row, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), host_entry, 1, row, 1, 1); row++;
 
-    GtkWidget *host_hint = gtk_label_new("Example: 192.168.1.*; 10.0.0.1-50; *");
+    GtkWidget *host_hint = gtk_label_new("Example: 192.168.1.*; 10.0.0.0/8; 10.0.0.1-10.0.0.50; github.com; *.github.com; * (domains are matched via DNS answers)");
+    gtk_label_set_line_wrap(GTK_LABEL(host_hint), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(host_hint), 60);
     gtk_style_context_add_class(gtk_widget_get_style_context(host_hint), "dim-label");
     gtk_widget_set_halign(host_hint, GTK_ALIGN_START);
     gtk_grid_attach(GTK_GRID(grid), host_hint, 1, row, 1, 1); row++;
@@ -172,30 +207,92 @@ static void open_rule_dialog(RuleData *rule) {
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Action:"), 0, row, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), action_combo, 1, row, 1, 1); row++;
 
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Proxy:"), 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), proxy_combo, 1, row, 1, 1); row++;
+
+    // inline validation error
+    GtkWidget *err_label = gtk_label_new("");
+    gtk_widget_set_halign(err_label, GTK_ALIGN_START);
+    gtk_label_set_xalign(GTK_LABEL(err_label), 0);
+    gtk_label_set_line_wrap(GTK_LABEL(err_label), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(err_label), 60);
+    gtk_grid_attach(GTK_GRID(grid), err_label, 0, row, 2, 1); row++;
+
     gtk_container_add(GTK_CONTAINER(content), grid);
 
-    GtkWidget *save_btn = gtk_button_new_with_label("Save");
-    GtkWidget *cancel_btn = gtk_button_new_with_label("Cancel");
-    gtk_dialog_add_action_widget(GTK_DIALOG(dialog), cancel_btn, GTK_RESPONSE_CANCEL);
-    gtk_dialog_add_action_widget(GTK_DIALOG(dialog), save_btn, GTK_RESPONSE_ACCEPT);
-
-    GtkWidget **data = malloc(7 * sizeof(GtkWidget*));
-    data[0] = dialog;
-    data[1] = proc_entry;
-    data[2] = host_entry;
-    data[3] = port_entry;
-    data[4] = proto_combo;
-    data[5] = action_combo;
-    data[6] = (GtkWidget*)rule;
-
-    g_signal_connect(save_btn, "clicked", G_CALLBACK(on_save_rule), data);
-    g_signal_connect(cancel_btn, "clicked", G_CALLBACK(gtk_widget_destroy), NULL);
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Cancel", GTK_RESPONSE_CANCEL);
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Save", GTK_RESPONSE_ACCEPT);
     gtk_widget_show_all(dialog);
+    on_action_changed(GTK_COMBO_BOX(action_combo), proxy_combo);
+
+    while (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        const char *proc = gtk_entry_get_text(GTK_ENTRY(proc_entry));
+        const char *hosts = gtk_entry_get_text(GTK_ENTRY(host_entry));
+        const char *ports = gtk_entry_get_text(GTK_ENTRY(port_entry));
+        int proto_i = gtk_combo_box_get_active(GTK_COMBO_BOX(proto_combo));
+        int action_i = gtk_combo_box_get_active(GTK_COMBO_BOX(action_combo));
+        if (proto_i < 0) proto_i = RULE_PROTOCOL_BOTH;
+        if (action_i < 0) action_i = RULE_ACTION_PROXY;
+        RuleProtocol proto = (RuleProtocol)proto_i;
+        RuleAction action = (RuleAction)action_i;
+
+        // proxy name from the combo, NULL = default
+        const char *proxy_name = NULL;
+        int psel = gtk_combo_box_get_active(GTK_COMBO_BOX(proxy_combo));
+        if (action == RULE_ACTION_PROXY && psel > 0) {
+            ProxyData *pd = (ProxyData *)g_list_nth_data(g_proxies_list, psel - 1);
+            if (pd) proxy_name = pd->name;
+        }
+
+        char err[256] = "";
+        bool ok = ProxyBridge_ValidateRule(proc, hosts, ports, err, sizeof(err));
+        uint32_t pid = rule_proxy_id(action, proxy_name);
+
+        if (ok) {
+            if (rule && rule->id != 0) {
+                ok = ProxyBridge_EditRule(rule->id, proc, hosts, ports, proto, action, pid, err, sizeof(err));
+            } else {
+                // new rule, or one the engine rejected when it was loaded
+                uint32_t new_id = ProxyBridge_AddRule(proc, hosts, ports, proto, action, pid, err, sizeof(err));
+                ok = (new_id != 0);
+                if (ok) {
+                    if (rule && !rule->enabled) ProxyBridge_DisableRule(new_id);
+                    if (rule) {
+                        rule->id = new_id;
+                        ProxyBridge_MoveRule(new_id, lib_index_of(rule));
+                    } else {
+                        RuleData *new_rule = g_malloc0(sizeof(RuleData));
+                        new_rule->id = new_id;
+                        new_rule->enabled = true;
+                        g_rules_list = g_list_append(g_rules_list, new_rule);
+                        rule = new_rule;
+                    }
+                }
+            }
+        }
+
+        if (!ok) {
+            char *esc = g_markup_printf_escaped("<span foreground='#e5534b'>%s</span>", err[0] ? err : "Invalid rule.");
+            gtk_label_set_markup(GTK_LABEL(err_label), esc);
+            g_free(esc);
+            continue;
+        }
+
+        // update local copy
+        g_free(rule->process_name); rule->process_name = g_strdup(proc);
+        g_free(rule->target_hosts); rule->target_hosts = g_strdup(hosts);
+        g_free(rule->target_ports); rule->target_ports = g_strdup(ports);
+        g_free(rule->proxy_name); rule->proxy_name = proxy_name ? g_strdup(proxy_name) : NULL;
+        rule->protocol = proto;
+        rule->action = action;
+        save_config();
+        refresh_rules_ui();
+        break;
+    }
+    gtk_widget_destroy(dialog);
 }
 
 static void on_rule_edit(GtkWidget *widget, gpointer data) {
-    on_proxy_rules_clicked(NULL, NULL); // Re-open if closed? Usually modal.
-    // Wait, on_rule_edit clicked from rules list already
     open_rule_dialog((RuleData *)data);
 }
 
@@ -227,16 +324,17 @@ static void on_rule_export_clicked(GtkWidget *widget, gpointer data) {
         if (((RuleData *)l->data)->selected) { any_selected = true; break; }
     }
     if (!any_selected) {
-        show_message(NULL, GTK_MESSAGE_WARNING, "Please select at least one rule to export.");
+        show_message(GTK_WINDOW(rules_window ? rules_window : window), GTK_MESSAGE_WARNING, "Please select at least one rule to export.");
         return;
     }
-    GtkWidget *dialog = gtk_file_chooser_dialog_new("Export Rules", GTK_WINDOW(window), GTK_FILE_CHOOSER_ACTION_SAVE, "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, NULL);
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Export Rules", GTK_WINDOW(rules_window ? rules_window : window), GTK_FILE_CHOOSER_ACTION_SAVE, "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, NULL);
     gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dialog), TRUE);
     gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), "proxy_rules.json");
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-        FILE *f = fopen(filename, "w");
+        FILE *f = filename ? fopen(filename, "w") : NULL;
         if (f) {
+            // both our keys and the macOS ones (ruleProtocol/ruleAction), plus the proxy name
             fprintf(f, "[\n");
             bool first = true;
             for (GList *l = g_rules_list; l != NULL; l = l->next) {
@@ -246,63 +344,105 @@ static void on_rule_export_clicked(GtkWidget *widget, gpointer data) {
                 char *proc = escape_json_string(r->process_name);
                 char *host = escape_json_string(r->target_hosts);
                 char *port = escape_json_string(r->target_ports);
+                char *pxy = escape_json_string(r->action == RULE_ACTION_PROXY ? r->proxy_name : NULL);
                 const char *proto = (r->protocol == RULE_PROTOCOL_TCP) ? "TCP" : (r->protocol == RULE_PROTOCOL_UDP ? "UDP" : "BOTH");
                 const char *act = (r->action == RULE_ACTION_PROXY) ? "PROXY" : (r->action == RULE_ACTION_DIRECT ? "DIRECT" : "BLOCK");
-                fprintf(f, "  {\n    \"processNames\": \"%s\",\n    \"targetHosts\": \"%s\",\n    \"targetPorts\": \"%s\",\n    \"protocol\": \"%s\",\n    \"action\": \"%s\",\n    \"enabled\": %s\n  }", proc, host, port, proto, act, r->enabled ? "true" : "false");
-                g_free(proc); g_free(host); g_free(port);
+                fprintf(f, "  {\n    \"processNames\": \"%s\",\n    \"targetHosts\": \"%s\",\n    \"targetPorts\": \"%s\",\n    \"protocol\": \"%s\",\n    \"ruleProtocol\": \"%s\",\n    \"action\": \"%s\",\n    \"ruleAction\": \"%s\",\n    \"proxy\": \"%s\",\n    \"enabled\": %s\n  }", proc, host, port, proto, proto, act, act, pxy, r->enabled ? "true" : "false");
+                g_free(proc); g_free(host); g_free(port); g_free(pxy);
                 first = false;
             }
             fprintf(f, "\n]\n");
-            fclose(f);
-            show_message(NULL, GTK_MESSAGE_INFO, "Rules exported successfully.");
+            if (fclose(f) == 0) show_message(GTK_WINDOW(rules_window ? rules_window : window), GTK_MESSAGE_INFO, "Rules exported successfully.");
+            else show_message(GTK_WINDOW(rules_window ? rules_window : window), GTK_MESSAGE_ERROR, "Failed to write %s", filename);
+        } else {
+            show_message(GTK_WINDOW(rules_window ? rules_window : window), GTK_MESSAGE_ERROR, "Could not open %s for writing.", filename ? filename : "file");
         }
         g_free(filename);
     }
     gtk_widget_destroy(dialog);
 }
 
+// first non-NULL of two (consumes both)
+static char *pick_str(char *a, char *b) {
+    if (a) { g_free(b); return a; }
+    return b;
+}
+
 static void on_rule_import_clicked(GtkWidget *widget, gpointer data) {
-    GtkWidget *dialog = gtk_file_chooser_dialog_new("Import Rules", GTK_WINDOW(window), GTK_FILE_CHOOSER_ACTION_OPEN, "_Cancel", GTK_RESPONSE_CANCEL, "_Open", GTK_RESPONSE_ACCEPT, NULL);
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Import Rules", GTK_WINDOW(rules_window ? rules_window : window), GTK_FILE_CHOOSER_ACTION_OPEN, "_Cancel", GTK_RESPONSE_CANCEL, "_Open", GTK_RESPONSE_ACCEPT, NULL);
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
         char *content = NULL;
         gsize len;
-        if (g_file_get_contents(filename, &content, &len, NULL)) {
+        if (filename && g_file_get_contents(filename, &content, &len, NULL)) {
             char *curr = content;
-            int imported = 0;
+            int imported = 0, failed = 0, index = 0;
+            GString *fail_msg = g_string_new("");
+
             while ((curr = strchr(curr, '{')) != NULL) {
                 char *end = strchr(curr, '}');
                 if (!end) break;
                 char saved = *end; *end = '\0';
+                index++;
 
+                // our keys first, macOS keys as fallback
                 char *proc = extract_sub_json_str(curr, "processNames");
                 char *host = extract_sub_json_str(curr, "targetHosts");
                 char *port = extract_sub_json_str(curr, "targetPorts");
-                char *proto_s = extract_sub_json_str(curr, "protocol");
-                char *act_s = extract_sub_json_str(curr, "action");
-                bool en = extract_sub_json_bool(curr, "enabled");
+                char *proto_s = pick_str(extract_sub_json_str(curr, "protocol"), extract_sub_json_str(curr, "ruleProtocol"));
+                char *act_s = pick_str(extract_sub_json_str(curr, "action"), extract_sub_json_str(curr, "ruleAction"));
+                char *proxy_s = extract_sub_json_str(curr, "proxy");
+                bool en = json_has_key(curr, "enabled") ? extract_sub_json_bool(curr, "enabled") : true;
 
-                if (proc && host && port && proto_s && act_s) {
+                if (!proc) {
+                    failed++;
+                    if (fail_msg->len < 3000) g_string_append_printf(fail_msg, "Rule #%d: missing processNames\n", index);
+                } else {
                     RuleProtocol p = RULE_PROTOCOL_BOTH;
-                    if (strcmp(proto_s, "TCP") == 0) p = RULE_PROTOCOL_TCP;
-                    else if (strcmp(proto_s, "UDP") == 0) p = RULE_PROTOCOL_UDP;
+                    if (proto_s && g_ascii_strcasecmp(proto_s, "TCP") == 0) p = RULE_PROTOCOL_TCP;
+                    else if (proto_s && g_ascii_strcasecmp(proto_s, "UDP") == 0) p = RULE_PROTOCOL_UDP;
+                    // anything that is not DIRECT/BLOCK is PROXY (macOS stores the proxy id there)
                     RuleAction a = RULE_ACTION_PROXY;
-                    if (strcmp(act_s, "DIRECT") == 0) a = RULE_ACTION_DIRECT;
-                    else if (strcmp(act_s, "BLOCK") == 0) a = RULE_ACTION_BLOCK;
+                    if (act_s && g_ascii_strcasecmp(act_s, "DIRECT") == 0) a = RULE_ACTION_DIRECT;
+                    else if (act_s && g_ascii_strcasecmp(act_s, "BLOCK") == 0) a = RULE_ACTION_BLOCK;
 
-                    uint32_t nid = ProxyBridge_AddRule(proc, host, port, p, a);
-                     if (!en) ProxyBridge_DisableRule(nid);
-                    RuleData *nd = malloc(sizeof(RuleData));
-                    nd->id = nid; nd->process_name = strdup(proc); nd->target_hosts = strdup(host);
-                    nd->target_ports = strdup(port); nd->protocol = p; nd->action = a; nd->enabled = en; nd->selected = false;
-                    g_rules_list = g_list_append(g_rules_list, nd);
-                    imported++;
+                    const char *h = host ? host : "*";
+                    const char *po = port ? port : "*";
+                    // unknown proxy name -> default proxy
+                    ProxyData *px = (a == RULE_ACTION_PROXY) ? find_proxy_by_name(proxy_s) : NULL;
+
+                    char err[256] = "";
+                    uint32_t nid = ProxyBridge_AddRule(proc, h, po, p, a, px ? px->id : 0, err, sizeof(err));
+                    if (nid == 0) {
+                        failed++;
+                        if (fail_msg->len < 3000) g_string_append_printf(fail_msg, "Rule #%d (%s): %s\n", index, proc, err[0] ? err : "rejected");
+                    } else {
+                        if (!en) ProxyBridge_DisableRule(nid);
+                        RuleData *nd = g_malloc0(sizeof(RuleData));
+                        nd->id = nid; nd->process_name = g_strdup(proc); nd->target_hosts = g_strdup(h);
+                        nd->target_ports = g_strdup(po); nd->protocol = p; nd->action = a; nd->enabled = en;
+                        nd->proxy_name = px ? g_strdup(px->name) : NULL;
+                        g_rules_list = g_list_append(g_rules_list, nd);
+                        imported++;
+                    }
                 }
-                g_free(proc); g_free(host); g_free(port); g_free(proto_s); g_free(act_s);
+                g_free(proc); g_free(host); g_free(port); g_free(proto_s); g_free(act_s); g_free(proxy_s);
                 *end = saved; curr = end + 1;
             }
             g_free(content);
-            if (imported > 0) { refresh_rules_ui(); show_message(NULL, GTK_MESSAGE_INFO, "Imported %d rules.", imported); }
+
+            if (imported > 0) { save_config(); refresh_rules_ui(); }
+            GtkWindow *parent = GTK_WINDOW(rules_window ? rules_window : window);
+            if (failed > 0) {
+                show_message(parent, GTK_MESSAGE_WARNING, "Imported %d rules, %d failed validation and were skipped:\n\n%s", imported, failed, fail_msg->str);
+            } else if (imported > 0) {
+                show_message(parent, GTK_MESSAGE_INFO, "Imported %d rules.", imported);
+            } else {
+                show_message(parent, GTK_MESSAGE_WARNING, "No rules found in the file.");
+            }
+            g_string_free(fail_msg, TRUE);
+        } else {
+            show_message(GTK_WINDOW(rules_window ? rules_window : window), GTK_MESSAGE_ERROR, "Could not read the selected file.");
         }
         g_free(filename);
     }
@@ -321,11 +461,12 @@ static void on_bulk_delete_clicked(GtkWidget *widget, gpointer data) {
     if (!to_delete) return;
     for (GList *d = to_delete; d != NULL; d = d->next) {
         RuleData *rule = (RuleData *)d->data;
-        ProxyBridge_DeleteRule(rule->id);
+        if (rule->id != 0) ProxyBridge_DeleteRule(rule->id);
         g_rules_list = g_list_remove(g_rules_list, rule);
         free_rule_data(rule);
     }
     g_list_free(to_delete);
+    save_config();
     refresh_rules_ui();
 }
 
@@ -371,8 +512,9 @@ static void refresh_rules_ui() {
     gtk_widget_set_hexpand(h_host, TRUE); gtk_grid_attach(GTK_GRID(grid), h_host, 5, row, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Protocol"), 6, row, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Action"), 7, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Proxy"), 8, row, 1, 1);
     row++;
-    gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row, 8, 1); row++;
+    gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row, 9, 1); row++;
 
     int sr_counter = 1;
     for (GList *l = g_rules_list; l != NULL; l = l->next) {
@@ -392,8 +534,19 @@ static void refresh_rules_ui() {
         g_signal_connect(btn_edit, "clicked", G_CALLBACK(on_rule_edit), r);
         GtkWidget *btn_del = gtk_button_new_with_label("Delete");
         g_signal_connect(btn_del, "clicked", G_CALLBACK(on_rule_delete), r);
+        // list position is the priority, first match wins
+        GtkWidget *btn_up = gtk_button_new_with_label("\u25B2");
+        gtk_widget_set_tooltip_text(btn_up, "Move up (higher priority)");
+        gtk_widget_set_sensitive(btn_up, l->prev != NULL);
+        g_signal_connect(btn_up, "clicked", G_CALLBACK(on_rule_move_up), r);
+        GtkWidget *btn_down = gtk_button_new_with_label("\u25BC");
+        gtk_widget_set_tooltip_text(btn_down, "Move down (lower priority)");
+        gtk_widget_set_sensitive(btn_down, l->next != NULL);
+        g_signal_connect(btn_down, "clicked", G_CALLBACK(on_rule_move_down), r);
         gtk_box_pack_start(GTK_BOX(act_box), btn_edit, FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(act_box), btn_del, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(act_box), btn_up, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(act_box), btn_down, FALSE, FALSE, 0);
         gtk_grid_attach(GTK_GRID(grid), act_box, 2, row, 1, 1);
 
         char sr_str[16]; snprintf(sr_str, sizeof(sr_str), "%d", sr_counter++);
@@ -408,26 +561,51 @@ static void refresh_rules_ui() {
         gtk_grid_attach(GTK_GRID(grid), l_host, 5, row, 1, 1);
 
         const char* proto_strs[] = {"TCP", "UDP", "BOTH"};
-        gtk_grid_attach(GTK_GRID(grid), gtk_label_new(proto_strs[r->protocol]), 6, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), gtk_label_new(proto_strs[r->protocol <= RULE_PROTOCOL_BOTH ? r->protocol : RULE_PROTOCOL_BOTH]), 6, row, 1, 1);
 
         const char* action_strs[] = {"PROXY", "DIRECT", "BLOCK"};
-        GtkWidget *l_act = gtk_label_new(action_strs[r->action]);
+        GtkWidget *l_act = gtk_label_new(action_strs[r->action <= RULE_ACTION_BLOCK ? r->action : RULE_ACTION_PROXY]);
         GtkStyleContext *context = gtk_widget_get_style_context(l_act);
         if (r->action == RULE_ACTION_PROXY) gtk_style_context_add_class(context, "success");
         else if (r->action == RULE_ACTION_DIRECT) gtk_style_context_add_class(context, "info");
         else gtk_style_context_add_class(context, "warning");
         gtk_grid_attach(GTK_GRID(grid), l_act, 7, row, 1, 1);
 
+        // proxy only matters for PROXY rules
+        const char *proxy_txt = "-";
+        if (r->action == RULE_ACTION_PROXY)
+            proxy_txt = (r->proxy_name && *r->proxy_name && find_proxy_by_name(r->proxy_name)) ? r->proxy_name : "default";
+        GtkWidget *l_proxy = gtk_label_new(proxy_txt);
+        gtk_label_set_ellipsize(GTK_LABEL(l_proxy), PANGO_ELLIPSIZE_END);
+        gtk_grid_attach(GTK_GRID(grid), l_proxy, 8, row, 1, 1);
+
         row++;
-        gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row, 8, 1); row++;
+        gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row, 9, 1); row++;
     }
     gtk_widget_show_all(rules_list_box);
 }
 
+void refresh_rules_window() {
+    refresh_rules_ui();
+}
+
+// widgets are gone, refresh_rules_ui must not touch them any more
+static void on_rules_window_destroy(GtkWidget *widget, gpointer data) {
+    rules_window = NULL;
+    rules_list_box = NULL;
+    btn_select_all_header = NULL;
+}
+
 void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
+    if (rules_window) {
+        gtk_window_present(GTK_WINDOW(rules_window));
+        return;
+    }
     GtkWidget *dialog = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    rules_window = dialog;
+    g_signal_connect(dialog, "destroy", G_CALLBACK(on_rules_window_destroy), NULL);
     gtk_window_set_title(GTK_WINDOW(dialog), "Process Rules");
-    gtk_window_set_default_size(GTK_WINDOW(dialog), 800, 500);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 1000, 500);
     gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(window));
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_container_set_border_width(GTK_CONTAINER(vbox), 20);

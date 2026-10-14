@@ -1,4 +1,5 @@
 #include "gui.h"
+#include <glib-unix.h>
 
 // widgets
 GtkWidget *window;
@@ -9,13 +10,10 @@ GtkTextBuffer *log_buffer;
 GtkWidget *status_bar;
 guint status_context_id;
 
-// default config
-char g_proxy_ip[256] = "";
-uint16_t g_proxy_port = 0;
-ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
-char g_proxy_user[256] = "";
-char g_proxy_pass[256] = "";
+// config lives in gui_settings.c (proxies) and gui_rules.c (rules)
+static bool g_engine_running = false;
 
+// default config
 GList *g_rules_list = NULL;
 bool g_chk_logging = true;
 bool g_chk_dns = true;
@@ -202,7 +200,8 @@ static void on_about(GtkWidget *widget, gpointer data) {
     char *markup = g_strdup_printf(
         "<span size='xx-large' weight='bold'>ProxyBridge</span>\n"
         "<span color='gray'>Version %s</span>\n\n"
-        "Universal proxy client for Linux applications\n\n"
+        "Universal proxy client for Linux applications\n"
+        "eBPF backend (needs root, kernel 5.8+ with BTF and cgroup v2)\n\n"
         "Author: Sourav Kalal / InterceptSuite\n\n"
         "Website: <a href=\"https://interceptsuite.com\">interceptsuite.com</a>\n"
         "GitHub: <a href=\"https://github.com/InterceptSuite/ProxyBridge\">InterceptSuite/ProxyBridge</a>\n\n"
@@ -217,22 +216,40 @@ static void on_about(GtkWidget *widget, gpointer data) {
     gtk_widget_destroy(dialog);
 }
 
-static void signal_handler(int sig) {
-    fprintf(stderr, "\nSignal %d received. Stopping ProxyBridge...\n", sig);
-    ProxyBridge_Stop();
-    exit(sig);
+// signal handlers run in the main loop (g_unix_signal_add), so no library calls from a real signal context
+static gboolean on_unix_signal(gpointer data) {
+    fprintf(stderr, "\nSignal received. Stopping ProxyBridge...\n");
+    gtk_main_quit();
+    return G_SOURCE_REMOVE;
 }
 
 static void on_window_destroy(GtkWidget *widget, gpointer data) {
-    ProxyBridge_Stop();
-    gtk_main_quit();
+    gtk_main_quit(); // engine is stopped once after gtk_main returns
+}
+
+// start the engine, config (proxies, rules) was already pushed to the library
+static bool start_engine() {
+    if (g_engine_running) return true;
+    if (ProxyBridge_Start()) {
+        g_engine_running = true;
+        char *msg = g_strdup_printf("ProxyBridge Service Started (eBPF). Active profile: %s", g_active_profile ? g_active_profile : "Default");
+        gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, msg);
+        g_free(msg);
+        return true;
+    }
+    gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "Failed to start ProxyBridge engine. See the Activity Logs tab.");
+    show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR,
+        "Failed to start the ProxyBridge engine.\n\n"
+        "Open the \"Activity Logs\" tab to see the reason.\n"
+        "The eBPF backend needs root, a kernel >= 5.8 with BTF and cgroup v2.");
+    return false;
+}
+
+static void on_start_engine(GtkWidget *widget, gpointer data) {
+    start_engine();
 }
 
 int main(int argc, char *argv[]) {
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGSEGV, signal_handler);
-
     if (getuid() != 0) { gtk_init(&argc, &argv); show_message(NULL, GTK_MESSAGE_ERROR, "ProxyBridge must be run as root (sudo)."); return 1; }
     setenv("GSETTINGS_BACKEND", "memory", 1);
 
@@ -245,7 +262,9 @@ int main(int argc, char *argv[]) {
     if (settings) g_object_set(settings, "gtk-application-prefer-dark-theme", TRUE, NULL);
 
     window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(window), "ProxyBridge");
+    char *win_title = g_strdup_printf("ProxyBridge - %s", g_active_profile ? g_active_profile : "Default");
+    gtk_window_set_title(GTK_WINDOW(window), win_title);
+    g_free(win_title);
     gtk_window_set_default_size(GTK_WINDOW(window), 900, 600);
     g_signal_connect(window, "destroy", G_CALLBACK(on_window_destroy), NULL);
 
@@ -256,8 +275,11 @@ int main(int argc, char *argv[]) {
     GtkWidget *menubar = gtk_menu_bar_new();
     GtkWidget *proxy_menu_item = gtk_menu_item_new_with_label("Proxy");
     GtkWidget *proxy_menu = gtk_menu_new();
-    GtkWidget *config_item = gtk_menu_item_new_with_label("Proxy Settings");
-    GtkWidget *rules_item = gtk_menu_item_new_with_label("Proxy Rules");
+    GtkWidget *config_item = gtk_menu_item_new_with_label("Proxy Settings...");
+    GtkWidget *rules_item = gtk_menu_item_new_with_label("Proxy Rules...");
+
+    GtkWidget *profiles_item = gtk_menu_item_new_with_label("Profiles...");
+    g_signal_connect(profiles_item, "activate", G_CALLBACK(on_profiles_clicked), NULL);
 
     GtkWidget *log_check_item = gtk_check_menu_item_new_with_label("Enable Traffic Logging");
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_check_item), g_chk_logging);
@@ -267,6 +289,9 @@ int main(int argc, char *argv[]) {
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_check_item), g_chk_dns);
     g_signal_connect(dns_check_item, "toggled", G_CALLBACK(on_dns_proxy_toggled), NULL);
 
+    GtkWidget *start_item = gtk_menu_item_new_with_label("Start Engine");
+    g_signal_connect(start_item, "activate", G_CALLBACK(on_start_engine), NULL);
+
     GtkWidget *exit_item = gtk_menu_item_new_with_label("Exit");
 
     g_signal_connect(config_item, "activate", G_CALLBACK(on_proxy_configure), NULL);
@@ -275,10 +300,12 @@ int main(int argc, char *argv[]) {
 
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), config_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), rules_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), profiles_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), gtk_separator_menu_item_new());
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), log_check_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), dns_check_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), gtk_separator_menu_item_new());
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), start_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), exit_item);
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(proxy_menu_item), proxy_menu);
 
@@ -349,30 +376,25 @@ int main(int argc, char *argv[]) {
     status_context_id = gtk_statusbar_get_context_id(GTK_STATUSBAR(status_bar), "Status");
     gtk_box_pack_start(GTK_BOX(vbox), status_bar, FALSE, FALSE, 0);
 
-    // start
+    // setup: callbacks, options, proxies, default proxy, rules, then start
     ProxyBridge_SetLogCallback(lib_log_callback);
     ProxyBridge_SetConnectionCallback(lib_connection_callback);
     ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
     ProxyBridge_SetDnsViaProxy(g_chk_dns);
+    apply_proxies_to_lib();
+    apply_rules_to_lib();
 
-    if (ProxyBridge_Start()) {
-        // apply config
-        ProxyBridge_SetProxyConfig(g_proxy_type, g_proxy_ip, g_proxy_port, g_proxy_user, g_proxy_pass);
-
-        // restore rules
-        for (GList *l = g_rules_list; l != NULL; l = l->next) {
-            RuleData *r = (RuleData *)l->data;
-            r->id = ProxyBridge_AddRule(r->process_name, r->target_hosts, r->target_ports, r->protocol, r->action);
-            if (!r->enabled) ProxyBridge_DisableRule(r->id);
-        }
-
-        gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "ProxyBridge Service Started.");
-    } else {
-        gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "Failed to start ProxyBridge engine.");
-    }
+    g_unix_signal_add(SIGINT, on_unix_signal, NULL);
+    g_unix_signal_add(SIGTERM, on_unix_signal, NULL);
 
     gtk_widget_show_all(window);
+    start_engine();
     gtk_main();
+
+    if (g_engine_running) {
+        ProxyBridge_Stop();
+        g_engine_running = false;
+    }
 
     return 0;
 }

@@ -40,40 +40,67 @@ void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines) {
 char* get_current_time_str() {
     time_t rawtime;
     struct tm *timeinfo;
-    char *buffer = malloc(32);
+    char *buffer = g_malloc0(32);
     time(&rawtime);
     timeinfo = localtime(&rawtime);
-    strftime(buffer, 32, "[%H:%M:%S]", timeinfo);
-    return buffer;
+    if (!timeinfo || strftime(buffer, 32, "[%H:%M:%S]", timeinfo) == 0) buffer[0] = '\0';
+    return buffer; // free with g_free
 }
 
 // json stuff
 char *escape_json_string(const char *src) {
-    if (!src) return strdup("");
+    if (!src) return g_strdup("");
     GString *str = g_string_new("");
     for (const char *p = src; *p; p++) {
         if (*p == '\\') g_string_append(str, "\\\\");
         else if (*p == '"') g_string_append(str, "\\\"");
         else if (*p == '\n') g_string_append(str, "\\n");
+        else if (*p == '\r') g_string_append(str, "\\r");
+        else if (*p == '\t') g_string_append(str, "\\t");
+        else if ((unsigned char)*p < 0x20) g_string_append_printf(str, "\\u%04x", (unsigned char)*p);
         else g_string_append_c(str, *p);
     }
     return g_string_free(str, FALSE);
 }
 
-// basic parser, good enough for valid inputs
+// basic parser, good enough for valid inputs. returns NULL if the key is missing or its value is not a string
 char *extract_sub_json_str(const char *json, const char *key) {
     char search_key[256];
     snprintf(search_key, sizeof(search_key), "\"%s\"", key);
-    char *k = strstr(json, search_key);
+    const char *k = strstr(json, search_key);
     if (!k) return NULL;
-    char *colon = strchr(k, ':');
+    const char *colon = strchr(k + strlen(search_key), ':');
     if (!colon) return NULL;
-    char *val_start = strchr(colon, '"');
-    if (!val_start) return NULL;
-    val_start++;
-    char *val_end = strchr(val_start, '"');
-    if (!val_end) return NULL;
-    return g_strndup(val_start, val_end - val_start);
+    const char *v = colon + 1;
+    while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
+    if (*v != '"') return NULL;
+    v++;
+
+    // copy up to the closing quote, handling escapes
+    GString *out = g_string_new("");
+    while (*v && *v != '"') {
+        if (*v == '\\' && v[1]) {
+            v++;
+            switch (*v) {
+                case 'n': g_string_append_c(out, '\n'); break;
+                case 'r': g_string_append_c(out, '\r'); break;
+                case 't': g_string_append_c(out, '\t'); break;
+                default: g_string_append_c(out, *v); break; // \\ \" \/
+            }
+        } else {
+            g_string_append_c(out, *v);
+        }
+        v++;
+    }
+    if (*v != '"') { g_string_free(out, TRUE); return NULL; }
+    return g_string_free(out, FALSE);
+}
+
+// true if the key is present at all (extract_sub_json_bool cant tell false from missing)
+bool json_has_key(const char *json, const char *key) {
+    char search_key[256];
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
+    return strstr(json, search_key) != NULL;
 }
 
 bool extract_sub_json_bool(const char *json, const char *key) {
@@ -85,7 +112,7 @@ bool extract_sub_json_bool(const char *json, const char *key) {
     if (!colon) return false;
     // skip whitespace
     char *v = colon + 1;
-    while(*v == ' ' || *v == '\t') v++;
+    while(*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
     if (strncmp(v, "true", 4) == 0) return true;
     return false;
 }

@@ -56,11 +56,11 @@ void on_clear_log_clicked(GtkButton *button, gpointer user_data) {
 
 static void free_connection_data(ConnectionData *data) {
     if (data) {
-        free(data->process_name);
-        free(data->dest_ip);
-        free(data->proxy_info);
-        free(data->timestamp);
-        free(data);
+        g_free(data->process_name);
+        g_free(data->dest_ip);
+        g_free(data->proxy_info);
+        g_free(data->timestamp);
+        g_free(data);
     }
 }
 
@@ -69,20 +69,28 @@ static gboolean update_log_gui(gpointer user_data) {
     LogData *data = (LogData *)user_data;
     if (!data) return FALSE;
 
-    GtkTextIter end;
-    gtk_text_buffer_get_end_iter(log_buffer, &end);
+    if (log_buffer) {
+        GtkTextIter end;
+        gtk_text_buffer_get_end_iter(log_buffer, &end);
 
-    char *time_str = get_current_time_str();
-    char full_msg[1200];
-    snprintf(full_msg, sizeof(full_msg), "%s %s\n", time_str, data->message);
-    free(time_str);
+        char *time_str = get_current_time_str();
+        char *full_msg = g_strdup_printf("%s %s\n", time_str, data->message);
+        g_free(time_str);
 
-    gtk_text_buffer_insert(log_buffer, &end, full_msg, -1);
+        // library strings are not guaranteed utf8
+        if (!g_utf8_validate(full_msg, -1, NULL)) {
+            char *fixed = g_utf8_make_valid(full_msg, -1);
+            g_free(full_msg);
+            full_msg = fixed;
+        }
+        gtk_text_buffer_insert(log_buffer, &end, full_msg, -1);
+        g_free(full_msg);
 
-    trim_buffer_lines(log_buffer, 100);
+        trim_buffer_lines(log_buffer, 100);
+    }
 
-    free(data->message);
-    free(data);
+    g_free(data->message);
+    g_free(data);
     return FALSE; // done
 }
 
@@ -95,11 +103,16 @@ static gboolean update_connection_gui_append(gpointer user_data) {
         GtkTextIter end;
         gtk_text_buffer_get_end_iter(conn_buffer, &end);
 
-        char line_buffer[1024];
-        snprintf(line_buffer, sizeof(line_buffer), "%s %s (PID:%u) -> %s:%u via %s\n",
+        char *line_buffer = g_strdup_printf("%s %s (PID:%u) -> %s:%u via %s\n",
                  data->timestamp, data->process_name, data->pid, data->dest_ip, data->dest_port, data->proxy_info);
+        if (!g_utf8_validate(line_buffer, -1, NULL)) {
+            char *fixed = g_utf8_make_valid(line_buffer, -1);
+            g_free(line_buffer);
+            line_buffer = fixed;
+        }
 
         gtk_text_buffer_insert(conn_buffer, &end, line_buffer, -1);
+        g_free(line_buffer);
 
         trim_buffer_lines(conn_buffer, 100);
     }
@@ -109,18 +122,28 @@ static gboolean update_connection_gui_append(gpointer user_data) {
 }
 
 void lib_log_callback(const char *message) {
-    LogData *data = malloc(sizeof(LogData));
-    data->message = strdup(message);
+    LogData *data = g_malloc0(sizeof(LogData));
+    data->message = g_strdup(message ? message : "");
     g_idle_add(update_log_gui, data);
 }
 
+// log a message from the gui itself, same path as library logs
+void gui_log(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    char *msg = g_strdup_vprintf(format, args);
+    va_end(args);
+    lib_log_callback(msg);
+    g_free(msg);
+}
+
 void lib_connection_callback(const char *process_name, uint32_t pid, const char *dest_ip, uint16_t dest_port, const char *proxy_info) {
-    ConnectionData *data = malloc(sizeof(ConnectionData));
-    data->process_name = strdup(process_name);
+    ConnectionData *data = g_malloc0(sizeof(ConnectionData));
+    data->process_name = g_strdup(process_name ? process_name : "");
     data->pid = pid;
-    data->dest_ip = strdup(dest_ip);
+    data->dest_ip = g_strdup(dest_ip ? dest_ip : "");
     data->dest_port = dest_port;
-    data->proxy_info = strdup(proxy_info);
+    data->proxy_info = g_strdup(proxy_info ? proxy_info : "");
     data->timestamp = get_current_time_str();
     g_idle_add(update_connection_gui_append, data);
 }
