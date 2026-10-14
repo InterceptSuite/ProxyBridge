@@ -1,32 +1,22 @@
 #include "gui.h"
 
-// safer way to turn string to int
 long safe_strtol(const char *nptr) {
-    if (!nptr) return 0; // null check
-    char *endptr;
-    long val = strtol(nptr, &endptr, 10);
-    if (endptr == nptr) return 0; // bad input
-    return val;
+    return nptr ? strtol(nptr, NULL, 10) : 0;
 }
 
-// show popup msg
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...) {
     va_list args;
     va_start(args, format);
     char *msg = g_strdup_vprintf(format, args);
     va_end(args);
 
-    GtkWidget *dialog = gtk_message_dialog_new(parent,
-                                            GTK_DIALOG_DESTROY_WITH_PARENT | GTK_DIALOG_MODAL,
-                                            type,
-                                            GTK_BUTTONS_OK,
-                                            "%s", msg);
+    GtkWidget *dialog = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT | GTK_DIALOG_MODAL,
+                                               type, GTK_BUTTONS_OK, "%s", msg);
     gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);
     g_free(msg);
 }
 
-// keep log size under control so we dont use too much ram
 void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines) {
     if (gtk_text_buffer_get_line_count(buffer) > max_lines) {
         GtkTextIter start, next;
@@ -37,82 +27,43 @@ void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines) {
     }
 }
 
-char* get_current_time_str() {
-    time_t rawtime;
-    struct tm *timeinfo;
-    char *buffer = g_malloc0(32);
-    time(&rawtime);
-    timeinfo = localtime(&rawtime);
-    if (!timeinfo || strftime(buffer, 32, "[%H:%M:%S]", timeinfo) == 0) buffer[0] = '\0';
-    return buffer; // free with g_free
+char *get_current_time_str() {
+    GDateTime *now = g_date_time_new_now_local();
+    char *s = g_date_time_format(now, "[%H:%M:%S]");
+    g_date_time_unref(now);
+    return s;
 }
 
-// json stuff
-char *escape_json_string(const char *src) {
-    if (!src) return g_strdup("");
-    GString *str = g_string_new("");
-    for (const char *p = src; *p; p++) {
-        if (*p == '\\') g_string_append(str, "\\\\");
-        else if (*p == '"') g_string_append(str, "\\\"");
-        else if (*p == '\n') g_string_append(str, "\\n");
-        else if (*p == '\r') g_string_append(str, "\\r");
-        else if (*p == '\t') g_string_append(str, "\\t");
-        else if ((unsigned char)*p < 0x20) g_string_append_printf(str, "\\u%04x", (unsigned char)*p);
-        else g_string_append_c(str, *p);
-    }
-    return g_string_free(str, FALSE);
+GtkWidget *combo_new(const char *first, ...) {
+    GtkWidget *combo = gtk_combo_box_text_new();
+    va_list args;
+    va_start(args, first);
+    for (const char *s = first; s; s = va_arg(args, const char *))
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), s);
+    va_end(args);
+    return combo;
 }
 
-// basic parser, good enough for valid inputs. returns NULL if the key is missing or its value is not a string
-char *extract_sub_json_str(const char *json, const char *key) {
-    char search_key[256];
-    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
-    const char *k = strstr(json, search_key);
-    if (!k) return NULL;
-    const char *colon = strchr(k + strlen(search_key), ':');
-    if (!colon) return NULL;
-    const char *v = colon + 1;
-    while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
-    if (*v != '"') return NULL;
-    v++;
-
-    // copy up to the closing quote, handling escapes
-    GString *out = g_string_new("");
-    while (*v && *v != '"') {
-        if (*v == '\\' && v[1]) {
-            v++;
-            switch (*v) {
-                case 'n': g_string_append_c(out, '\n'); break;
-                case 'r': g_string_append_c(out, '\r'); break;
-                case 't': g_string_append_c(out, '\t'); break;
-                default: g_string_append_c(out, *v); break; // \\ \" \/
-            }
-        } else {
-            g_string_append_c(out, *v);
-        }
-        v++;
-    }
-    if (*v != '"') { g_string_free(out, TRUE); return NULL; }
-    return g_string_free(out, FALSE);
+GtkWidget *hint_label(const char *text) {
+    GtkWidget *l = gtk_label_new(text);
+    gtk_style_context_add_class(gtk_widget_get_style_context(l), "dim-label");
+    gtk_widget_set_halign(l, GTK_ALIGN_START);
+    gtk_label_set_xalign(GTK_LABEL(l), 0);
+    gtk_label_set_line_wrap(GTK_LABEL(l), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(l), 60);
+    return l;
 }
 
-// true if the key is present at all (extract_sub_json_bool cant tell false from missing)
-bool json_has_key(const char *json, const char *key) {
-    char search_key[256];
-    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
-    return strstr(json, search_key) != NULL;
+void set_error_label(GtkWidget *label, const char *msg) {
+    char *m = g_markup_printf_escaped("<span foreground='#e5534b'>%s</span>", msg);
+    gtk_label_set_markup(GTK_LABEL(label), m);
+    g_free(m);
 }
 
-bool extract_sub_json_bool(const char *json, const char *key) {
-    char search_key[256];
-    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
-    char *k = strstr(json, search_key);
-    if (!k) return false;
-    char *colon = strchr(k, ':');
-    if (!colon) return false;
-    // skip whitespace
-    char *v = colon + 1;
-    while(*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
-    if (strncmp(v, "true", 4) == 0) return true;
-    return false;
+void grid_row(GtkWidget *grid, int row, const char *label, GtkWidget *widget) {
+    GtkWidget *l = gtk_label_new(label);
+    gtk_widget_set_halign(l, GTK_ALIGN_START);
+    gtk_grid_attach(GTK_GRID(grid), l, 0, row, 1, 1);
+    gtk_widget_set_hexpand(widget, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), widget, 1, row, 1, 1);
 }
