@@ -90,6 +90,7 @@ echo "Copying binaries to $OUTPUT_DIR ..."
 cp "$BUILD_DIR/lib/libproxybridge.so" "$OUTPUT_DIR/"
 cp "$BUILD_DIR/cli/ProxyBridge" "$OUTPUT_DIR/"
 [ "$GUI_BUILT" = 1 ] && cp "$BUILD_DIR/gui/ProxyBridgeGUI" "$OUTPUT_DIR/"
+install -m 755 "$SCRIPT_DIR/setup.sh" "$OUTPUT_DIR/setup.sh"
 echo ""
 
 if [ "${AUDIT:-1}" = 1 ]; then
