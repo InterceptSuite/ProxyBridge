@@ -39,6 +39,7 @@ typedef struct {
     GList *proxies;
     char *default_proxy;
     GList *rules;
+    char *saved;            // what is on disk, to skip rewriting unchanged profiles
 } Profile;
 
 typedef void (*RuleImportCb)(const RuleData *rule, int index, void *ud);
@@ -80,6 +81,8 @@ Profile *profile_create(const char *name, bool copy_active);
 bool profile_rename(Profile *p, const char *new_name);
 bool profile_activate(const char *name);
 bool profile_delete(Profile *p);
+bool profile_export(const Profile *prof, const char *path, char *err, size_t errlen);
+Profile *profile_import(const char *path, char *err, size_t errlen);   // not activated
 
 void on_proxy_configure(GtkWidget *widget, gpointer data);
 void on_profiles_clicked(GtkWidget *widget, gpointer data);

@@ -1,31 +1,35 @@
 #include "gui.h"
 #include <fcntl.h>
-
-#define CONFIG_DIR_DEFAULT "/etc/proxybridge"
+#include <dirent.h>
+#include "pb_profile.h"
 
 GList *g_profiles = NULL;
 char *g_active_profile = NULL;
 
-// PROXYBRIDGE_CONFIG_DIR overrides the default dir (used for testing)
 static char *config_dir() {
-    const char *env = getenv("PROXYBRIDGE_CONFIG_DIR");
-    return g_strdup((env && *env) ? env : CONFIG_DIR_DEFAULT);
+    return g_strdup(pbp_config_dir());
 }
 
-static char *esc(const char *s) {
-    return g_uri_escape_string(s ? s : "", NULL, FALSE);
+static char *profile_path(const char *name) {
+    char *file = pbp_filename_for(name);
+    if (!file) return NULL;
+    char *dir = config_dir();
+    char *path = g_strdup_printf("%s/profiles/%s", dir, file);
+    free(file);
+    g_free(dir);
+    return path;
+}
+
+// the file of a deleted or renamed profile must go, or it would come back at the next start
+static void remove_profile_file(const char *name) {
+    char *path = profile_path(name);
+    if (path) unlink(path);
+    g_free(path);
 }
 
 static char *unesc(const char *s) {
     char *out = g_uri_unescape_string(s ? s : "", NULL);
     return out ? out : g_strdup("");
-}
-
-static void put_esc(FILE *f, const char *s, char sep) {
-    char *e = esc(s);
-    fputs(e, f);
-    fputc(sep, f);
-    g_free(e);
 }
 
 static void free_profile(Profile *p) {
@@ -35,6 +39,7 @@ static void free_profile(Profile *p) {
     g_list_free(p->rules);
     g_free(p->default_proxy);
     g_free(p->name);
+    free(p->saved);
     g_free(p);
 }
 
@@ -118,6 +123,7 @@ bool profile_rename(Profile *p, const char *new_name) {
     if (strcmp(p->name, new_name) == 0) return true;
     if (profile_find(new_name)) return false;
     bool active = g_active_profile && strcmp(g_active_profile, p->name) == 0;
+    remove_profile_file(p->name);
     g_free(p->name);
     p->name = g_strdup(new_name);
     if (active) {
@@ -149,87 +155,188 @@ bool profile_delete(Profile *p) {
         if (!profile_activate(other->name)) return false;
     }
     g_profiles = g_list_remove(g_profiles, p);
+    remove_profile_file(p->name);
     free_profile(p);
     return true;
-}
-
-static void write_profile(FILE *f, Profile *prof) {
-    fputs("[PROFILE:", f);
-    char *pn = esc(prof->name);
-    fprintf(f, "%s]\ndefaultProxy=", pn);
-    g_free(pn);
-    put_esc(f, prof->default_proxy, '\n');
-
-    // fields are percent-encoded so '|' and newlines are safe: name|type|host|port|user|pass
-    fputs("[PROXIES]\n", f);
-    for (GList *l = prof->proxies; l != NULL; l = l->next) {
-        ProxyData *p = (ProxyData *)l->data;
-        put_esc(f, p->name, '|');
-        fprintf(f, "%d|", p->type);
-        put_esc(f, p->host, '|');
-        fprintf(f, "%u|", p->port);
-        put_esc(f, p->username, '|');
-        put_esc(f, p->password, '\n');
-    }
-
-    // id|protocol|action|enabled|procname|hosts|ports|proxyname
-    fputs("[RULES]\n", f);
-    for (GList *l = prof->rules; l != NULL; l = l->next) {
-        RuleData *r = (RuleData *)l->data;
-        fprintf(f, "%u|%d|%d|%d|%s|%s|%s|", r->id, r->protocol, r->action, r->enabled,
-                r->process_name ? r->process_name : "", r->target_hosts ? r->target_hosts : "",
-                r->target_ports ? r->target_ports : "");
-        put_esc(f, r->proxy_name, '\n');
-    }
-}
-
-void save_config() {
-    profile_sync_active();
-
-    char *dir = config_dir();
-    char *path = g_strdup_printf("%s/config.ini", dir);
-    struct stat st;
-    if (stat(dir, &st) == -1) {
-        if (g_mkdir_with_parents(dir, 0700) != 0) {
-            perror("failed to create config dir");
-            goto out;
-        }
-    } else if (chmod(dir, 0700) != 0) {
-        perror("chmod config dir failed");
-    }
-
-    int cfg_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (cfg_fd < 0) {
-        fprintf(stderr, "failed to save config to %s\n", path);
-        goto out;
-    }
-    // mode on open only hits create; tighten existing 0644 installs too
-    if (fchmod(cfg_fd, 0600) != 0) perror("chmod config file failed");
-    FILE *f = fdopen(cfg_fd, "w");
-    if (!f) {
-        close(cfg_fd);
-        fprintf(stderr, "failed to save config to %s\n", path);
-        goto out;
-    }
-
-    fputs("[SETTINGS]\nactiveProfile=", f);
-    put_esc(f, g_active_profile, '\n');
-    fprintf(f, "logging=%d\ndns=%d\n", g_chk_logging, g_chk_dns);
-    for (GList *l = g_profiles; l != NULL; l = l->next) write_profile(f, (Profile *)l->data);
-    fclose(f);
-out:
-    g_free(dir);
-    g_free(path);
-}
-
-static ProxyType proxy_type_from_int(int v) {
-    return v == PROXY_TYPE_HTTP ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
 }
 
 static ProxyData *find_in_list(GList *list, const char *name) {
     for (GList *l = list; l != NULL; l = l->next)
         if (strcmp(((ProxyData *)l->data)->name, name) == 0) return (ProxyData *)l->data;
     return NULL;
+}
+
+// Borrows the strings of the profile; release with free_pbp_view, not pbp_free.
+static void profile_to_pbp(const Profile *prof, struct pbp_profile *out) {
+    memset(out, 0, sizeof *out);
+    out->name = prof->name;
+    out->logging = g_chk_logging;
+    out->dns_via_proxy = g_chk_dns;
+    out->nproxies = g_list_length(prof->proxies);
+    out->nrules = g_list_length(prof->rules);
+    out->proxies = g_new0(struct pbp_proxy, out->nproxies + 1);
+    out->rules = g_new0(struct pbp_rule, out->nrules + 1);
+
+    uint32_t id = 0;
+    for (GList *l = prof->proxies; l != NULL; l = l->next) {
+        ProxyData *p = (ProxyData *)l->data;
+        struct pbp_proxy *x = &out->proxies[id++];
+        x->id = id;
+        x->name = p->name;
+        x->type = p->type == PROXY_TYPE_HTTP ? 0 : 1;
+        x->host = p->host;
+        x->port = p->port;
+        x->user = p->username ? p->username : (char *)"";
+        x->pass = p->password ? p->password : (char *)"";
+        if (prof->default_proxy && strcmp(prof->default_proxy, p->name) == 0) out->default_proxy_id = x->id;
+    }
+    size_t i = 0;
+    for (GList *l = prof->rules; l != NULL; l = l->next) {
+        RuleData *r = (RuleData *)l->data;
+        struct pbp_rule *x = &out->rules[i++];
+        x->process = r->process_name ? r->process_name : (char *)"*";
+        x->hosts = r->target_hosts ? r->target_hosts : (char *)"*";
+        x->ports = r->target_ports ? r->target_ports : (char *)"*";
+        x->protocol = r->protocol;
+        x->action = r->action;
+        x->enabled = r->enabled;
+        if (r->action == RULE_ACTION_PROXY && r->proxy_name && r->proxy_name[0])
+            for (size_t k = 0; k < out->nproxies; k++)
+                if (strcmp(out->proxies[k].name, r->proxy_name) == 0) { x->proxy_id = out->proxies[k].id; break; }
+    }
+}
+
+static void free_pbp_view(struct pbp_profile *v) {
+    g_free(v->proxies);
+    g_free(v->rules);
+}
+
+static void fill_profile_from_pbp(Profile *p, const struct pbp_profile *src) {
+    for (size_t i = 0; i < src->nproxies; i++) {
+        const struct pbp_proxy *x = &src->proxies[i];
+        ProxyData *px = g_malloc0(sizeof(ProxyData));
+        px->name = g_strdup(x->name);
+        px->type = x->type ? PROXY_TYPE_SOCKS5 : PROXY_TYPE_HTTP;
+        px->host = g_strdup(x->host);
+        px->port = x->port;
+        px->username = g_strdup(x->user);
+        px->password = g_strdup(x->pass);
+        p->proxies = g_list_append(p->proxies, px);
+    }
+    for (size_t i = 0; i < src->nrules; i++) {
+        const struct pbp_rule *x = &src->rules[i];
+        RuleData *r = g_malloc0(sizeof(RuleData));
+        r->process_name = g_strdup(x->process);
+        r->target_hosts = g_strdup(x->hosts);
+        r->target_ports = g_strdup(x->ports);
+        r->protocol = x->protocol;
+        r->action = x->action;
+        r->enabled = x->enabled;
+        const struct pbp_proxy *px = x->proxy_id ? pbp_find_proxy(src, x->proxy_id) : NULL;
+        if (px) r->proxy_name = g_strdup(px->name);
+        p->rules = g_list_append(p->rules, r);
+    }
+    const struct pbp_proxy *d = src->default_proxy_id ? pbp_find_proxy(src, src->default_proxy_id) : NULL;
+    g_free(p->default_proxy);
+    p->default_proxy = d ? g_strdup(d->name) : NULL;
+}
+
+bool profile_export(const Profile *prof, const char *path, char *err, size_t errlen) {
+    profile_sync_active();
+    struct pbp_profile view;
+    profile_to_pbp(prof, &view);
+    bool ok = pbp_save_file(path, &view, err, errlen) == 0;
+    free_pbp_view(&view);
+    return ok;
+}
+
+static bool name_storable(const char *name) {
+    char *file = pbp_filename_for(name);
+    free(file);
+    return file != NULL;
+}
+
+// the profile is named after the file (or the "Name" it carries), made unique if needed
+Profile *profile_import(const char *path, char *err, size_t errlen) {
+    struct pbp_profile src;
+    if (pbp_load_file(path, &src, err, errlen) != 0) return NULL;
+
+    char *base = NULL;
+    if (src.name && src.name[0]) {
+        base = g_strdup(src.name);
+    } else {
+        char *file = g_path_get_basename(path);
+        size_t n = strlen(file), e = strlen(PBP_EXT);
+        if (n > e && strcmp(file + n - e, PBP_EXT) == 0) file[n - e] = 0;
+        base = file;
+    }
+    char *name = g_strdup(base);
+    for (int i = 2; profile_find(name) || !name_storable(name); i++) {
+        g_free(name);
+        name = g_strdup_printf("%s (%d)", base[0] ? base : "Imported", i);
+        if (i > 1000) { g_free(name); g_free(base); pbp_free(&src); snprintf(err, errlen, "no free profile name"); return NULL; }
+    }
+    profile_sync_active();
+    Profile *p = profile_new_empty(name);
+    fill_profile_from_pbp(p, &src);
+    g_free(name);
+    g_free(base);
+    pbp_free(&src);
+    return p;
+}
+
+static bool ensure_private_dir(const char *dir) {
+    struct stat st;
+    if (stat(dir, &st) == -1) {
+        if (g_mkdir_with_parents(dir, 0700) != 0) { perror("failed to create config dir"); return false; }
+    } else if (chmod(dir, 0700) != 0) {
+        perror("chmod config dir failed");
+    }
+    return true;
+}
+
+void save_config() {
+    profile_sync_active();
+
+    char *dir = config_dir();
+    char *pdir = g_strdup_printf("%s/profiles", dir);
+    if (!ensure_private_dir(dir) || !ensure_private_dir(pdir)) goto out;
+
+    char err[256];
+    for (GList *l = g_profiles; l != NULL; l = l->next) {
+        Profile *prof = (Profile *)l->data;
+        char *path = profile_path(prof->name);
+        if (!path) {
+            fprintf(stderr, "profile '%s': the name is too long to be stored\n", prof->name);
+            continue;
+        }
+        struct pbp_profile view;
+        profile_to_pbp(prof, &view);
+        char *json = pbp_serialize(&view);
+        free_pbp_view(&view);
+        if (json && !(prof->saved && strcmp(prof->saved, json) == 0 && access(path, F_OK) == 0)) {
+            if (pbp_write_file(path, json, err, sizeof err) == 0) {
+                free(prof->saved);
+                prof->saved = json;
+                json = NULL;
+            } else {
+                fprintf(stderr, "failed to save profile '%s': %s\n", prof->name, err);
+            }
+        }
+        free(json);
+        g_free(path);
+    }
+    char *settings = g_strdup_printf("%s/settings.json", dir);
+    if (pbp_settings_save(settings, g_active_profile, g_chk_logging, g_chk_dns, err, sizeof err) != 0)
+        fprintf(stderr, "failed to save settings: %s\n", err);
+    g_free(settings);
+out:
+    g_free(pdir);
+    g_free(dir);
+}
+
+static ProxyType proxy_type_from_int(int v) {
+    return v == PROXY_TYPE_HTTP ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
 }
 
 static ProxyData *parse_proxy_line(char *line) {
@@ -276,14 +383,14 @@ static RuleData *parse_rule_line(char *line) {
     return rule;
 }
 
-// files without profile blocks (old format) end up in a profile called "Default"
-void load_config() {
-    char *dir = config_dir();
+// config.ini of the previous versions; files without profile blocks end up in a profile called "Default".
+// Returns false when there is no such file.
+static bool load_legacy_ini(const char *dir, char **saved_active_out) {
     char *path = g_strdup_printf("%s/config.ini", dir);
     chmod(path, 0600);
     FILE *f = fopen(path, "r");
-    g_free(dir);
     g_free(path);
+    if (!f) return false;
 
     char line[8192];
     int section = 0; // 1=settings, 2=rules, 3=proxies, 4=profile header
@@ -294,7 +401,7 @@ void load_config() {
     char old_ip[256] = "", old_user[256] = "", old_pass[256] = "";
     int old_port = 0, old_type = PROXY_TYPE_SOCKS5;
 
-    while (f && fgets(line, sizeof(line), f)) {
+    while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = 0;
         if (!line[0] || line[0] == '#') continue;
 
@@ -346,7 +453,7 @@ void load_config() {
             if (rule) cur->rules = g_list_append(cur->rules, rule);
         }
     }
-    if (f) fclose(f);
+    fclose(f);
 
     if (old_ip[0] && old_port >= 1 && old_port <= 65535) {
         Profile *d = profile_find("Default");
@@ -365,6 +472,11 @@ void load_config() {
         }
     }
 
+    *saved_active_out = saved_active;
+    return true;
+}
+
+static void finish_load(char *saved_active) {
     if (!g_profiles) profile_new_empty("Default");
 
     for (GList *l = g_profiles; l != NULL; l = l->next) {
@@ -381,4 +493,68 @@ void load_config() {
     g_free(g_active_profile);
     g_active_profile = g_strdup(act->name);
     load_globals_from(act);
+}
+
+static gint compare_names(gconstpointer a, gconstpointer b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+// sorted by file name, so the order is the same on every start
+static void load_profile_files(const char *dir) {
+    char *pdir = g_strdup_printf("%s/profiles", dir);
+    GPtrArray *files = g_ptr_array_new_with_free_func(g_free);
+    DIR *d = opendir(pdir);
+    struct dirent *de;
+    while (d && (de = readdir(d)) != NULL)
+        if (strlen(de->d_name) > strlen(PBP_EXT)) g_ptr_array_add(files, g_strdup(de->d_name));
+    if (d) closedir(d);
+    g_ptr_array_sort(files, compare_names);
+
+    for (guint i = 0; i < files->len; i++) {
+        const char *file = g_ptr_array_index(files, i);
+        char *name = pbp_name_from_filename(file);
+        if (!name) continue;
+        char *path = g_strdup_printf("%s/%s", pdir, file);
+        struct pbp_profile src;
+        char err[256];
+        chmod(path, 0600);
+        if (profile_find(name)) {
+            /* duplicate name after decoding: keep the first */
+        } else if (pbp_load_file(path, &src, err, sizeof err) == 0) {
+            fill_profile_from_pbp(profile_new_empty(name), &src);
+            pbp_free(&src);
+        } else {
+            fprintf(stderr, "ignoring profile '%s': %s\n", name, err);
+        }
+        g_free(path);
+        free(name);
+    }
+    g_ptr_array_free(files, TRUE);
+    g_free(pdir);
+}
+
+// profiles/<name>.pbprofile + settings.json; a config.ini from an older version is converted on first start
+void load_config() {
+    char *dir = config_dir();
+    char *settings_active = NULL, *legacy_active = NULL;
+    bool migrate = false;
+
+    load_profile_files(dir);
+    char *settings = g_strdup_printf("%s/settings.json", dir);
+    pbp_settings_load(settings, &settings_active, &g_chk_logging, &g_chk_dns);
+    g_free(settings);
+    if (!g_profiles) migrate = load_legacy_ini(dir, &legacy_active);
+    char *active = g_strdup(migrate && legacy_active ? legacy_active : settings_active);
+    free(settings_active);
+    g_free(legacy_active);
+    finish_load(active);
+
+    if (migrate) {
+        save_config();
+        char *from = g_strdup_printf("%s/config.ini", dir), *to = g_strdup_printf("%s/config.ini.bak", dir);
+        if (rename(from, to) != 0) perror("could not set the old config.ini aside");
+        g_free(from);
+        g_free(to);
+    }
+    g_free(dir);
 }
