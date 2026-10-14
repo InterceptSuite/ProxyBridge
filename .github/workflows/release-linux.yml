@@ -27,8 +27,9 @@ jobs:
           build-essential \
           gcc \
           make \
-          libnetfilter-queue-dev \
-          libnfnetlink-dev \
+          clang \
+          bpftool \
+          libbpf-dev \
           libgtk-3-dev \
           pkg-config
       shell: bash

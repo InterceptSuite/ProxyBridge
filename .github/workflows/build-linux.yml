@@ -28,8 +28,9 @@ jobs:
           build-essential \
           gcc \
           make \
-          libnetfilter-queue-dev \
-          libnfnetlink-dev \
+          clang \
+          bpftool \
+          libbpf-dev \
           libgtk-3-dev \
           pkg-config
       shell: bash
@@ -48,8 +49,22 @@ jobs:
         echo "=== Checking GTK3 ==="
         pkg-config --modversion gtk+-3.0
         echo ""
-        echo "=== Checking libnetfilter_queue ==="
-        pkg-config --modversion libnetfilter_queue || echo "Package info not available, but headers should be present"
+        echo "=== Checking clang (eBPF compiler) ==="
+        clang --version | head -1
+        echo ""
+        echo "=== Checking bpftool (skeleton generator) ==="
+        bpftool version | head -1
+        echo ""
+        echo "=== Checking libbpf ==="
+        pkg-config --modversion libbpf
+      shell: bash
+
+    - name: Unit tests (rule engine, DNS parser, relay)
+      run: |
+        cd Linux/src
+        make test-rules BUILD_DIR="$RUNNER_TEMP/pb-tests"
+        cd tests
+        TMPDIR="$RUNNER_TEMP" ./run_relay_test.sh plain
       shell: bash
 
     - name: Build project
