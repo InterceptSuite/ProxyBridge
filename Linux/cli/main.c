@@ -8,7 +8,8 @@
 #include "../src/ProxyBridge.h"
 
 #define MAX_RULES 100
-#define MAX_RULE_STR 512
+#define MAX_PROXIES 32
+#define MAX_RULE_STR 1024
 
 typedef struct {
     char process_name[256];
@@ -16,7 +17,18 @@ typedef struct {
     char target_ports[256];
     RuleProtocol protocol;
     RuleAction action;
+    char proxy_ref[64];     /* name or 1-based index of a --proxy; empty = first proxy */
 } ProxyRule;
+
+typedef struct {
+    char name[64];
+    ProxyType type;
+    char host[256];
+    uint16_t port;
+    char username[256];
+    char password[256];
+    uint32_t id;
+} ProxyEntry;
 
 static volatile bool keep_running = false;
 static int verbose_level = 0;
@@ -40,22 +52,8 @@ static void connection_callback(const char* process_name, uint32_t pid, const ch
 
 static void signal_handler(int sig)
 {
-    if (sig == SIGSEGV || sig == SIGABRT || sig == SIGBUS)
-    {
-        printf("\n\n=== CLI CRASH DETECTED ===\n");
-        printf("Signal: %d (%s)\n", sig,
-               sig == SIGSEGV ? "SEGFAULT" :
-               sig == SIGABRT ? "ABORT" : "BUS ERROR");
-        printf("Calling emergency cleanup...\n");
-        ProxyBridge_Stop();
-        _exit(1);
-    }
-
-    if (keep_running)
-    {
-        printf("\n\nStopping ProxyBridge...\n");
-        keep_running = false;
-    }
+    (void)sig;
+    keep_running = false;   /* async-signal-safe: the main loop does the shutdown */
 }
 
 static void show_banner(void)
@@ -66,7 +64,7 @@ static void show_banner(void)
     printf(" | |_) | '__/ _ \\ \\/ / | | | |  _ \\| '__| |/ _` |/ _` |/ _ \\\n");
     printf(" |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/\n");
     printf(" |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|\n");
-    printf("                      |___/                      |___/  V4.0-Beta\n");
+    printf("                      |___/                      |___/  V4.0\n");
     printf("\n");
     printf("  Universal proxy client for Linux applications\n");
     printf("\n");
@@ -82,213 +80,242 @@ static void show_help(const char* prog)
     printf("  %s [OPTIONS]\n\n", prog);
 
     printf("OPTIONS:\n");
-    printf("  --proxy <url>          Proxy server URL with optional authentication\n");
-    printf("                         Format: type://ip:port or type://ip:port:username:password\n");
+    printf("  --proxy <spec>         Add a proxy (repeatable). The first one is the default.\n");
+    printf("                         Format: [name=]type://[user:pass@]host:port\n");
     printf("                         Examples: socks5://127.0.0.1:1080\n");
-    printf("                                   http://proxy.com:8080:myuser:mypass\n");
+    printf("                                   work=http://alice:secret@proxy.corp:8080\n");
+    printf("                                   tor=socks5://[::1]:9050\n");
+    printf("                         Legacy form type://host:port:user:pass is still accepted.\n");
     printf("                         Default: socks5://127.0.0.1:4444\n\n");
 
-    printf("  --rule <rule>          Traffic routing rule (can be specified multiple times)\n");
-    printf("                         Format: process:hosts:ports:protocol:action\n");
-    printf("                           process  - Process name(s): curl, cur*, *, or multiple separated by ;\n");
-    printf("                           hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple separated by ; or ,\n");
-    printf("                           ports    - Port(s): *, 443, 80;8080, 80-100, or multiple separated by ; or ,\n");
+    printf("  --rule <rule>          Traffic routing rule (repeatable, first match wins)\n");
+    printf("                         Format: process:hosts:ports:protocol:action[=proxy]\n");
+    printf("                           process  - name or path glob(s): curl, chrom*, *, or several separated by ; or ,\n");
+    printf("                           hosts    - IPv4/IPv6, CIDR (10.0.0.0/8), ranges (1.2.3.4-1.2.3.9),\n");
+    printf("                                      octet patterns (192.168.*.*), domain names (github.com, *.github.com)\n");
+    printf("                                      or *; several separated by ; or ,\n");
+    printf("                                      (domains are matched via the DNS answers the application received)\n");
+    printf("                           ports    - *, 443, 80;8080, 8000-9000\n");
     printf("                           protocol - TCP, UDP, or BOTH\n");
-    printf("                           action   - PROXY, DIRECT, or BLOCK\n");
+    printf("                           action   - PROXY, DIRECT, or BLOCK; PROXY=name (or PROXY=2) picks a specific proxy\n");
     printf("                         Examples:\n");
     printf("                           curl:*:*:TCP:PROXY\n");
-    printf("                           curl;wget:*:*:TCP:PROXY\n");
-    printf("                           *:*:53:UDP:PROXY\n");
-    printf("                           firefox:*:80;443:TCP:DIRECT\n\n");
+    printf("                           firefox:*:*:BOTH:PROXY=work\n");
+    printf("                           curl;wget:10.0.0.0/8:*:TCP:DIRECT\n");
+    printf("                           *:*:53:UDP:PROXY=tor\n");
+    printf("                           firefox:*.github.com;github.com:443:TCP:PROXY=work\n\n");
 
-    printf("  --dns-via-proxy <bool> Route DNS queries through proxy\n");
-    printf("                         Values: true, false, 1, 0\n");
-    printf("                         Default: true\n\n");
+    printf("  --dns-via-proxy <bool> Route DNS queries through the proxy (true/false/1/0, default true)\n\n");
 
-    printf("  --verbose <level>      Logging verbosity level\n");
-    printf("                           0 - No logs (default)\n");
-    printf("                           1 - Show log messages only\n");
-    printf("                           2 - Show connection events only\n");
-    printf("                           3 - Show both logs and connections\n\n");
+    printf("  --verbose <level>      0 none (default), 1 logs, 2 connections, 3 both\n\n");
 
-    printf("  --cleanup              Cleanup resources (iptables, etc.) from crashed instance\n");
-    printf("                         Use if ProxyBridge crashed without proper cleanup\n\n");
+    printf("  --cleanup              No-op, kept for compatibility: the eBPF programs detach automatically\n\n");
 
     printf("  --help, -h             Show this help message\n\n");
 
     printf("EXAMPLES:\n");
-    printf("  # Basic usage with default proxy\n");
     printf("  sudo %s --rule curl:*:*:TCP:PROXY\n\n", prog);
-
-    printf("  # Multiple rules with custom proxy\n");
-    printf("  sudo %s --proxy socks5://192.168.1.10:1080 \\\n", prog);
-    printf("       --rule curl:*:*:TCP:PROXY \\\n");
-    printf("       --rule wget:*:*:TCP:PROXY \\\n");
-    printf("       --verbose 2\n\n");
-
-    printf("  # Route DNS through proxy with multiple apps\n");
-    printf("  sudo %s --proxy socks5://127.0.0.1:1080 \\\n", prog);
-    printf("       --rule \"curl;wget;firefox:*:*:BOTH:PROXY\" \\\n");
-    printf("       --dns-via-proxy true --verbose 3\n\n");
+    printf("  sudo %s --proxy socks5://192.168.1.10:1080 --proxy work=http://proxy.corp:8080 \\\n", prog);
+    printf("       --rule firefox:*:*:BOTH:PROXY --rule curl:*:*:TCP:PROXY=work --verbose 2\n\n");
 
     printf("NOTE:\n");
-    printf("  ProxyBridge requires root privileges to use nfqueue.\n");
-    printf("  Run with 'sudo' or as root user.\n\n");
+    printf("  ProxyBridge needs root and a Linux kernel >= 5.8 with BTF and cgroup v2 (eBPF datapath).\n");
+    printf("  Credentials given on the command line are visible to other users via ps.\n\n");
+}
+
+static void upper_copy(char* dst, const char* src, size_t n)
+{
+    size_t i = 0;
+    for (; src[i] && i + 1 < n; i++)
+        dst[i] = (char)toupper((unsigned char)src[i]);
+    dst[i] = '\0';
 }
 
 static RuleProtocol parse_protocol(const char* str)
 {
     char upper[16];
-    for (size_t i = 0; str[i] && i < 15; i++)
-        upper[i] = toupper(str[i]);
-    upper[strlen(str) < 15 ? strlen(str) : 15] = '\0';
-
-    if (strcmp(upper, "TCP") == 0)
-        return RULE_PROTOCOL_TCP;
-    else if (strcmp(upper, "UDP") == 0)
-        return RULE_PROTOCOL_UDP;
-    else if (strcmp(upper, "BOTH") == 0)
-        return RULE_PROTOCOL_BOTH;
-    else
-    {
-        fprintf(stderr, "ERROR: Invalid protocol '%s'. Use TCP, UDP, or BOTH\n", str);
-        exit(1);
-    }
+    upper_copy(upper, str, sizeof(upper));
+    if (strcmp(upper, "TCP") == 0) return RULE_PROTOCOL_TCP;
+    if (strcmp(upper, "UDP") == 0) return RULE_PROTOCOL_UDP;
+    if (strcmp(upper, "BOTH") == 0) return RULE_PROTOCOL_BOTH;
+    fprintf(stderr, "ERROR: Invalid protocol '%s'. Use TCP, UDP, or BOTH\n", str);
+    exit(1);
 }
 
-static RuleAction parse_action(const char* str)
+/* action[=proxy] */
+static RuleAction parse_action(const char* str, char* proxy_ref, size_t ref_size)
 {
-    char upper[16];
-    for (size_t i = 0; str[i] && i < 15; i++)
-        upper[i] = toupper(str[i]);
-    upper[strlen(str) < 15 ? strlen(str) : 15] = '\0';
-
-    if (strcmp(upper, "PROXY") == 0)
-        return RULE_ACTION_PROXY;
-    else if (strcmp(upper, "DIRECT") == 0)
-        return RULE_ACTION_DIRECT;
-    else if (strcmp(upper, "BLOCK") == 0)
-        return RULE_ACTION_BLOCK;
-    else
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s", str);
+    proxy_ref[0] = '\0';
+    char* eq = strchr(buf, '=');
+    if (eq)
     {
-        fprintf(stderr, "ERROR: Invalid action '%s'. Use PROXY, DIRECT, or BLOCK\n", str);
-        exit(1);
+        *eq = '\0';
+        snprintf(proxy_ref, ref_size, "%s", eq + 1);
     }
+    char upper[16];
+    upper_copy(upper, buf, sizeof(upper));
+    if (strcmp(upper, "PROXY") == 0) return RULE_ACTION_PROXY;
+    if (eq && proxy_ref[0]) { fprintf(stderr, "ERROR: '=proxy' is only valid with PROXY\n"); exit(1); }
+    if (strcmp(upper, "DIRECT") == 0) return RULE_ACTION_DIRECT;
+    if (strcmp(upper, "BLOCK") == 0) return RULE_ACTION_BLOCK;
+    fprintf(stderr, "ERROR: Invalid action '%s'. Use PROXY, DIRECT, or BLOCK\n", buf);
+    exit(1);
 }
 
 static void default_if_empty(char* dest, const char* src, const char* default_val, size_t dest_size)
 {
     if (src == NULL || src[0] == '\0' || strcmp(src, " ") == 0)
-        strncpy(dest, default_val, dest_size - 1);
+        snprintf(dest, dest_size, "%s", default_val);
     else
-        strncpy(dest, src, dest_size - 1);
-    dest[dest_size - 1] = '\0';
+        snprintf(dest, dest_size, "%.*s", (int)dest_size - 1, src);
 }
 
+/* process:hosts:ports:protocol:action[=proxy] -- hosts may itself contain ':' (IPv6), so parse from both ends */
 static bool parse_rule(const char* rule_str, ProxyRule* rule)
 {
     char buffer[MAX_RULE_STR];
-    strncpy(buffer, rule_str, sizeof(buffer) - 1);
-    buffer[sizeof(buffer) - 1] = '\0';
+    snprintf(buffer, sizeof(buffer), "%s", rule_str);
 
-    char* parts[5] = {NULL, NULL, NULL, NULL, NULL};
-    int part_idx = 0;
-    char* token = strtok(buffer, ":");
-
-    while (token != NULL && part_idx < 5)
+    char* first = strchr(buffer, ':');
+    char* last = strrchr(buffer, ':');
+    char* second_last = NULL;
+    char* third_last = NULL;
+    if (last && last != first)
     {
-        parts[part_idx++] = token;
-        token = strtok(NULL, ":");
+        *last = '\0';
+        second_last = strrchr(buffer, ':');
+        if (second_last && second_last != first)
+        {
+            *second_last = '\0';
+            third_last = strrchr(buffer, ':');
+        }
     }
-
-    if (part_idx != 5)
+    if (!first || !last || !second_last || !third_last || third_last == first)
     {
         fprintf(stderr, "ERROR: Invalid rule format '%s'\n", rule_str);
-        fprintf(stderr, "Expected format: process:hosts:ports:protocol:action\n");
+        fprintf(stderr, "Expected format: process:hosts:ports:protocol:action[=proxy]\n");
         return false;
     }
+    /* after trimming: buffer = process ':' hosts ':' ports ; protocol = second_last+1 ; action = last+1 */
+    *third_last = '\0';
+    const char* ports = third_last + 1;
+    const char* protocol = second_last + 1;
+    const char* action = last + 1;
 
-    default_if_empty(rule->process_name, parts[0], "*", sizeof(rule->process_name));
-    default_if_empty(rule->target_hosts, parts[1], "*", sizeof(rule->target_hosts));
-    default_if_empty(rule->target_ports, parts[2], "*", sizeof(rule->target_ports));
+    /* process = up to the first ':' ; hosts = between first ':' and third_last */
+    char* sep = strchr(buffer, ':');
+    if (!sep)
+    {
+        fprintf(stderr, "ERROR: Invalid rule format '%s'\n", rule_str);
+        return false;
+    }
+    *sep = '\0';
+    const char* hosts = sep + 1;
 
-    rule->protocol = parse_protocol(parts[3]);
-    rule->action = parse_action(parts[4]);
-
+    default_if_empty(rule->process_name, buffer, "*", sizeof(rule->process_name));
+    default_if_empty(rule->target_hosts, hosts, "*", sizeof(rule->target_hosts));
+    default_if_empty(rule->target_ports, ports, "*", sizeof(rule->target_ports));
+    rule->protocol = parse_protocol(protocol);
+    rule->action = parse_action(action, rule->proxy_ref, sizeof(rule->proxy_ref));
     return true;
 }
 
-static bool parse_proxy_url(const char* url, ProxyType* type, char* host, uint16_t* port, char* username, char* password)
+/* [name=]type://[user:pass@]host:port  or legacy type://host:port[:user:pass] ; host may be [v6] */
+static bool parse_proxy_spec(const char* spec, ProxyEntry* p)
 {
-    char buffer[512];
-    strncpy(buffer, url, sizeof(buffer) - 1);
-    buffer[sizeof(buffer) - 1] = '\0';
+    char buffer[768];
+    snprintf(buffer, sizeof(buffer), "%s", spec);
+    memset(p, 0, sizeof(*p));
 
-    username[0] = '\0';
-    password[0] = '\0';
-
-    // parse type://
     char* scheme_end = strstr(buffer, "://");
     if (scheme_end == NULL)
     {
-        fprintf(stderr, "ERROR: Invalid proxy URL format. Expected type://host:port\n");
+        fprintf(stderr, "ERROR: Invalid proxy '%s'. Expected [name=]type://host:port\n", spec);
         return false;
     }
-
     *scheme_end = '\0';
     char* scheme = buffer;
     char* rest = scheme_end + 3;
+    char* eq = strchr(scheme, '=');
+    if (eq)
+    {
+        *eq = '\0';
+        snprintf(p->name, sizeof(p->name), "%.*s", (int)sizeof(p->name) - 1, scheme);
+        scheme = eq + 1;
+    }
 
     char upper_scheme[16];
-    for (size_t i = 0; scheme[i] && i < 15; i++)
-        upper_scheme[i] = toupper(scheme[i]);
-    upper_scheme[strlen(scheme) < 15 ? strlen(scheme) : 15] = '\0';
-
-    if (strcmp(upper_scheme, "SOCKS5") == 0)
-        *type = PROXY_TYPE_SOCKS5;
-    else if (strcmp(upper_scheme, "HTTP") == 0)
-        *type = PROXY_TYPE_HTTP;
+    upper_copy(upper_scheme, scheme, sizeof(upper_scheme));
+    if (strcmp(upper_scheme, "SOCKS5") == 0) p->type = PROXY_TYPE_SOCKS5;
+    else if (strcmp(upper_scheme, "HTTP") == 0) p->type = PROXY_TYPE_HTTP;
     else
     {
         fprintf(stderr, "ERROR: Invalid proxy type '%s'. Use 'socks5' or 'http'\n", scheme);
         return false;
     }
 
-    // parse host:port[:user:pass]
-    char* parts[4];
-    int num_parts = 0;
-    char* token = strtok(rest, ":");
-    while (token != NULL && num_parts < 4)
+    char* at = strrchr(rest, '@');
+    if (at)
     {
-        parts[num_parts++] = token;
-        token = strtok(NULL, ":");
+        *at = '\0';
+        char* colon = strchr(rest, ':');
+        if (colon) { *colon = '\0'; snprintf(p->password, sizeof(p->password), "%s", colon + 1); }
+        snprintf(p->username, sizeof(p->username), "%s", rest);
+        rest = at + 1;
     }
 
-    if (num_parts < 2)
+    char* port_str = NULL;
+    char* legacy = NULL;
+    if (rest[0] == '[')
     {
-        fprintf(stderr, "ERROR: Invalid proxy URL. Missing host or port\n");
+        char* close = strchr(rest, ']');
+        if (!close || close[1] != ':') { fprintf(stderr, "ERROR: Invalid IPv6 proxy host in '%s'\n", spec); return false; }
+        *close = '\0';
+        snprintf(p->host, sizeof(p->host), "%s", rest + 1);
+        port_str = close + 2;
+    }
+    else
+    {
+        char* colon = strchr(rest, ':');
+        if (!colon) { fprintf(stderr, "ERROR: Invalid proxy '%s': missing port\n", spec); return false; }
+        *colon = '\0';
+        snprintf(p->host, sizeof(p->host), "%s", rest);
+        port_str = colon + 1;
+    }
+    legacy = strchr(port_str, ':');          /* type://host:port:user:pass */
+    if (legacy && !at)
+    {
+        *legacy++ = '\0';
+        char* colon = strchr(legacy, ':');
+        if (colon) { *colon = '\0'; snprintf(p->password, sizeof(p->password), "%s", colon + 1); }
+        snprintf(p->username, sizeof(p->username), "%s", legacy);
+    }
+    char* endp = NULL;
+    long port = strtol(port_str, &endp, 10);
+    if (!*port_str || *endp || port < 1 || port > 65535)
+    {
+        fprintf(stderr, "ERROR: Invalid proxy port '%s'\n", port_str);
         return false;
     }
-
-    strncpy(host, parts[0], 255);
-    host[255] = '\0';
-
-    *port = atoi(parts[1]);
-    if (*port == 0)
-    {
-        fprintf(stderr, "ERROR: Invalid proxy port '%s'\n", parts[1]);
-        return false;
-    }
-
-    if (num_parts >= 4)
-    {
-        strncpy(username, parts[2], 255);
-        username[255] = '\0';
-        strncpy(password, parts[3], 255);
-        password[255] = '\0';
-    }
-
+    p->port = (uint16_t)port;
+    if (!p->host[0]) { fprintf(stderr, "ERROR: Proxy host is empty in '%s'\n", spec); return false; }
     return true;
+}
+
+static uint32_t find_proxy(const ProxyEntry* proxies, int n, const char* ref)
+{
+    if (!ref[0])
+        return 0;                            /* default proxy */
+    char* endp = NULL;
+    long idx = strtol(ref, &endp, 10);
+    if (!*endp && idx >= 1 && idx <= n)
+        return proxies[idx - 1].id;
+    for (int i = 0; i < n; i++)
+        if (strcmp(proxies[i].name, ref) == 0)
+            return proxies[i].id;
+    return UINT32_MAX;
 }
 
 static bool is_root(void)
@@ -298,24 +325,21 @@ static bool is_root(void)
 
 int main(int argc, char *argv[])
 {
-    // check cleanup flag
-    for (int i = 1; i < argc; i++)
-    {
-        if (strcmp(argv[i], "--cleanup") == 0)
-        {
-            printf("Running cleanup...\n");
-            ProxyBridge_Stop();
-            printf("Cleanup complete.\n");
-            return 0;
-        }
-    }
-
-    char proxy_url[512] = "socks5://127.0.0.1:4444";
+    ProxyEntry proxies[MAX_PROXIES];
+    int num_proxies = 0;
     ProxyRule rules[MAX_RULES];
     int num_rules = 0;
     bool dns_via_proxy = true;
 
-    // parse args
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "--cleanup") == 0)
+        {
+            printf("Nothing to clean up: the eBPF programs detach automatically when ProxyBridge exits.\n");
+            return 0;
+        }
+    }
+
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
@@ -325,8 +349,14 @@ int main(int argc, char *argv[])
         }
         else if (strcmp(argv[i], "--proxy") == 0 && i + 1 < argc)
         {
-            strncpy(proxy_url, argv[++i], sizeof(proxy_url) - 1);
-            proxy_url[sizeof(proxy_url) - 1] = '\0';
+            if (num_proxies >= MAX_PROXIES)
+            {
+                fprintf(stderr, "ERROR: Maximum %d proxies supported\n", MAX_PROXIES);
+                return 1;
+            }
+            if (!parse_proxy_spec(argv[++i], &proxies[num_proxies]))
+                return 1;
+            num_proxies++;
         }
         else if (strcmp(argv[i], "--rule") == 0 && i + 1 < argc)
         {
@@ -369,9 +399,15 @@ int main(int argc, char *argv[])
         }
     }
 
+    if (num_proxies == 0)
+    {
+        if (!parse_proxy_spec("socks5://127.0.0.1:4444", &proxies[0]))
+            return 1;
+        num_proxies = 1;
+    }
+
     show_banner();
 
-    // need root
     if (!is_root())
     {
         printf("\033[31m\nERROR: ProxyBridge requires root privileges!\033[0m\n");
@@ -379,54 +415,35 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // parse proxy config
-    ProxyType proxy_type;
-    char proxy_host[256];
-    uint16_t proxy_port;
-    char proxy_username[256];
-    char proxy_password[256];
-
-    if (!parse_proxy_url(proxy_url, &proxy_type, proxy_host, &proxy_port, proxy_username, proxy_password))
-        return 1;
-
-    // setup callbacks based on verbose
-    // 0=nothing 1=logs 2=connections 3=both
-
     if (verbose_level == 1 || verbose_level == 3)
         ProxyBridge_SetLogCallback(log_callback);
     else
-        ProxyBridge_SetLogCallback(NULL);  // Explicitly disable
+        ProxyBridge_SetLogCallback(NULL);
 
     if (verbose_level == 2 || verbose_level == 3)
         ProxyBridge_SetConnectionCallback(connection_callback);
     else
-        ProxyBridge_SetConnectionCallback(NULL);  // Explicitly disable
+        ProxyBridge_SetConnectionCallback(NULL);
 
-    // turn on traffic logging when needed
     ProxyBridge_SetTrafficLoggingEnabled(verbose_level > 0);
-
-    // show config
-    printf("Proxy: %s://%s:%u\n",
-           proxy_type == PROXY_TYPE_HTTP ? "http" : "socks5",
-           proxy_host, proxy_port);
-
-    if (proxy_username[0] != '\0')
-        printf("Proxy Auth: %s:***\n", proxy_username);
-
-    printf("DNS via Proxy: %s\n", dns_via_proxy ? "Enabled" : "Disabled");
-
-    // setup proxy
-    if (!ProxyBridge_SetProxyConfig(proxy_type, proxy_host, proxy_port,
-                                    proxy_username[0] ? proxy_username : "",
-                                    proxy_password[0] ? proxy_password : ""))
-    {
-        fprintf(stderr, "ERROR: Failed to set proxy configuration\n");
-        return 1;
-    }
-
     ProxyBridge_SetDnsViaProxy(dns_via_proxy);
 
-    // add rules
+    char err[256];
+    printf("Proxies: %d\n", num_proxies);
+    for (int i = 0; i < num_proxies; i++)
+    {
+        ProxyEntry* p = &proxies[i];
+        p->id = ProxyBridge_AddProxy(p->name, p->type, p->host, p->port, p->username, p->password, err, sizeof(err));
+        if (!p->id)
+        {
+            fprintf(stderr, "ERROR: Proxy %d (%s:%u): %s\n", i + 1, p->host, p->port, err);
+            return 1;
+        }
+        printf("  [%d]%s%s%s %s://%s:%u%s\n", i + 1, p->name[0] ? " " : "", p->name, i == 0 ? " (default)" : "",
+               p->type == PROXY_TYPE_HTTP ? "http" : "socks5", p->host, p->port, p->username[0] ? " (auth)" : "");
+    }
+    printf("DNS via Proxy: %s\n", dns_via_proxy ? "Enabled" : "Disabled");
+
     if (num_rules > 0)
     {
         printf("Rules: %d\n", num_rules);
@@ -436,28 +453,28 @@ int main(int argc, char *argv[])
                                       rules[i].protocol == RULE_PROTOCOL_UDP ? "UDP" : "BOTH";
             const char* action_str = rules[i].action == RULE_ACTION_PROXY ? "PROXY" :
                                     rules[i].action == RULE_ACTION_DIRECT ? "DIRECT" : "BLOCK";
-
-            uint32_t rule_id = ProxyBridge_AddRule(
-                rules[i].process_name,
-                rules[i].target_hosts,
-                rules[i].target_ports,
-                rules[i].protocol,
-                rules[i].action);
-
-            if (rule_id > 0)
+            uint32_t proxy_id = 0;
+            if (rules[i].action == RULE_ACTION_PROXY)
             {
-                printf("  [%u] %s:%s:%s:%s -> %s\n",
-                       rule_id,
-                       rules[i].process_name,
-                       rules[i].target_hosts,
-                       rules[i].target_ports,
-                       protocol_str,
-                       action_str);
+                proxy_id = find_proxy(proxies, num_proxies, rules[i].proxy_ref);
+                if (proxy_id == UINT32_MAX)
+                {
+                    fprintf(stderr, "ERROR: Rule %d refers to unknown proxy '%s'\n", i + 1, rules[i].proxy_ref);
+                    return 1;
+                }
             }
-            else
+
+            uint32_t rule_id = ProxyBridge_AddRule(rules[i].process_name, rules[i].target_hosts, rules[i].target_ports,
+                                                   rules[i].protocol, rules[i].action, proxy_id, err, sizeof(err));
+            if (rule_id == 0)
             {
-                fprintf(stderr, "  ERROR: Failed to add rule for %s\n", rules[i].process_name);
+                fprintf(stderr, "  ERROR: Rule %d (%s:%s:%s): %s\n", i + 1, rules[i].process_name,
+                        rules[i].target_hosts, rules[i].target_ports, err);
+                return 1;
             }
+            printf("  [%u] %s:%s:%s:%s -> %s%s%s\n", rule_id, rules[i].process_name, rules[i].target_hosts,
+                   rules[i].target_ports, protocol_str, action_str,
+                   rules[i].proxy_ref[0] ? " via " : "", rules[i].proxy_ref);
         }
     }
     else
@@ -466,10 +483,9 @@ int main(int argc, char *argv[])
         printf("Use --rule to add proxy rules. See --help for examples.\n");
     }
 
-    // start proxybridge
     if (!ProxyBridge_Start())
     {
-        fprintf(stderr, "ERROR: Failed to start ProxyBridge\n");
+        fprintf(stderr, "ERROR: Failed to start ProxyBridge (run with --verbose 1 for details)\n");
         return 1;
     }
 
@@ -478,19 +494,11 @@ int main(int argc, char *argv[])
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-    signal(SIGSEGV, signal_handler);  // Catch segfault
-    signal(SIGABRT, signal_handler);  // Catch abort
-    signal(SIGBUS, signal_handler);   // Catch bus error
 
-    // main loop
     while (keep_running)
-    {
         sleep(1);
-    }
 
-    // cleanup
     ProxyBridge_Stop();
     printf("ProxyBridge stopped.\n");
-
     return 0;
 }
