@@ -3,6 +3,8 @@
 #   sudo tests/e2e_rules.sh      (needs curl, python3; only loopback + TEST-NET addresses are used)
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
+PB_DIR="${PB_DIR:-$ROOT/output}"   # directory holding the built ProxyBridge + libproxybridge.so (run ../build.sh first)
+[ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first: (cd Linux && ./build.sh), or set PB_DIR to a directory containing ProxyBridge and libproxybridge.so"; exit 1; }
 WORK="$(mktemp -d)"; PLOG="$WORK/proxy.log"; : > "$PLOG"
 PASS=0; FAIL=0
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
@@ -17,7 +19,7 @@ blocked() { local out; out=$(curl -s -m 5 "$2" 2>&1; echo "rc=$?"); [[ "$out" ==
 cleanup() { kill $PB_PID $FAKE_PID 2>/dev/null; wait 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
-export LD_LIBRARY_PATH="$ROOT/src"
+export LD_LIBRARY_PATH="$PB_DIR"
 
 python3 "$HERE/fake_proxies.py" "$PLOG" >/dev/null 2>&1 & FAKE_PID=$!
 mkdir -p "$WORK/bin" "$WORK/pbpath"
@@ -26,7 +28,7 @@ cp "$CURL" "$WORK/bin/wget"; cp "$CURL" "$WORK/bin/newtool"; cp "$CURL" "$WORK/b
 sleep 1
 
 start_pb() { # extra CLI args...
-  stdbuf -oL "$ROOT/cli/ProxyBridge" --verbose 1 \
+  stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 1 \
     --proxy a=socks5://127.0.0.1:19080 --proxy b=socks5://bob:pw@127.0.0.1:19081 --proxy c=http://127.0.0.1:19082 \
     --proxy d=http://bob:pw@127.0.0.1:19083 --proxy e=http://bob:wrong@127.0.0.1:19083 "$@" > "$WORK/pb.out" 2>&1 & PB_PID=$!
   for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/pb.out" && return 0; sleep 0.25; done

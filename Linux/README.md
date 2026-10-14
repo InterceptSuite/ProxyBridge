@@ -501,10 +501,10 @@ MIT License - See LICENSE file for details
 ## Testing
 
 ```bash
-cd Linux/src && make && cd ../cli && make        # build
-cd ../src && make test-rules                      # rule engine + DNS parser tests (no root needed)
+cd Linux && ./build.sh                            # builds in a temp dir, final files land in Linux/output/
+cd src && make test-rules BUILD_DIR=/tmp/pbt      # rule engine + DNS parser tests (no root needed)
 cd tests && ./run_relay_test.sh both              # relay tests, plain and ASan/UBSan (no root needed)
-cd ../../tests && sudo ./e2e.sh                   # end-to-end with real kernel hooks (root)
+cd ../../tests && sudo ./e2e.sh                   # end-to-end with real kernel hooks (root); uses Linux/output, override with PB_DIR=
 sudo ./e2e_domains.sh                             # domain rules with a real resolver client (root, needs dig)
 sudo ./e2e_rules.sh                               # every rule form + every proxy type, incl. HTTP auth and UDP rules (root)
 sudo ./api_live.sh                                # library API: edit/move/disable/delete rules and proxies on the live datapath (root)

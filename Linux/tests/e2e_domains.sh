@@ -3,6 +3,8 @@
 #   sudo Linux/tests/e2e_domains.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
+PB_DIR="${PB_DIR:-$ROOT/output}"   # directory holding the built ProxyBridge + libproxybridge.so (run ../build.sh first)
+[ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first: (cd Linux && ./build.sh), or set PB_DIR to a directory containing ProxyBridge and libproxybridge.so"; exit 1; }
 WORK="$(mktemp -d)"; PLOG="$WORK/proxy.log"; DLOG="$WORK/dns.log"; : > "$PLOG"; : > "$DLOG"
 PASS=0; FAIL=0; DNSIP=10.77.0.2
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
@@ -11,13 +13,13 @@ has() { [[ "$2" == *"$3"* ]] && ok "$1" || bad "$1 (got: ${2:0:160})"; }
 cleanup() { kill "$PB_PID" "$FAKE_PID" "$DNS_PID" 2>/dev/null; wait 2>/dev/null; ip addr del $DNSIP/32 dev lo 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
-export LD_LIBRARY_PATH="$ROOT/src"
+export LD_LIBRARY_PATH="$PB_DIR"
 ip addr add $DNSIP/32 dev lo 2>/dev/null
 python3 "$HERE/fake_proxies.py" "$PLOG" > /dev/null 2>&1 & FAKE_PID=$!
 python3 "$HERE/fake_dns.py" $DNSIP "$DLOG" > /dev/null 2>&1 & DNS_PID=$!
 sleep 1
 
-stdbuf -oL "$ROOT/cli/ProxyBridge" --verbose 2 \
+stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 2 \
   --proxy a=socks5://127.0.0.1:19080 --proxy b=socks5://bob:pw@127.0.0.1:19081 --proxy h=socks5://localhost:19080 \
   --rule "*:blocked.example.test:*:TCP:BLOCK" \
   --rule "*:*.example.test:*:TCP:PROXY=a" \

@@ -3,7 +3,9 @@
 #   sudo tests/dnsbench.sh [queries]
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"; N=${1:-20000}
-export LD_LIBRARY_PATH="$ROOT/src"; DNSIP=10.77.0.3
+PB_DIR="${PB_DIR:-$ROOT/output}"   # directory holding the built ProxyBridge + libproxybridge.so (run ../build.sh first)
+[ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first: (cd Linux && ./build.sh), or set PB_DIR to a directory containing ProxyBridge and libproxybridge.so"; exit 1; }
+export LD_LIBRARY_PATH="$PB_DIR"; DNSIP=10.77.0.3
 WORK=$(mktemp -d); trap 'kill $DNS $PB 2>/dev/null; wait 2>/dev/null; ip addr del $DNSIP/32 dev lo 2>/dev/null; rm -rf $WORK' EXIT
 ip addr add $DNSIP/32 dev lo 2>/dev/null
 python3 "$HERE/fake_dns.py" $DNSIP $WORK/dns.log >/dev/null 2>&1 & DNS=$!
@@ -22,10 +24,10 @@ print("  %d queries: %.0f qps  avg=%.0fus p50=%.0fus p99=%.0fus" % (n, n / dt, s
 PY
 }
 echo "== no ProxyBridge"; bench; bench
-stdbuf -oL "$ROOT/cli/ProxyBridge" --proxy a=socks5://127.0.0.1:19080 --rule "*:*.example.test:*:TCP:PROXY=a" > $WORK/pb.out 2>&1 & PB=$!
+stdbuf -oL "$PB_DIR/ProxyBridge" --proxy a=socks5://127.0.0.1:19080 --rule "*:*.example.test:*:TCP:PROXY=a" > $WORK/pb.out 2>&1 & PB=$!
 for _ in $(seq 40); do grep -q "ProxyBridge started" $WORK/pb.out && break; sleep 0.25; done
 echo "== ProxyBridge running, python3 covered by a domain rule (every query goes through the DNS tap)"; bench; bench
 kill -INT $PB; wait $PB 2>/dev/null
-stdbuf -oL "$ROOT/cli/ProxyBridge" --proxy a=socks5://127.0.0.1:19080 --rule "someother:*.example.test:*:TCP:PROXY=a" > $WORK/pb.out 2>&1 & PB=$!
+stdbuf -oL "$PB_DIR/ProxyBridge" --proxy a=socks5://127.0.0.1:19080 --rule "someother:*.example.test:*:TCP:PROXY=a" > $WORK/pb.out 2>&1 & PB=$!
 for _ in $(seq 40); do grep -q "ProxyBridge started" $WORK/pb.out && break; sleep 0.25; done
 echo "== ProxyBridge running, python3 NOT covered (DNS untouched by the tap)"; bench; bench

@@ -107,6 +107,8 @@ Linux/gui/*.o
 Linux/gui/ProxyBridgeGUI
 Linux/ProxyBridgeGUI
 Linux/src/tests/rules_test
+Linux/src/dns_test
+Linux/src/rules_test
 Linux/src/tests/dns_test
 Linux/**/*.o
 Linux/**/*.skel.h

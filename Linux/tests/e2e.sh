@@ -4,6 +4,8 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
+PB_DIR="${PB_DIR:-$ROOT/output}"   # directory holding the built ProxyBridge + libproxybridge.so (run ../build.sh first)
+[ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first: (cd Linux && ./build.sh), or set PB_DIR to a directory containing ProxyBridge and libproxybridge.so"; exit 1; }
 WORK="$(mktemp -d)"
 LOG="$WORK/proxy.log"; : > "$LOG"
 PASS=0; FAIL=0
@@ -16,7 +18,7 @@ cleanup() { kill "$PB_PID" "$FAKE_PID" "$DIRECT_PID" 2>/dev/null; wait 2>/dev/nu
 trap cleanup EXIT
 
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
-export LD_LIBRARY_PATH="$ROOT/src"
+export LD_LIBRARY_PATH="$PB_DIR"
 
 python3 "$HERE/fake_proxies.py" "$LOG" > "$WORK/fake.out" 2>&1 & FAKE_PID=$!
 # a direct (non-proxied) origin on the host's own LAN address, so DIRECT rules can be seen to work
@@ -27,7 +29,7 @@ sleep 1
 
 cp "$(command -v curl)" "$WORK/newcurl"            # a binary that did not exist when ProxyBridge started
 
-stdbuf -oL "$ROOT/cli/ProxyBridge" --verbose 3 \
+stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 3 \
   --proxy a=socks5://127.0.0.1:19080 --proxy b=socks5://bob:pw@127.0.0.1:19081 --proxy c=http://127.0.0.1:19082 \
   --rule "curl:$MYIP/32:18399:TCP:DIRECT" \
   --rule "curl:192.0.2.0/24:*:TCP:PROXY=a" \
