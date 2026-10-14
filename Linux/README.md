@@ -461,6 +461,8 @@ gcc -o ProxyBridge main.o \
     -lproxybridge -lpthread
 ```
 
+**Testing against Nexus Proxy.** [Nexus Proxy](https://github.com/InterceptSuite/nexus-proxy) is a Node.js SOCKS5 server that really forwards TCP and UDP. `tests/e2e_nexus.sh` runs ProxyBridge in front of two Nexus instances (one with a username/password) with real origin servers and a real DNS server, and checks rules by IP, port, port range, process, CIDR and domain, TCP and UDP, 200 MB / 100 MB checksummed transfers, 100 parallel and 1,500 sequential connections, 300 concurrent UDP sockets, 59 KB datagrams, a sustained UDP stream, and recovery after the proxy restarts. Stock Nexus cannot do UDP ASSOCIATE on Linux (its IPv6 relay socket binds `0.0.0.0`, IPv4 destinations are not sent as `::ffff:` addresses, and mapped replies are not matched); `tests/nexus-linux-udp.patch` fixes that, and without it the UDP checks are skipped. Nexus limits each client IP to 500 connections, so it cannot be used for the 10,000-connection scale test.
+
 **Config location:** the GUI stores profiles, proxies and rules in `/etc/proxybridge/config.ini` (mode 0600). Set `PROXYBRIDGE_CONFIG_DIR` to use another directory (used by the tests).
 
 ## Uninstallation
@@ -509,6 +511,7 @@ sudo ./e2e_domains.sh                             # domain rules with a real res
 sudo ./e2e_rules.sh                               # every rule form + every proxy type, incl. HTTP auth and UDP rules (root)
 sudo ./api_live.sh                                # library API: edit/move/disable/delete rules and proxies on the live datapath (root)
 sudo ./e2e_openssh.sh                             # interoperability with a real third-party SOCKS5 server (OpenSSH ssh -D), 40 MB each way (root)
+sudo NODE=$(command -v node) NEXUS_JS=/path/to/nexus-proxy/script.js ./e2e_nexus.sh   # against Nexus Proxy, a real forwarding SOCKS5 server with UDP (root)
 sudo ./scale.sh 10000                             # 10,000 concurrent proxied connections (root)
 sudo ./gui_headless.sh <ProxyBridgeGUI> <libdir>  # the real GTK GUI under the Broadway backend (root, needs broadwayd)
 cd ../gui/tests && gcc -I../../src -I.. -D_GNU_SOURCE $(pkg-config --cflags gtk+-3.0) config_test.c ../gui_config.c -o /tmp/config_test $(pkg-config --libs gtk+-3.0) && /tmp/config_test   # GUI config/profile tests

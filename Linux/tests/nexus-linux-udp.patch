@@ -1,0 +1,25 @@
+--- a/script.js
++++ b/script.js
+@@ -301,7 +301,7 @@
+       this.handleUDPMessage(msg, rinfo, udpRelay, remoteMap);
+     });
+ 
+-    udpRelay.bind(0, '0.0.0.0', () => {
++    udpRelay.bind(0, '::', () => {
+       const udpPort = udpRelay.address().port;
+ 
+       this.udpClients.set(clientKey, {
+@@ -428,10 +428,12 @@
+       console.log(`  └─> ${host}:${port}${protocol}`);
+     }
+ 
+-    udpRelay.send(data, port, host);
++    // the relay socket is IPv6 dual-stack: IPv4 destinations must be addressed as ::ffff:a.b.c.d
++    udpRelay.send(data, port, host.includes(':') ? host : '::ffff:' + host);
+   }
+ 
+   handleRemoteToClient(msg, rinfo, udpRelay, remoteMap) {
++    rinfo = { ...rinfo, address: rinfo.address.replace(/^::ffff:/i, '') };
+     const remoteKey = `${rinfo.address}:${rinfo.port}`;
+     const clientInfo = remoteMap.get(remoteKey);
+ 

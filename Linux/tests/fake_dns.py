@@ -22,6 +22,11 @@ ZONE = {
     "svc.byname.test": [("A", "192.0.2.81")],
     "plain.other.test": [("A", "192.0.2.82")],
 }
+# extra records for tests: PB_DNS_ZONE="name=ip;name2=ip2"
+import os
+for item in filter(None, os.environ.get("PB_DNS_ZONE", "").split(";")):
+    n, ip = item.split("=", 1)
+    ZONE[n.strip().lower()] = [("A", ip.strip())]
 LOG = open(sys.argv[2], "a", buffering=1)
 
 
