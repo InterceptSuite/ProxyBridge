@@ -5,14 +5,15 @@ permissions:
 
 on:
   push:
-    branches: [ master, dev ]
+    branches: [ master, dev, Linux-ebpf ]
   pull_request:
-    branches: [ master, dev ]
+    branches: [ master, dev, Linux-ebpf ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
@@ -28,10 +29,25 @@ jobs:
           build-essential \
           gcc \
           make \
-          libnetfilter-queue-dev \
-          libnfnetlink-dev \
+          clang \
+          linux-tools-common \
+          linux-tools-generic \
+          libbpf-dev \
+          libelf-dev \
+          zlib1g-dev \
           libgtk-3-dev \
           pkg-config
+      shell: bash
+
+    - name: Locate bpftool
+      # On Ubuntu "bpftool" is only a virtual package; the real binary ships in linux-tools-* and is not on PATH
+      # for the runner's cloud kernel, so find it explicitly.
+      run: |
+        shopt -s nullglob
+        candidates=(/usr/lib/linux-tools/*/bpftool)
+        [ ${#candidates[@]} -gt 0 ] || { echo "bpftool binary not found"; ls /usr/lib/linux-tools 2>&1 || true; exit 1; }
+        echo "BPFTOOL=${candidates[0]}" >> "$GITHUB_ENV"
+        "${candidates[0]}" version | head -1
       shell: bash
 
     - name: Verify dependencies
@@ -48,15 +64,30 @@ jobs:
         echo "=== Checking GTK3 ==="
         pkg-config --modversion gtk+-3.0
         echo ""
-        echo "=== Checking libnetfilter_queue ==="
-        pkg-config --modversion libnetfilter_queue || echo "Package info not available, but headers should be present"
+        echo "=== Checking clang (eBPF compiler) ==="
+        clang --version | head -1
+        echo ""
+        echo "=== Checking bpftool (skeleton generator) ==="
+        "$BPFTOOL" version | head -1
+        echo ""
+        echo "=== Checking libbpf ==="
+        pkg-config --modversion libbpf
+      shell: bash
+
+    - name: Unit tests (rule engine, DNS parser, relay)
+      timeout-minutes: 15
+      run: |
+        cd Linux/src
+        make test-rules BUILD_DIR="$RUNNER_TEMP/pb-tests"
+        cd tests
+        TMPDIR="$RUNNER_TEMP" ./run_relay_test.sh plain
       shell: bash
 
     - name: Build project
       run: |
         cd Linux
         chmod +x build.sh
-        ./build.sh
+        WERROR=1 ./build.sh
       shell: bash
 
     - name: Verify build output
@@ -84,8 +115,82 @@ jobs:
           echo "✓ GUI built successfully"
           file Linux/output/ProxyBridgeGUI
         else
-          echo "⚠ GUI build skipped (GTK3 not available or build failed)"
+          echo "✗ GUI build failed (GTK3 is installed on this runner)"
+          exit 1
         fi
+      shell: bash
+
+    - name: Smoke test the built binaries
+      run: |
+        cd Linux/output
+        # capture output first: `cmd | grep -q` can fail under pipefail when grep exits early (SIGPIPE)
+        help_out="$(LD_LIBRARY_PATH="$PWD" ./ProxyBridge --help)"
+        grep -q -- "--proxy" <<<"$help_out" && echo "✓ CLI runs and shows its help"
+        cli_deps="$(LD_LIBRARY_PATH="$PWD" ldd ./ProxyBridge)"
+        grep -q libproxybridge <<<"$cli_deps" && echo "✓ CLI links libproxybridge.so"
+        # the GUI must carry an $ORIGIN runpath so it finds the library in its own directory
+        gui_dyn="$(readelf -d ./ProxyBridgeGUI)"
+        grep -q 'RUNPATH.*\$ORIGIN' <<<"$gui_dyn" && echo "✓ GUI runpath is \$ORIGIN"
+        # the library must export the public API
+        exports="$(nm -D libproxybridge.so)"
+        for sym in ProxyBridge_Start ProxyBridge_Stop ProxyBridge_AddRule ProxyBridge_AddProxy ProxyBridge_ValidateRule; do
+          grep -q " T $sym" <<<"$exports" || { echo "✗ missing export $sym"; exit 1; }
+        done
+        echo "✓ public API exported"
+        # no iptables/NFQUEUE dependency may come back
+        lib_deps="$(ldd libproxybridge.so)"
+        if grep -qi netfilter <<<"$lib_deps"; then echo "✗ libnetfilter dependency is back"; exit 1; fi
+        echo "✓ no libnetfilter dependency"
+      shell: bash
+
+    - name: Portability - run the binaries on older distributions (issue 146)
+      # BIND_NOW makes the loader resolve every glibc symbol at start-up, so a clean --help run in these images proves the
+      # binaries do not need a newer glibc than Ubuntu 22.04 / Debian 12 / RHEL 9 era systems provide.
+      run: |
+        set -e
+        out="$PWD/Linux/output"
+        run_in() { # image, install command
+          echo "::group::$1"
+          docker run --rm -v "$out:/out:ro" "$1" sh -c "$2 >/dev/null 2>&1 &&
+            LD_LIBRARY_PATH=/out /out/ProxyBridge --help | grep -q -- '--proxy' && echo 'CLI starts' &&
+            missing=\$(LD_LIBRARY_PATH=/out ldd /out/ProxyBridge /out/libproxybridge.so /out/ProxyBridgeGUI 2>&1 | grep 'not found' || true) &&
+            if [ -n \"\$missing\" ]; then echo \"missing: \$missing\"; exit 1; fi && echo 'all libraries resolve'"
+          echo "::endgroup::"
+        }
+        run_in ubuntu:22.04 "apt-get update && apt-get install -y libelf1 zlib1g libgtk-3-0"
+        run_in debian:12 "apt-get update && apt-get install -y libelf1 zlib1g libgtk-3-0"
+        run_in fedora:40 "dnf install -y elfutils-libelf zlib gtk3"
+      shell: bash
+
+    - name: Verify the build left the source tree clean
+      run: |
+        # build.sh compiles in a temp directory: no untracked or ignored file may appear outside Linux/output/
+        status="$(git status --porcelain --ignored)"
+        dirty="$(grep -E '^(\?\?|!!)' <<<"$status" | grep -v 'Linux/output' || true)"
+        if [ -n "$dirty" ]; then
+          echo "✗ build left files outside Linux/output:"
+          echo "$dirty"
+          exit 1
+        fi
+        echo "✓ source tree clean (only Linux/output/ was written)"
+      shell: bash
+
+    - name: End-to-end tests with the real kernel datapath (best effort)
+      # Needs root, cgroup v2 and a BTF kernel. GitHub-hosted runners usually have them, but this is not guaranteed,
+      # so a failure here is reported without failing the build.
+      continue-on-error: true
+      timeout-minutes: 15
+      run: |
+        sudo apt-get install -y dnsutils >/dev/null
+        uname -r
+        ls /sys/kernel/btf/vmlinux && mount | grep -q "type cgroup2" || { echo "kernel lacks BTF or cgroup2: skipping"; exit 0; }
+        fail=0
+        for t in e2e e2e_rules e2e_domains e2e_security api_live; do
+          echo "::group::$t"
+          sudo env PB_DIR="$PWD/Linux/output" BPFTOOL="$BPFTOOL" bash "Linux/tests/$t.sh" || fail=1
+          echo "::endgroup::"
+        done
+        exit $fail
       shell: bash
 
     - name: Upload artifacts
