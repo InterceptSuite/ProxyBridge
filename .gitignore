@@ -99,6 +99,26 @@ Linux/cli/main.o
 Linux/cli/proxybridge-cli
 Linux/src/libproxybridge.so
 Linux/src/ProxyBridge.o
+Linux/src/*.o
+Linux/src/proxybridge.skel.h
+Linux/src/bpf/*.o
+Linux/cli/ProxyBridge
+Linux/gui/*.o
+Linux/gui/ProxyBridgeGUI
+Linux/ProxyBridgeGUI
+Linux/src/tests/rules_test
+Linux/src/tests/dns_test
+Linux/**/*.o
+Linux/**/*.skel.h
+Linux/**/vmlinux.h
+Linux/gui/tests/config_test
+Linux/src/tests/relay_test
+Linux/src/tests/relay_test_*
+Linux/tests/hookbench
+Linux/tests/thrbench
+Linux/tests/api_live_test
+Linux/**/__pycache__/
+!Linux/tests/*.py
 Android/**
 iOS/**
 # Windows build intermediates (MSVC import lib / export file / objects)

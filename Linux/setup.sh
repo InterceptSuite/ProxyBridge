@@ -53,36 +53,36 @@ install_dependencies() {
         ubuntu|debian|linuxmint|pop|elementary|zorin|kali|raspbian|mx|antix|deepin|lmde)
             echo "Using apt package manager..."
             apt-get update -qq
-            # libgtk-3-0 is for runtime, libnetfilter-queue1 for functionality
-            apt-get install -y libnetfilter-queue1 libnfnetlink0 iptables libgtk-3-0
+            # libgtk-3-0 is for the GUI, libbpf for the eBPF datapath
+            apt-get install -y libbpf1 libgtk-3-0
             ;;
         fedora)
             echo "Using dnf package manager..."
-            dnf install -y libnetfilter_queue libnfnetlink iptables gtk3
+            dnf install -y libbpf gtk3
             ;;
         rhel|centos|rocky|almalinux)
             echo "Using yum package manager..."
-            yum install -y libnetfilter_queue libnfnetlink iptables gtk3
+            yum install -y libbpf gtk3
             ;;
         arch|manjaro|endeavouros|garuda)
             echo "Using pacman package manager..."
-            pacman -Sy --noconfirm libnetfilter_queue libnfnetlink iptables gtk3
+            pacman -Sy --noconfirm libbpf gtk3
             ;;
         opensuse*|sles)
             echo "Using zypper package manager..."
-            zypper install -y libnetfilter_queue1 libnfnetlink0 iptables gtk3
+            zypper install -y libbpf1 gtk3
             ;;
         void)
             echo "Using xbps package manager..."
-            xbps-install -Sy libnetfilter_queue libnfnetlink iptables gtk3
+            xbps-install -Sy libbpf gtk3
             ;;
         *)
             echo "WARNING: Unknown distribution '$DISTRO' (family: '$DISTRO_LIKE')"
             echo ""
             echo "Please manually install the following packages:"
-            echo "  Debian/Ubuntu: sudo apt install libnetfilter-queue1 libnfnetlink0 iptables libgtk-3-0"
-            echo "  Fedora:        sudo dnf install libnetfilter_queue libnfnetlink iptables gtk3"
-            echo "  Arch:          sudo pacman -S libnetfilter_queue libnfnetlink iptables gtk3"
+            echo "  Debian/Ubuntu: sudo apt install libbpf1 libgtk-3-0"
+            echo "  Fedora:        sudo dnf install libbpf gtk3"
+            echo "  Arch:          sudo pacman -S libbpf gtk3"
             echo ""
             read -p "Continue anyway? (y/n) " -n 1 -r
             echo
