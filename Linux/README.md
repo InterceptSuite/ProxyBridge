@@ -258,6 +258,7 @@ Rules are evaluated **in order and the first match wins** (put specific rules be
 - Process names are case-sensitive on Linux
 - Interpreted programs (python, node, java) are identified by the interpreter binary, e.g. `python3.12`
 - A `PROXY` rule whose proxy does not exist is treated as `BLOCK` (traffic never leaks around a missing proxy)
+- A local proxy is never proxied through itself: processes that listen on a configured proxy address (for example Burp, mitmproxy, Tor or `ssh -D` on 127.0.0.1) are exempted automatically, so a rule with process `*` cannot create a loop. The exemption is per process, not per program, and is refreshed every two seconds
 - Press `Ctrl+C` to stop ProxyBridge; the kernel hooks are removed automatically, even if ProxyBridge crashes
 
 ## Domain rules
@@ -280,6 +281,14 @@ Cost: DNS from covered processes takes one extra loopback hop (about +90 µs per
 ## Multiple proxies
 
 Add as many `--proxy` entries (CLI) or proxies (GUI) as you need; each rule chooses its own with `PROXY=name`. Proxy hosts may be IP addresses or **host names** (resolved with a 5 s deadline and a cache, so a slow resolver cannot stall traffic). A rule that references a proxy that no longer exists blocks instead of leaking.
+
+## Security model
+
+- **Redirected TCP connections** are bound to the client's source address and port. A process that connects to the relay from a different loopback address (for example `127.0.0.2`) cannot claim another process's pending flow, and an entry is consumed on first use.
+- **Redirected UDP flows** are addressed by a loopback flow address that the relay maps back to the original destination. These addresses are not secret (they are visible in `/proc/net/udp`), so on a **multi-user host** another local user can send datagrams to the relay's UDP port and have them forwarded to a destination that some other process is already talking to, through the same proxy. Run ProxyBridge on machines you trust locally.
+- A rule that needs a proxy that does not exist **blocks** instead of letting traffic through.
+- The relay listens on loopback only (UDP is additionally bound to the `lo` device). Other network namespaces (containers) are never redirected.
+- Proxy passwords are kept in `/etc/proxybridge/config.ini` (mode 0600, root). On the command line, `--proxy user:pass@host` is wiped from the process list after parsing, but a shell history can still keep it; prefer the GUI or a config file for secrets.
 
 ## Use Cases
 
@@ -314,7 +323,7 @@ Add as many `--proxy` entries (CLI) or proxies (GUI) as you need; each rule choo
 
   These addresses and ports are used by system components, network discovery, and essential Linux services.
 
-- **UDP Proxy Requirements**: UDP traffic only works when a SOCKS5 proxy is configured. If an HTTP proxy server is configured, ProxyBridge will ignore UDP proxy rules and route UDP traffic as direct connection instead. This limitation does not affect UDP rules with BLOCK or DIRECT actions.
+- **UDP Proxy Requirements**: UDP traffic only works through a SOCKS5 proxy. A rule that sends UDP to an HTTP proxy cannot be honoured, so that UDP traffic goes DIRECT; ProxyBridge logs a warning naming the rule when it is created or the engine starts. Use a SOCKS5 proxy, or a TCP-only rule plus a separate `UDP ... BLOCK` rule, if direct UDP is not acceptable. This limitation does not affect UDP rules with BLOCK or DIRECT actions.
 
   **Important UDP Considerations**:
   - Configuring a SOCKS5 proxy does not guarantee UDP will work. Most SOCKS5 proxies do not support UDP traffic, including SSH SOCKS5 proxies.
@@ -510,6 +519,8 @@ cd ../../tests && sudo ./e2e.sh                   # end-to-end with real kernel 
 sudo ./e2e_domains.sh                             # domain rules with a real resolver client (root, needs dig)
 sudo ./e2e_rules.sh                               # every rule form + every proxy type, incl. HTTP auth and UDP rules (root)
 sudo ./api_live.sh                                # library API: edit/move/disable/delete rules and proxies on the live datapath (root)
+sudo BPFTOOL=$(command -v bpftool) ./e2e_security.sh   # relay hand-off cannot be hijacked from another loopback address (root)
+sudo ./churn.sh 3000                              # rule/proxy churn with live traffic: memory, fds and threads must stay flat (root)
 sudo ./e2e_openssh.sh                             # interoperability with a real third-party SOCKS5 server (OpenSSH ssh -D), 40 MB each way (root)
 sudo NODE=$(command -v node) NEXUS_JS=/path/to/nexus-proxy/script.js ./e2e_nexus.sh   # against Nexus Proxy, a real forwarding SOCKS5 server with UDP (root)
 sudo ./scale.sh 10000                             # 10,000 concurrent proxied connections (root)

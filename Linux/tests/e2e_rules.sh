@@ -57,6 +57,9 @@ start_pb \
   --rule "python3*:203.0.113.160:*:BOTH:PROXY=a"
 sleep 1
 
+echo "== diagnostics"
+grep -q "sends UDP to HTTP proxy 'c', which cannot carry UDP" "$WORK/pb.out" && ok "a UDP rule pointing at an HTTP proxy is reported in the log" || bad "no warning for UDP over an HTTP proxy"
+
 echo "== host forms (process: curl)"
 via     "single IP"                               http://192.0.2.10/            A 192.0.2.10:80
 via     "CIDR /24"                                http://192.0.2.200/           A 192.0.2.200:80

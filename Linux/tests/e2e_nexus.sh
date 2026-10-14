@@ -63,7 +63,6 @@ sha_for() { python3 -c "$EXPECT_PY" "$1"; }
 
 stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 2 \
   --proxy n1=socks5://127.0.0.1:1080 --proxy n2=socks5://nx:secret@127.0.0.1:1081 \
-  --rule "node:*:*:BOTH:DIRECT" \
   --rule "curl:10.77.1.3:*:TCP:DIRECT" \
   --rule "curl:10.77.1.4:*:TCP:BLOCK" \
   --rule "curl:10.77.1.1:18701-18703:TCP:PROXY=n2" \
@@ -111,6 +110,13 @@ out=$(O http://10.77.1.6:18700/);   has "*.corp.test -> n1"                     
 inlog $NX1LOG "[CONNECT] 10.77.1.6:18700" && ok "  n1 carried the domain-matched connection" || bad "  not via n1"
 inlog $NX1LOG "[CONNECT] 10.77.1.53:53" && ok "  n1 carried the DNS-over-TCP query" || bad "  DNS/TCP did not go through n1"
 grep -q "10.77.1.5 (app.example.test)" "$WORK/pb.out" && ok "  connection log names the domain" || bad "  no domain in the connection log"
+
+echo "== the proxy's own process is exempted automatically (no DIRECT rule for node exists)"
+inlog $NX2LOG "[CONNECT] 10.77.1.5:18700" && ok "  nexus's own outbound connections were not sent back through itself" || bad "  proxy loop"
+before=$(grep -cF "[CONNECT] 10.77.1.5:18700" "$NX2LOG")
+"$NODE" -e "require('net').connect(18700,'10.77.1.5').on('connect',function(){this.end()}).on('error',()=>{})"; sleep 1
+after=$(grep -cF "[CONNECT] 10.77.1.5:18700" "$NX2LOG")
+[ "$after" -gt "$before" ] && ok "another node process (not the proxy) is still proxied: exemption is per process, not per binary" || bad "unrelated node process bypassed the rules"
 
 echo "== TCP: many connections, big transfers, integrity"
 cpids=(); for i in $(seq 1 100); do (O http://10.77.1.1:18700/ > "$WORK/p$i.out") & cpids+=($!); done; wait "${cpids[@]}" 2>/dev/null

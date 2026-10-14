@@ -7,4 +7,4 @@ WORK=$(mktemp -d); trap 'kill $FAKE 2>/dev/null; wait 2>/dev/null; rm -rf $WORK'
 gcc -Wall -Wextra -O1 -g -I"$ROOT/src" -o "$WORK/api_live_test" "$HERE/api_live_test.c" -L"$PB_DIR" -lproxybridge -lpthread || exit 1
 python3 "$HERE/fake_proxies.py" "$WORK/log" >/dev/null 2>&1 & FAKE=$!
 sleep 1
-LD_LIBRARY_PATH="$PB_DIR" "$WORK/api_live_test"
+env LD_LIBRARY_PATH="$PB_DIR" ${PB_PRELOAD:+LD_PRELOAD="$PB_PRELOAD"} "$WORK/api_live_test"

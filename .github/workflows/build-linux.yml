@@ -164,7 +164,7 @@ jobs:
         uname -r
         ls /sys/kernel/btf/vmlinux && mount | grep -q "type cgroup2" || { echo "kernel lacks BTF or cgroup2: skipping"; exit 0; }
         fail=0
-        for t in e2e e2e_rules e2e_domains api_live; do
+        for t in e2e e2e_rules e2e_domains e2e_security api_live; do
           echo "::group::$t"
           sudo env PB_DIR="$PWD/Linux/output" BPFTOOL="$BPFTOOL" bash "Linux/tests/$t.sh" || fail=1
           echo "::endgroup::"

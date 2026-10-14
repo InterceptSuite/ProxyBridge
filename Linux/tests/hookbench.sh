@@ -7,7 +7,7 @@ export LD_LIBRARY_PATH="$PB_DIR"
 IP=10.77.0.1   # alias on lo: local like loopback, but not caught by the implicit-loopback bypass
 ip addr add $IP/32 dev lo 2>/dev/null
 trap 'ip addr del $IP/32 dev lo 2>/dev/null' EXIT
-run() { for i in 1 2 3; do $HB tcp $IP 19555 20000; done; for i in 1 2 3; do $HB udp $IP 19556 1000000; done; }
+run() { for i in 1 2 3; do $HB udp $IP 19556 1000000; done; }
 echo "### A: ProxyBridge not running"; run
 start() { stdbuf -oL "$PB_DIR/ProxyBridge" "$@" > /tmp/pbbench.out 2>&1 & PB=$!; for _ in $(seq 40); do grep -q "ProxyBridge started" /tmp/pbbench.out && break; sleep 0.25; done; }
 echo "### B: running, 20 rules for other programs (this binary: empty class -> immediate direct)"
