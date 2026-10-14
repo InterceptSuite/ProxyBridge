@@ -11,3 +11,9 @@ gcc -O1 -I../src -I. -D_GNU_SOURCE $(pkg-config --cflags gtk+-3.0) tests/config_
 "$OUT/config_plain"
 ASAN_OPTIONS=detect_leaks=1 "$OUT/config_test"
 ASAN_OPTIONS=detect_leaks=1 "$OUT/json_test"
+gcc -O2 -Wall -Wextra -I. tests/events_test.c gui_events.c -o "$OUT/events_plain" -pthread
+time "$OUT/events_plain"
+gcc -g -Wall -Wextra -fsanitize=address,undefined -I. tests/events_test.c gui_events.c -o "$OUT/events_asan" -pthread
+ASAN_OPTIONS=detect_leaks=1 "$OUT/events_asan"
+gcc -g -O1 -Wall -Wextra -fsanitize=thread -I. tests/events_test.c gui_events.c -o "$OUT/events_tsan" -pthread
+setarch "$(uname -m)" -R "$OUT/events_tsan"

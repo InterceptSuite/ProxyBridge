@@ -76,7 +76,7 @@ static bool confirm(GtkWindow *parent, const char *format, ...) {
 static bool port_text_valid(const char *text, int *port_out) {
     size_t n = strlen(text);
     if (n == 0 || n > 5 || strspn(text, "0123456789") != n) return false;
-    int p = atoi(text);
+    int p = (int)parse_long(text);
     if (p < 1 || p > 65535) return false;
     *port_out = p;
     return true;
@@ -123,7 +123,7 @@ static void on_start_test_clicked(GtkWidget *widget, gpointer data) {
     }
 
     const char *t_host = gtk_entry_get_text(GTK_ENTRY(info->test_host));
-    int t_port = (int)safe_strtol(gtk_entry_get_text(GTK_ENTRY(info->test_port)));
+    int t_port = (int)parse_long(gtk_entry_get_text(GTK_ENTRY(info->test_port)));
     if (t_port <= 0 || t_port > 65535) t_port = 80;
 
     gtk_text_buffer_set_text(info->output_buffer, "Testing connection... Please wait...", -1);

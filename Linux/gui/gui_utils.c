@@ -1,9 +1,5 @@
 #include "gui.h"
 
-long safe_strtol(const char *nptr) {
-    return nptr ? strtol(nptr, NULL, 10) : 0;
-}
-
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...) {
     va_list args;
     va_start(args, format);
@@ -15,23 +11,6 @@ void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ..
     gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);
     g_free(msg);
-}
-
-void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines) {
-    if (gtk_text_buffer_get_line_count(buffer) > max_lines) {
-        GtkTextIter start, next;
-        gtk_text_buffer_get_start_iter(buffer, &start);
-        next = start;
-        gtk_text_iter_forward_line(&next);
-        gtk_text_buffer_delete(buffer, &start, &next);
-    }
-}
-
-char *get_current_time_str() {
-    GDateTime *now = g_date_time_new_now_local();
-    char *s = g_date_time_format(now, "[%H:%M:%S]");
-    g_date_time_unref(now);
-    return s;
 }
 
 GtkWidget *combo_new(const char *first, ...) {

@@ -12,15 +12,6 @@
 #include "ProxyBridge.h"
 
 typedef struct {
-    char *process_name;
-    uint32_t pid;
-    char *dest_ip;
-    uint16_t dest_port;
-    char *proxy_info;
-    char *timestamp;
-} ConnectionData;
-
-typedef struct {
     uint32_t id;            // library id, 0 = not registered
     char *name;             // unique key, rules and config refer to it
     ProxyType type;
@@ -58,6 +49,11 @@ extern GtkTextBuffer *log_buffer;
 extern GtkWidget *status_bar;
 extern guint status_context_id;
 
+// avoids libc strto*/atoi, glibc 2.38 redirects them to symbols old systems lack
+static inline long parse_long(const char *s) {
+    return s ? (long)g_ascii_strtoll(s, NULL, 10) : 0;
+}
+
 extern GList *g_profiles;
 extern char *g_active_profile;
 extern GList *g_proxies_list;   // working copy of the active profile
@@ -66,10 +62,7 @@ extern GList *g_rules_list;
 extern bool g_chk_logging;
 extern bool g_chk_dns;
 
-long safe_strtol(const char *nptr);
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...);
-void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines);
-char *get_current_time_str();
 GtkWidget *combo_new(const char *first, ...) G_GNUC_NULL_TERMINATED;
 GtkWidget *hint_label(const char *text);
 void set_error_label(GtkWidget *label, const char *msg);
@@ -103,6 +96,11 @@ void refresh_rules_window();
 void gui_log(const char *format, ...);
 void lib_log_callback(const char *message);
 void lib_connection_callback(const char *process_name, uint32_t pid, const char *dest_ip, uint16_t dest_port, const char *proxy_info);
+void gui_logs_init();
+void gui_logs_stop_timers();
+void gui_logs_free();
+uint64_t gui_conn_event_count();
+void on_pause_conn_toggled(GtkToggleButton *button, gpointer user_data);
 void on_search_conn_changed(GtkSearchEntry *entry, gpointer user_data);
 void on_search_log_changed(GtkSearchEntry *entry, gpointer user_data);
 void on_clear_conn_clicked(GtkButton *button, gpointer user_data);

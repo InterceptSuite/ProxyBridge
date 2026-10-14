@@ -239,10 +239,10 @@ static ProxyData *parse_proxy_line(char *line) {
     while (n < 6 && (tok = strsep(&line, "|")) != NULL) fields[n++] = tok;
     if (n < 4) return NULL;
 
-    int port = atoi(fields[3]);
+    int port = parse_long(fields[3]);
     ProxyData *px = g_malloc0(sizeof(ProxyData));
     px->name = unesc(fields[0]);
-    px->type = proxy_type_from_int(atoi(fields[1]));
+    px->type = proxy_type_from_int(parse_long(fields[1]));
     px->host = unesc(fields[2]);
     px->port = (port >= 1 && port <= 65535) ? (uint16_t)port : 0;
     px->username = unesc(n > 4 ? fields[4] : "");
@@ -256,9 +256,9 @@ static RuleData *parse_rule_line(char *line) {
     int idx = 0;
     while ((tok = strsep(&line, "|")) != NULL) {
         switch (idx++) {
-            case 1: rule->protocol = atoi(tok); break;
-            case 2: rule->action = atoi(tok); break;
-            case 3: rule->enabled = atoi(tok); break;
+            case 1: rule->protocol = parse_long(tok); break;
+            case 2: rule->action = parse_long(tok); break;
+            case 3: rule->enabled = parse_long(tok); break;
             case 4: rule->process_name = g_strdup(tok); break;
             case 5: rule->target_hosts = g_strdup(tok); break;
             case 6: rule->target_ports = g_strdup(tok); break;
@@ -328,13 +328,13 @@ void load_config() {
             }
             else if (section != 1) continue;
             else if (strcmp(line, "ip") == 0) g_strlcpy(old_ip, val, sizeof(old_ip));
-            else if (strcmp(line, "port") == 0) old_port = atoi(val);
-            else if (strcmp(line, "type") == 0) old_type = atoi(val);
+            else if (strcmp(line, "port") == 0) old_port = parse_long(val);
+            else if (strcmp(line, "type") == 0) old_type = parse_long(val);
             else if (strcmp(line, "user") == 0) g_strlcpy(old_user, val, sizeof(old_user));
             else if (strcmp(line, "pass") == 0) g_strlcpy(old_pass, val, sizeof(old_pass));
             else if (strcmp(line, "activeProfile") == 0) { g_free(saved_active); saved_active = unesc(val); }
-            else if (strcmp(line, "logging") == 0) g_chk_logging = atoi(val);
-            else if (strcmp(line, "dns") == 0) g_chk_dns = atoi(val);
+            else if (strcmp(line, "logging") == 0) g_chk_logging = parse_long(val);
+            else if (strcmp(line, "dns") == 0) g_chk_dns = parse_long(val);
         }
         else if (section == 3 && cur) {
             ProxyData *px = parse_proxy_line(line);
