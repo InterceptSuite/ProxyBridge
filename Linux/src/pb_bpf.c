@@ -138,7 +138,7 @@ int pb_bpf_start(const struct pb_bpf_cfg *cfg, pb_event_cb cb)
             bpf_program__set_autoload(G.skel->progs.pb_getpeername6, false);
             err = proxybridge_bpf__load(G.skel);
         }
-        if (err || !G.skel) { pb_core_log("loading the BPF programs failed (kernel needs BTF and cgroup sock_addr support, >= 5.8): %s", strerror(-err ? -err : errno)); goto out; }
+        if (err || !G.skel) { pb_core_log("loading the BPF programs failed (kernel needs BTF and cgroup sock_addr support, >= 5.11): %s", strerror(-err ? -err : errno)); goto out; }
     }
 
     {   // sockets of other network namespaces (containers) must not be redirected to our loopback relay

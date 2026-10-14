@@ -73,7 +73,7 @@ void ProxyBridge_SetLogCallback(LogCallback callback);
 void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
 void ProxyBridge_SetTrafficLoggingEnabled(bool enable);
 void ProxyBridge_ClearConnectionLogs(void);
-bool ProxyBridge_Start(void);   /* needs root (CAP_BPF/CAP_SYS_ADMIN) and a BTF kernel >= 5.8; returns false and logs why on failure */
+bool ProxyBridge_Start(void);   /* needs root (CAP_BPF/CAP_SYS_ADMIN) and a BTF kernel >= 5.11; returns false and logs why on failure */
 bool ProxyBridge_Stop(void);    /* keeps rules and proxies; Start() may be called again */
 int  ProxyBridge_TestConnection(const char* target_host, uint16_t target_port, char* result_buffer, size_t buffer_size);
 int  ProxyBridge_TestProxy(uint32_t proxy_id, const char* target_host, uint16_t target_port, char* result_buffer, size_t buffer_size);

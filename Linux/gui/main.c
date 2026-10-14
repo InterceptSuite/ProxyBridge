@@ -201,7 +201,7 @@ static void on_about(GtkWidget *widget, gpointer data) {
         "<span size='xx-large' weight='bold'>ProxyBridge</span>\n"
         "<span color='gray'>Version %s</span>\n\n"
         "Universal proxy client for Linux applications\n"
-        "eBPF backend (needs root, kernel 5.8+ with BTF and cgroup v2)\n\n"
+        "eBPF backend (needs root, kernel 5.11+ with BTF and cgroup v2)\n\n"
         "Author: Sourav Kalal / InterceptSuite\n\n"
         "Website: <a href=\"https://interceptsuite.com\">interceptsuite.com</a>\n"
         "GitHub: <a href=\"https://github.com/InterceptSuite/ProxyBridge\">InterceptSuite/ProxyBridge</a>\n\n"
@@ -241,7 +241,7 @@ static bool start_engine() {
     show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR,
         "Failed to start the ProxyBridge engine.\n\n"
         "Open the \"Activity Logs\" tab to see the reason.\n"
-        "The eBPF backend needs root, a kernel >= 5.8 with BTF and cgroup v2.");
+        "The eBPF backend needs root, a kernel >= 5.11 with BTF and cgroup v2.");
     return false;
 }
 

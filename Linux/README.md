@@ -208,7 +208,7 @@ EXAMPLES:
        --rule firefox:*:*:BOTH:PROXY --rule curl:*:*:TCP:PROXY=work --verbose 2
 
 NOTE:
-  ProxyBridge needs root and a Linux kernel >= 5.8 with BTF and cgroup v2 (eBPF datapath).
+  ProxyBridge needs root and a Linux kernel >= 5.11 with BTF and cgroup v2 (eBPF datapath).
   Credentials given on the command line are visible to other users via ps.
 ```
 
@@ -293,7 +293,7 @@ Add as many `--proxy` entries (CLI) or proxies (GUI) as you need; each rule choo
 
 ## Current Limitations
 
-- **Needs a recent kernel**: Linux 5.8+ with BTF (`/sys/kernel/btf/vmlinux`) and cgroup v2 mounted (default on current Ubuntu, Debian, Fedora, Arch). Older kernels are not supported
+- **Needs a recent kernel**: Linux 5.11+ with BTF (`/sys/kernel/btf/vmlinux`) and cgroup v2 mounted (default on current Ubuntu, Debian, Fedora, Arch). Older kernels are not supported
 - **Root privileges required** - loading the eBPF programs needs root (CAP_BPF/CAP_SYS_ADMIN)
 - **Native IPv6 UDP to a PROXY rule fails closed** - an unconnected UDP socket sending to a native IPv6 address cannot be redirected (kernel limitation); the `sendto()` returns `EPERM` and applications fall back to IPv4/TCP. Connected IPv6 UDP sockets, IPv6 TCP and UDP to IPv4 destinations through dual-stack sockets all work
 - **IPv4 is the fully supported path**; IPv6 (TCP, connected UDP) works for IP rules but has no domain matching and the limits above
@@ -371,7 +371,7 @@ ProxyBridge hooks the **socket calls** (`connect()`, `sendmsg()`, `recvmsg()`) w
 
 ### Requirements
 
-- Linux kernel 5.8+ with BTF and cgroup v2 (to run); GCC, Make, **clang** and **bpftool** (to build the eBPF object and skeleton)
+- Linux kernel 5.11+ with BTF and cgroup v2 (to run); GCC, Make, **clang** and **bpftool** (to build the eBPF object and skeleton)
 - Development libraries:
   - libbpf-dev (Debian/Ubuntu) or libbpf-devel (Fedora/RHEL)
   - libgtk-3-dev (optional, for GUI) or gtk3-devel (Fedora/RHEL)

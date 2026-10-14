@@ -119,7 +119,7 @@ static void show_help(const char* prog)
     printf("       --rule firefox:*:*:BOTH:PROXY --rule curl:*:*:TCP:PROXY=work --verbose 2\n\n");
 
     printf("NOTE:\n");
-    printf("  ProxyBridge needs root and a Linux kernel >= 5.8 with BTF and cgroup v2 (eBPF datapath).\n");
+    printf("  ProxyBridge needs root and a Linux kernel >= 5.11 with BTF and cgroup v2 (eBPF datapath).\n");
     printf("  Credentials given on the command line are visible to other users via ps.\n\n");
 }
 
