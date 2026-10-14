@@ -496,11 +496,17 @@ static int relay_connect(uint16_t src)
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = htons(src) };
-    if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) { close(fd); return -1; }
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) {
+        printf("      relay_connect: bind(127.0.0.1:%u) failed: %s\n", src, strerror(errno));
+        close(fd); return -1;
+    }
     a.sin_port = htons(pb_relay_tcp_port());
     struct timeval tv = { 10, 0 };
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);     // bounds connect()
-    if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) { close(fd); return -1; }
+    if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) {
+        printf("      relay_connect: connect(src port %u -> relay port %u) failed: %s\n", src, pb_relay_tcp_port(), strerror(errno));
+        close(fd); return -1;
+    }
     tv.tv_sec = 30;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
