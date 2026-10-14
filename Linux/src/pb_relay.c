@@ -1,8 +1,5 @@
-// pb_relay.c - userspace relay for the eBPF backend.
-//
-// TCP: acceptor thread -> bounded handshake worker pool (blocking steps with deadlines) -> epoll data threads.
-// UDP: one epoll thread owning every session; SOCKS5 UDP ASSOCIATE setup runs in the worker pool.
-// Ownership: a conn/session is only touched by the thread that owns its epoll; workers hand objects over via queues.
+// Userspace relay for the eBPF backend: TCP (SOCKS5 / HTTP CONNECT / DIRECT) and UDP (SOCKS5 UDP ASSOCIATE / DIRECT).
+// Every conn/session is owned by exactly one epoll thread; handshake workers hand finished objects over through queues.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -28,7 +25,7 @@
 
 #include "pb_internal.h"
 
-#define SCRATCH_SZ      65536   // per data thread read buffer; idle connections hold no buffer
+#define SCRATCH_SZ      65536
 #define HDR_MAX         8192
 #define NWORKERS        16
 #define MAX_DATA        8
@@ -39,15 +36,14 @@
 #define UDP_QMAX        32
 #define UDP_QBYTES      (256 * 1024)
 #define UDP_MAXDG       65536
+#define UDP_BATCH       16
+#define FLOW_TTL_MS     1000
 #define DC_SIZE         1024
 #define SESS_BUCKETS    256
 #define DIRECT_ID       0xFFFFFFFFu
 
 static char TAG_STOP, TAG_WAKE, TAG_UDP, TAG_TIMER;
 
-// ---------------------------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------------------------
 static int64_t now_ms(void)
 {
     struct timespec ts;
@@ -105,7 +101,6 @@ static int wait_fd(int fd, short ev, int64_t deadline, int stopfd)
     }
 }
 
-// Blocking-with-deadline I/O context for handshakes (fd is non-blocking).
 struct io {
     int     fd;
     int64_t dl;
@@ -145,7 +140,6 @@ static int io_send(struct io *x, const void *buf, size_t n)
     return 0;
 }
 
-// Receives 1..n bytes.
 static ssize_t io_recv(struct io *x, void *buf, size_t n)
 {
     for (;;) {
@@ -175,9 +169,6 @@ static int io_recv_exact(struct io *x, void *buf, size_t n)
     return 0;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Connecting
-// ---------------------------------------------------------------------------------------------
 static void tune_sock(int fd)
 {
     int one = 1, idle = 60, intvl = 15, cnt = 4;
@@ -205,10 +196,8 @@ static int connect_addr(const struct sockaddr *sa, socklen_t len, int64_t dl, in
     return fd;
 }
 
-// ---------------------------------------------------------------------------------------------
 // Hostname resolution (IPv4): at most RES_MAX_THREADS short-lived detached lookups, deadline-bounded for the waiter,
 // results cached (fresh for 60 s; last good answer reused for up to 10 min when re-resolution fails).
-// ---------------------------------------------------------------------------------------------
 #define RES_MAX_THREADS 4
 #define RES_DEADLINE_MS 5000
 #define RES_TTL_MS      60000
@@ -254,7 +243,7 @@ static void *res_thread(void *arg)
     if (gr == 0 && res && res->ai_family == AF_INET) {
         r->addr = ((struct sockaddr_in *)res->ai_addr)->sin_addr;
         struct rescache *c = res_cache_find(r->name);
-        if (!c) {                                             // reuse a free slot, else evict the oldest
+        if (!c) {
             c = &res_cache[0];
             for (int i = 0; i < RES_CACHE_N; i++) {
                 if (!res_cache[i].used) { c = &res_cache[i]; break; }
@@ -304,7 +293,7 @@ static int resolve_v4(const char *name, int64_t dl, int stopfd, struct in_addr *
             pthread_attr_setstacksize(&at, 256 * 1024);
             if (r) {
                 snprintf(r->name, sizeof r->name, "%s", name);
-                r->refs = 2;                                  // thread + this waiter
+                r->refs = 2;
                 r->next = res_inflight; res_inflight = r;
                 res_threads++;
                 if (pthread_create(&th, &at, res_thread, r) != 0) {
@@ -336,7 +325,7 @@ static int resolve_v4(const char *name, int64_t dl, int stopfd, struct in_addr *
         res_unref(r);
     }
     if (rc != 0) {
-        c = res_cache_find(name);                             // the lookup may have refreshed it; else try a stale answer
+        c = res_cache_find(name);
         if (c && now_ms() - c->when < RES_STALE_MS) { *out = c->addr; rc = 0; }
     }
     pthread_mutex_unlock(&res_mu);
@@ -362,7 +351,7 @@ static int connect_host(const char *host, uint16_t port, int64_t dl, int stopfd,
         s->sin6_family = AF_INET6; s->sin6_port = htons(port); s->sin6_addr = a6;
         sl[0] = sizeof *s; n = 1;
     } else {
-        return -1;                                            // resolve_v4 filled err
+        return -1;
     }
     int eno = ETIMEDOUT;
     for (int i = 0; i < n; i++) {
@@ -376,9 +365,6 @@ static int connect_host(const char *host, uint16_t port, int64_t dl, int stopfd,
     return -1;
 }
 
-// ---------------------------------------------------------------------------------------------
-// SOCKS5 / HTTP CONNECT handshakes
-// ---------------------------------------------------------------------------------------------
 struct s5dst { uint8_t atyp; uint8_t addr[16]; char host[256]; uint16_t port; };
 struct s5bnd { uint8_t atyp; uint8_t addr[16]; uint16_t port; };
 
@@ -405,7 +391,6 @@ static void s5dst_from_orig(struct s5dst *d, const struct pb_orig *o)
     else { d->atyp = 4; memcpy(d->addr, o->addr, 16); }
 }
 
-// cmd: 1 = CONNECT, 3 = UDP ASSOCIATE
 static int socks5_request(struct io *x, const struct pb_proxy *p, uint8_t cmd, const struct s5dst *d, struct s5bnd *b)
 {
     bool auth = p->user[0] != 0;
@@ -484,7 +469,6 @@ static void b64(const char *in, size_t n, char *out)
     out[o] = 0;
 }
 
-// host: IP literal (v6 without brackets) or hostname. Bytes received after the response headers go to left/leftn.
 static int http_connect(struct io *x, const struct pb_proxy *p, const char *host, uint16_t port, uint8_t *left, size_t *leftn)
 {
     char hp[300];
@@ -530,17 +514,14 @@ static int http_connect(struct io *x, const struct pb_proxy *p, const char *host
     return 0;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Relay state
-// ---------------------------------------------------------------------------------------------
 struct conn {
     struct conn *prev, *next;
-    int      fd[2];                 // 0 = client, 1 = upstream
+    int      fd[2];
     size_t   off[2], len[2];        // pend[d]: unsent tail of bytes read from fd[d] (heap, freed once drained)
     uint8_t *pend[2];
     bool     dns;                   // original destination port 53: upstream->client is parsed as TCP-DNS
     bool     doff;                  // stopped observing (malformed stream)
-    uint8_t *dbuf;                  // bytes of the current, not yet complete, DNS message(s)
+    uint8_t *dbuf;
     size_t   dhave, dcap;
     uint32_t mask[2];
     bool     eof[2], shut[2], dead;
@@ -559,7 +540,7 @@ struct dthread {
     int             ep, wake;
     pthread_mutex_t mu;
     struct conn    *inq_head, *inq_tail;
-    struct conn    *conns;         // owned by thread
+    struct conn    *conns;
     struct conn    *grave;
     uint8_t        *scratch;
     int             pfd[2];         // reusable splice pipe; always empty between connections
@@ -588,13 +569,13 @@ struct sess {
     struct sess *hnext, *prev, *next, *dnext;
     struct sockaddr_in cli;
     uint32_t id, flow_be;            // id = proxy id or DIRECT_ID; flow_be only for DIRECT sessions
+    uint64_t sid;
     int      kind, state;
     int      up_fd, ctl_fd;
-    int      family;                 // DIRECT: family of original destination
     bool     connected;              // DIRECT: v6 sockets are connected; v4 are not (replies from any port of the host are accepted)
-    struct sockaddr_storage dst;     // DIRECT destination
+    struct sockaddr_storage dst;
     socklen_t dstlen;
-    uint16_t dport;                  // DIRECT: original destination port (53 => DNS tap)
+    uint16_t dport;
     bool     dead, ok, warned;
     int64_t  last, fail_until;
     struct pb_proxy proxy;
@@ -607,14 +588,14 @@ struct sess {
     size_t   qbytes;
 };
 
-struct dce {                         // per-(client, flow ip) decision cache
+struct dce {
     bool used;
     struct sockaddr_in cli;
-    uint32_t flow_be;
-    uint8_t addr[16];
-    uint16_t port;
-    int action;
-    int64_t last;
+    uint32_t flow_be, pid;
+    struct pb_orig o;
+    int action, fidx;
+    int64_t looked, last;
+    uint64_t sid;
 };
 
 static struct {
@@ -638,17 +619,21 @@ static struct {
     struct job *jhead, *jtail;
     int         jcount;
 
-    pthread_mutex_t dmu;            // UDP setup completion queue
+    pthread_mutex_t dmu;
     struct sess *done;
 
-    // UDP thread-confined state
     struct sess *sess_head;
     struct sess *buckets[SESS_BUCKETS];
     int          nsess;
     struct sess *sgrave;
     struct dce  *dc;
-    uint8_t     *rxbuf, *txbuf;
+    uint8_t     *rxbuf;
     int64_t      drop_count, drop_logged;
+    uint64_t     next_sid;
+    struct mmsghdr *mm;
+    struct iovec    *mmiov;
+    struct sockaddr_in *mmname;
+    char         (*mmctl)[CMSG_SPACE(sizeof(struct in_pktinfo))];
 } R = { .life = PTHREAD_MUTEX_INITIALIZER, .jmu = PTHREAD_MUTEX_INITIALIZER, .jcv = PTHREAD_COND_INITIALIZER,
         .dmu = PTHREAD_MUTEX_INITIALIZER, .lfd = -1, .ufd = -1, .stopfd = -1, .tmfd = -1, .uep = -1, .uwake = -1 };
 
@@ -657,9 +642,6 @@ static void proxy_desc(const struct pb_proxy *p, char *out, size_t n)
     snprintf(out, n, "%s %s:%u", p->type == PROXY_TYPE_SOCKS5 ? "SOCKS5" : "HTTP", p->host, p->port);
 }
 
-// ---------------------------------------------------------------------------------------------
-// Job queue / worker pool
-// ---------------------------------------------------------------------------------------------
 static int job_push(int kind, int fd, const struct pb_orig *o, struct sess *s)
 {
     struct job *j = calloc(1, sizeof *j);
@@ -695,7 +677,7 @@ static void conn_handoff(int cfd, int ufd, const uint8_t *left, size_t leftn, bo
     }
     unsigned start = atomic_fetch_add(&R.rr, 1);
     struct dthread *t = &R.data[start % R.ndata];
-    for (int i = 1; i < R.ndata; i++) {      // least-loaded, ties go to the round-robin choice
+    for (int i = 1; i < R.ndata; i++) {
         struct dthread *u = &R.data[(start + i) % R.ndata];
         if (atomic_load(&u->load) < atomic_load(&t->load)) t = u;
     }
@@ -712,13 +694,6 @@ static void conn_handoff(int cfd, int ufd, const uint8_t *left, size_t leftn, bo
     t->inq_tail = c;
     pthread_mutex_unlock(&t->mu);
     eventfd_write(t->wake, 1);
-}
-
-static void abort_close(int fd)
-{
-    struct linger l = { 1, 0 };
-    setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
-    close(fd);
 }
 
 static void tcp_job_run(struct job *j)
@@ -738,7 +713,7 @@ static void tcp_job_run(struct job *j)
         action = d.action; pid = d.proxy_id;
     }
     if (action == PB_ACT_DIRECT) {
-        pb_core_flow_event(o, PB_ACT_DIRECT, "DIRECT");
+        pb_core_flow_event(o, PB_ACT_DIRECT);
         struct sockaddr_storage ss;
         socklen_t sl = orig_to_sa(o, &ss);
         int eno = 0;
@@ -747,11 +722,11 @@ static void tcp_job_run(struct job *j)
     } else if (action == PB_ACT_PROXY) {
         struct pb_proxy px;
         if (pb_core_get_proxy(pid, &px) != 0) {
-            pb_core_flow_event(o, PB_ACT_PROXY, "unknown proxy");
+            pb_core_flow_event(o, PB_ACT_PROXY);
             snprintf(err, sizeof err, "no proxy configured (id %u) for %s", pid, dst);
         } else {
             proxy_desc(&px, desc, sizeof desc);
-            pb_core_flow_event(o, PB_ACT_PROXY, desc);
+            pb_core_flow_event(o, PB_ACT_PROXY);
             char cerr[200];
             up = connect_host(px.host, px.port, dl, R.stopfd, cerr, sizeof cerr);
             if (up < 0) {
@@ -775,8 +750,9 @@ static void tcp_job_run(struct job *j)
             }
         }
     } else {
-        pb_core_flow_event(o, PB_ACT_BLOCK, "BLOCK");
-        abort_close(cfd);
+        pb_core_flow_event(o, PB_ACT_BLOCK);
+        setsockopt(cfd, SOL_SOCKET, SO_LINGER, &(struct linger){ 1, 0 }, sizeof(struct linger));
+        close(cfd);
         atomic_fetch_sub(&R.nconn, 1);
         return;
     }
@@ -858,9 +834,6 @@ static void *worker_main(void *arg)
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Acceptor
-// ---------------------------------------------------------------------------------------------
 static void *acceptor_main(void *arg)
 {
     (void)arg;
@@ -879,15 +852,14 @@ static void *acceptor_main(void *arg)
                     struct pollfd s = { .fd = R.stopfd, .events = POLLIN };
                     poll(&s, 1, 200);
                 }
-                break;      // EAGAIN or error: back to poll
+                break;
             }
             struct pb_orig o;
-            if (pb_core_take_tcp_orig(ntohs(pa.sin_port), &o) != 0) {
-                pb_core_log("relay: no original destination for client port %u, closing", ntohs(pa.sin_port));
+            if (pb_core_take_tcp_orig(pa.sin_addr.s_addr, ntohs(pa.sin_port), &o) != 0) {
+                pb_core_log("relay: no original destination for client %s:%u, closing", inet_ntoa(pa.sin_addr), ntohs(pa.sin_port));
                 close(fd);
                 continue;
             }
-            tune_sock(fd);
             if (atomic_fetch_add(&R.nconn, 1) >= R.cfg.max_tcp_conns) {
                 atomic_fetch_sub(&R.nconn, 1);
                 int64_t t = now_ms();
@@ -906,16 +878,12 @@ static void *acceptor_main(void *arg)
     return NULL;
 }
 
-// ---------------------------------------------------------------------------------------------
-// TCP data threads
-// ---------------------------------------------------------------------------------------------
 static void pipe_discard(int fd)
 {
     char b[4096];
     while (read(fd, b, sizeof b) > 0) {}
 }
 
-// Reads `n` bytes the pipe holds into a fresh heap tail for direction d.
 static int spill_from_pipe(struct conn *c, int d, int pipe_rd, size_t n)
 {
     c->pend[d] = malloc(n);
@@ -955,7 +923,6 @@ static int pump_splice(struct dthread *t, struct conn *c, int d)
 }
 
 // Upstream->client for TCP-DNS: only whole messages (after pb_core_dns_observe returned) are forwarded.
-// Returns 1 progress, 0 none, -1 fatal.
 static int dns_pump_up(struct conn *c, uint8_t *scratch)
 {
     int progress = 0;
@@ -1091,7 +1058,6 @@ static void conn_close(struct dthread *t, struct conn *c)
     close(c->fd[1]);
     c->dead = true;
     conn_bufs_free(c);
-    c->pend[0] = c->pend[1] = NULL;
     if (c->prev) c->prev->next = c->next; else t->conns = c->next;
     if (c->next) c->next->prev = c->prev;
     c->next = t->grave;
@@ -1101,7 +1067,6 @@ static void conn_close(struct dthread *t, struct conn *c)
     atomic_fetch_sub(&t->load, 1);
 }
 
-// Returns after pump + epoll mask refresh; closes the conn when done/failed.
 static void conn_service(struct dthread *t, struct conn *c)
 {
     int r = conn_pump(t, c);
@@ -1121,7 +1086,8 @@ static void dthread_adopt(struct dthread *t)
         if (t->conns) t->conns->prev = c;
         t->conns = c;
         c->last = now_ms();
-        conn_service(t, c);
+        if (c->len[1] || c->dhave) conn_service(t, c);
+        else if (conn_update(t, c) != 0) conn_close(t, c);
         c = n;
     }
 }
@@ -1169,9 +1135,6 @@ done:
     return NULL;
 }
 
-// ---------------------------------------------------------------------------------------------
-// UDP
-// ---------------------------------------------------------------------------------------------
 static void udp_droplog(const char *why)
 {
     R.drop_count++;
@@ -1235,6 +1198,7 @@ static struct sess *sess_new(const struct sockaddr_in *cli, uint32_t id, uint32_
     s->ref[0].s = s->ref[1].s = s;
     s->ref[0].which = 0; s->ref[1].which = 1;
     s->last = now_ms();
+    s->sid = ++R.next_sid;
     uint32_t h = sess_hash(cli, id, flow);
     s->hnext = R.buckets[h]; R.buckets[h] = s;
     s->next = R.sess_head;
@@ -1267,85 +1231,91 @@ static int sess_arm(struct sess *s, int which, uint32_t events)
     return epoll_ctl(R.uep, EPOLL_CTL_ADD, fd, &ev);
 }
 
-static void flow_upsert(struct sess *s, const struct pb_orig *o, uint32_t flow_be)
+static int flow_upsert(struct sess *s, const struct pb_orig *o, uint32_t flow_be, int64_t now)
 {
     int victim = 0;
     for (int i = 0; i < s->nflows; i++) {
-        if (s->flows[i].port == o->port && !memcmp(s->flows[i].addr, o->addr, 16)) { victim = -1; s->flows[i].ip_be = flow_be; s->flows[i].last = s->last; break; }
+        if (s->flows[i].port == o->port && !memcmp(s->flows[i].addr, o->addr, 16)) {
+            s->flows[i].ip_be = flow_be;
+            s->flows[i].last = now;
+            return i;
+        }
         if (s->flows[i].last < s->flows[victim].last) victim = i;
     }
-    if (victim < 0) return;
     if (s->nflows < MAX_FLOWS) victim = s->nflows++;
     memcpy(s->flows[victim].addr, o->addr, 16);
     s->flows[victim].port = o->port;
     s->flows[victim].ip_be = flow_be;
-    s->flows[victim].last = s->last;
+    s->flows[victim].last = now;
+    return victim;
 }
 
-// Wraps the datagram with a SOCKS5 UDP header into R.txbuf; returns total length or 0.
-static size_t socks5_wrap(const struct pb_orig *o, const uint8_t *pl, size_t n)
+static size_t socks5_header(uint8_t *h, const struct pb_orig *o)
 {
-    size_t h = o->family == AF_INET ? 10 : 22;
-    if (n + h > UDP_MAXDG) return 0;
-    uint8_t *b = R.txbuf;
-    b[0] = b[1] = b[2] = 0;
-    if (o->family == AF_INET) { b[3] = 1; memcpy(b + 4, o->addr + 12, 4); }
-    else { b[3] = 4; memcpy(b + 4, o->addr, 16); }
-    b[h - 2] = (uint8_t)(o->port >> 8); b[h - 1] = (uint8_t)o->port;
-    memcpy(b + h, pl, n);
-    return n + h;
+    h[0] = h[1] = h[2] = 0;
+    size_t n;
+    if (o->family == AF_INET) { h[3] = 1; memcpy(h + 4, o->addr + 12, 4); n = 10; }
+    else { h[3] = 4; memcpy(h + 4, o->addr, 16); n = 22; }
+    h[n - 2] = (uint8_t)(o->port >> 8);
+    h[n - 1] = (uint8_t)o->port;
+    return n;
 }
 
-static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uint8_t *pl, size_t n)
+static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uint8_t *pl, size_t n, int64_t now)
 {
-    struct pb_orig o;
-    if (pb_core_get_udp_flow(flow_be, &o) != 0) { udp_droplog("unknown flow address"); return; }
-    int64_t now = now_ms();
     uint32_t hv = (cli->sin_addr.s_addr * 2654435761u) ^ (cli->sin_port * 40503u) ^ (flow_be * 2246822519u);
     struct dce *e = &R.dc[hv % DC_SIZE];
-    uint32_t pid = o.proxy_id;
-    if (!(e->used && e->cli.sin_addr.s_addr == cli->sin_addr.s_addr && e->cli.sin_port == cli->sin_port && e->flow_be == flow_be &&
-          e->port == o.port && !memcmp(e->addr, o.addr, 16) && now - e->last <= (int64_t)R.cfg.udp_idle_timeout_s * 1000)) {
-        int act = o.action;
-        if (act == PB_ACT_DECIDE) {
-            struct pb_decision d;
-            pb_core_decide(&o, &d);
-            act = d.action; pid = d.proxy_id;
-        }
-        char desc[300] = "BLOCK";
-        if (act == PB_ACT_PROXY) {
-            struct pb_proxy px;
-            if (pb_core_get_proxy(pid, &px) != 0) {
-                pb_core_log("relay: UDP: no proxy configured (id %u), dropping", pid);
-                act = PB_ACT_BLOCK;
-            } else {
-                proxy_desc(&px, desc, sizeof desc);
-                if (px.type != PROXY_TYPE_SOCKS5) snprintf(desc + strlen(desc), sizeof desc - strlen(desc), " (UDP unsupported)");
+    bool same = e->used && e->cli.sin_addr.s_addr == cli->sin_addr.s_addr && e->cli.sin_port == cli->sin_port && e->flow_be == flow_be;
+    if (!same || now - e->looked >= FLOW_TTL_MS) {
+        struct pb_orig o;
+        if (pb_core_get_udp_flow(flow_be, &o) != 0) { e->used = false; udp_droplog("unknown flow address"); return; }
+        bool keep = same && e->o.port == o.port && !memcmp(e->o.addr, o.addr, 16) && now - e->last <= (int64_t)R.cfg.udp_idle_timeout_s * 1000;
+        if (!keep) {
+            int act = o.action;
+            uint32_t pid = o.proxy_id;
+            if (act == PB_ACT_DECIDE) {
+                struct pb_decision d;
+                pb_core_decide(&o, &d);
+                act = d.action;
+                pid = d.proxy_id;
             }
-        } else if (act == PB_ACT_DIRECT) {
-            strcpy(desc, "DIRECT");
-        } else {
-            act = PB_ACT_BLOCK;
+            if (act == PB_ACT_PROXY) {
+                struct pb_proxy px;
+                if (pb_core_get_proxy(pid, &px) != 0) {
+                    pb_core_log("relay: UDP: no proxy configured (id %u), dropping", pid);
+                    act = PB_ACT_BLOCK;
+                } else {
+                    pid = px.id;
+                }
+            } else if (act != PB_ACT_DIRECT) {
+                act = PB_ACT_BLOCK;
+            }
+            pb_core_flow_event(&o, act);
+            e->action = act;
+            e->pid = pid;
+            e->sid = 0;
         }
-        pb_core_flow_event(&o, act, desc);
-        e->used = true; e->cli = *cli; e->flow_be = flow_be; memcpy(e->addr, o.addr, 16); e->port = o.port; e->action = act;
+        e->used = true;
+        e->cli = *cli;
+        e->flow_be = flow_be;
+        e->o = o;
+        e->looked = now;
     }
     e->last = now;
     if (e->action == PB_ACT_BLOCK) return;
 
+    const struct pb_orig *o = &e->o;
     struct sess *s;
     if (e->action == PB_ACT_DIRECT) {
         s = sess_find(cli, DIRECT_ID, flow_be);
         if (!s) {
-            struct sockaddr_storage ss;
-            socklen_t sl = orig_to_sa(&o, &ss);
             s = sess_new(cli, DIRECT_ID, flow_be, SK_DIRECT);
             if (!s) { udp_droplog("UDP session limit reached"); return; }
-            s->family = o.family;
-            s->dst = ss; s->dstlen = sl; s->dport = o.port;
-            s->connected = o.family != AF_INET;
-            s->up_fd = socket(ss.ss_family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (s->up_fd < 0 || (s->connected && connect(s->up_fd, (struct sockaddr *)&ss, sl) < 0) || sess_arm(s, 0, EPOLLIN) < 0) {
+            s->dstlen = orig_to_sa(o, &s->dst);
+            s->dport = o->port;
+            s->connected = o->family != AF_INET;
+            s->up_fd = socket(s->dst.ss_family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+            if (s->up_fd < 0 || (s->connected && connect(s->up_fd, (struct sockaddr *)&s->dst, s->dstlen) < 0) || sess_arm(s, 0, EPOLLIN) < 0) {
                 pb_core_log("relay: UDP direct socket failed: %s", strerror(errno));
                 sess_destroy(s);
                 return;
@@ -1358,11 +1328,10 @@ static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uin
         return;
     }
 
-    // PROXY: re-resolve to get the canonical id and type
-    struct pb_proxy px;
-    if (pb_core_get_proxy(pid, &px) != 0) { udp_droplog("proxy vanished"); return; }
-    s = sess_find(cli, px.id, 0);
+    s = sess_find(cli, e->pid, 0);
     if (!s) {
+        struct pb_proxy px;
+        if (pb_core_get_proxy(e->pid, &px) != 0) { udp_droplog("proxy vanished"); return; }
         s = sess_new(cli, px.id, 0, px.type == PROXY_TYPE_SOCKS5 ? SK_SOCKS5 : SK_DROP);
         if (!s) { udp_droplog("UDP session limit reached"); return; }
         s->proxy = px;
@@ -1370,50 +1339,72 @@ static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uin
             s->state = ST_READY;
         } else {
             s->state = ST_SETUP;
-            if (job_push(J_UDP, -1, NULL, s) != 0) { s->state = ST_FAILED; s->fail_until = now + 5000; udp_droplog("setup queue full"); }
+            if (job_push(J_UDP, -1, NULL, s) != 0) {
+                s->state = ST_FAILED;
+                s->fail_until = now + 5000;
+                udp_droplog("setup queue full");
+            }
         }
     }
     s->last = now;
     if (s->kind == SK_DROP) {
         if (!s->warned) {
             s->warned = true;
-            pb_core_log("relay: UDP cannot be proxied through HTTP proxy '%s'; dropping UDP from %s:%u", px.name,
+            pb_core_log("relay: UDP cannot be proxied through HTTP proxy '%s'; dropping UDP from %s:%u", s->proxy.name,
                         inet_ntoa(cli->sin_addr), ntohs(cli->sin_port));
         }
         return;
     }
     if (s->state == ST_FAILED) { udp_droplog("proxy UDP setup failed"); return; }
-    flow_upsert(s, &o, flow_be);
-    size_t wl = socks5_wrap(&o, pl, n);
-    if (!wl) { udp_droplog("datagram too large"); return; }
+
+    if (e->sid == s->sid && e->fidx < s->nflows && s->flows[e->fidx].port == o->port && !memcmp(s->flows[e->fidx].addr, o->addr, 16)) {
+        s->flows[e->fidx].last = now;
+    } else {
+        e->fidx = flow_upsert(s, o, flow_be, now);
+        e->sid = s->sid;
+    }
+
+    uint8_t hdr[22];
+    size_t hl = socks5_header(hdr, o);
+    if (hl + n > UDP_MAXDG) { udp_droplog("datagram too large"); return; }
     if (s->state == ST_SETUP) {
-        if (s->nq >= UDP_QMAX || s->qbytes + wl > UDP_QBYTES) { udp_droplog("setup queue full"); return; }
-        struct pkt *p = malloc(sizeof *p + wl);
+        if (s->nq >= UDP_QMAX || s->qbytes + hl + n > UDP_QBYTES) { udp_droplog("setup queue full"); return; }
+        struct pkt *p = malloc(sizeof *p + hl + n);
         if (!p) return;
-        p->len = wl; memcpy(p->d, R.txbuf, wl);
-        s->q[s->nq++] = p; s->qbytes += wl;
+        p->len = hl + n;
+        memcpy(p->d, hdr, hl);
+        memcpy(p->d + hl, pl, n);
+        s->q[s->nq++] = p;
+        s->qbytes += p->len;
         return;
     }
-    send(s->up_fd, R.txbuf, wl, MSG_DONTWAIT | MSG_NOSIGNAL);
+    struct iovec iov[2] = { { hdr, hl }, { (void *)pl, n } };
+    struct msghdr mh = { .msg_iov = iov, .msg_iovlen = 2 };
+    sendmsg(s->up_fd, &mh, MSG_DONTWAIT | MSG_NOSIGNAL);
 }
 
 static void udp_recv_client(void)
 {
-    for (int i = 0; i < 128; i++) {
-        struct sockaddr_in cli;
-        union { char b[CMSG_SPACE(sizeof(struct in_pktinfo))]; struct cmsghdr a; } cb;
-        struct iovec iov = { R.rxbuf, UDP_MAXDG };
-        struct msghdr mh = { .msg_name = &cli, .msg_namelen = sizeof cli, .msg_iov = &iov, .msg_iovlen = 1,
-                             .msg_control = cb.b, .msg_controllen = sizeof cb.b };
-        ssize_t n = recvmsg(R.ufd, &mh, MSG_DONTWAIT);
-        if (n < 0) return;
-        if (mh.msg_flags & MSG_TRUNC) continue;
-        bool have = false;
-        struct in_pktinfo pi;
-        for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(&mh, c))
-            if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_PKTINFO) { memcpy(&pi, CMSG_DATA(c), sizeof pi); have = true; }
-        if (!have || (ntohl(pi.ipi_addr.s_addr) >> 24) != 127) { udp_droplog("destination not in 127.0.0.0/8"); continue; }
-        udp_dgram(&cli, pi.ipi_addr.s_addr, R.rxbuf, (size_t)n);
+    for (int round = 0; round < 8; round++) {
+        for (int i = 0; i < UDP_BATCH; i++) {
+            R.mmiov[i] = (struct iovec){ R.rxbuf + (size_t)i * UDP_MAXDG, UDP_MAXDG };
+            R.mm[i].msg_hdr = (struct msghdr){ .msg_name = &R.mmname[i], .msg_namelen = sizeof(struct sockaddr_in), .msg_iov = &R.mmiov[i],
+                                               .msg_iovlen = 1, .msg_control = R.mmctl[i], .msg_controllen = sizeof R.mmctl[i] };
+        }
+        int cnt = recvmmsg(R.ufd, R.mm, UDP_BATCH, MSG_DONTWAIT, NULL);
+        if (cnt <= 0) return;
+        int64_t now = now_ms();
+        for (int i = 0; i < cnt; i++) {
+            struct msghdr *mh = &R.mm[i].msg_hdr;
+            if (mh->msg_flags & MSG_TRUNC) continue;
+            struct in_pktinfo pi;
+            bool have = false;
+            for (struct cmsghdr *c = CMSG_FIRSTHDR(mh); c; c = CMSG_NXTHDR(mh, c))
+                if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_PKTINFO) { memcpy(&pi, CMSG_DATA(c), sizeof pi); have = true; }
+            if (!have || (ntohl(pi.ipi_addr.s_addr) >> 24) != 127) { udp_droplog("destination not in 127.0.0.0/8"); continue; }
+            udp_dgram(&R.mmname[i], pi.ipi_addr.s_addr, R.rxbuf + (size_t)i * UDP_MAXDG, R.mm[i].msg_len, now);
+        }
+        if (cnt < UDP_BATCH) return;
     }
 }
 
@@ -1544,9 +1535,6 @@ static void *udp_main(void *arg)
     return NULL;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Start / stop
-// ---------------------------------------------------------------------------------------------
 static void teardown(void)
 {
     atomic_store(&R.stopping, true);
@@ -1561,7 +1549,6 @@ static void teardown(void)
     R.acc_started = R.udp_started = false;
     R.nworkers = 0;
 
-    // everything is single-threaded from here on
     while (R.jhead) {
         struct job *j = R.jhead;
         R.jhead = j->next;
@@ -1589,7 +1576,8 @@ static void teardown(void)
     R.nsess = 0;
     free(R.dc); R.dc = NULL;
     free(R.rxbuf); R.rxbuf = NULL;
-    free(R.txbuf); R.txbuf = NULL;
+    free(R.mm); free(R.mmiov); free(R.mmname); free(R.mmctl);
+    R.mm = NULL; R.mmiov = NULL; R.mmname = NULL; R.mmctl = NULL;
     close_fd(&R.lfd);
     close_fd(&R.ufd);
     close_fd(&R.tmfd);
@@ -1624,9 +1612,6 @@ int pb_relay_start(const struct pb_relay_cfg *cfg)
     int one = 1;
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     R.ndata = ncpu < 2 ? 2 : (ncpu > MAX_DATA ? MAX_DATA : (int)ncpu);
-#ifdef PB_RELAY_NDATA            // benchmarking override
-    R.ndata = PB_RELAY_NDATA;
-#endif
     for (int i = 0; i < R.ndata; i++) {
         memset(&R.data[i], 0, sizeof R.data[i]);
         R.data[i].ep = R.data[i].wake = -1;
@@ -1641,6 +1626,7 @@ int pb_relay_start(const struct pb_relay_cfg *cfg)
     R.lfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (R.lfd < 0) { why = "tcp socket"; goto fail; }
     setsockopt(R.lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    tune_sock(R.lfd);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(c.tcp_port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
     if (bind(R.lfd, (struct sockaddr *)&a, sizeof a) < 0 || listen(R.lfd, 4096) < 0) {
         pb_core_log("relay: cannot listen on 127.0.0.1:%u: %s", c.tcp_port, strerror(errno));
@@ -1652,7 +1638,7 @@ int pb_relay_start(const struct pb_relay_cfg *cfg)
     if (setsockopt(R.ufd, SOL_SOCKET, SO_BINDTODEVICE, "lo", 3) < 0)
         pb_core_log("relay: SO_BINDTODEVICE lo failed (%s); relying on destination address filtering", strerror(errno));
     int rb = 4 << 20;
-    setsockopt(R.ufd, SOL_SOCKET, SO_RCVBUF, &rb, sizeof rb);
+    if (setsockopt(R.ufd, SOL_SOCKET, SO_RCVBUFFORCE, &rb, sizeof rb) < 0) setsockopt(R.ufd, SOL_SOCKET, SO_RCVBUF, &rb, sizeof rb);
     if (setsockopt(R.ufd, IPPROTO_IP, IP_PKTINFO, &one, sizeof one) < 0) { why = "IP_PKTINFO"; goto fail; }
     a.sin_port = htons(c.udp_port);
     a.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -1665,9 +1651,12 @@ int pb_relay_start(const struct pb_relay_cfg *cfg)
     R.uep = epoll_create1(EPOLL_CLOEXEC);
     R.tmfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     R.dc = calloc(DC_SIZE, sizeof *R.dc);
-    R.rxbuf = malloc(UDP_MAXDG);
-    R.txbuf = malloc(UDP_MAXDG + 32);
-    if (R.uep < 0 || R.tmfd < 0 || !R.dc || !R.rxbuf || !R.txbuf) { why = "udp resources"; goto fail; }
+    R.rxbuf = malloc((size_t)UDP_MAXDG * UDP_BATCH);
+    R.mm = calloc(UDP_BATCH, sizeof *R.mm);
+    R.mmiov = calloc(UDP_BATCH, sizeof *R.mmiov);
+    R.mmname = calloc(UDP_BATCH, sizeof *R.mmname);
+    R.mmctl = calloc(UDP_BATCH, sizeof *R.mmctl);
+    if (R.uep < 0 || R.tmfd < 0 || !R.dc || !R.rxbuf || !R.mm || !R.mmiov || !R.mmname || !R.mmctl) { why = "udp resources"; goto fail; }
     struct itimerspec its = { .it_interval = { 1, 0 }, .it_value = { 1, 0 } };
     if (timerfd_settime(R.tmfd, 0, &its, NULL) < 0 ||
         add_ep(R.uep, R.ufd, &TAG_UDP, EPOLLIN) || add_ep(R.uep, R.stopfd, &TAG_STOP, EPOLLIN) ||
@@ -1678,9 +1667,6 @@ int pb_relay_start(const struct pb_relay_cfg *cfg)
         t->scratch = malloc(SCRATCH_SZ);
         if (pipe2(t->pfd, O_CLOEXEC | O_NONBLOCK) == 0) fcntl(t->pfd[0], F_SETPIPE_SZ, PIPE_SZ);
         else t->pfd[0] = t->pfd[1] = -1, t->nosplice = true;
-#ifdef PB_RELAY_COPY_ONLY          // benchmarking override
-        t->nosplice = true;
-#endif
         t->ep = epoll_create1(EPOLL_CLOEXEC);
         t->wake = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
         if (!t->scratch || t->ep < 0 || t->wake < 0 || add_ep(t->ep, t->wake, &TAG_WAKE, EPOLLIN) || add_ep(t->ep, R.stopfd, &TAG_STOP, EPOLLIN)) {
@@ -1728,9 +1714,6 @@ void pb_relay_stop(void)
 uint16_t pb_relay_tcp_port(void) { return R.tcp_port; }
 uint16_t pb_relay_udp_port(void) { return R.udp_port; }
 
-// ---------------------------------------------------------------------------------------------
-// Synchronous proxy test
-// ---------------------------------------------------------------------------------------------
 int pb_relay_test_proxy(const struct pb_proxy *proxy, const char *host, uint16_t port, char *buf, size_t buflen)
 {
     if (!buf || !buflen) return -1;

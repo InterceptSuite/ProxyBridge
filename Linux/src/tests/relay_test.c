@@ -1,7 +1,5 @@
-// Root-free loopback test harness for pb_relay.c. Fakes every pb_core_* function and runs in-process fake
-// SOCKS5 / HTTP CONNECT proxies and echo servers. The kernel redirect is simulated (see README comments below):
-//   TCP: client bind()s a known source port, the fake pb_core_take_tcp_orig() maps that port to the destination.
-//   UDP: client sends to 127.x.y.z:udp_port, the fake pb_core_get_udp_flow() maps 127.x.y.z to the destination.
+// Root-free loopback test harness for pb_relay.c: fake pb_core_* services, in-process SOCKS5 / HTTP proxies and echo servers.
+// The kernel redirect is simulated by registering original destinations keyed by the client's (ip,port) or by flow address.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -33,12 +31,11 @@
 
 #include "../pb_internal.h"
 
-// ---------------------------------------------------------------------------------------------
-// Fake core
-// ---------------------------------------------------------------------------------------------
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static struct pb_orig g_tcp[65536];
-static bool g_tcp_valid[65536];
+#define TCP_SLOTS 65536
+static struct tcp_slot { uint64_t key; struct pb_orig o; uint8_t state; } g_tcp[TCP_SLOTS];   // 0 free, 1 used, 2 tombstone
+static inline uint64_t tcp_key(uint32_t ip_be, uint16_t port) { return (uint64_t)ip_be << 16 | port; }
+static inline uint32_t tcp_hash(uint64_t k) { return (uint32_t)((k * 0x9E3779B97F4A7C15ull) >> 48); }
 static struct { uint32_t ip_be; struct pb_orig o; bool used; } g_flows[64];
 static struct pb_proxy g_px[16];
 static bool g_px_used[16];
@@ -48,11 +45,19 @@ static atomic_int g_ev, g_ev_proxy, g_ev_direct, g_ev_block, g_decide_calls;
 static char g_log[64][512];
 static int g_log_n;
 
-int pb_core_take_tcp_orig(uint16_t p, struct pb_orig *out)
+int pb_core_take_tcp_orig(uint32_t ip_be, uint16_t port, struct pb_orig *out)
 {
+    uint64_t k = tcp_key(ip_be, port);
+    int ok = 0;
     pthread_mutex_lock(&g_mu);
-    int ok = g_tcp_valid[p];
-    if (ok) { *out = g_tcp[p]; g_tcp_valid[p] = false; }
+    for (uint32_t i = tcp_hash(k), n = 0; n < TCP_SLOTS && g_tcp[i].state; i = (i + 1) % TCP_SLOTS, n++) {
+        if (g_tcp[i].state == 1 && g_tcp[i].key == k) {
+            *out = g_tcp[i].o;
+            g_tcp[i].state = g_tcp[(i + 1) % TCP_SLOTS].state ? 2 : 0;
+            ok = 1;
+            break;
+        }
+    }
     pthread_mutex_unlock(&g_mu);
     return ok ? 0 : -1;
 }
@@ -92,15 +97,14 @@ void pb_core_log(const char *fmt, ...)
     pthread_mutex_unlock(&g_mu);
     if (getenv("VERBOSE")) fprintf(stderr, "  [log] %s\n", b);
 }
-void pb_core_flow_event(const struct pb_orig *o, int action, const char *d)
+void pb_core_flow_event(const struct pb_orig *o, int action)
 {
-    (void)o; (void)d;
+    (void)o;
     atomic_fetch_add(&g_ev, 1);
     if (action == PB_ACT_PROXY) atomic_fetch_add(&g_ev_proxy, 1);
     else if (action == PB_ACT_DIRECT) atomic_fetch_add(&g_ev_direct, 1);
     else atomic_fetch_add(&g_ev_block, 1);
 }
-bool pb_core_dns_via_proxy(void) { return false; }
 
 struct obs { int64_t t0, t1; size_t len; uint32_t h; };
 static struct obs g_obs[64];
@@ -143,9 +147,6 @@ static void set_decision(struct pb_decision d)
 static void log_clear(void) { pthread_mutex_lock(&g_mu); g_log_n = 0; memset(g_log, 0, sizeof g_log); pthread_mutex_unlock(&g_mu); }
 static void ev_clear(void) { g_ev = g_ev_proxy = g_ev_direct = g_ev_block = 0; }
 
-// ---------------------------------------------------------------------------------------------
-// Test plumbing
-// ---------------------------------------------------------------------------------------------
 static int g_pass, g_fail;
 static const char *volatile g_cur = "startup";
 static void watchdog(int sig)
@@ -165,7 +166,7 @@ static void arm_watchdog(void)
     signal(SIGALRM, watchdog);
     alarm((unsigned)(secs > 0 ? secs : 300));
 }
-#define RUN(fn) do { g_cur = #fn; printf("---- %s\n", #fn); fn(); } while (0)
+#define RUN(fn) do { const char *only_ = getenv("PB_TEST_ONLY"); if (only_ && !strstr(only_, #fn)) break; g_cur = #fn; printf("---- %s\n", #fn); fn(); } while (0)
 #define CHECK(cond, ...) do { if (cond) { g_pass++; printf("PASS  "); } else { g_fail++; printf("FAIL  "); } \
                               printf(__VA_ARGS__); printf("\n"); fflush(stdout); } while (0)
 
@@ -181,12 +182,20 @@ static void fill_orig(struct pb_orig *o, const char *ip, uint16_t port, int prot
     memcpy(o->addr + 12, &a, 4);
     o->port = port; o->family = AF_INET; o->proto = (uint8_t)proto; o->action = (uint8_t)action; o->proxy_id = (uint16_t)px;
 }
+static void set_tcp_from(uint32_t src_ip_be, uint16_t src, const char *ip, uint16_t port, int action, uint32_t px)
+{
+    uint64_t k = tcp_key(src_ip_be, src);
+    pthread_mutex_lock(&g_mu);
+    uint32_t i = tcp_hash(k);
+    while (g_tcp[i].state == 1 && g_tcp[i].key != k) i = (i + 1) % TCP_SLOTS;
+    g_tcp[i].key = k;
+    g_tcp[i].state = 1;
+    fill_orig(&g_tcp[i].o, ip, port, IPPROTO_TCP, action, px);
+    pthread_mutex_unlock(&g_mu);
+}
 static void set_tcp(uint16_t src, const char *ip, uint16_t port, int action, uint32_t px)
 {
-    pthread_mutex_lock(&g_mu);
-    fill_orig(&g_tcp[src], ip, port, IPPROTO_TCP, action, px);
-    g_tcp_valid[src] = true;
-    pthread_mutex_unlock(&g_mu);
+    set_tcp_from(htonl(INADDR_LOOPBACK), src, ip, port, action, px);
 }
 static int g_nflows;
 static void set_flow(const char *flow_ip, const char *ip, uint16_t port, int action, uint32_t px)
@@ -222,9 +231,8 @@ static int count_fds(void)
     DIR *d = opendir("/proc/self/fd");
     while (readdir(d)) n++;
     closedir(d);
-    return n - 3;   // ., .., and the dir fd itself
+    return n - 3;
 }
-// Waits (up to ms) for the fd count to drop to <= target; returns the final count.
 static int settle_fds(int target, int ms);
 static int64_t now_ms(void)
 {
@@ -241,9 +249,6 @@ static int settle_fds(int target, int ms)
     return n;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Fake servers
-// ---------------------------------------------------------------------------------------------
 struct srvcfg { bool auth; char user[64], pass[64]; bool leftover; bool silent; };
 struct srv { int lfd; uint16_t port; void (*h)(int, const struct srvcfg *); struct srvcfg cfg; };
 struct hctx { int fd; struct srv *s; };
@@ -399,7 +404,6 @@ static void http_handler(int fd, const struct srvcfg *c)
     }
     b[n] = 0;
     if (c->auth) {
-        // Basic base64("user:pass") computed by the test config: pass holds the expected token in user field? keep simple:
         char want[200];
         snprintf(want, sizeof want, "Proxy-Authorization: Basic %s", c->pass);
         if (!strstr(b, want)) { const char *r = "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n"; wr_full(fd, r, strlen(r)); return; }
@@ -476,6 +480,8 @@ static uint16_t udpecho_start(void)
 {
     struct udpecho *e = calloc(1, sizeof *e);
     e->fd = socket(AF_INET, SOCK_DGRAM, 0);
+    int rb = 4 << 20;
+    setsockopt(e->fd, SOL_SOCKET, SO_RCVBUF, &rb, sizeof rb);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
     bind(e->fd, (struct sockaddr *)&a, sizeof a);
     socklen_t al = sizeof a;
@@ -487,24 +493,22 @@ static uint16_t udpecho_start(void)
     return e->port;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Client helpers
-// ---------------------------------------------------------------------------------------------
-static int g_last_connect_errno;   // errno of the last failed relay_connect()
-static int relay_connect(uint16_t src)
+static int g_last_connect_errno;
+static int relay_connect_from(uint32_t src_ip_be, uint16_t src)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = htons(src) };
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = src_ip_be, .sin_port = htons(src) };
     if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) {
         g_last_connect_errno = errno;
         printf("      relay_connect: bind(127.0.0.1:%u) failed: %s\n", src, strerror(errno));
         close(fd); return -1;
     }
     a.sin_port = htons(pb_relay_tcp_port());
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     struct timeval tv = { 10, 0 };
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);     // bounds connect()
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) {
         g_last_connect_errno = errno;
         // an ECONNRESET here is legitimate for flows the relay aborts (BLOCK, cap): on a fast loopback the RST can arrive
@@ -518,6 +522,7 @@ static int relay_connect(uint16_t src)
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     return fd;
 }
+static int relay_connect(uint16_t src) { return relay_connect_from(htonl(INADDR_LOOPBACK), src); }
 static uint16_t new_src(void) { return (uint16_t)atomic_fetch_add(&g_next_port, 1); }
 
 static inline uint8_t pat(uint64_t i) { return (uint8_t)((i * 0x9E3779B1u) >> 11); }
@@ -537,7 +542,6 @@ static void *xf_send(void *p)
     if (x->half) shutdown(x->fd, SHUT_WR);
     return NULL;
 }
-// Sends `total` patterned bytes and verifies the echo. Returns bytes verified, -1 on mismatch.
 static int64_t xfer(int fd, uint64_t total, bool half)
 {
     struct xf x = { fd, total, half };
@@ -559,10 +563,9 @@ out:
     pthread_join(t, NULL);
     return res;
 }
-// True when the peer closes (EOF or reset) within timeout_ms with no data.
 static bool expect_closed(int fd, int timeout_ms)
 {
-    if (timeout_ms < 10000) timeout_ms = 10000;          // generous: the watchdog bounds real hangs
+    if (timeout_ms < 10000) timeout_ms = 10000;
     struct pollfd p = { fd, POLLIN, 0 };
     int pr = poll(&p, 1, timeout_ms);
     if (pr <= 0) { printf("      expect_closed(fd=%d): poll=%d errno=%d revents=0x%x\n", fd, pr, errno, p.revents); return false; }
@@ -599,7 +602,6 @@ static uint16_t free_port(void)
     return ntohs(a.sin_port);
 }
 
-// One echo round trip of `n` bytes through the relay for the given action.
 static int64_t tcp_roundtrip(const char *dst_ip, uint16_t dst_port, int action, uint32_t px, uint64_t n, bool half)
 {
     uint16_t src = new_src();
@@ -611,9 +613,6 @@ static int64_t tcp_roundtrip(const char *dst_ip, uint16_t dst_port, int action, 
     return r;
 }
 
-// ---------------------------------------------------------------------------------------------
-// UDP client helpers
-// ---------------------------------------------------------------------------------------------
 static int udp_client(void)
 {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -627,7 +626,6 @@ static void udp_send_flow(int fd, const char *flow_ip, const char *msg)
     inet_pton(AF_INET, flow_ip, &a.sin_addr);
     sendto(fd, msg, strlen(msg), 0, (struct sockaddr *)&a, sizeof a);
 }
-// Receives one datagram; returns length or -1; src_ip filled with the sender address.
 static int udp_recv_to(int fd, char *buf, size_t n, char *src_ip, uint16_t *src_port, int ms)
 {
     struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
@@ -652,9 +650,6 @@ static bool udp_echo_ok(int fd, const char *flow_ip, const char *msg)
     return r == (int)strlen(msg) && !strcmp(b, msg) && !strcmp(ip, flow_ip) && sp == pb_relay_udp_port();
 }
 
-// ---------------------------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------------------------
 static struct srv *g_echo, *g_s5, *g_s5auth, *g_http, *g_httpauth, *g_httpleft, *g_silent;
 static uint16_t g_uecho1, g_uecho2;
 
@@ -666,6 +661,207 @@ static void *conc_thread(void *p)
     int64_t r = tcp_roundtrip("127.0.0.1", g_echo->port, mode == 2 ? PB_ACT_DIRECT : PB_ACT_PROXY, mode == 0 ? 1 : (mode == 1 ? 3 : 0),
                               mb << 20, false);
     return (void *)(intptr_t)(r == (int64_t)(mb << 20));
+}
+
+static long vmrss_kb(void)
+{
+    FILE *f = fopen("/proc/self/status", "r");
+    char line[256];
+    long v = -1;
+    while (f && fgets(line, sizeof line, f))
+        if (!strncmp(line, "VmRSS:", 6)) { v = atol(line + 6); break; }
+    if (f) fclose(f);
+    return v;
+}
+
+static atomic_uint g_churn_ctr;
+static atomic_int g_churn_bad, g_churn_udp_lost;
+static uint16_t g_dead_port;
+
+static void churn_one(unsigned n)
+{
+    uint32_t ip = htonl(0x7f000002 + n % 60);
+    uint16_t src = (uint16_t)(20000 + (n / 60) % 12000);
+    int mode = (int)(n % 9);
+    uint32_t px = 0;
+    int action = PB_ACT_PROXY;
+    uint16_t dport = g_echo->port;
+    switch (mode) {
+    case 0: px = 1; break;
+    case 1: px = 3; break;
+    case 2: action = PB_ACT_DIRECT; break;
+    case 3: action = PB_ACT_BLOCK; break;
+    case 4: px = 6; break;
+    case 5: px = 7; break;
+    case 6: px = 1; break;
+    case 7: action = PB_ACT_DIRECT; dport = g_dead_port; break;
+    default: action = PB_ACT_DIRECT; break;
+    }
+    set_tcp_from(ip, src, "127.0.0.1", dport, action, px);
+    int fd = relay_connect_from(ip, src);
+    if (fd < 0) {
+        if (mode != 3 && mode != 4 && mode != 5 && mode != 7) atomic_fetch_add(&g_churn_bad, 1);
+        return;
+    }
+    char b[128];
+    switch (mode) {
+    case 0: case 1: case 2:
+        if (send(fd, "z", 1, MSG_NOSIGNAL) != 1 || rd_full(fd, b, 1) || b[0] != 'z') atomic_fetch_add(&g_churn_bad, 1);
+        break;
+    case 6: {
+        struct linger l = { 1, 0 };
+        setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
+        break;
+    }
+    case 8: {
+        char big[100] = { 0 };
+        send(fd, big, sizeof big, MSG_NOSIGNAL);
+        struct linger l = { 1, 0 };
+        setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
+        break;
+    }
+    default:
+        (void)expect_closed(fd, 10000);
+    }
+    close(fd);
+}
+
+struct churn_arg { unsigned count; };
+static void *churn_tcp_thread(void *p)
+{
+    struct churn_arg *a = p;
+    for (unsigned i = 0; i < a->count; i++) churn_one(atomic_fetch_add(&g_churn_ctr, 1));
+    return NULL;
+}
+
+struct churn_udp { unsigned total; int bad; };
+static void *churn_udp_thread(void *p)
+{
+    struct churn_udp *a = p;
+    enum { B = 1000 };
+    int *fds = malloc(B * sizeof *fds);
+    for (unsigned done = 0; done < a->total;) {
+        int n = a->total - done < B ? (int)(a->total - done) : B;
+        for (int lo = 0; lo < n; lo += 50) {          // paced so a starved echo server cannot overflow its socket buffer
+            int hi = lo + 50 < n ? lo + 50 : n;
+            for (int i = lo; i < hi; i++) {
+                fds[i] = udp_client();
+                udp_send_flow(fds[i], (done + (unsigned)i) % 10 == 0 ? "127.1.9.2" : "127.1.9.1", "churn");
+            }
+            for (int i = lo; i < hi; i++) {
+                char r[32], ip[32];
+                uint16_t sp;
+                if (udp_recv_to(fds[i], r, sizeof r, ip, &sp, 4000) != 5) a->bad++;
+                close(fds[i]);
+            }
+        }
+        done += (unsigned)n;
+        if (done < a->total) msleep(2200);
+    }
+    free(fds);
+    return NULL;
+}
+
+static void churn_phase(unsigned tcp_total, unsigned udp_total)
+{
+    enum { T = 8 };
+    pthread_t th[T], ut;
+    struct churn_arg ca = { tcp_total / T };
+    struct churn_udp cu = { udp_total, 0 };
+    pthread_create(&ut, NULL, churn_udp_thread, &cu);
+    for (int i = 0; i < T; i++) pthread_create(&th[i], NULL, churn_tcp_thread, &ca);
+    for (int i = 0; i < T; i++) pthread_join(th[i], NULL);
+    pthread_join(ut, NULL);
+    atomic_fetch_add(&g_churn_udp_lost, cu.bad);
+}
+
+static void test_churn(void)
+{
+    unsigned tcp_total = getenv("PB_CHURN_TCP") ? (unsigned)atoi(getenv("PB_CHURN_TCP")) : 100000;
+    unsigned udp_total = getenv("PB_CHURN_UDP") ? (unsigned)atoi(getenv("PB_CHURN_UDP")) : 20000;
+    long limit_kb = (getenv("PB_CHURN_RSS_MB") ? atol(getenv("PB_CHURN_RSS_MB")) : 6) * 1024;
+    pb_relay_stop();
+    CHECK(relay_up(300, 1, 0, 5) == 0, "restart relay for churn (udp_idle=1s)");
+    g_dead_port = free_port();
+    set_proxy(6, PROXY_TYPE_SOCKS5, g_dead_port, NULL, NULL);
+    set_proxy(7, PROXY_TYPE_SOCKS5, g_s5auth->port, "alice", "WRONG");
+    set_flow("127.1.9.1", "127.0.0.1", g_uecho1, PB_ACT_DIRECT, 0);
+    set_flow("127.1.9.2", "127.0.0.1", g_uecho2, PB_ACT_PROXY, 1);
+    msleep(300);
+    int base_fds = count_fds();
+
+    unsigned chunk_tcp = tcp_total / 10 / 8 * 8, chunk_udp = udp_total / 10;
+    long budget_ms = (getenv("PB_CHURN_BUDGET_S") ? atol(getenv("PB_CHURN_BUDGET_S")) : 60) * 1000;
+    int64_t t0 = now_ms();
+    churn_phase(chunk_tcp, chunk_udp);
+    msleep(3000);
+    long rss0 = vmrss_kb();
+    int chunks = 1;
+    while (chunks < 10 && now_ms() - t0 < budget_ms) { churn_phase(chunk_tcp, chunk_udp); chunks++; }
+    msleep(3500);
+    int fds_end = settle_fds(base_fds, 10000);
+    long rss1 = vmrss_kb();
+    unsigned tcp_done = chunk_tcp * (unsigned)chunks, udp_done = chunk_udp * (unsigned)chunks;
+    printf("      churn: %u TCP + %u UDP sessions in %lld ms; RSS after warm-up %ld KB, final %ld KB (+%ld KB); fds base=%d end=%d\n",
+           tcp_done, udp_done, (long long)(now_ms() - t0), rss0, rss1, rss1 - rss0, base_fds, fds_end);
+    CHECK(chunks >= 4, "churn: completed %d of 10 chunks within the time budget", chunks);
+    CHECK(g_churn_bad == 0, "churn: every TCP flow that must succeed did (failures=%d)", (int)g_churn_bad);
+    CHECK(g_churn_udp_lost * 50 <= (int)udp_done, "churn: UDP datagrams lost <= 2%% (%d of %u; session-limit drop logged: %s)", (int)g_churn_udp_lost, udp_done,
+          log_has("UDP session limit") ? "yes" : "no");
+    CHECK(fds_end <= base_fds, "churn: fd count back to baseline (base=%d end=%d)", base_fds, fds_end);
+    CHECK(rss1 - rss0 < limit_kb, "churn: RSS growth after warm-up < %ld MB (+%ld KB)", limit_kb / 1024, rss1 - rss0);
+    pb_relay_stop();
+    CHECK(relay_up(300, 60, 0, 5) == 0, "restart relay");
+}
+
+static void *perf_conn_thread(void *p)
+{
+    int n = (int)(intptr_t)p, ok = 0;
+    for (int i = 0; i < n; i++) {
+        uint16_t src = new_src();
+        set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_PROXY, 1);
+        int fd = relay_connect(src);
+        char b = 'a';
+        if (fd >= 0 && send(fd, &b, 1, MSG_NOSIGNAL) == 1 && recv(fd, &b, 1, 0) == 1) ok++;
+        if (fd >= 0) close(fd);
+    }
+    return (void *)(intptr_t)ok;
+}
+
+static void test_perf(void)
+{
+    unsigned dg = getenv("PB_PERF_UDP") ? (unsigned)atoi(getenv("PB_PERF_UDP")) : 60000;
+    int conns = getenv("PB_PERF_CONNS") ? atoi(getenv("PB_PERF_CONNS")) : 1500;
+    set_flow("127.1.10.1", "127.0.0.1", g_uecho1, PB_ACT_DIRECT, 0);
+    set_flow("127.1.10.2", "127.0.0.1", g_uecho2, PB_ACT_PROXY, 1);
+    const char *fl[2] = { "127.1.10.1", "127.1.10.2" };
+    const char *nm[2] = { "DIRECT", "SOCKS5" };
+    for (int k = 0; k < 2; k++) {
+        int c = udp_client();
+        struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(pb_relay_udp_port()) };
+        inet_pton(AF_INET, fl[k], &a.sin_addr);
+        char msg[64] = "perf-datagram", rx[128], ip[32];
+        uint16_t sp;
+        udp_echo_ok(c, fl[k], "warm");
+        unsigned got = 0;
+        int64_t t0 = now_ms();
+        for (unsigned sent = 0; sent < dg; sent += 16) {
+            for (int i = 0; i < 16; i++) sendto(c, msg, sizeof msg, 0, (struct sockaddr *)&a, sizeof a);
+            for (int i = 0; i < 16; i++) if (udp_recv_to(c, rx, sizeof rx, ip, &sp, 2000) > 0) got++;
+        }
+        int64_t ms = now_ms() - t0;
+        CHECK(got >= dg * 99 / 100, "perf UDP %s: %u datagrams round trip, %.0f pps (%lld ms, %u received)", nm[k], dg,
+              (double)got * 1000.0 / (double)(ms + 1), (long long)ms, got);
+        close(c);
+    }
+    enum { T = 8 };
+    pthread_t th[T];
+    int64_t t0 = now_ms();
+    for (int i = 0; i < T; i++) pthread_create(&th[i], NULL, perf_conn_thread, (void *)(intptr_t)(conns / T));
+    int ok = 0;
+    for (int i = 0; i < T; i++) { void *r; pthread_join(th[i], &r); ok += (int)(intptr_t)r; }
+    int64_t ms = now_ms() - t0;
+    CHECK(ok == conns / T * T, "perf TCP via SOCKS5: %d short connections, %.0f conn/s (%lld ms)", ok, (double)ok * 1000.0 / (double)(ms + 1), (long long)ms);
 }
 
 static void test_tcp_basic(void)
@@ -681,7 +877,6 @@ static void test_tcp_basic(void)
     CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0, 100000, false) == 100000, "TCP DIRECT");
     CHECK(g_ev == 1 && g_ev_direct == 1, "flow_event for direct");
 
-    // HTTP leftover bytes after the 200 response must reach the client first
     uint16_t src = new_src();
     set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_PROXY, 5);
     int fd = relay_connect(src);
@@ -690,7 +885,6 @@ static void test_tcp_basic(void)
     CHECK(ok, "HTTP CONNECT leftover bytes forwarded to client");
     if (fd >= 0) close(fd);
 
-    // BLOCK
     ev_clear();
     src = new_src();
     set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_BLOCK, 0);
@@ -700,7 +894,6 @@ static void test_tcp_basic(void)
     CHECK(g_ev_block == 1, "flow_event BLOCK");
     close(fd);
 
-    // DECIDE
     set_decision((struct pb_decision){ PB_ACT_DIRECT, 0 });
     CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_DECIDE, 0, 5000, false) == 5000, "TCP DECIDE -> DIRECT");
     set_decision((struct pb_decision){ PB_ACT_PROXY, 1 });
@@ -712,12 +905,28 @@ static void test_tcp_basic(void)
     CHECK(closed_by_relay(fd, 3000), "TCP DECIDE -> BLOCK");
     close(fd);
 
-    // no orig entry
     fd = relay_connect(new_src());
     CHECK(closed_by_relay(fd, 3000), "TCP without original destination is closed");
     close(fd);
 
-    // domain-name target through test helper is covered separately; IPv6 original destination (no v6 proxy server: direct to ::1)
+}
+
+static void test_tcp_identity(void)
+{
+    uint16_t src = new_src();
+    set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0);
+    int fd = relay_connect_from(htonl(0x7f000002), src);
+    if (fd >= 0) send(fd, "x", 1, MSG_NOSIGNAL);
+    CHECK(closed_by_relay(fd, 3000), "connection from 127.0.0.2 with a registered port is closed");
+    if (fd >= 0) close(fd);
+    fd = relay_connect(src);
+    char b = 0;
+    bool ok = fd >= 0 && send(fd, "y", 1, MSG_NOSIGNAL) == 1 && rd_full(fd, &b, 1) == 0 && b == 'y';
+    CHECK(ok, "registered flow from the right source address still works (entry not consumed by the impostor)");
+    if (fd >= 0) close(fd);
+    fd = relay_connect_from(htonl(0x7f000003), new_src());
+    CHECK(closed_by_relay(fd, 3000), "connection from an unregistered address/port is closed");
+    if (fd >= 0) close(fd);
 }
 
 static void test_tcp_bad_proxy(void)
@@ -749,12 +958,11 @@ static void test_tcp_bad_proxy(void)
 
     log_clear();
     src = new_src();
-    set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_PROXY, 12);   // unknown proxy id
+    set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_PROXY, 12);
     fd = relay_connect(src);
     CHECK(closed_by_relay(fd, 5000) && log_has("no proxy configured"), "unknown proxy id: client closed + logged");
     close(fd);
 
-    // dead target through a working proxy -> SOCKS5 REP 5
     log_clear();
     src = new_src();
     set_tcp(src, "127.0.0.1", dead, PB_ACT_PROXY, 1);
@@ -972,7 +1180,7 @@ static void test_tcp_idle(void)
     set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0);
     fd = relay_connect(src);
     bool alive = true;
-    for (int i = 0; i < 10 && alive; i++) {        // ~5 s of traffic every 0.5 s, longer than the 3 s idle timeout
+    for (int i = 0; i < 10 && alive; i++) {
         send(fd, "p", 1, 0);
         alive = rd_full(fd, b, 1) == 0;
         msleep(500);
@@ -1004,7 +1212,7 @@ static void test_tcp_cap(void)
     close(extra);
     close(fds[0]);
     bool freed = false;
-    for (int i = 0; i < 100 && !freed; i++) {      // up to ~10 s for the relay to notice the close
+    for (int i = 0; i < 100 && !freed; i++) {
         msleep(100);
         freed = tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0, 1000, false) == 1000;
     }
@@ -1041,7 +1249,6 @@ static void test_udp(void)
     CHECK(udp_echo_ok(c, "127.1.2.3", "again"), "first destination again");
     CHECK(g_assoc_count - a0 == 1, "exactly one UDP ASSOCIATE for the session (got %d)", (int)g_assoc_count - a0);
 
-    // burst while association is being set up (new client => new session): queued datagrams all delivered
     int c2 = udp_client();
     for (int i = 0; i < 10; i++) { char m[32]; snprintf(m, sizeof m, "burst%d", i); udp_send_flow(c2, "127.1.2.3", m); }
     int got = 0;
@@ -1049,39 +1256,33 @@ static void test_udp(void)
     CHECK(got == 10, "10 datagrams sent during association setup delivered (got %d)", got);
     close(c2);
 
-    // SOCKS5 with auth for UDP
     set_flow("127.1.2.5", "127.0.0.1", g_uecho1, PB_ACT_PROXY, 2);
     c2 = udp_client();
     CHECK(udp_echo_ok(c2, "127.1.2.5", "auth-udp"), "UDP via authenticated SOCKS5");
     close(c2);
 
-    // direct
     set_flow("127.1.3.1", "127.0.0.1", g_uecho1, PB_ACT_DIRECT, 0);
     set_flow("127.1.3.2", "127.0.0.1", g_uecho2, PB_ACT_DIRECT, 0);
     CHECK(udp_echo_ok(c, "127.1.3.1", "direct-1") && udp_echo_ok(c, "127.1.3.2", "direct-2"), "UDP DIRECT, two destinations");
 
-    // block / unknown flow / non-loopback
     set_flow("127.1.4.1", "127.0.0.1", g_uecho1, PB_ACT_BLOCK, 0);
     udp_send_flow(c, "127.1.4.1", "blocked");
     CHECK(udp_recv_neg(c, b, sizeof b, ip, &sp) < 0, "UDP BLOCK dropped");
     udp_send_flow(c, "127.9.9.9", "unknown");
     CHECK(udp_recv_neg(c, b, sizeof b, ip, &sp) < 0, "UDP unknown flow dropped");
 
-    // HTTP proxy cannot do UDP
     log_clear();
     set_flow("127.1.4.2", "127.0.0.1", g_uecho1, PB_ACT_PROXY, 3);
     udp_send_flow(c, "127.1.4.2", "via-http");
     udp_send_flow(c, "127.1.4.2", "via-http2");
     CHECK(udp_recv_neg(c, b, sizeof b, ip, &sp) < 0 && log_has("HTTP proxy"), "UDP via HTTP proxy dropped + logged");
 
-    // DECIDE cached per (client, flow)
     set_decision((struct pb_decision){ PB_ACT_DIRECT, 0 });
     set_flow("127.1.4.3", "127.0.0.1", g_uecho1, PB_ACT_DECIDE, 0);
     g_decide_calls = 0;
     bool ok = udp_echo_ok(c, "127.1.4.3", "d1") && udp_echo_ok(c, "127.1.4.3", "d2") && udp_echo_ok(c, "127.1.4.3", "d3");
     CHECK(ok && g_decide_calls == 1, "UDP DECIDE -> DIRECT, decided once (calls=%d)", (int)g_decide_calls);
 
-    // bad proxy for UDP: nothing comes back, no crash
     set_flow("127.1.4.4", "127.0.0.1", g_uecho1, PB_ACT_PROXY, 6);
     udp_send_flow(c, "127.1.4.4", "dead-proxy");
     CHECK(udp_recv_neg(c, b, sizeof b, ip, &sp) < 0, "UDP via dead SOCKS5 proxy: no reply, relay survives");
@@ -1098,7 +1299,7 @@ static void test_udp_idle(void)
     set_flow("127.1.5.2", "127.0.0.1", g_uecho2, PB_ACT_PROXY, 1);
     int base = count_fds();
     bool ok = udp_echo_ok(c, "127.1.5.1", "x") && udp_echo_ok(c, "127.1.5.2", "y");
-    int mid = count_fds();      // direct: +1 fd; socks5: +ctl +udp in relay and +3 in the fake server
+    int mid = count_fds();
     int end = settle_fds(base, 15000);
     CHECK(ok && mid > base && end <= base, "UDP sessions expire after idle and free their fds (base=%d mid=%d end=%d)", base, mid, end);
     CHECK(udp_echo_ok(c, "127.1.5.1", "again"), "new session after expiry works");
@@ -1128,7 +1329,6 @@ static void test_start_stop(void)
     int after = settle_fds(before, 5000);
     CHECK(bad == 0 && after <= before, "start/stop x20 (with traffic): fds before=%d after=%d, failures=%d", before, after, bad);
 
-    // start while ports are taken: must fail and leak nothing
     int l = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
     setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
@@ -1157,9 +1357,6 @@ static void test_start_stop(void)
 static void test_proxy_helper(void)
 {
     char b[256];
-    // HTTP target on port 80 is not available on loopback in tests: use a tiny HTTP server through the proxies.
-    struct srvcfg hc = { 0 };
-    (void)hc;
     int r = pb_relay_test_proxy(&g_px[1], "echo.test", g_echo->port, b, sizeof b);
     CHECK(r == 0 && !strcmp(b, "Tunnel established"), "test_proxy SOCKS5 domain ATYP, non-80 port: '%s'", b);
     r = pb_relay_test_proxy(&g_px[2], "127.0.0.1", g_echo->port, b, sizeof b);
@@ -1174,12 +1371,6 @@ static void test_proxy_helper(void)
     CHECK(r == -1 && strstr(b, "refused"), "test_proxy unreachable target -> error: '%s'", b);
 }
 
-// Tiny HTTP origin to exercise the port-80 HEAD path of pb_relay_test_proxy (it listens on a high port, so we
-// verify the HEAD logic via a SOCKS5 server mapping port 80 is not possible; instead call with the origin port and
-// confirm the tunnel path only. HEAD logic is covered by the echo server answering the request verbatim.)
-// ---------------------------------------------------------------------------------------------
-// Network namespace so that we can bind port 53 without real root
-// ---------------------------------------------------------------------------------------------
 static bool loopback_ok(void)
 {
     int l = socket(AF_INET, SOCK_STREAM, 0), c = socket(AF_INET, SOCK_STREAM, 0);
@@ -1211,7 +1402,7 @@ static bool can_bind53(void)
 static bool isolate_for_port53(void)
 {
     bool force_no_lo = getenv("PB_TEST_FORCE_NO_LO") != NULL;
-    if (!force_no_lo && can_bind53() && loopback_ok()) return true;     // already privileged enough
+    if (!force_no_lo && can_bind53() && loopback_ok()) return true;
     uid_t uid = getuid();
     gid_t gid = getgid();
     if (unshare(CLONE_NEWUSER | CLONE_NEWNET) != 0) { printf("NOTE  DNS child: unshare failed: %s\n", strerror(errno)); return false; }
@@ -1235,13 +1426,9 @@ static bool isolate_for_port53(void)
     return true;
 }
 
-// Shared with the forked DNS child.
 struct shared { int pass, fail, status; };      // status: 0 = not run, 1 = ran, 3 = cannot isolate
 static struct shared *g_shared;
 
-// ---------------------------------------------------------------------------------------------
-// DNS tap tests
-// ---------------------------------------------------------------------------------------------
 static void mk_msg(int mode, int idx, uint8_t *m, size_t len)
 {
     for (size_t i = 0; i < len; i++) m[i] = (uint8_t)(mode * 31 + idx * 17 + (int)i * 7);
@@ -1257,14 +1444,14 @@ static void dns_tcp_handler(int fd, const struct srvcfg *c)
     if (n > sizeof q || rd_full(fd, q, n)) return;
     int mode = q[0];
     uint8_t out[300];
-    if (mode == 'a') {                       // one 100-byte message, written one byte at a time
+    if (mode == 'a') {
         out[0] = 0; out[1] = 100; mk_msg(mode, 0, out + 2, 100);
         for (int i = 0; i < 102; i++) { wr_full(fd, out + i, 1); usleep(1500); }
-    } else if (mode == 'b') {                // two messages in a single write
+    } else if (mode == 'b') {
         out[0] = 0; out[1] = 40; mk_msg(mode, 0, out + 2, 40);
         out[42] = 0; out[43] = 60; mk_msg(mode, 1, out + 44, 60);
         wr_full(fd, out, 104);
-    } else {                                 // 'c': plain single write
+    } else {
         out[0] = 0; out[1] = 100; mk_msg(mode, 0, out + 2, 100);
         wr_full(fd, out, 102);
     }
@@ -1344,11 +1531,9 @@ static void test_dns(void)
     dns_tcp_case("via HTTP CONNECT 1-byte writes", PB_ACT_PROXY, 3, 'a', 1);
     dns_tcp_case("via HTTP CONNECT two messages", PB_ACT_PROXY, 3, 'b', 2);
 
-    // non-53 TCP must not be observed
     atomic_store(&g_obs_n, 0);
     CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0, 1000, false) == 1000 && g_obs_n == 0, "TCP non-53 not observed");
 
-    // UDP
     struct { const char *name; int action; uint32_t px; const char *flow; } u[] = {
         { "UDP DIRECT", PB_ACT_DIRECT, 0, "127.1.7.1" }, { "UDP via SOCKS5", PB_ACT_PROXY, 1, "127.1.7.2" } };
     for (int k = 0; k < 2; k++) {
@@ -1366,7 +1551,6 @@ static void test_dns(void)
         CHECK(ok, "%s DNS tap: reply observed (calls=%d) before delivery, from flow address", u[k].name, (int)g_obs_n);
         close(c);
     }
-    // non-53 UDP not observed
     atomic_store(&g_obs_n, 0);
     int c = udp_client();
     set_flow("127.1.7.3", "127.0.0.1", g_uecho1, PB_ACT_DIRECT, 0);
@@ -1375,9 +1559,6 @@ static void test_dns(void)
     atomic_store(&g_obs_sleep, 0);
 }
 
-// ---------------------------------------------------------------------------------------------
-// Latency, hostname proxies, UDP sizes / odd servers
-// ---------------------------------------------------------------------------------------------
 static double pingpong_us(int fd, int n)
 {
     char b = 'x';
@@ -1530,7 +1711,6 @@ static void init_world(void)
     struct srvcfg ca = { .auth = true }; strcpy(ca.user, "alice"); strcpy(ca.pass, "secret");
     g_s5auth = srv_start(socks_handler, &ca);
     g_http = srv_start(http_handler, &c);
-    // HTTP auth: server expects base64("alice:secret") == "YWxpY2U6c2VjcmV0"
     struct srvcfg ch = { .auth = true }; strcpy(ch.pass, "YWxpY2U6c2VjcmV0");
     g_httpauth = srv_start(http_handler, &ch);
     struct srvcfg cl = { .leftover = true };
@@ -1596,6 +1776,7 @@ int main(void)
     g_cur = "pb_relay_start";
     CHECK(relay_up(300, 60, 0, 5) == 0, "pb_relay_start");
     RUN(test_tcp_basic);
+    RUN(test_tcp_identity);
     RUN(test_tcp_bad_proxy);
     RUN(test_tcp_halfclose);
     RUN(test_udp);
@@ -1605,7 +1786,9 @@ int main(void)
     RUN(test_latency);
     RUN(test_tcp_large);
     RUN(test_throughput);
+    RUN(test_perf);
     RUN(test_tcp_10k);
+    RUN(test_churn);
     RUN(test_tcp_idle);
     RUN(test_tcp_cap);
     RUN(test_handshake_timeout);
