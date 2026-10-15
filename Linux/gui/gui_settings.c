@@ -459,6 +459,7 @@ static void reapply_active_profile() {
     ProxyBridge_ClearRules();
     apply_proxies_to_lib();
     apply_rules_to_lib();
+    gui_sync_switches();
     save_config();
     refresh_rules_window();
     update_profile_ui();

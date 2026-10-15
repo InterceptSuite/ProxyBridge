@@ -55,7 +55,15 @@ static void check_storage(const char *dir) {
     CHECK(stat(p, &st) == 0 && (st.st_mode & 0777) == 0700);
     g_free(p);
     p = g_strdup_printf("%s/settings.json", dir);
-    CHECK(stat(p, &st) == 0);
+    char *settings = NULL;
+    CHECK(g_file_get_contents(p, &settings, NULL, NULL) && strstr(settings, "ActiveProfileName") &&
+          !strstr(settings, "Logging") && !strstr(settings, "Dns"));      // nothing but the pointer to the active profile
+    g_free(settings);
+    g_free(p);
+    p = g_strdup_printf("%s/profiles/Work.pbprofile", dir);
+    char *prof = NULL;
+    CHECK(g_file_get_contents(p, &prof, NULL, NULL) && strstr(prof, "\"IsTrafficLoggingEnabled\": false") && strstr(prof, "\"DnsViaProxy\": false"));
+    g_free(prof);
     g_free(p);
     // the migration set the old file aside
     p = g_strdup_printf("%s/config.ini", dir);
@@ -182,7 +190,9 @@ int main() {
     CHECK(profile_activate("Work"));
     CHECK(g_proxies_list == NULL && g_rules_list == NULL);
     add_content("p 1|x");
+    CHECK(g_chk_logging && g_chk_dns);                      // a new profile starts with both switches on
     g_chk_dns = false;
+    g_chk_logging = false;
     save_config();
 
     check_storage(dir);
@@ -193,9 +203,16 @@ int main() {
     CHECK(strcmp(((ProxyData *)g_proxies_list->data)->name, "p 1|x") == 0);
     CHECK(strcmp(((ProxyData *)g_proxies_list->data)->password, "s3cr|et") == 0);
     CHECK(strcmp(((RuleData *)g_rules_list->data)->target_hosts, "*.github.com") == 0);
-    CHECK(!g_chk_dns && !g_chk_logging);
+    CHECK(!g_chk_dns && !g_chk_logging);                    // restored from the Work profile file itself
+    CHECK(profile_find("Home") && !profile_find("Home")->logging && profile_find("Home")->dns);   // migrated values of the old file, per profile
     CHECK(profile_find("Home") && g_list_length(profile_find("Home")->rules) == 1);
 
+    CHECK(profile_activate("Home"));                        // switching profiles switches the values too
+    CHECK(!g_chk_logging && g_chk_dns);
+    CHECK(profile_activate("Work"));
+    CHECK(!g_chk_logging && !g_chk_dns);
+    CHECK(profile_activate("Home"));
+    CHECK(profile_activate("Work"));
     CHECK(profile_delete(profile_find("Work")));
     CHECK(strcmp(g_active_profile, "Default") == 0 && g_list_length(g_rules_list) == 1);
     CHECK(profile_delete(profile_find("Home")));

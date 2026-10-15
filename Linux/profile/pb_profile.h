@@ -58,9 +58,9 @@ int   pbp_write_file(const char *path, const char *data, char *err, size_t errle
 // Atomic (temporary file + rename), mode 0600 because the file holds proxy credentials.
 int   pbp_save_file(const char *path, const struct pbp_profile *p, char *err, size_t errlen);
 
-// settings.json next to the profiles: which profile is active, plus the GUI-wide switches (absent keys keep the defaults).
-int   pbp_settings_load(const char *path, char **active, bool *logging, bool *dns);   // -1 if missing or unreadable
-int   pbp_settings_save(const char *path, const char *active, bool logging, bool dns, char *err, size_t errlen);
+// settings.json next to the profiles holds only the name of the active profile; everything else lives in the profile files.
+int   pbp_settings_load(const char *path, char **active);                       // -1 if missing or unreadable
+int   pbp_settings_save(const char *path, const char *active, char *err, size_t errlen);
 
 // Profile name <-> file name inside a profiles directory (percent-encoding, so any name is safe).
 char *pbp_filename_for(const char *name);                          // malloc'd, includes the extension

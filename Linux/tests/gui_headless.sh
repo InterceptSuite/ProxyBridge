@@ -52,7 +52,7 @@ chmod 600 "$WORK/cfg/config.ini"
 
 run_gui() { # active profile
   if [ ! -d "$WORK/cfg/profiles" ]; then write_cfg "$1"
-  else printf '{ "ActiveProfileName": "%s", "IsTrafficLoggingEnabled": true, "DnsViaProxy": true }\n' "$1" > "$WORK/cfg/settings.json"; fi
+  else printf '{ "ActiveProfileName": "%s" }\n' "$1" > "$WORK/cfg/settings.json"; fi
   GDK_BACKEND=broadway BROADWAY_DISPLAY=:9 PROXYBRIDGE_CONFIG_DIR="$WORK/cfg" LD_LIBRARY_PATH="$LIBDIR" "$GUI" > "$WORK/gui.out" 2>&1 & GUI_PID=$!
   for _ in $(seq 60); do "${BPFTOOL:-bpftool}" prog show 2>/dev/null | grep -q pb_connect4 && break; kill -0 $GUI_PID 2>/dev/null || break; sleep 0.25; done
   sleep 1
@@ -87,6 +87,9 @@ P="$WORK/cfg/profiles"
 grep -q '"ActiveProfileName": "Alt"' "$WORK/cfg/settings.json" && ok "settings.json remembers the active profile" || bad "settings.json: $(cat "$WORK/cfg/settings.json")"
 grep -q '"ProxyConfigs"' "$P/Default.pbprofile" && grep -q '"TargetDomains": "\*.example.test"' "$P/Default.pbprofile" && grep -q '"Version": "1.0"' "$P/Default.pbprofile" \
   && ok "the saved profile uses the Windows/macOS format (domain rule in TargetDomains)" || bad "profile format: $(head -40 "$P/Default.pbprofile")"
+grep -q '"IsTrafficLoggingEnabled": true' "$P/Default.pbprofile" && grep -q '"DnsViaProxy": true' "$P/Default.pbprofile" \
+  && [ "$(grep -c . "$WORK/cfg/settings.json")" -le 4 ] && ! grep -q Dns "$WORK/cfg/settings.json" \
+  && ok "logging and DNS switches live in the profile; settings.json only names the active profile" || bad "switches placement"
 [ "$(stat -c %a "$P/Default.pbprofile")" = 600 ] && [ "$(stat -c %a "$P")" = 700 ] && ok "profile files are 0600 in a 0700 directory" || bad "profile permissions"
 
 echo "== a profile exported by the Windows app, dropped into the profiles directory"

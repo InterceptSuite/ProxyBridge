@@ -57,12 +57,16 @@ static void profile_sync_active() {
     p->proxies = g_proxies_list;
     p->rules = g_rules_list;
     p->default_proxy = g_default_proxy;
+    p->logging = g_chk_logging;
+    p->dns = g_chk_dns;
 }
 
 static void load_globals_from(Profile *p) {
     g_proxies_list = p->proxies;
     g_rules_list = p->rules;
     g_default_proxy = p->default_proxy;
+    g_chk_logging = p->logging;
+    g_chk_dns = p->dns;
 }
 
 void config_free_all() {
@@ -78,6 +82,7 @@ void config_free_all() {
 static Profile *profile_new_empty(const char *name) {
     Profile *p = g_malloc0(sizeof(Profile));
     p->name = g_strdup(name);
+    p->logging = p->dns = true;
     g_profiles = g_list_append(g_profiles, p);
     return p;
 }
@@ -114,6 +119,8 @@ Profile *profile_create(const char *name, bool copy_active) {
         for (GList *l = src->proxies; l != NULL; l = l->next) p->proxies = g_list_append(p->proxies, copy_proxy((ProxyData *)l->data));
         for (GList *l = src->rules; l != NULL; l = l->next) p->rules = g_list_append(p->rules, copy_rule((RuleData *)l->data));
         p->default_proxy = g_strdup(src->default_proxy);
+        p->logging = src->logging;
+        p->dns = src->dns;
     }
     return p;
 }
@@ -170,8 +177,8 @@ static ProxyData *find_in_list(GList *list, const char *name) {
 static void profile_to_pbp(const Profile *prof, struct pbp_profile *out) {
     memset(out, 0, sizeof *out);
     out->name = prof->name;
-    out->logging = g_chk_logging;
-    out->dns_via_proxy = g_chk_dns;
+    out->logging = prof->logging;
+    out->dns_via_proxy = prof->dns;
     out->nproxies = g_list_length(prof->proxies);
     out->nrules = g_list_length(prof->rules);
     out->proxies = g_new0(struct pbp_proxy, out->nproxies + 1);
@@ -239,6 +246,8 @@ static void fill_profile_from_pbp(Profile *p, const struct pbp_profile *src) {
     const struct pbp_proxy *d = src->default_proxy_id ? pbp_find_proxy(src, src->default_proxy_id) : NULL;
     g_free(p->default_proxy);
     p->default_proxy = d ? g_strdup(d->name) : NULL;
+    p->logging = src->logging;
+    p->dns = src->dns_via_proxy;
 }
 
 bool profile_export(const Profile *prof, const char *path, char *err, size_t errlen) {
@@ -327,7 +336,7 @@ void save_config() {
         g_free(path);
     }
     char *settings = g_strdup_printf("%s/settings.json", dir);
-    if (pbp_settings_save(settings, g_active_profile, g_chk_logging, g_chk_dns, err, sizeof err) != 0)
+    if (pbp_settings_save(settings, g_active_profile, err, sizeof err) != 0)
         fprintf(stderr, "failed to save settings: %s\n", err);
     g_free(settings);
 out:
@@ -541,9 +550,15 @@ void load_config() {
 
     load_profile_files(dir);
     char *settings = g_strdup_printf("%s/settings.json", dir);
-    pbp_settings_load(settings, &settings_active, &g_chk_logging, &g_chk_dns);
+    pbp_settings_load(settings, &settings_active);
     g_free(settings);
-    if (!g_profiles) migrate = load_legacy_ini(dir, &legacy_active);
+    if (!g_profiles) {
+        migrate = load_legacy_ini(dir, &legacy_active);
+        for (GList *l = g_profiles; l != NULL; l = l->next) {      // the old file had one pair of switches for all profiles
+            ((Profile *)l->data)->logging = g_chk_logging;
+            ((Profile *)l->data)->dns = g_chk_dns;
+        }
+    }
     char *active = g_strdup(migrate && legacy_active ? legacy_active : settings_active);
     free(settings_active);
     g_free(legacy_active);

@@ -703,7 +703,7 @@ int pbp_save_file(const char *path, const struct pbp_profile *p, char *err, size
     return rc;
 }
 
-int pbp_settings_load(const char *path, char **active, bool *logging, bool *dns)
+int pbp_settings_load(const char *path, char **active)
 {
     char err[200];
     FILE *f = fopen(path, "r");
@@ -719,21 +719,17 @@ int pbp_settings_load(const char *path, char **active, bool *logging, bool *dns)
     if (rc == 0 && root.t == J_OBJ) {
         char *a = jtext(&root, "ActiveProfileName");
         if (a && *a) { free(*active); *active = a; } else free(a);
-        *logging = jbool(&root, "IsTrafficLoggingEnabled", *logging);
-        *dns = jbool(&root, "DnsViaProxy", *dns);
     } else rc = -1;
     jfree(&root);
     free(buf);
     return rc;
 }
 
-int pbp_settings_save(const char *path, const char *active, bool logging, bool dns, char *err, size_t errlen)
+int pbp_settings_save(const char *path, const char *active, char *err, size_t errlen)
 {
     struct sb b = {0};
     sb_puts(&b, "{\n");
-    sb_kv(&b, "  ", "ActiveProfileName", active ? active : "", ",\n");
-    sb_puts(&b, logging ? "  \"IsTrafficLoggingEnabled\": true,\n" : "  \"IsTrafficLoggingEnabled\": false,\n");
-    sb_puts(&b, dns ? "  \"DnsViaProxy\": true\n}\n" : "  \"DnsViaProxy\": false\n}\n");
+    sb_kv(&b, "  ", "ActiveProfileName", active ? active : "", "\n}\n");
     if (b.oom) { free(b.p); snprintf(err, errlen, "out of memory"); return -1; }
     int rc = pbp_write_file(path, b.p, err, errlen);
     free(b.p);
