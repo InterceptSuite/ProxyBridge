@@ -259,15 +259,19 @@ bool pb_rule_parse(struct pb_rule *out, const char *process, const char *hosts, 
     if (!process) process = "";
     if (!hosts) hosts = "";
     if (!ports) ports = "";
-    if (strlen(process) >= sizeof out->process_src || strlen(hosts) >= sizeof out->hosts_src || strlen(ports) >= sizeof out->ports_src) {
+    if (strlen(process) >= sizeof out->process_src || strlen(ports) >= sizeof out->ports_src) {
         set_err(err, errlen, "pattern too long (max 511 characters)");
+        return false;
+    }
+    if (strlen(hosts) >= sizeof out->hosts_src) {
+        set_err(err, errlen, "host list too long (max %d characters)", PB_HOSTS_MAX - 1);
         return false;
     }
     snprintf(out->process_src, sizeof out->process_src, "%s", process);
     snprintf(out->hosts_src, sizeof out->hosts_src, "%s", hosts);
     snprintf(out->ports_src, sizeof out->ports_src, "%s", ports);
 
-    char (*tok)[256] = malloc(sizeof(char[256]) * PB_MAX_PATTERNS);
+    char (*tok)[256] = malloc(sizeof(char[256]) * PB_MAX_HOST_PATTERNS);   // sized for the longest list (hosts)
     if (!tok) { set_err(err, errlen, "out of memory"); return false; }
 
     if (is_any(process)) out->any_proc = true;
@@ -285,8 +289,8 @@ bool pb_rule_parse(struct pb_rule *out, const char *process, const char *hosts, 
 
     if (is_any(hosts)) out->any_host = true;
     else {
-        int n = split_list(hosts, tok, PB_MAX_PATTERNS);
-        if (n < 0) { set_err(err, errlen, "too many host patterns (max %d)", PB_MAX_PATTERNS); goto fail; }
+        int n = split_list(hosts, tok, PB_MAX_HOST_PATTERNS);
+        if (n < 0) { set_err(err, errlen, "too many host patterns (max %d)", PB_MAX_HOST_PATTERNS); goto fail; }
         out->hosts = calloc((size_t)(n ? n : 1), sizeof *out->hosts);
         out->domains = malloc(sizeof(char[256]) * (size_t)(n ? n : 1));
         if (!out->hosts || !out->domains) goto oom;

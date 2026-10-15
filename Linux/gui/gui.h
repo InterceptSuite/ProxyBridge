@@ -70,6 +70,10 @@ GtkWidget *hint_label(const char *text);
 void set_error_label(GtkWidget *label, const char *msg);
 void grid_row(GtkWidget *grid, int row, const char *label, GtkWidget *widget);
 
+// Target Host list helpers (gui_list.c): the editor shows one entry per line, the engine gets one clean ";" list.
+char *list_normalize(const char *in);   // g_free() the result
+char *list_format(const char *in);      // g_free() the result
+
 char *extract_sub_json_str(const char *json, const char *key);
 int rules_from_json(const char *json, RuleImportCb cb, void *ud);
 char *rules_to_json(GList *rules, bool only_selected);
