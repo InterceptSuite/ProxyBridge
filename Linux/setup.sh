@@ -53,36 +53,36 @@ install_dependencies() {
         ubuntu|debian|linuxmint|pop|elementary|zorin|kali|raspbian|mx|antix|deepin|lmde)
             echo "Using apt package manager..."
             apt-get update -qq
-            # libgtk-3-0 is for runtime, libnetfilter-queue1 for functionality
-            apt-get install -y libnetfilter-queue1 libnfnetlink0 iptables libgtk-3-0
+            # libgtk-3-0 is for the GUI, libelf+zlib are what the statically linked libbpf needs
+            apt-get install -y libelf1 zlib1g libgtk-3-0
             ;;
         fedora)
             echo "Using dnf package manager..."
-            dnf install -y libnetfilter_queue libnfnetlink iptables gtk3
+            dnf install -y elfutils-libelf zlib gtk3
             ;;
         rhel|centos|rocky|almalinux)
             echo "Using yum package manager..."
-            yum install -y libnetfilter_queue libnfnetlink iptables gtk3
+            yum install -y elfutils-libelf zlib gtk3
             ;;
         arch|manjaro|endeavouros|garuda)
             echo "Using pacman package manager..."
-            pacman -Sy --noconfirm libnetfilter_queue libnfnetlink iptables gtk3
+            pacman -Sy --noconfirm libelf zlib gtk3
             ;;
         opensuse*|sles)
             echo "Using zypper package manager..."
-            zypper install -y libnetfilter_queue1 libnfnetlink0 iptables gtk3
+            zypper install -y libelf1 libz1 gtk3
             ;;
         void)
             echo "Using xbps package manager..."
-            xbps-install -Sy libnetfilter_queue libnfnetlink iptables gtk3
+            xbps-install -Sy libelf zlib gtk3
             ;;
         *)
             echo "WARNING: Unknown distribution '$DISTRO' (family: '$DISTRO_LIKE')"
             echo ""
             echo "Please manually install the following packages:"
-            echo "  Debian/Ubuntu: sudo apt install libnetfilter-queue1 libnfnetlink0 iptables libgtk-3-0"
-            echo "  Fedora:        sudo dnf install libnetfilter_queue libnfnetlink iptables gtk3"
-            echo "  Arch:          sudo pacman -S libnetfilter_queue libnfnetlink iptables gtk3"
+            echo "  Debian/Ubuntu: sudo apt install libelf1 zlib1g libgtk-3-0"
+            echo "  Fedora:        sudo dnf install elfutils-libelf zlib gtk3"
+            echo "  Arch:          sudo pacman -S libelf zlib gtk3"
             echo ""
             read -p "Continue anyway? (y/n) " -n 1 -r
             echo
@@ -229,8 +229,7 @@ main() {
     fi
     echo "  sudo ProxyBridge --proxy socks5://IP:PORT --rule \"app:*:*:TCP:PROXY\""
     echo ""
-    echo "For cleanup after crash:"
-    echo "  sudo ProxyBridge --cleanup"
+    echo "No cleanup is needed after a crash: the kernel detaches the eBPF programs automatically."
     echo ""
 }
 

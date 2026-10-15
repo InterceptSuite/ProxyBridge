@@ -1,29 +1,28 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -O3 -I../src \
-	-fstack-protector-strong \
-	-D_FORTIFY_SOURCE=2 \
-	-fPIE \
-	-Wformat -Wformat-security \
-	-Werror=format-security \
-	-fno-strict-overflow \
-	-fno-delete-null-pointer-checks \
-	-fwrapv
-LDFLAGS = -L../src -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack -s \
-	-Wl,-rpath,/usr/local/lib
+include ../common.mk
+
+# BUILD_DIR / LIBDIR: where generated files go and where libproxybridge.so was built (build.sh sets both).
+BUILD_DIR ?= .
+LIBDIR ?= ../src
+
+CFLAGS = $(CFLAGS_COMMON) -fPIE -I../src -I../profile
+LDFLAGS = -pie $(HARDEN_LDFLAGS) -L$(LIBDIR) -Wl,-rpath,/usr/local/lib $(STRIP_FLAG)
 LIBS = -lproxybridge -lpthread
 
-TARGET = ProxyBridge
-SOURCES = main.c
-OBJECTS = $(SOURCES:.c=.o)
+TARGET = $(BUILD_DIR)/ProxyBridge
+OBJECTS = $(BUILD_DIR)/main.o $(BUILD_DIR)/pb_profile.o
 
 all: $(TARGET)
 
-$(TARGET): $(OBJECTS)
-	$(CC) -o $@ $^ $(LDFLAGS) $(LIBS)
-	@echo "Stripping debug symbols..."
-	strip --strip-all $@
+$(BUILD_DIR):
+	mkdir -p $@
 
-%.o: %.c
+$(TARGET): $(OBJECTS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
+
+$(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/pb_profile.o: ../profile/pb_profile.c ../profile/pb_profile.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
