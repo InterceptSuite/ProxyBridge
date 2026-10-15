@@ -154,14 +154,14 @@ static BOOL Dispatch(const BYTE *req, DWORD reqLen, PbW *resp)
         UINT32 id = (op == PBOP_EDIT_RULE) ? PbR_U32(&r) : 0;
         PbR_Str(&r, proc, sizeof(proc), &nProc); PbR_Str(&r, hosts, sizeof(hosts), &nHosts);
         PbR_Str(&r, ports, sizeof(ports), &nPorts); PbR_Str(&r, domains, sizeof(domains), &nDomains);
-        UINT32 proto = PbR_U32(&r), action = PbR_U32(&r), cfg = PbR_U32(&r);
+        UINT32 proto = PbR_U32(&r), action = PbR_U32(&r), cfg = PbR_U32(&r), localhost = PbR_U32(&r);
         if (!r.ok || proto > 2 || action > 2) return FALSE;
         if (op == PBOP_ADD_RULE)
             ret = g_api.AddRule(nProc ? NULL : proc, nHosts ? NULL : hosts, nPorts ? NULL : ports, nDomains ? NULL : domains,
-                                (PBRuleProtocol)proto, (PBRuleAction)action, cfg);
+                                (PBRuleProtocol)proto, (PBRuleAction)action, cfg, localhost != 0);
         else
             ret = g_api.EditRule(id, nProc ? NULL : proc, nHosts ? NULL : hosts, nPorts ? NULL : ports, nDomains ? NULL : domains,
-                                 (PBRuleProtocol)proto, (PBRuleAction)action, cfg);
+                                 (PBRuleProtocol)proto, (PBRuleAction)action, cfg, localhost != 0);
         break; }
     case PBOP_ENABLE_RULE:  { UINT32 id = PbR_U32(&r); if (!r.ok) return FALSE; ret = g_api.EnableRule(id);  break; }
     case PBOP_DISABLE_RULE: { UINT32 id = PbR_U32(&r); if (!r.ok) return FALSE; ret = g_api.DisableRule(id); break; }
@@ -169,7 +169,6 @@ static BOOL Dispatch(const BYTE *req, DWORD reqLen, PbW *resp)
     case PBOP_MOVE_RULE:    { UINT32 id = PbR_U32(&r), pos = PbR_U32(&r); if (!r.ok) return FALSE; ret = g_api.MoveRuleToPosition(id, pos); break; }
     case PBOP_GET_RULE_POS: { UINT32 id = PbR_U32(&r); if (!r.ok) return FALSE; ret = g_api.GetRulePosition(id); break; }
 
-    case PBOP_SET_LOCALHOST:    { UINT32 v = PbR_U32(&r); if (!r.ok) return FALSE; g_api.SetLocalhostViaProxy(v != 0); break; }
     case PBOP_SET_TRAFFIC_LOG:  { UINT32 v = PbR_U32(&r); if (!r.ok) return FALSE; g_api.SetTrafficLoggingEnabled(v != 0); break; }
     case PBOP_CLEAR_CONN_LOGS:  g_api.ClearConnectionLogs(); break;
     case PBOP_START: ret = g_api.Start(); break;

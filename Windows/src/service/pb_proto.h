@@ -19,7 +19,7 @@
 #define PB_SERVICE_NAME  L"ProxyBridgeSvc"
 #define PB_PIPE_CTL      L"\\\\.\\pipe\\ProxyBridgeCtl"
 #define PB_PIPE_EVT      L"\\\\.\\pipe\\ProxyBridgeEvt"
-#define PB_PROTO_VERSION 1
+#define PB_PROTO_VERSION 2   // 2: per-rule localhost flag; PBOP_SET_LOCALHOST removed
 #define PB_MSG_MAX       (64u * 1024u)
 #define PB_STR_MAX       (32u * 1024u)
 #define PB_NULL_STR      0xFFFFFFFFu
@@ -30,14 +30,13 @@ enum {
     PBOP_EDIT_PROXY,          // id, type, ip, port, user, pass, sendDomain -> bool
     PBOP_DELETE_PROXY,        // id -> bool
     PBOP_TEST_PROXY_START,    // id, host, port -> bool (result arrives as PBEVT_TEST_DONE)
-    PBOP_ADD_RULE,            // proc, hosts, ports, domains, proto, action, cfgId -> id
+    PBOP_ADD_RULE,            // proc, hosts, ports, domains, proto, action, cfgId, localhost -> id
     PBOP_ENABLE_RULE,         // id -> bool
     PBOP_DISABLE_RULE,        // id -> bool
     PBOP_DELETE_RULE,         // id -> bool
-    PBOP_EDIT_RULE,           // id, proc, hosts, ports, domains, proto, action, cfgId -> bool
+    PBOP_EDIT_RULE,           // id, proc, hosts, ports, domains, proto, action, cfgId, localhost -> bool
     PBOP_MOVE_RULE,           // id, pos -> bool
     PBOP_GET_RULE_POS,        // id -> pos
-    PBOP_SET_LOCALHOST,       // bool -> 0
     PBOP_SET_TRAFFIC_LOG,     // bool -> 0
     PBOP_CLEAR_CONN_LOGS,     // () -> 0
     PBOP_START,               // () -> bool

@@ -442,6 +442,17 @@ static void AppendApp(wchar_t* out, int cap, const wchar_t* name)
 
 // Edit sub-dialog. lParam is a PBRule* seeded with current values; on OK it is written back
 // (name/proc/hosts/ports/domains/proto/action/cfgStoredId/enabled) and the dialog returns 1.
+// "Also proxy localhost traffic" only means something for a PROXY rule (DIRECT / BLOCK never
+// send traffic to a proxy), so show it only while the Action list has a proxy selected.
+// Action list: 0 = Direct, 1 = Block, 2.. = one entry per proxy server.
+static void RuleSyncLocalhostVisibility(HWND dlg)
+{
+    int asel = (int)SendMessageW(GetDlgItem(dlg, IDC_RE_ACTION), CB_GETCURSEL, 0, 0);
+    int show = (asel >= 2) ? SW_SHOW : SW_HIDE;
+    ShowWindow(GetDlgItem(dlg, IDC_RE_LOCALHOST), show);
+    ShowWindow(GetDlgItem(dlg, IDC_RE_EX_LOCAL),  show);
+}
+
 INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -465,6 +476,8 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_RE_EX_PORTS,   T(S_EX_PORTS));
         SetDlgItemTextW(dlg, IDC_RE_EX_DOMAINS, T(S_EX_DOMAINS));
         SetDlgItemTextW(dlg, IDC_RE_UDPNOTE,    T(S_UDP_NOTE));
+        SetDlgItemTextW(dlg, IDC_RE_LOCALHOST,  T(S_CHK_LOCALHOST));
+        SetDlgItemTextW(dlg, IDC_RE_EX_LOCAL,   T(S_EX_LOCALHOST));
         SetDlgItemTextW(dlg, IDOK,            T(S_BTN_OK));
         SetDlgItemTextW(dlg, IDCANCEL,        T(S_BTN_CANCEL));
         HWND pr = GetDlgItem(dlg, IDC_RE_PROTO);
@@ -504,6 +517,8 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         }
         SendMessageW(ac, CB_SETCURSEL, target, 0);
         CheckDlgButton(dlg, IDC_RE_ENABLED, r->enabled ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dlg, IDC_RE_LOCALHOST, r->localhost ? BST_CHECKED : BST_UNCHECKED);
+        RuleSyncLocalhostVisibility(dlg);
         InitDarkMode(dlg);
         return TRUE;
     }
@@ -519,13 +534,16 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetBkColor(dc, C_BG);
         if (id == IDC_RE_UDPNOTE) SetTextColor(dc, C_WARN);
         else if (id == IDC_RE_EX_APPS || id == IDC_RE_EX_HOSTS ||
-                 id == IDC_RE_EX_PORTS || id == IDC_RE_EX_DOMAINS) SetTextColor(dc, C_DIM);
+                 id == IDC_RE_EX_PORTS || id == IDC_RE_EX_DOMAINS || id == IDC_RE_EX_LOCAL) SetTextColor(dc, C_DIM);
         else SetTextColor(dc, C_TEXT);
         return (INT_PTR)g_brBg;
     }
     case WM_COMMAND:
         switch (LOWORD(wp))
         {
+        case IDC_RE_ACTION:
+            if (HIWORD(wp) == CBN_SELCHANGE) RuleSyncLocalhostVisibility(dlg);
+            return TRUE;
         case IDC_RE_BROWSE:
         {
             // Pick one or more .exe files and append each file name to the list.
@@ -586,6 +604,7 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             else                { lstrcpynW(r->action, L"PROXY",  16);
                                   r->cfgStoredId = (UINT32)SendMessageW(ac, CB_GETITEMDATA, asel, 0); }
             r->enabled = (IsDlgButtonChecked(dlg, IDC_RE_ENABLED) == BST_CHECKED) ? 1 : 0;
+            r->localhost = (asel >= 2 && IsDlgButtonChecked(dlg, IDC_RE_LOCALHOST) == BST_CHECKED) ? 1 : 0;   // only for PROXY rules
             EndDialog(dlg, 1);
             return TRUE;
         }

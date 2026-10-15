@@ -144,7 +144,6 @@ void PB_ProfileDefaults(PBProfile* p, const wchar_t* name)
 {
     (void)name;
     ZeroMemory(p, sizeof(*p));
-    p->localhostViaProxy = 0;
     p->trafficLogging    = 1;
     p->autoClearLogs     = 1;
     p->closeToTray       = 1;
@@ -186,7 +185,9 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
     JVal* root = json_parse(txt, len);
     if (root && root->type == J_OBJ)
     {
-        p->localhostViaProxy = json_bool(root, "LocalhostViaProxy", 0);
+        // Older profiles had one global "LocalhostViaProxy"; it is now per rule. Use the old value as
+        // each rule's default so an upgraded profile keeps behaving the same.
+        int oldGlobalLocalhost = json_bool(root, "LocalhostViaProxy", 0);
         p->trafficLogging    = json_bool(root, "IsTrafficLoggingEnabled", 1);
         p->autoClearLogs     = json_bool(root, "AutoClearConnectionLogs", 1);
         p->closeToTray       = json_bool(root, "CloseToTray", 1);
@@ -225,6 +226,7 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
                 u2w(json_str(r, "Protocol", "TCP"), ru->proto, 8);
                 u2w(json_str(r, "Action", "PROXY"), ru->action, 16);
                 ru->enabled = json_bool(r, "IsEnabled", 1);
+                ru->localhost = json_bool(r, "LocalhostViaProxy", oldGlobalLocalhost);
                 ru->cfgStoredId = (UINT32)json_long(r, "ProxyConfigId", 0);
             }
 
@@ -263,7 +265,6 @@ BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
     sb_put(&b, "{\n");
     sb_put(&b, "  \"Version\": \"1.0\",\n");
     put_kv_str(&b, "  ", "Name", name, ",\n");
-    sb_put(&b, "  \"LocalhostViaProxy\": ");       sb_put(&b, p->localhostViaProxy ? "true" : "false"); sb_put(&b, ",\n");
     sb_put(&b, "  \"IsTrafficLoggingEnabled\": ");  sb_put(&b, p->trafficLogging ? "true" : "false");    sb_put(&b, ",\n");
     sb_put(&b, "  \"AutoClearConnectionLogs\": ");  sb_put(&b, p->autoClearLogs ? "true" : "false");     sb_put(&b, ",\n");
     put_kv_str(&b, "  ", "Language", p->language, ",\n");
@@ -302,6 +303,7 @@ BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
         put_kv_str(&b, "      ", "Protocol", r->proto, ",\n");
         put_kv_str(&b, "      ", "Action", r->action, ",\n");
         sb_put(&b, "      \"IsEnabled\": "); sb_put(&b, r->enabled ? "true" : "false"); sb_put(&b, ",\n");
+        sb_put(&b, "      \"LocalhostViaProxy\": "); sb_put(&b, r->localhost ? "true" : "false"); sb_put(&b, ",\n");
         snprintf(tmp, sizeof(tmp), "%u", r->cfgStoredId);
         sb_put(&b, "      \"ProxyConfigId\": "); sb_put(&b, tmp); sb_put(&b, "\n");
         sb_put(&b, "    }");

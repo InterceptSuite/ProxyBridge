@@ -18,7 +18,6 @@
 #define IDR_MAINMENU                200
 #define IDM_PROXY_SETTINGS          201
 #define IDM_PROXY_RULES             202
-#define IDM_SET_LOCALHOST           210
 #define IDM_SET_TRAFFICLOG          211
 #define IDM_SET_CLOSETOTRAY         212
 #define IDM_SET_STARTUP             215
@@ -134,6 +133,8 @@
 #define IDC_RE_UDPNOTE             441
 #define IDC_RE_NAME                442   // friendly name edit
 #define IDC_RE_L_NAME              443   // "Name:" label
+#define IDC_RE_LOCALHOST           444   // "also proxy localhost" checkbox
+#define IDC_RE_EX_LOCAL            445   // its hint text
 
 // Name-input dialog (new profile)
 #define IDD_NAME                   500

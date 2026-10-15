@@ -151,7 +151,6 @@ ProxyBridge allows you to export selected rules to a `.pbprofile` JSON file and 
 ```json
 {
   "Version": "1.0",
-  "LocalhostViaProxy": false,
   "IsTrafficLoggingEnabled": true,
   "ProxyConfigs": [
     {
@@ -179,6 +178,7 @@ ProxyBridge allows you to export selected rules to a `.pbprofile` JSON file and 
       "Protocol": "TCP",
       "Action": "PROXY",
       "IsEnabled": true,
+      "LocalhostViaProxy": false,
       "ProxyConfigId": 1
     },
     {
@@ -188,6 +188,7 @@ ProxyBridge allows you to export selected rules to a `.pbprofile` JSON file and 
       "Protocol": "BOTH",
       "Action": "PROXY",
       "IsEnabled": true,
+      "LocalhostViaProxy": false,
       "ProxyConfigId": 2
     }
   ]
@@ -223,7 +224,7 @@ The CLI reads `.pbprofile` files exported directly from the GUI (**File → Expo
 |---|---|
 | `ProxyConfigs[]` | Array of proxy servers (SOCKS5 or HTTP, up to 16) |
 | `ProxyRules[]` | Array of routing rules (up to 256) |
-| `LocalhostViaProxy` | Whether to route `127.x.x.x` traffic through the proxy |
+| `ProxyRules[].LocalhostViaProxy` | Per rule: also proxy `127.x.x.x` / `::1` traffic that matches this rule (default `false`) |
 | `IsTrafficLoggingEnabled` | Enable/disable connection logging |
 | `ProxyConfigId` | Per-rule proxy assignment (maps to `ProxyConfigs[].Id`) |
 
@@ -298,12 +299,12 @@ Commands:
 
 ## Things to Note
 
-- **Localhost Traffic Handling**: Localhost traffic (`127.0.0.0/8` and IPv6 `::1`) requires special handling and is controlled by the **Localhost via Proxy** option in the Proxy menu (disabled by default):
+- **Localhost Traffic Handling**: Localhost traffic (`127.0.0.0/8` and IPv6 `::1`) is handled **per rule** with the **Also proxy localhost traffic** checkbox in the rule editor (off by default):
 
-  **Default Behavior (Localhost via Proxy = Disabled):**
-  - ALL localhost traffic automatically uses direct connection
-  - Proxy rules matching `127.x.x.x` or `::1` addresses are automatically overridden to DIRECT
-  - This is the recommended setting for most users
+  **Default Behavior (checkbox off):**
+  - Connections to localhost that match the rule are sent directly, not through the proxy
+  - Other traffic from the same application still follows the rule as usual
+  - This is the recommended setting for most rules
 
   **Why localhost should stay local:**
   - **Security**: Most proxy servers reject localhost traffic to prevent SSRF (Server-Side Request Forgery) attacks
@@ -314,13 +315,15 @@ Commands:
     - Inter-process communication (IPC) using TCP/UDP on `127.0.0.1`
   - **Routing Issues**: When localhost traffic goes to a remote proxy, the proxy server cannot reach services running on YOUR machine
 
-  **When to Enable Localhost via Proxy:**
+  **When to tick "Also proxy localhost traffic" on a rule:**
   - ✅ Proxy server is running on the same machine (`127.0.0.1:1080`)
-  - ✅ Security testing: Intercepting localhost traffic in Burp Suite/InterceptSuite
+  - ✅ Security testing: Intercepting that application's localhost traffic in Burp Suite/InterceptSuite
   - ✅ Your proxy is configured to handle localhost requests properly
-  - ❌ Do NOT enable if proxy is on a different machine/IP address
+  - ❌ Do NOT tick it if the proxy is on a different machine/IP address
 
-  **CLI:** Controlled via the `LocalhostViaProxy` field in the `.pbprofile` file.
+  Because the setting belongs to the rule, you can proxy localhost traffic for one application (for example your browser) while another (for example `curl.exe`) keeps its local connections direct.
+
+  **CLI / profiles:** Controlled by the `LocalhostViaProxy` field of each rule in the `.pbprofile` file. Older profiles with a single global `LocalhostViaProxy` are still read; that value becomes the default for rules that have no setting of their own.
 
 - **Automatic Direct Routing**: Certain addresses and ports always bypass proxy rules and use direct connection to preserve network stability:
 

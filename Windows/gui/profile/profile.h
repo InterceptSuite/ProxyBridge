@@ -39,6 +39,7 @@ typedef struct {
     wchar_t proto[8];             // "TCP" | "UDP" | "BOTH"
     wchar_t action[16];           // "PROXY" | "DIRECT" | "BLOCK"
     int     enabled;
+    int     localhost;            // 1 = connections to localhost (127.x / ::1) matching this rule are proxied too
     UINT32  cfgStoredId;          // ProxyConfigId as written in the profile
 } PBRule;
 
@@ -53,7 +54,6 @@ typedef struct PBProfile PBProfile;
 UINT32 PB_AllocConfigId(PBProfile* p);
 
 typedef struct PBProfile {
-    int      localhostViaProxy;
     int      trafficLogging;
     int      autoClearLogs;
     int      closeToTray;

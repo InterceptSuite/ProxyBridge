@@ -125,7 +125,7 @@ static BOOL      g_started = FALSE;
 
 static PBProfile g_profile;
 static wchar_t   g_activeProfile[PB_NAME_MAX] = L"Default";
-static BOOL      g_localhost = FALSE, g_trafficLog = TRUE, g_closeToTray = TRUE;
+static BOOL      g_trafficLog = TRUE, g_closeToTray = TRUE;
 static BOOL      g_startup = FALSE;   // "Run at Startup" (schtasks logon task)
 static BOOL      g_autoClear = TRUE;  // auto-clear logs past a line threshold to save memory
 #define AUTO_CLEAR_LINES 500
@@ -253,7 +253,7 @@ static void ApplyRules(void)
         W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
         r->nativeId = g_api.AddRule(proc, hosts, ports, domains,
                                     (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
-                                    ResolveNativeCfg(r->cfgStoredId));
+                                    ResolveNativeCfg(r->cfgStoredId), r->localhost != 0);
         if (r->nativeId && !r->enabled) g_api.DisableRule(r->nativeId);
     }
 }
@@ -266,7 +266,7 @@ static UINT32 EngineAddRule(PBRule* r)
     W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
     UINT32 id = g_api.AddRule(proc, hosts, ports, domains,
                               (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
-                              ResolveNativeCfg(r->cfgStoredId));
+                              ResolveNativeCfg(r->cfgStoredId), r->localhost != 0);
     if (id && !r->enabled) g_api.DisableRule(id);
     return id;
 }
@@ -278,7 +278,7 @@ static void EngineEditRule(PBRule* r)
     W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
     g_api.EditRule(r->nativeId, proc, hosts, ports, domains,
                    (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
-                   ResolveNativeCfg(r->cfgStoredId));
+                   ResolveNativeCfg(r->cfgStoredId), r->localhost != 0);
     if (r->enabled) g_api.EnableRule(r->nativeId); else g_api.DisableRule(r->nativeId);
 }
 
@@ -294,13 +294,11 @@ static void SwitchToProfile(const wchar_t* name)
     PB_SetActiveProfile(name);
     lstrcpynW(g_activeProfile, name, PB_NAME_MAX);
     PB_ProfileLoad(name, &g_profile);
-    g_localhost = g_profile.localhostViaProxy;
     g_trafficLog = g_profile.trafficLogging;
     g_closeToTray = g_profile.closeToTray;
     g_autoClear = g_profile.autoClearLogs;
     if (g_profile.fontZoom != g_zoom) { g_zoom = g_profile.fontZoom; ApplyZoom(g_hMain); }
     ApplyFilterSnapshot();
-    g_api.SetLocalhostViaProxy(g_localhost);
     g_api.SetTrafficLoggingEnabled(g_trafficLog);
     ApplyConfigs();
     ApplyRules();
@@ -354,7 +352,6 @@ static void BuildMainMenu(HWND hwnd)
     AppendTopMenu(bar, profile, T(S_M_PROFILE));
 
     HMENU settings = CreatePopupMenu();
-    AppendMenuW(settings, MF_STRING, IDM_SET_LOCALHOST,   T(S_M_LOCALHOST));
     AppendMenuW(settings, MF_STRING, IDM_SET_TRAFFICLOG,  T(S_M_TRAFFIC));
     AppendMenuW(settings, MF_STRING, IDM_SET_CLOSETOTRAY, T(S_M_TRAY));
     AppendMenuW(settings, MF_STRING, IDM_SET_STARTUP,     T(S_M_STARTUP));
@@ -537,7 +534,6 @@ static void SelectTab(int idx)
 static void SyncMenuChecks(HWND hwnd)
 {
     HMENU m = GetMenu(hwnd);
-    CheckMenuItem(m, IDM_SET_LOCALHOST,   MF_BYCOMMAND | (g_localhost  ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_SET_TRAFFICLOG,  MF_BYCOMMAND | (g_trafficLog ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_SET_CLOSETOTRAY, MF_BYCOMMAND | (g_closeToTray? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_SET_STARTUP,     MF_BYCOMMAND | (g_startup    ? MF_CHECKED : MF_UNCHECKED));
@@ -875,9 +871,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
         case IDM_PROXY_SETTINGS: DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_SERVERS), hwnd, ServersDlgProc); return 0;
         case IDM_PROXY_RULES:    DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_RULES),   hwnd, RulesDlgProc);   return 0;
-        case IDM_SET_LOCALHOST:
-            g_localhost = !g_localhost; g_profile.localhostViaProxy = g_localhost;
-            g_api.SetLocalhostViaProxy(g_localhost); SaveActive(); SyncMenuChecks(hwnd); return 0;
         case IDM_SET_TRAFFICLOG:
             g_trafficLog = !g_trafficLog; g_profile.trafficLogging = g_trafficLog;
             g_api.SetTrafficLoggingEnabled(g_trafficLog); SaveActive(); SyncMenuChecks(hwnd); return 0;
@@ -1093,7 +1086,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     // Load the active profile.
     PB_GetActiveProfile(g_activeProfile, PB_NAME_MAX);
     PB_ProfileLoad(g_activeProfile, &g_profile);
-    g_localhost   = g_profile.localhostViaProxy;
     g_trafficLog  = g_profile.trafficLogging;
     g_closeToTray = g_profile.closeToTray;
     g_zoom        = g_profile.fontZoom;
@@ -1168,7 +1160,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
 
     // Wire callbacks + toggles, add configs (before Start so the UDP relay starts), start,
     // then add rules.
-    g_api.SetLocalhostViaProxy(g_localhost);
     g_api.SetTrafficLoggingEnabled(g_trafficLog);
     g_api.SetLogCallback(PBLogCb);
     g_api.SetConnectionCallback(PBConnCb);

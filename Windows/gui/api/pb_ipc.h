@@ -117,16 +117,15 @@ static int IpcTestProxyConfigEx(UINT32 id, const char* host, unsigned short port
     return rc;
 }
 
-static UINT32 IpcAddRule(const char* proc, const char* hosts, const char* ports, const char* domains, PBRuleProtocol pr, PBRuleAction ac, UINT32 cfg)
-{ PBIPC_BEGIN(PBOP_ADD_RULE); PbW_Str(&_w, proc); PbW_Str(&_w, hosts); PbW_Str(&_w, ports); PbW_Str(&_w, domains); PbW_U32(&_w, pr); PbW_U32(&_w, ac); PbW_U32(&_w, cfg); PBIPC_END(); }
-static BOOL IpcEditRule(UINT32 id, const char* proc, const char* hosts, const char* ports, const char* domains, PBRuleProtocol pr, PBRuleAction ac, UINT32 cfg)
-{ PBIPC_BEGIN(PBOP_EDIT_RULE); PbW_U32(&_w, id); PbW_Str(&_w, proc); PbW_Str(&_w, hosts); PbW_Str(&_w, ports); PbW_Str(&_w, domains); PbW_U32(&_w, pr); PbW_U32(&_w, ac); PbW_U32(&_w, cfg); PBIPC_END(); }
+static UINT32 IpcAddRule(const char* proc, const char* hosts, const char* ports, const char* domains, PBRuleProtocol pr, PBRuleAction ac, UINT32 cfg, BOOL localhost)
+{ PBIPC_BEGIN(PBOP_ADD_RULE); PbW_Str(&_w, proc); PbW_Str(&_w, hosts); PbW_Str(&_w, ports); PbW_Str(&_w, domains); PbW_U32(&_w, pr); PbW_U32(&_w, ac); PbW_U32(&_w, cfg); PbW_U32(&_w, localhost != 0); PBIPC_END(); }
+static BOOL IpcEditRule(UINT32 id, const char* proc, const char* hosts, const char* ports, const char* domains, PBRuleProtocol pr, PBRuleAction ac, UINT32 cfg, BOOL localhost)
+{ PBIPC_BEGIN(PBOP_EDIT_RULE); PbW_U32(&_w, id); PbW_Str(&_w, proc); PbW_Str(&_w, hosts); PbW_Str(&_w, ports); PbW_Str(&_w, domains); PbW_U32(&_w, pr); PbW_U32(&_w, ac); PbW_U32(&_w, cfg); PbW_U32(&_w, localhost != 0); PBIPC_END(); }
 static BOOL IpcEnableRule(UINT32 id)  { PBIPC_BEGIN(PBOP_ENABLE_RULE);  PbW_U32(&_w, id); PBIPC_END(); }
 static BOOL IpcDisableRule(UINT32 id) { PBIPC_BEGIN(PBOP_DISABLE_RULE); PbW_U32(&_w, id); PBIPC_END(); }
 static BOOL IpcDeleteRule(UINT32 id)  { PBIPC_BEGIN(PBOP_DELETE_RULE);  PbW_U32(&_w, id); PBIPC_END(); }
 static BOOL IpcMoveRule(UINT32 id, UINT32 pos) { PBIPC_BEGIN(PBOP_MOVE_RULE); PbW_U32(&_w, id); PbW_U32(&_w, pos); PBIPC_END(); }
 static UINT32 IpcGetRulePos(UINT32 id) { PBIPC_BEGIN(PBOP_GET_RULE_POS); PbW_U32(&_w, id); PBIPC_END(); }
-static void IpcSetLocalhost(BOOL v)   { PBIPC_BEGIN(PBOP_SET_LOCALHOST);   PbW_U32(&_w, v != 0); PbIpcCall(_b, _w.len); }
 static void IpcSetTrafficLog(BOOL v)  { PBIPC_BEGIN(PBOP_SET_TRAFFIC_LOG); PbW_U32(&_w, v != 0); PbIpcCall(_b, _w.len); }
 static void IpcClearConnLogs(void)    { PBIPC_BEGIN(PBOP_CLEAR_CONN_LOGS); PbIpcCall(_b, _w.len); }
 static void IpcSetLogCallback(PBLogCallback cb)               { g_ipcLogCb = cb; }
@@ -243,7 +242,7 @@ static int PB_LoadService(PBApi* api)
     api->EnableRule = IpcEnableRule;               api->DisableRule = IpcDisableRule;
     api->DeleteRule = IpcDeleteRule;               api->EditRule = IpcEditRule;
     api->MoveRuleToPosition = IpcMoveRule;         api->GetRulePosition = IpcGetRulePos;
-    api->SetLocalhostViaProxy = IpcSetLocalhost;   api->SetLogCallback = IpcSetLogCallback;
+    api->SetLogCallback = IpcSetLogCallback;
     api->SetConnectionCallback = IpcSetConnectionCallback;
     api->SetTrafficLoggingEnabled = IpcSetTrafficLog;
     api->ClearConnectionLogs = IpcClearConnLogs;   api->Start = IpcStart; api->Stop = IpcStop;

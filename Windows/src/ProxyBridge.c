@@ -71,7 +71,6 @@ volatile LONG port_decided_bitmap[2048] = {0};  // 8 KB
 volatile LONG port_direct_bitmap[2048]  = {0};  // 8 KB
 
 UINT16 g_local_relay_port = LOCAL_PROXY_PORT;
-BOOL g_localhost_via_proxy = FALSE;  // default disabled for security - most proxy server block localhost for ssrf and also many app might not work if localhost trafic goes to remote server if proxy server is on diffrent machine
 LogCallback g_log_callback = NULL;
 ConnectionCallback g_connection_callback = NULL;
 
@@ -267,7 +266,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     if (action6u == RULE_ACTION_DIRECT && pid6u > 0)
                         udp_direct_remember(TRUE, ipv6_header->DstAddr, sp, dp);
 
-                    if (action6u == RULE_ACTION_PROXY && !g_localhost_via_proxy)
+                    if (action6u == RULE_ACTION_PROXY && !g_tl_rule_localhost)
                     {
                         const UINT8 *d6=(const UINT8*)ipv6_header->DstAddr;
                         static const UINT8 lb6[16]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
@@ -464,8 +463,8 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 UINT32 proxy_config_id6 = 0;
                 action6 = check_process_rule_v6((const UINT8*)ipv6_header->SrcAddr, sp, (const UINT8*)ipv6_header->DstAddr, dp, FALSE, &pid6, &proxy_config_id6);
 
-                // ::1 IPv6 loopback - use  same "Localhost via Proxy" toggle as IPv4 127.
-                if (action6 == RULE_ACTION_PROXY && !g_localhost_via_proxy)
+                // ::1 IPv6 loopback - same per-rule "localhost via proxy" flag as IPv4 127.
+                if (action6 == RULE_ACTION_PROXY && !g_tl_rule_localhost)
                 {
                     const UINT8 *dst6 = (const UINT8*)ipv6_header->DstAddr;
                     // check for ::1 (loopback) or ::ffff:127.x.x.x (v4-mapped loopback)
@@ -656,9 +655,9 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     if (action == RULE_ACTION_DIRECT && pid > 0)
                         udp_direct_remember(FALSE, &dest_ip, src_port, dest_port);
 
-                    // override PROXY to DIRECT if localhost proxy is disabled and destination is localhost
+                    // override PROXY to DIRECT when the matched rule does not allow localhost and the destination is localhost
                     BYTE dest_first_octet = (dest_ip >> 0) & 0xFF;
-                    if (action == RULE_ACTION_PROXY && !g_localhost_via_proxy && dest_first_octet == 127)
+                    if (action == RULE_ACTION_PROXY && !g_tl_rule_localhost && dest_first_octet == 127)
                         action = RULE_ACTION_DIRECT;
 
                     // Override PROXY to DIRECT for critical IPs and ports
@@ -915,7 +914,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, &pid, &proxy_config_id);
 
                 BYTE orig_dest_first_octet = (orig_dest_ip >> 0) & 0xFF;
-                if (action == RULE_ACTION_PROXY && !g_localhost_via_proxy && orig_dest_first_octet == 127)
+                if (action == RULE_ACTION_PROXY && !g_tl_rule_localhost && orig_dest_first_octet == 127)
                     action = RULE_ACTION_DIRECT;
 
                 // Override PROXY to DIRECT for criticl ips
@@ -1034,12 +1033,6 @@ DWORD WINAPI packet_processor(LPVOID arg)
     }
 
     return 0;
-}
-
-PROXYBRIDGE_API void ProxyBridge_SetLocalhostViaProxy(BOOL enable)
-{
-    g_localhost_via_proxy = enable;
-    log_message("Localhost routing: %s (most proxies block localhost for SSRF prevention)", enable ? "via proxy" : "direct");
 }
 
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback)

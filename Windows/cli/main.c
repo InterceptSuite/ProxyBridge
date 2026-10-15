@@ -28,12 +28,11 @@ typedef uint32_t (*pfnAddProxyConfig)(int type, const char* ip, uint16_t port,
 typedef uint32_t (*pfnAddRule)(const char* process, const char* hosts,
                                const char* ports, const char* domains,
                                int protocol, int action,
-                               uint32_t config_id);
+                               uint32_t config_id, int localhost_via_proxy);
 typedef int  (*pfnDisableRule)(uint32_t rule_id);
 typedef void (*pfnSetLogCallback)(void (*cb)(const char*));
 typedef void (*pfnSetConnectionCallback)(void (*cb)(const char*, DWORD,
                                           const char*, uint16_t, const char*));
-typedef void (*pfnSetLocalhostViaProxy)(int enable);
 typedef void (*pfnSetTrafficLogging)(int enable);
 typedef int  (*pfnStart)(void);
 typedef int  (*pfnStop)(void);
@@ -43,7 +42,6 @@ static pfnAddRule               g_AddRule        = NULL;
 static pfnDisableRule           g_DisableRule    = NULL;
 static pfnSetLogCallback        g_SetLog         = NULL;
 static pfnSetConnectionCallback g_SetConn        = NULL;
-static pfnSetLocalhostViaProxy  g_SetLocalhost   = NULL;
 static pfnSetTrafficLogging     g_SetTraffic     = NULL;
 static pfnStart                 g_Start          = NULL;
 static pfnStop                  g_Stop           = NULL;
@@ -69,10 +67,11 @@ typedef struct {
     int      action;          // 0=PROXY, 1=DIRECT, 2=BLOCK
     int      is_enabled;
     uint32_t proxy_config_id; // maps to PBProxyConfig.profile_id
+    int      localhost_via_proxy; // 1 = localhost (127.x / ::1) traffic matching this rule is proxied too
 } PBRule;
 
 typedef struct {
-    int         localhost_via_proxy;
+    int         localhost_via_proxy;   // legacy global key; only the default for rules that lack their own
     int         traffic_logging;
     PBProxyConfig configs[MAX_PROXY_CONFIGS];
     int         num_configs;
@@ -476,6 +475,7 @@ static bool load_profile(const char* path, PBProfile* prof)
             else                                  r->action = 0;
 
             r->is_enabled      = jbool(buf, "IsEnabled", true) ? 1 : 0;
+            r->localhost_via_proxy = jbool(buf, "LocalhostViaProxy", prof->localhost_via_proxy != 0) ? 1 : 0;
             r->proxy_config_id = (uint32_t)jint(buf, "ProxyConfigId", 0);
 
             free(buf);
@@ -527,7 +527,6 @@ static bool load_dll(void)
     LOAD_FN(pfnDisableRule,           g_DisableRule,    "ProxyBridge_DisableRule");
     LOAD_FN(pfnSetLogCallback,        g_SetLog,         "ProxyBridge_SetLogCallback");
     LOAD_FN(pfnSetConnectionCallback, g_SetConn,        "ProxyBridge_SetConnectionCallback");
-    LOAD_FN(pfnSetLocalhostViaProxy,  g_SetLocalhost,   "ProxyBridge_SetLocalhostViaProxy");
     LOAD_FN(pfnSetTrafficLogging,     g_SetTraffic,     "ProxyBridge_SetTrafficLoggingEnabled");
     LOAD_FN(pfnStart,                 g_Start,          "ProxyBridge_Start");
     LOAD_FN(pfnStop,                  g_Stop,           "ProxyBridge_Stop");
@@ -961,7 +960,6 @@ int main(int argc, char* argv[])
     if (g_verbose != 0) outq_start();
     if (g_verbose == 1 || g_verbose == 3) g_SetLog(log_cb);
     if (g_verbose == 2 || g_verbose == 3) g_SetConn(conn_cb);
-    g_SetLocalhost(prof.localhost_via_proxy);
     g_SetTraffic(prof.traffic_logging);
 
     // ── Add proxy configs, map profile IDs to DLL-assigned IDs ───────────────
@@ -1019,7 +1017,7 @@ int main(int argc, char* argv[])
         const char* domains = r->target_domains[0] ? r->target_domains : "*";
 
         uint32_t rid = g_AddRule(proc, hosts, ports, domains,
-                                 r->protocol, r->action, dll_cfg_id);
+                                 r->protocol, r->action, dll_cfg_id, r->localhost_via_proxy);
         if (rid == 0)
         {
             fprintf(stderr, "  [%d] WARNING: Failed to add rule (%s)\n",

@@ -53,6 +53,7 @@ typedef struct PROCESS_RULE {
     RuleProtocol protocol;  // TCP, UDP, or BOTH
     RuleAction action;
     UINT32 proxy_config_id;  // Which proxy config to route this rule through (0 = first available)
+    BOOL localhost_via_proxy; // TRUE: connections to localhost (127.x / ::1) that match this rule are proxied; FALSE: they go direct
     BOOL enabled;
     struct PROCESS_RULE *next;
 } PROCESS_RULE;
@@ -207,7 +208,9 @@ extern SRWLOCK             g_dns_cache_lock;
 extern volatile LONG port_decided_bitmap[2048];  // 8 KB
 extern volatile LONG port_direct_bitmap[2048];  // 8 KB
 extern UINT16 g_local_relay_port;
-extern BOOL g_localhost_via_proxy;  // default disabled for security - most proxy server block localhost for ssrf and also many app might not work if localhost trafic goes to remote server if proxy server is on diffrent machine
+// Set by match_rule*_inner on the calling thread: the "localhost via proxy" flag of the rule that
+// produced the last verdict (FALSE when nothing matched). Read right after check_process_rule*().
+extern __declspec(thread) BOOL g_tl_rule_localhost;
 extern LogCallback g_log_callback;
 extern ConnectionCallback g_connection_callback;
 extern char  *g_pidtbl_buf;
