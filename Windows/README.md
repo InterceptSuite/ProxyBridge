@@ -116,7 +116,17 @@ ProxyBridge supports multiple proxy server configurations simultaneously. Each p
    - IPv6 exact: `::1`, `2001:db8::1`
    - IPv6 CIDR: `2001:db8::/32`, `fe80::/10`
    - IPv6 range: `2001:db8::1-2001:db8::ff`
+   - Domain names: `github.com`, `*.github.com`
    - Leave empty or use `*` for all hosts
+
+   IP addresses and domain names go in the **same** field and can be mixed: `10.*.*.*; github.com; *.google.com`
+   matches a connection when its IP matches an IP entry **or** its domain matches a domain entry. The box is
+   multiline, so a long list can be written one entry per line; line breaks are only for readability and
+   `;` separates the entries (up to 8191 characters).
+
+   Domain names are learned from the application's own DNS lookups, so they only work with unencrypted DNS
+   (turn off "Secure DNS" / DNS over HTTPS in the browser). In profile files the entries are saved as
+   `TargetHosts` (IPs) and `TargetDomains` (domain names), which other ProxyBridge apps read the same way.
 
    **Target Ports (Optional):**
    - Specific ports: `80; 8080`

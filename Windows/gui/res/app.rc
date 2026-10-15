@@ -120,7 +120,7 @@ BEGIN
 END
 
 // Proxification Rule (edit) sub-dialog
-IDD_RULE DIALOGEX 0, 0, 480, 294
+IDD_RULE DIALOGEX 0, 0, 480, 314
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Proxy Rule"
 FONT 11, "Segoe UI", 400, 0, 0x0
@@ -135,29 +135,25 @@ BEGIN
     LTEXT           "",                IDC_RE_EX_APPS,   92,  46, 380, 9
 
     LTEXT           "Target Hosts:",   IDC_RE_L_HOSTS,    8,  62, 80, 10
-    EDITTEXT        IDC_RE_HOSTS,      92,  60, 380, 13, ES_AUTOHSCROLL | WS_TABSTOP
-    LTEXT           "",                IDC_RE_EX_HOSTS,  92,  76, 380, 9
+    EDITTEXT        IDC_RE_HOSTS,      92,  60, 380, 52, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "",                IDC_RE_EX_HOSTS,  92, 116, 380, 18
 
-    LTEXT           "Target Ports:",   IDC_RE_L_PORTS,    8,  92, 80, 10
-    EDITTEXT        IDC_RE_PORTS,      92,  90, 380, 13, ES_AUTOHSCROLL | WS_TABSTOP
-    LTEXT           "",                IDC_RE_EX_PORTS,  92, 106, 380, 9
+    LTEXT           "Target Ports:",   IDC_RE_L_PORTS,    8, 142, 80, 10
+    EDITTEXT        IDC_RE_PORTS,      92, 140, 380, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "",                IDC_RE_EX_PORTS,  92, 156, 380, 9
 
-    LTEXT           "Target Domains:", IDC_RE_L_DOMAINS,  8, 122, 80, 10
-    EDITTEXT        IDC_RE_DOMAINS,    92, 120, 380, 13, ES_AUTOHSCROLL | WS_TABSTOP
-    LTEXT           "",                IDC_RE_EX_DOMAINS,92, 136, 380, 9
+    LTEXT           "Protocol:",       IDC_RE_L_PROTO,    8, 176, 80, 10
+    COMBOBOX        IDC_RE_PROTO,      92, 174, 120, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "",                IDC_RE_UDPNOTE,   92, 192, 380, 40
 
-    LTEXT           "Protocol:",       IDC_RE_L_PROTO,    8, 152, 80, 10
-    COMBOBOX        IDC_RE_PROTO,      92, 150, 120, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "",                IDC_RE_UDPNOTE,   92, 168, 380, 40
+    LTEXT           "Action:",         IDC_RE_L_ACTION,   8, 238, 80, 10
+    COMBOBOX        IDC_RE_ACTION,     92, 236, 380,160, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
-    LTEXT           "Action:",         IDC_RE_L_ACTION,   8, 214, 80, 10
-    COMBOBOX        IDC_RE_ACTION,     92, 212, 380,160, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX    "Also proxy localhost traffic", IDC_RE_LOCALHOST, 92, 258, 380, 10
+    LTEXT           "",                IDC_RE_EX_LOCAL,  92, 271, 380, 20
 
-    AUTOCHECKBOX    "Also proxy localhost traffic", IDC_RE_LOCALHOST, 92, 234, 380, 10
-    LTEXT           "",                IDC_RE_EX_LOCAL,  92, 247, 380, 20
-
-    DEFPUSHBUTTON   "OK",              IDOK,            362, 272, 52, 14
-    PUSHBUTTON      "Cancel",          IDCANCEL,        418, 272, 52, 14
+    DEFPUSHBUTTON   "OK",              IDOK,            362, 294, 52, 14
+    PUSHBUTTON      "Cancel",          IDCANCEL,        418, 294, 52, 14
 END
 
 // Log Filters (list) dialog

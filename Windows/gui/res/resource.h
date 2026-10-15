@@ -116,20 +116,17 @@
 #define IDC_RE_APPS                422
 #define IDC_RE_HOSTS               423
 #define IDC_RE_PORTS               424
-#define IDC_RE_DOMAINS             425
 #define IDC_RE_PROTO               426
 #define IDC_RE_ACTION              427
 #define IDC_RE_L_APPS              430
 #define IDC_RE_L_HOSTS             431
 #define IDC_RE_L_PORTS             432
-#define IDC_RE_L_DOMAINS           433
 #define IDC_RE_L_PROTO             434
 #define IDC_RE_L_ACTION            435
 #define IDC_RE_BROWSE              436
 #define IDC_RE_EX_APPS             437
 #define IDC_RE_EX_HOSTS            438
 #define IDC_RE_EX_PORTS            439
-#define IDC_RE_EX_DOMAINS          440
 #define IDC_RE_UDPNOTE             441
 #define IDC_RE_NAME                442   // friendly name edit
 #define IDC_RE_L_NAME              443   // "Name:" label

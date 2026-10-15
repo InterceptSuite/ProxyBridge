@@ -388,13 +388,13 @@ static void InitRulesList(HWND lv)
     // Checkboxes give the enable/disable toggle in the first column.
     DarkListView(lv, LVS_EX_CHECKBOXES);
     struct { int s; int w; } cols[] = {
-        {S_COL_ON, 36}, {S_COL_NAME, 130}, {S_COL_APPS, 160}, {S_COL_HOSTS, 70}, {S_COL_PORTS, 55},
-        {S_COL_DOMAINS, 90}, {S_COL_PROTO, 55}, {S_COL_ACTION, 65}, {S_COL_CFG, 190}
+        {S_COL_ON, 36}, {S_COL_NAME, 130}, {S_COL_APPS, 160}, {S_COL_HOSTS, 200}, {S_COL_PORTS, 60},
+        {S_COL_PROTO, 55}, {S_COL_ACTION, 65}, {S_COL_CFG, 190}
     };
     LVCOLUMNW c; c.mask = LVCF_TEXT | LVCF_WIDTH;
-    for (int i = 0; i < 9; i++) { c.pszText = (LPWSTR)T(cols[i].s); c.cx = cols[i].w; ListView_InsertColumn(lv, i, &c); }
+    for (int i = 0; i < 8; i++) { c.pszText = (LPWSTR)T(cols[i].s); c.cx = cols[i].w; ListView_InsertColumn(lv, i, &c); }
     SetWindowSubclass(lv, ListDarkSubProc, 3, 0);
-    FillColumns(lv, 9);
+    FillColumns(lv, 8);
 }
 static void RefreshRulesList(HWND lv)
 {
@@ -410,9 +410,8 @@ static void RefreshRulesList(HWND lv)
         ListView_SetItemText(lv, i, 2, r->proc);
         ListView_SetItemText(lv, i, 3, r->hosts);
         ListView_SetItemText(lv, i, 4, r->ports);
-        ListView_SetItemText(lv, i, 5, r->domains);
-        ListView_SetItemText(lv, i, 6, r->proto);
-        ListView_SetItemText(lv, i, 7, r->action);
+        ListView_SetItemText(lv, i, 5, r->proto);
+        ListView_SetItemText(lv, i, 6, r->action);
         wchar_t cfg[200];
         if (_wcsicmp(r->action, L"PROXY") == 0)
         {
@@ -424,7 +423,7 @@ static void RefreshRulesList(HWND lv)
             cfg[199] = 0;
         }
         else lstrcpynW(cfg, L"\x2014", 200);   // em dash for Direct/Block
-        ListView_SetItemText(lv, i, 8, cfg);
+        ListView_SetItemText(lv, i, 7, cfg);
         ListView_SetCheckState(lv, i, r->enabled ? TRUE : FALSE);
     }
     g_rulesRefreshing = FALSE;
@@ -467,14 +466,12 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_RE_L_APPS,   T(S_L_APPS));
         SetDlgItemTextW(dlg, IDC_RE_L_HOSTS,  T(S_L_HOSTS));
         SetDlgItemTextW(dlg, IDC_RE_L_PORTS,  T(S_L_PORTS));
-        SetDlgItemTextW(dlg, IDC_RE_L_DOMAINS,T(S_L_DOMAINS));
         SetDlgItemTextW(dlg, IDC_RE_L_PROTO,  T(S_L_PROTO));
         SetDlgItemTextW(dlg, IDC_RE_L_ACTION, T(S_L_ACTION));
         SetDlgItemTextW(dlg, IDC_RE_BROWSE,   T(S_BTN_BROWSE));
         SetDlgItemTextW(dlg, IDC_RE_EX_APPS,    T(S_EX_APPS));
         SetDlgItemTextW(dlg, IDC_RE_EX_HOSTS,   T(S_EX_HOSTS));
         SetDlgItemTextW(dlg, IDC_RE_EX_PORTS,   T(S_EX_PORTS));
-        SetDlgItemTextW(dlg, IDC_RE_EX_DOMAINS, T(S_EX_DOMAINS));
         SetDlgItemTextW(dlg, IDC_RE_UDPNOTE,    T(S_UDP_NOTE));
         SetDlgItemTextW(dlg, IDC_RE_LOCALHOST,  T(S_CHK_LOCALHOST));
         SetDlgItemTextW(dlg, IDC_RE_EX_LOCAL,   T(S_EX_LOCALHOST));
@@ -502,9 +499,16 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_RE_NAME,    r->name[0]    ? r->name    : L"ProxyBridge Rule");
         SendDlgItemMessageW(dlg, IDC_RE_APPS, EM_LIMITTEXT, PB_APPS_MAX - 1, 0);
         SetDlgItemTextW(dlg, IDC_RE_APPS,    r->proc[0]    ? r->proc    : L"*");
-        SetDlgItemTextW(dlg, IDC_RE_HOSTS,   r->hosts[0]   ? r->hosts   : L"*");
         SetDlgItemTextW(dlg, IDC_RE_PORTS,   r->ports[0]   ? r->ports   : L"*");
-        SetDlgItemTextW(dlg, IDC_RE_DOMAINS, r->domains[0] ? r->domains : L"*");
+        {
+            // multiline editor: one entry per line (the line breaks are display-only, removed again on save)
+            HWND he = GetDlgItem(dlg, IDC_RE_HOSTS);
+            SendMessageW(he, EM_LIMITTEXT, PB_HOSTS_MAX * 3, 0);
+            size_t fcap = wcslen(r->hosts) * 3 + 4;
+            wchar_t* fmt = (wchar_t*)malloc(fcap * sizeof(wchar_t));
+            if (fmt) { PB_ListFormat(r->hosts[0] ? r->hosts : L"*", fmt, fcap); SetWindowTextW(he, fmt); free(fmt); }
+            else SetWindowTextW(he, L"*");
+        }
         SendMessageW(pr, CB_SETCURSEL, ProtoIdx(r->proto[0] ? r->proto : L"BOTH"), 0);
         int target = 0;
         if (!_wcsicmp(r->action, L"BLOCK")) target = 1;
@@ -534,7 +538,7 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetBkColor(dc, C_BG);
         if (id == IDC_RE_UDPNOTE) SetTextColor(dc, C_WARN);
         else if (id == IDC_RE_EX_APPS || id == IDC_RE_EX_HOSTS ||
-                 id == IDC_RE_EX_PORTS || id == IDC_RE_EX_DOMAINS || id == IDC_RE_EX_LOCAL) SetTextColor(dc, C_DIM);
+                 id == IDC_RE_EX_PORTS || id == IDC_RE_EX_LOCAL) SetTextColor(dc, C_DIM);
         else SetTextColor(dc, C_TEXT);
         return (INT_PTR)g_brBg;
     }
@@ -589,13 +593,28 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             GetDlgItemTextW(dlg, IDC_RE_NAME,    r->name,    128);
             if (!r->name[0]) lstrcpynW(r->name, L"ProxyBridge Rule", 128);
             GetDlgItemTextW(dlg, IDC_RE_APPS,    r->proc,    PB_APPS_MAX);
-            GetDlgItemTextW(dlg, IDC_RE_HOSTS,   r->hosts,   256);
             GetDlgItemTextW(dlg, IDC_RE_PORTS,   r->ports,   128);
-            GetDlgItemTextW(dlg, IDC_RE_DOMAINS, r->domains, 256);
+            {
+                // read the whole text (line breaks included), clean it up, and refuse - not cut - a list that is too long
+                HWND he = GetDlgItem(dlg, IDC_RE_HOSTS);
+                int hn = GetWindowTextLengthW(he);
+                wchar_t* htxt = (wchar_t*)malloc(((size_t)hn + 1) * sizeof(wchar_t));
+                if (!htxt) { MessageBoxW(dlg, L"Out of memory.", APP_TITLE, MB_OK | MB_ICONERROR); return TRUE; }
+                GetWindowTextW(he, htxt, hn + 1);
+                PB_ListNormalize(htxt);
+                if (wcslen(htxt) >= PB_HOSTS_MAX)
+                {
+                    wchar_t m[96]; _snwprintf_s(m, ARRAYSIZE(m), _TRUNCATE, L"Target Hosts is too long (maximum %d characters).", PB_HOSTS_MAX - 1);
+                    MessageBoxW(dlg, m, APP_TITLE, MB_OK | MB_ICONWARNING);
+                    free(htxt);
+                    return TRUE;
+                }
+                lstrcpynW(r->hosts, htxt, PB_HOSTS_MAX);
+                free(htxt);
+            }
             if (!r->proc[0])    lstrcpynW(r->proc,    L"*", 256);
-            if (!r->hosts[0])   lstrcpynW(r->hosts,   L"*", 256);
+            if (!r->hosts[0])   lstrcpynW(r->hosts,   L"*", PB_HOSTS_MAX);
             if (!r->ports[0])   lstrcpynW(r->ports,   L"*", 128);
-            if (!r->domains[0]) lstrcpynW(r->domains, L"*", 256);
             lstrcpynW(r->proto, ProtoName((int)SendMessageW(GetDlgItem(dlg, IDC_RE_PROTO), CB_GETCURSEL, 0, 0)), 8);
             HWND ac = GetDlgItem(dlg, IDC_RE_ACTION);
             int asel = (int)SendMessageW(ac, CB_GETCURSEL, 0, 0);
@@ -688,8 +707,8 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (g_profile.ruleCount >= PB_MAX_RULE) { MessageBoxW(dlg, L"Rule limit reached.", APP_TITLE, MB_OK); return TRUE; }
             PBRule r; ZeroMemory(&r, sizeof(r));
             lstrcpynW(r.name, L"ProxyBridge Rule", 128);
-            lstrcpynW(r.proc, L"*", 256); lstrcpynW(r.hosts, L"*", 256);
-            lstrcpynW(r.ports, L"*", 128); lstrcpynW(r.domains, L"*", 256);
+            lstrcpynW(r.proc, L"*", 256); lstrcpynW(r.hosts, L"*", PB_HOSTS_MAX);
+            lstrcpynW(r.ports, L"*", 128);
             lstrcpynW(r.proto, L"BOTH", 8); lstrcpynW(r.action, L"DIRECT", 16); r.enabled = 1;
             if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_RULE), dlg, RuleEditDlgProc, (LPARAM)&r) == 1)
             {

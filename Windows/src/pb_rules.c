@@ -506,6 +506,34 @@ BOOL match_domain_filter(const PROCESS_RULE *rule, const char *domain)
     return match_domain_list(rule->target_domains, domain);
 }
 
+// Target Hosts (IPs, ranges, patterns) and Target Domains (hostnames) act as ONE list of hosts: a
+// connection matches when its IP matches an IP entry OR its resolved name matches a domain entry.
+// A side that is empty or "*" adds no restriction by itself; when both are, every host matches.
+static BOOL rule_has_ip_filter(const PROCESS_RULE *rule)
+{
+    return rule->target_hosts != NULL && rule->target_hosts[0] != '\0' && strcmp(rule->target_hosts, "*") != 0;
+}
+
+static BOOL rule_host_match(const PROCESS_RULE *rule, UINT32 dest_ip, const char *dst_domain)
+{
+    BOOL has_ip = rule_has_ip_filter(rule), has_dom = rule_has_domain_filter(rule);
+    if (!has_ip && !has_dom)
+        return TRUE;
+    if (has_ip && match_ip_list(rule->target_hosts, dest_ip))
+        return TRUE;
+    return has_dom && dst_domain != NULL && dst_domain[0] != '\0' && match_domain_list(rule->target_domains, dst_domain);
+}
+
+static BOOL rule_host_match_v6(const PROCESS_RULE *rule, const UINT8 dest_ip6[16], const char *dst_domain)
+{
+    BOOL has_ip = rule_has_ip_filter(rule), has_dom = rule_has_domain_filter(rule);
+    if (!has_ip && !has_dom)
+        return TRUE;
+    if (has_ip && match_ip_list_v6(rule->target_hosts, dest_ip6))
+        return TRUE;
+    return has_dom && dst_domain != NULL && dst_domain[0] != '\0' && match_domain_list(rule->target_domains, dst_domain);
+}
+
 BOOL is_broadcast_or_multicast(UINT32 ip)
 {
     // note: Localhost (127.x.x.x) is now supported for proxying
@@ -586,9 +614,8 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
             if (has_ip_filter || has_port_filter || has_domain_filter)
             {
                 // Filtered wildcard - check if it matches
-                if (match_ip_list(rule->target_hosts, dest_ip) &&
-                    match_port_list(rule->target_ports, dest_port) &&
-                    match_domain_filter(rule, dst_domain))
+                if (rule_host_match(rule, dest_ip, dst_domain) &&
+                    match_port_list(rule->target_ports, dest_port))
                 {
                     // Matched! Return this rule's action
                     g_tl_rule_localhost = rule->localhost_via_proxy;
@@ -613,9 +640,8 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
         if (match_process_list(rule->process_name, process_name))
         {
             // Process matched! Check IP, port and domain filters
-            if (match_ip_list(rule->target_hosts, dest_ip) &&
-                match_port_list(rule->target_ports, dest_port) &&
-                match_domain_filter(rule, dst_domain))
+            if (rule_host_match(rule, dest_ip, dst_domain) &&
+                    match_port_list(rule->target_ports, dest_port))
             {
                 // All filters matched! Return this rule's action
                 g_tl_rule_localhost = rule->localhost_via_proxy;
@@ -691,9 +717,8 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
 
             if (has_ip_filter || has_port_filter || has_domain_filter)
             {
-                if (match_ip_list_v6(rule->target_hosts, dest_ip6) &&
-                    match_port_list(rule->target_ports, dest_port) &&
-                    match_domain_filter(rule, dst_domain))
+                if (rule_host_match_v6(rule, dest_ip6, dst_domain) &&
+                    match_port_list(rule->target_ports, dest_port))
                 {
                     g_tl_rule_localhost = rule->localhost_via_proxy;
                     if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
@@ -711,9 +736,8 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
 
         if (match_process_list(rule->process_name, process_name))
         {
-            if (match_ip_list_v6(rule->target_hosts, dest_ip6) &&
-                match_port_list(rule->target_ports, dest_port) &&
-                match_domain_filter(rule, dst_domain))
+            if (rule_host_match_v6(rule, dest_ip6, dst_domain) &&
+                    match_port_list(rule->target_ports, dest_port))
             {
                 g_tl_rule_localhost = rule->localhost_via_proxy;
                     if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;

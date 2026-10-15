@@ -139,7 +139,11 @@ static HMENU     g_switchMenu = NULL;   // the Profile > Switch submenu (rebuilt
 
 // small helpers
 static void W2Ux(const wchar_t* w, char* out, int cch)
-{ WideCharToMultiByte(CP_UTF8, 0, w ? w : L"", -1, out, cch, NULL, NULL); }
+{
+    if (cch <= 0) return;
+    out[0] = 0;
+    if (!WideCharToMultiByte(CP_UTF8, 0, w ? w : L"", -1, out, cch, NULL, NULL)) out[0] = 0;   // too small: empty, never unterminated
+}
 
 static wchar_t* U2Wdup(const char* s)
 {
@@ -243,43 +247,61 @@ static void ApplyConfigs(void)
     }
 }
 
+// The UTF-8 strings of one rule, in a single heap block (worst case 3 bytes per UTF-16 unit, so nothing is
+// ever cut). The GUI keeps IPs and domain names in one list; the engine takes them as two.
+typedef struct { char proc[PB_APPS_MAX * 3 + 4]; char ports[128 * 3 + 4]; char ips[PB_HOSTS_MAX * 3 + 4]; char doms[PB_HOSTS_MAX * 3 + 4]; } EngineStr;
+
+static EngineStr* EngineStrings(const PBRule* r)
+{
+    EngineStr* s = (EngineStr*)malloc(sizeof(*s));
+    size_t n = wcslen(r->hosts) + 2;
+    wchar_t* wi = (wchar_t*)malloc(n * sizeof(wchar_t));
+    wchar_t* wd = (wchar_t*)malloc(n * sizeof(wchar_t));
+    if (!s || !wi || !wd) { free(s); free(wi); free(wd); return NULL; }
+    PB_HostsSplit(r->hosts, wi, n, wd, n);
+    W2Ux(r->proc, s->proc, sizeof(s->proc)); W2Ux(r->ports, s->ports, sizeof(s->ports));
+    W2Ux(wi, s->ips, sizeof(s->ips)); W2Ux(wd, s->doms, sizeof(s->doms));
+    free(wi); free(wd);
+    return s;
+}
+
 static void ApplyRules(void)
 {
     for (int i = 0; i < g_profile.ruleCount; i++)
     {
         PBRule* r = &g_profile.rule[i];
-        char proc[2048], hosts[512], ports[256], domains[512];
-        W2Ux(r->proc, proc, sizeof(proc)); W2Ux(r->hosts, hosts, sizeof(hosts));
-        W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
-        r->nativeId = g_api.AddRule(proc, hosts, ports, domains,
+        EngineStr* s = EngineStrings(r);
+        if (!s) continue;
+        r->nativeId = g_api.AddRule(s->proc, s->ips, s->ports, s->doms,
                                     (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
                                     ResolveNativeCfg(r->cfgStoredId), r->localhost != 0);
         if (r->nativeId && !r->enabled) g_api.DisableRule(r->nativeId);
+        free(s);
     }
 }
 
 // Add one rule to the engine, returning its (stable) native id. Enable state applied too.
 static UINT32 EngineAddRule(PBRule* r)
 {
-    char proc[2048], hosts[512], ports[256], domains[512];
-    W2Ux(r->proc, proc, sizeof(proc)); W2Ux(r->hosts, hosts, sizeof(hosts));
-    W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
-    UINT32 id = g_api.AddRule(proc, hosts, ports, domains,
+    EngineStr* s = EngineStrings(r);
+    if (!s) return 0;
+    UINT32 id = g_api.AddRule(s->proc, s->ips, s->ports, s->doms,
                               (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
                               ResolveNativeCfg(r->cfgStoredId), r->localhost != 0);
     if (id && !r->enabled) g_api.DisableRule(id);
+    free(s);
     return id;
 }
 // Edit an existing rule in place - keeps the same native id and list position.
 static void EngineEditRule(PBRule* r)
 {
-    char proc[2048], hosts[512], ports[256], domains[512];
-    W2Ux(r->proc, proc, sizeof(proc)); W2Ux(r->hosts, hosts, sizeof(hosts));
-    W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
-    g_api.EditRule(r->nativeId, proc, hosts, ports, domains,
+    EngineStr* s = EngineStrings(r);
+    if (!s) return;
+    g_api.EditRule(r->nativeId, s->proc, s->ips, s->ports, s->doms,
                    (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
                    ResolveNativeCfg(r->cfgStoredId), r->localhost != 0);
     if (r->enabled) g_api.EnableRule(r->nativeId); else g_api.DisableRule(r->nativeId);
+    free(s);
 }
 
 static void UnapplyProfile(void)
