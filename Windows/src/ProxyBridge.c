@@ -292,7 +292,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                         char pname[MAX_PROCESS_NAME];
                         if (get_process_name_from_pid(pid6u, pname, sizeof(pname)))
                         {
-                            if (!is_connection_already_logged(pid6u, v6key, dp, action6u))
+                            if (connection_log_wanted(pid6u, v6key, dp, sp, TRUE, action6u))
                             {
                                 char dstr[64];
                                 inet_ntop(AF_INET6, ipv6_header->DstAddr, dstr, sizeof(dstr));
@@ -487,7 +487,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     char process_name[MAX_PROCESS_NAME];
                     if (get_process_name_from_pid(pid6, process_name, sizeof(process_name)))
                     {
-                        if (!is_connection_already_logged(pid6, v6key, dp, action6))
+                        if (connection_log_wanted(pid6, v6key, dp, sp, FALSE, action6))
                         {
                             char dest_ip_str[64];
                             const UINT8 *d6 = (const UINT8*)ipv6_header->DstAddr;
@@ -678,7 +678,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
 
                         if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
                         {
-                            if (!is_connection_already_logged(pid, dest_ip, dest_port, action))
+                            if (connection_log_wanted(pid, dest_ip, dest_port, src_port, TRUE, action))
                             {
                                 char dest_ip_str[32];
                                 format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
@@ -928,7 +928,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                     char process_name[MAX_PROCESS_NAME];
                     if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
                     {
-                        if (!is_connection_already_logged(pid, orig_dest_ip, orig_dest_port, action))
+                        if (connection_log_wanted(pid, orig_dest_ip, orig_dest_port, src_port, FALSE, action))
                         {
                             char dest_ip_str[32];
                             snprintf(dest_ip_str, sizeof(dest_ip_str), "%d.%d.%d.%d",
@@ -1039,6 +1039,14 @@ DWORD WINAPI packet_processor(LPVOID arg)
 // Main on/off switch. FALSE pauses ProxyBridge without stopping the capture driver: every NEW connection is
 // sent directly, and no rule (proxy or block) applies. Connections that are already being proxied keep working
 // until they end. TRUE (the default) applies the rules again.
+// "Log every connection": FALSE (default) shows a connection once per (process, destination, port, action);
+// TRUE logs every new TCP connection and every new UDP flow.
+PROXYBRIDGE_API void ProxyBridge_SetLogEveryConnection(BOOL enable)
+{
+    g_log_every_connection = enable ? TRUE : FALSE;
+    clear_logged_connections();
+}
+
 PROXYBRIDGE_API void ProxyBridge_SetEnabled(BOOL enable)
 {
     BOOL was = g_proxy_enabled;

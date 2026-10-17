@@ -128,6 +128,7 @@ static wchar_t   g_activeProfile[PB_NAME_MAX] = L"Default";
 static BOOL      g_trafficLog = TRUE, g_closeToTray = TRUE;
 static BOOL      g_proxyEnabled = TRUE;   // main switch; not saved: ProxyBridge always starts enabled
 static BOOL      g_startup = FALSE;   // "Run at Startup" (schtasks logon task)
+static BOOL      g_logEvery = FALSE;   // log every new connection (no de-duplication); saved per profile
 static BOOL      g_autoClear = TRUE;  // auto-clear logs past a line threshold to save memory
 #define AUTO_CLEAR_LINES 500
 static PBFilter  g_flt[PB_MAX_FILTER];  // connection-log filter snapshot (read by native cb)
@@ -320,9 +321,11 @@ static void SwitchToProfile(const wchar_t* name)
     g_trafficLog = g_profile.trafficLogging;
     g_closeToTray = g_profile.closeToTray;
     g_autoClear = g_profile.autoClearLogs;
+    g_logEvery = g_profile.logEveryConnection != 0;
     if (g_profile.fontZoom != g_zoom) { g_zoom = g_profile.fontZoom; ApplyZoom(g_hMain); }
     ApplyFilterSnapshot();
     g_api.SetTrafficLoggingEnabled(g_trafficLog);
+    g_api.SetLogEveryConnection(g_logEvery);
     ApplyConfigs();
     ApplyRules();
     SyncMenuChecks(g_hMain);
@@ -381,6 +384,7 @@ static void BuildMainMenu(HWND hwnd)
     AppendMenuW(settings, MF_STRING, IDM_SET_CLOSETOTRAY, T(S_M_TRAY));
     AppendMenuW(settings, MF_STRING, IDM_SET_STARTUP,     T(S_M_STARTUP));
     AppendMenuW(settings, MF_STRING, IDM_SET_AUTOCLEAR,   T(S_M_AUTOCLEAR));
+    AppendMenuW(settings, MF_STRING, IDM_SET_LOGALL,      T(S_M_LOGALL));
     AppendMenuW(settings, MF_SEPARATOR, 0, NULL);
     AppendMenuW(settings, MF_STRING, IDM_ZOOM_IN,    T(S_M_ZOOM_IN));
     AppendMenuW(settings, MF_STRING, IDM_ZOOM_OUT,   T(S_M_ZOOM_OUT));
@@ -572,6 +576,7 @@ static void SyncMenuChecks(HWND hwnd)
     CheckMenuItem(m, IDM_SET_CLOSETOTRAY, MF_BYCOMMAND | (g_closeToTray? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_SET_STARTUP,     MF_BYCOMMAND | (g_startup    ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_SET_AUTOCLEAR,   MF_BYCOMMAND | (g_autoClear  ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(m, IDM_SET_LOGALL,      MF_BYCOMMAND | (g_logEvery   ? MF_CHECKED : MF_UNCHECKED));
     int zh = (_wcsicmp(g_profile.language, L"zh") == 0);
     CheckMenuItem(m, IDM_LANG_EN, MF_BYCOMMAND | (zh ? MF_UNCHECKED : MF_CHECKED));
     CheckMenuItem(m, IDM_LANG_ZH, MF_BYCOMMAND | (zh ? MF_CHECKED : MF_UNCHECKED));
@@ -921,6 +926,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_startup = !g_startup; StartupSet(g_startup);
             g_startup = StartupIsEnabled();   // reflect the real state
             SyncMenuChecks(hwnd); return 0;
+        case IDM_SET_LOGALL:
+            g_logEvery = !g_logEvery; g_profile.logEveryConnection = g_logEvery;
+            g_api.SetLogEveryConnection(g_logEvery); SaveActive(); SyncMenuChecks(hwnd); return 0;
         case IDM_SET_AUTOCLEAR:
             g_autoClear = !g_autoClear; g_profile.autoClearLogs = g_autoClear;
             SaveActive(); SyncMenuChecks(hwnd); return 0;
@@ -1143,6 +1151,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
         return 1;
 
     g_autoClear   = g_profile.autoClearLogs;
+    g_logEvery    = g_profile.logEveryConnection != 0;
     g_startup     = StartupIsEnabled();
     ApplyFilterSnapshot();
 
@@ -1201,6 +1210,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     // Wire callbacks + toggles, add configs (before Start so the UDP relay starts), start,
     // then add rules.
     g_api.SetTrafficLoggingEnabled(g_trafficLog);
+    g_api.SetLogEveryConnection(g_logEvery);
     g_api.SetEnabled(g_proxyEnabled);
     g_api.SetLogCallback(PBLogCb);
     g_api.SetConnectionCallback(PBConnCb);

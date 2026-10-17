@@ -27,6 +27,7 @@
 #define IDM_ZOOM_OUT                224
 #define IDM_ZOOM_RESET              225
 #define IDM_PROXY_ENABLE            226   // main on/off switch
+#define IDM_SET_LOGALL              227   // log every connection (no de-duplication)
 #define IDM_PROFILE_RENAME          244
 
 // Log Filters (list) dialog

@@ -280,6 +280,7 @@ void PB_ProfileDefaults(PBProfile* p, const wchar_t* name)
     ZeroMemory(p, sizeof(*p));
     p->trafficLogging    = 1;
     p->autoClearLogs     = 1;
+    p->logEveryConnection = 0;
     p->closeToTray       = 1;
     p->fontZoom          = 100;
     lstrcpynW(p->language, L"en", 8);
@@ -324,6 +325,7 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
         int oldGlobalLocalhost = json_bool(root, "LocalhostViaProxy", 0);
         p->trafficLogging    = json_bool(root, "IsTrafficLoggingEnabled", 1);
         p->autoClearLogs     = json_bool(root, "AutoClearConnectionLogs", 1);
+        p->logEveryConnection = json_bool(root, "LogEveryConnection", 0);
         p->closeToTray       = json_bool(root, "CloseToTray", 1);
         p->nextCfgId         = (UINT32)json_long(root, "NextProxyConfigId", 0);
         p->fontZoom          = (int)json_long(root, "FontZoom", 100);
@@ -417,6 +419,7 @@ BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
     put_kv_str(&b, "  ", "Name", name, ",\n");
     sb_put(&b, "  \"IsTrafficLoggingEnabled\": ");  sb_put(&b, p->trafficLogging ? "true" : "false");    sb_put(&b, ",\n");
     sb_put(&b, "  \"AutoClearConnectionLogs\": ");  sb_put(&b, p->autoClearLogs ? "true" : "false");     sb_put(&b, ",\n");
+    sb_put(&b, "  \"LogEveryConnection\": ");      sb_put(&b, p->logEveryConnection ? "true" : "false");   sb_put(&b, ",\n");
     put_kv_str(&b, "  ", "Language", p->language, ",\n");
     sb_put(&b, "  \"CloseToTray\": ");              sb_put(&b, p->closeToTray ? "true" : "false");       sb_put(&b, ",\n");
     { char zb[48]; _snprintf_s(zb, sizeof(zb), _TRUNCATE, "  \"FontZoom\": %d,\n", p->fontZoom); sb_put(&b, zb); }

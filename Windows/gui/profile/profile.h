@@ -56,6 +56,7 @@ UINT32 PB_AllocConfigId(PBProfile* p);
 typedef struct PBProfile {
     int      trafficLogging;
     int      autoClearLogs;
+    int      logEveryConnection;   // 1 = the Connections log shows every new connection, not just the first of identical ones
     int      closeToTray;
     int      fontZoom;            // UI/log text zoom in percent (60-300), 100 = DPI default
     UINT32   nextCfgId;           // next stable proxy-config id to hand out (persisted; ids are never reused)

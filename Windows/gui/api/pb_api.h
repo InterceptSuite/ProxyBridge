@@ -37,6 +37,7 @@ typedef void   (*PFN_SetLogCallback)(PBLogCallback);
 typedef void   (*PFN_SetConnectionCallback)(PBConnectionCallback);
 typedef void   (*PFN_SetTrafficLoggingEnabled)(BOOL);
 typedef void   (*PFN_SetEnabled)(BOOL);
+typedef void   (*PFN_SetLogEveryConnection)(BOOL);
 typedef void   (*PFN_ClearConnectionLogs)(void);
 typedef BOOL   (*PFN_Start)(void);
 typedef BOOL   (*PFN_Stop)(void);
@@ -60,6 +61,7 @@ typedef struct {
     PFN_SetConnectionCallback     SetConnectionCallback;
     PFN_SetTrafficLoggingEnabled  SetTrafficLoggingEnabled;
     PFN_SetEnabled                SetEnabled;
+    PFN_SetLogEveryConnection     SetLogEveryConnection;
     PFN_ClearConnectionLogs       ClearConnectionLogs;
     PFN_Start                     Start;
     PFN_Stop                      Stop;
@@ -105,6 +107,7 @@ static BOOL PB_LoadDirect(PBApi* api)
     PB_BIND(SetConnectionCallback,    "SetConnectionCallback");
     PB_BIND(SetTrafficLoggingEnabled, "SetTrafficLoggingEnabled");
     PB_BIND(SetEnabled,               "SetEnabled");
+    PB_BIND(SetLogEveryConnection,    "SetLogEveryConnection");
     PB_BIND(ClearConnectionLogs,      "ClearConnectionLogs");
     PB_BIND(Start,                    "Start");
     PB_BIND(Stop,                     "Stop");

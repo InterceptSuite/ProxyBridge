@@ -61,6 +61,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_DeleteRule(UINT32 rule_id);
 PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id, BOOL localhost_via_proxy);
 PROXYBRIDGE_API BOOL ProxyBridge_MoveRuleToPosition(UINT32 rule_id, UINT32 new_position);  // Move rule to specific position (1=first, 2=second, etc)
 PROXYBRIDGE_API UINT32 ProxyBridge_GetRulePosition(UINT32 rule_id);  // Get current position of rule in list (1-based)
+PROXYBRIDGE_API void ProxyBridge_SetLogEveryConnection(BOOL enable);   // FALSE (default): Connections log skips repeats; TRUE: every new connection
 PROXYBRIDGE_API void ProxyBridge_SetEnabled(BOOL enable);   // main switch: FALSE pauses all rules for new connections (default TRUE)
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback);
 PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
