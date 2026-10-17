@@ -120,7 +120,10 @@ struct ProxyRule: Codable {
 
     // wildcard match supporting any number of "*", e.g. *chrome*, com.*.browser, curl*
     private static func globMatch(_ pattern: String, _ text: String) -> Bool {
-        let p = Array(pattern), t = Array(text)
+        return globMatch(Array(pattern), Array(text))
+    }
+
+    fileprivate static func globMatch(_ p: [Character], _ t: [Character]) -> Bool {
         var pi = 0, ti = 0, star = -1, mark = 0
         while ti < t.count {
             if pi < p.count, p[pi] == t[ti] {
@@ -178,7 +181,7 @@ struct ProxyRule: Codable {
         return groups
     }
 
-    private static func matchIPPattern(_ pattern: String, ipString: String) -> Bool {
+    fileprivate static func matchIPPattern(_ pattern: String, ipString: String) -> Bool {
         if pattern.isEmpty || pattern == "*" {
             return true
         }
@@ -270,6 +273,117 @@ struct ProxyRule: Codable {
     }
 }
 
+// Pre-parsed form of a rule. Rules are matched on every new flow, so the string
+// splitting, lowercasing and number parsing happens once when the rule is added
+// instead of once per rule per connection.
+extension ProxyRule {
+    // lowercased forms of the flow's process, built once per flow
+    struct FlowProcess {
+        let candidates: [(path: [Character], file: [Character])]
+
+        init(bundleId: String, processName: String?) {
+            var list = [bundleId]
+            if let processName = processName { list.append(processName) }
+            candidates = list.map {
+                (Array($0.lowercased()), Array((($0 as NSString).lastPathComponent).lowercased()))
+            }
+        }
+    }
+
+    struct Matcher {
+        let processAll: Bool
+        let processPatterns: [(chars: [Character], fullPath: Bool)]
+        let hostAll: Bool
+        let hostPatterns: [(raw: String, glob: [Character], apex: String?)]
+        let portAll: Bool
+        let portRanges: [ClosedRange<UInt16>]
+
+        init(_ rule: ProxyRule) {
+            func isAll(_ s: String) -> Bool { s.isEmpty || s == "*" }
+
+            // empty segments are skipped, "Safari;" used to match every process
+            // because the empty pattern after the ; counted as a wildcard
+            var all = isAll(rule.processNames)
+            var procs: [(chars: [Character], fullPath: Bool)] = []
+            if !all {
+                for raw in rule.processNames.components(separatedBy: CharacterSet(charactersIn: ",;")) {
+                    let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if t.isEmpty { continue }
+                    if t == "*" { all = true; break }
+                    procs.append((Array(t.lowercased()), t.contains("/") || t.contains("\\")))
+                }
+            }
+            processAll = all
+            processPatterns = procs
+
+            var hostsAll = isAll(rule.targetHosts)
+            var hosts: [(raw: String, glob: [Character], apex: String?)] = []
+            if !hostsAll {
+                for raw in rule.targetHosts.components(separatedBy: ";") {
+                    let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if t.isEmpty { continue }
+                    if t == "*" { hostsAll = true; break }
+                    let lowered = t.lowercased()
+                    let apex = lowered.hasPrefix("*.") ? String(lowered.dropFirst(2)) : nil
+                    hosts.append((t, Array(lowered), apex))
+                }
+            }
+            hostAll = hostsAll
+            hostPatterns = hosts
+
+            var portsAll = isAll(rule.targetPorts)
+            var ranges: [ClosedRange<UInt16>] = []
+            if !portsAll {
+                for raw in rule.targetPorts.components(separatedBy: CharacterSet(charactersIn: ",;")) {
+                    let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if t.isEmpty { continue }
+                    if t == "*" { portsAll = true; break }
+                    if let dash = t.firstIndex(of: "-") {
+                        if let lo = UInt16(t[..<dash]), let hi = UInt16(t[t.index(after: dash)...]), lo <= hi {
+                            ranges.append(lo...hi)
+                        }
+                    } else if let p = UInt16(t) {
+                        ranges.append(p...p)
+                    }
+                }
+            }
+            portAll = portsAll
+            portRanges = ranges
+        }
+
+        var hasHostFilter: Bool { !hostAll }
+        var hasPortFilter: Bool { !portAll }
+
+        func matchesProcess(_ flow: FlowProcess) -> Bool {
+            if processAll { return true }
+            for cand in flow.candidates {
+                for p in processPatterns {
+                    if ProxyRule.globMatch(p.chars, p.fullPath ? cand.path : cand.file) { return true }
+                }
+            }
+            return false
+        }
+
+        func matchesHost(ip: String, domains: [(name: String, chars: [Character])]) -> Bool {
+            if hostAll { return true }
+            for p in hostPatterns {
+                if ProxyRule.matchIPPattern(p.raw, ipString: ip) { return true }
+                for d in domains {
+                    if ProxyRule.globMatch(p.glob, d.chars) { return true }
+                    if let apex = p.apex, d.name == apex { return true }
+                }
+            }
+            return false
+        }
+
+        func matchesPort(_ port: UInt16) -> Bool {
+            if portAll { return true }
+            for r in portRanges where r.contains(port) { return true }
+            return false
+        }
+    }
+}
+
 class AppProxyProvider: NETransparentProxyProvider {
     
     // one log entry, kept as an enum so we don't allocate a dictionary per line,
@@ -357,7 +471,8 @@ class AppProxyProvider: NETransparentProxyProvider {
         set { trafficLoggingLock.lock(); _trafficLoggingEnabled = newValue; trafficLoggingLock.unlock() }
     }
     
-    private var rules: [ProxyRule] = []
+    private typealias CompiledRule = (rule: ProxyRule, matcher: ProxyRule.Matcher)
+    private var rules: [CompiledRule] = []
     private let rulesLock = NSLock()
     private var nextRuleId: UInt32 = 1
     
@@ -412,13 +527,13 @@ class AppProxyProvider: NETransparentProxyProvider {
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         udpSweepTimer?.cancel()
         udpSweepTimer = nil
+        sweepHandshakes(all: true)
         udpLock.lock()
         let all = Array(udpAssociations.values)
         udpAssociations.removeAll()
         udpLock.unlock()
         for a in all {
-            a.controlConnection.cancel()
-            a.udpSession.cancel()
+            a.release()
         }
         completionHandler()
     }
@@ -435,6 +550,14 @@ class AppProxyProvider: NETransparentProxyProvider {
         private var lastActivity = Date()
         private let activityLock = NSLock()
 
+        // per-packet work is the hot path for quic/video, so the socks5 header for
+        // a destination and the endpoint for a relay source are built once and
+        // reused. both are capped so they can't grow forever.
+        struct HostPort: Hashable { let host: String; let port: UInt16 }
+        var headerCache: [HostPort: Data] = [:]
+        var endpointCache: [UInt64: (host: String, port: UInt16)] = [:]
+        static let cacheLimit = 64
+
         func touch() {
             activityLock.lock(); lastActivity = Date(); activityLock.unlock()
         }
@@ -442,6 +565,16 @@ class AppProxyProvider: NETransparentProxyProvider {
         func idleTime() -> TimeInterval {
             activityLock.lock(); defer { activityLock.unlock() }
             return Date().timeIntervalSince(lastActivity)
+        }
+
+        // NWUDPSession keeps its read handler after cancel(), and that handler
+        // refers back to this association, so the whole graph (association,
+        // session, tcp control connection, flow) used to stay alive after every
+        // udp flow. swap the handler out first, then cancel.
+        func release() {
+            udpSession.setReadHandler({ _, _ in }, maxDatagrams: 1)
+            controlConnection.cancel()
+            udpSession.cancel()
         }
 
         init(clientFlow: NEAppProxyUDPFlow, controlConnection: NWTCPConnection, udpSession: NWUDPSession, displayName: String) {
@@ -463,9 +596,10 @@ class AppProxyProvider: NETransparentProxyProvider {
     private func startUDPSweepTimer() {
         udpSweepTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        timer.schedule(deadline: .now() + 30, repeating: 30, leeway: .seconds(5))
+        timer.schedule(deadline: .now() + 5, repeating: 5, leeway: .seconds(1))
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
+            self.sweepHandshakes()
             self.udpLock.lock()
             let stale = self.udpAssociations.filter { $0.value.idleTime() > AppProxyProvider.udpIdleTimeout }.map { $0.key }
             self.udpLock.unlock()
@@ -477,32 +611,39 @@ class AppProxyProvider: NETransparentProxyProvider {
 
     // tcp and udp proxy handshakes have no timeout of their own, so a proxy that
     // accepts the connection and then goes quiet would pin the flow forever.
-    // an id stays in this set until the handshake finishes or the timer fires.
-    private var pendingHandshakes = Set<ObjectIdentifier>()
+    // entries are checked by the shared sweep timer, no per-flow timer is
+    // scheduled (a timer closure would hold the flow for its full delay even
+    // after the handshake succeeded, which adds up with quic churn)
+    private var pendingHandshakes: [ObjectIdentifier: (deadline: Date, flow: NEAppProxyFlow, connection: NWTCPConnection)] = [:]
     private let handshakeLock = NSLock()
     private static let handshakeTimeout: TimeInterval = 20
+    // grace between a client FIN and tearing the relay down, lets the upstream FIN flush
+    private static let halfCloseTimeout: TimeInterval = 3
 
     private func armHandshakeTimeout(flow: NEAppProxyFlow, connection: NWTCPConnection) {
-        let id = ObjectIdentifier(connection)
-        handshakeLock.lock(); pendingHandshakes.insert(id); handshakeLock.unlock()
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + AppProxyProvider.handshakeTimeout) { [weak self] in
-            guard let self = self else { return }
-            self.handshakeLock.lock()
-            let timedOut = self.pendingHandshakes.remove(id) != nil
-            self.handshakeLock.unlock()
-            if timedOut {
-                connection.cancel()
-                flow.closeReadWithError(nil)
-                flow.closeWriteWithError(nil)
-            }
-        }
+        let deadline = Date().addingTimeInterval(AppProxyProvider.handshakeTimeout)
+        handshakeLock.lock()
+        pendingHandshakes[ObjectIdentifier(connection)] = (deadline, flow, connection)
+        handshakeLock.unlock()
     }
 
-    // false means the timeout already fired and tore everything down
+    // false means the sweep already timed it out and tore everything down
     private func completeHandshake(_ connection: NWTCPConnection) -> Bool {
         handshakeLock.lock()
         defer { handshakeLock.unlock() }
-        return pendingHandshakes.remove(ObjectIdentifier(connection)) != nil
+        return pendingHandshakes.removeValue(forKey: ObjectIdentifier(connection)) != nil
+    }
+
+    private func sweepHandshakes(now: Date = Date(), all: Bool = false) {
+        handshakeLock.lock()
+        let expired = pendingHandshakes.filter { all || $0.value.deadline <= now }
+        for key in expired.keys { pendingHandshakes.removeValue(forKey: key) }
+        handshakeLock.unlock()
+        for (_, entry) in expired {
+            entry.connection.cancel()
+            entry.flow.closeReadWithError(nil)
+            entry.flow.closeWriteWithError(nil)
+        }
     }
 
     private func closeRelay(_ flow: NEAppProxyTCPFlow, _ connection: NWTCPConnection, error: Error? = nil) {
@@ -573,7 +714,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                 rulesLock.lock()
                 rule.ruleId = nextRuleId
                 nextRuleId += 1
-                rules.append(rule)
+                rules.append((rule, ProxyRule.Matcher(rule)))
                 rulesLock.unlock()
 
                 let response: [String: Any] = [
@@ -963,8 +1104,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         udpAssociations[clientFlow] = association
         udpLock.unlock()
         // if the app reused a flow, drop the stale association first
-        existing?.controlConnection.cancel()
-        existing?.udpSession.cancel()
+        existing?.release()
 
         readAndForwardClientUDP(association)
         readAndForwardRelayUDP(association)
@@ -983,8 +1123,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         assoc.isTornDown = true
         udpLock.unlock()
 
-        assoc.controlConnection.cancel()
-        assoc.udpSession.cancel()
+        assoc.release()
         flow.closeReadWithError(nil)
         flow.closeWriteWithError(nil)
     }
@@ -1026,8 +1165,18 @@ class AppProxyProvider: NETransparentProxyProvider {
                     self.sendLogToApp(protocol: "UDP", process: association.displayName, destination: destHost, port: nwHost.port, proxy: "SOCKS5")
                 }
 
-                if let encapsulated = self.encapsulateSOCKS5UDP(datagram: datagrams[i], destHost: destHost, destPort: destPort) {
-                    toSend.append(encapsulated)
+                let key = UDPAssociation.HostPort(host: destHost, port: destPort)
+                var header = association.headerCache[key]
+                if header == nil, let built = self.socks5UDPHeader(destHost: destHost, destPort: destPort) {
+                    if association.headerCache.count < UDPAssociation.cacheLimit { association.headerCache[key] = built }
+                    header = built
+                }
+                // a udp payload can be up to ~65507 bytes, don't drop mtu-sized quic packets
+                if let header = header, datagrams[i].count <= 65507 {
+                    var packet = Data(capacity: header.count + datagrams[i].count)
+                    packet.append(header)
+                    packet.append(datagrams[i])
+                    toSend.append(packet)
                 }
             }
 
@@ -1045,8 +1194,8 @@ class AppProxyProvider: NETransparentProxyProvider {
 
     private func readAndForwardRelayUDP(_ association: UDPAssociation) {
         let clientFlow = association.clientFlow
-        association.udpSession.setReadHandler({ [weak self] datagrams, error in
-            guard let self = self else { return }
+        association.udpSession.setReadHandler({ [weak self, weak association] datagrams, error in
+            guard let self = self, let association = association else { return }
 
             if let error = error {
                 // stop reading the relay but don't close the app's flow, let it
@@ -1064,7 +1213,7 @@ class AppProxyProvider: NETransparentProxyProvider {
             endpoints.reserveCapacity(datagrams.count)
 
             for datagram in datagrams {
-                if let (payload, destHost, destPort) = self.decapsulateSOCKS5UDPWithEndpoint(datagram: datagram) {
+                if let (payload, destHost, destPort) = self.decapsulateSOCKS5UDPWithEndpoint(datagram: datagram, association: association) {
                     payloads.append(payload)
                     endpoints.append(NWHostEndpoint(hostname: destHost, port: String(destPort)))
                 }
@@ -1080,13 +1229,8 @@ class AppProxyProvider: NETransparentProxyProvider {
         }, maxDatagrams: 32)
     }
     
-    private func encapsulateSOCKS5UDP(datagram: Data, destHost: String, destPort: UInt16) -> Data? {
-        // a udp payload can be up to ~65507 bytes, don't drop mtu-sized quic
-        // packets, let the network fragment if it must
-        if datagram.count > 65507 {
-            return nil
-        }
-
+    // the socks5 udp request header for one destination, the payload follows it
+    private func socks5UDPHeader(destHost: String, destPort: UInt16) -> Data? {
         var header = Data()
         header.append(contentsOf: [0, 0])
         header.append(0x00)
@@ -1111,13 +1255,10 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         header.append(UInt8(destPort >> 8))
         header.append(UInt8(destPort & 0xFF))
-        
-        var result = header
-        result.append(datagram)
-        return result
+        return header
     }
     
-    private func decapsulateSOCKS5UDPWithEndpoint(datagram: Data) -> (Data, String, UInt16)? {
+    private func decapsulateSOCKS5UDPWithEndpoint(datagram: Data, association: UDPAssociation) -> (Data, String, UInt16)? {
         guard datagram.count > 10 else { return nil }
 
         // byte 2 is FRAG, we don't reassemble so drop any fragmented datagram
@@ -1129,9 +1270,20 @@ class AppProxyProvider: NETransparentProxyProvider {
         var destPort: UInt16 = 0
 
         if atyp == 0x01 {
-            // ipv4 is 4 bytes + 2 port, already covered by count > 10
-            destHost = "\(datagram[4]).\(datagram[5]).\(datagram[6]).\(datagram[7])"
-            destPort = (UInt16(datagram[8]) << 8) | UInt16(datagram[9])
+            // ipv4 is 4 bytes + 2 port, already covered by count > 10. the dotted
+            // string is cached by the raw 6 bytes, a flow talks to few peers
+            let raw = (UInt64(datagram[4]) << 40) | (UInt64(datagram[5]) << 32) | (UInt64(datagram[6]) << 24)
+                | (UInt64(datagram[7]) << 16) | (UInt64(datagram[8]) << 8) | UInt64(datagram[9])
+            if let hit = association.endpointCache[raw] {
+                destHost = hit.host
+                destPort = hit.port
+            } else {
+                destHost = "\(datagram[4]).\(datagram[5]).\(datagram[6]).\(datagram[7])"
+                destPort = (UInt16(datagram[8]) << 8) | UInt16(datagram[9])
+                if association.endpointCache.count < UDPAssociation.cacheLimit {
+                    association.endpointCache[raw] = (destHost, destPort)
+                }
+            }
             headerLen += 6
         } else if atyp == 0x04 {
             // ipv6 needs 16 bytes + 2 port
@@ -1441,10 +1593,19 @@ class AppProxyProvider: NETransparentProxyProvider {
             }
             
             guard let data = data, !data.isEmpty else {
-                self?.closeRelay(clientFlow, proxyConnection)
+                // the client finished sending (FIN). macOS closes the flow in
+                // both directions at that point (the system log shows "Closing
+                // writes" right after the EOF), so a reply can't be delivered
+                // to a client that half-closes. send a FIN upstream so the request
+                // is flushed cleanly, then tear down after a short grace instead
+                // of cancelling mid-flush.
+                proxyConnection.writeClose()
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + AppProxyProvider.halfCloseTimeout) { [weak self] in
+                    self?.closeRelay(clientFlow, proxyConnection)
+                }
                 return
             }
-            
+
             proxyConnection.write(data) { error in
                 if let error = error {
                     self?.log("Proxy write error: \(error.localizedDescription)", level: "ERROR")
@@ -1487,25 +1648,24 @@ class AppProxyProvider: NETransparentProxyProvider {
         rulesLock.lock()
         let currentRules = rules
         rulesLock.unlock()
+        if currentRules.isEmpty { return nil }
+
+        let flowProcess = ProxyRule.FlowProcess(bundleId: bundleId, processName: processName)
+        let domainChars = domains.map { (name: $0, chars: Array($0)) }
 
         var wildcardRule: ProxyRule? = nil
 
-        for rule in currentRules {
+        for (rule, m) in currentRules {
             guard rule.enabled else { continue }
 
             if rule.ruleProtocol != .both && rule.ruleProtocol != connectionProtocol {
                 continue
             }
 
-            let isWildcardProcess = (rule.processNames == "*" || rule.processNames.isEmpty)
-
-            if isWildcardProcess {
-                let hasIpFilter = (rule.targetHosts != "*" && !rule.targetHosts.isEmpty)
-                let hasPortFilter = (rule.targetPorts != "*" && !rule.targetPorts.isEmpty)
-
-                if hasIpFilter || hasPortFilter {
+            if m.processAll {
+                if m.hasHostFilter || m.hasPortFilter {
                     // udp has no destination here, so a filtered wildcard can't match
-                    if checkIpPort, rule.matchesHost(ip: destination, domains: domains), rule.matchesPort(port) {
+                    if checkIpPort, m.matchesHost(ip: destination, domains: domainChars), m.matchesPort(port) {
                         return rule
                     }
                     continue
@@ -1518,9 +1678,9 @@ class AppProxyProvider: NETransparentProxyProvider {
                 continue
             }
 
-            if rule.matchesProcess(bundleId: bundleId, processName: processName) {
+            if m.matchesProcess(flowProcess) {
                 if checkIpPort {
-                    if rule.matchesHost(ip: destination, domains: domains) && rule.matchesPort(port) {
+                    if m.matchesHost(ip: destination, domains: domainChars) && m.matchesPort(port) {
                         return rule
                     }
                 } else {
@@ -1530,11 +1690,7 @@ class AppProxyProvider: NETransparentProxyProvider {
             }
         }
 
-        if let wildcardRule = wildcardRule {
-            return wildcardRule
-        }
-        
-        return nil
+        return wildcardRule
     }
     
     private func sendLogToApp(protocol: String, process: String, destination: String, port: String, proxy: String) {
