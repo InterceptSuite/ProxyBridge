@@ -1,9 +1,14 @@
 name: Release ProxyBridge Linux
 
 on:
-  release:
-    types: [published, created]
+  # manual only, so creating a release no longer triggers every OS build. create
+  # the release, then run just the workflow for the OS you want against its tag.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and attach the installer to (e.g. v4.1.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,11 +20,13 @@ jobs:
     permissions:
       contents: write
       actions: read
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner)
+    if: github.actor == github.repository_owner
 
     steps:
     - name: Checkout code
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      with:
+        ref: ${{ inputs.tag }}
 
     - name: Install build dependencies
       run: |
@@ -96,16 +103,14 @@ jobs:
     - name: Extract version from tag
       id: version
       run: |
-        if [ "${{ github.event_name }}" == "release" ]; then
-          VERSION="${{ github.event.release.tag_name }}"
-        else
-          VERSION="dev-$(date +%Y%m%d-%H%M%S)"
-        fi
+        VERSION="$TAG"
         # Remove 'v' prefix if present
         VERSION="${VERSION#v}"
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Version: $VERSION"
       shell: bash
+      env:
+        TAG: ${{ inputs.tag }}
 
     - name: Create release archive
       run: |
@@ -138,12 +143,12 @@ jobs:
       shell: bash
 
     - name: Upload archive to release
-      if: github.event_name == 'release'
       run: |
-        gh release upload "${{ github.event.release.tag_name }}" ProxyBridge-Linux-v*.tar.gz --clobber
+        gh release upload "$TAG" ProxyBridge-Linux-v*.tar.gz --clobber
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag }}
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

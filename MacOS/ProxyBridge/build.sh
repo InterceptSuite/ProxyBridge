@@ -5,6 +5,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION="4.1.0"
 
+# the pkg name/version here and the version shown in the app (About page, bundle)
+# come from different places, make a mismatch fail the build instead of shipping it
+PROJECT_VERSIONS=$(grep "MARKETING_VERSION" "$SCRIPT_DIR/ProxyBridge.xcodeproj/project.pbxproj" | sed -E 's/.*= *([^;]+);.*/\1/' | sort -u)
+if [ "$PROJECT_VERSIONS" != "$VERSION" ]; then
+    echo "Version mismatch: build.sh VERSION=$VERSION but MARKETING_VERSION in the Xcode project is: $(echo $PROJECT_VERSIONS)"
+    exit 1
+fi
+
 if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
 fi
