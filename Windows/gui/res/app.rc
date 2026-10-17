@@ -109,11 +109,14 @@ BEGIN
     PUSHBUTTON      "Clone",     IDC_RL_CLONE,  72,   8, 60, 16
     PUSHBUTTON      "Edit...",   IDC_RL_EDIT,  136,   8, 60, 16
     PUSHBUTTON      "Remove",    IDC_RL_REMOVE,200,   8, 60, 16
+    EDITTEXT        IDC_RL_SEARCH, 384,  9, 206, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    PUSHBUTTON      "x",         IDC_RL_CLEAR, 592,  9,  16, 14
+    LTEXT           "",          IDC_RL_COUNT, 330, 26, 278, 10, SS_RIGHT
     CONTROL         "", IDC_RL_LIST, "SysListView32",
                     LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP,
-                    8, 30, 600, 252
-    PUSHBUTTON      "Move Up",   IDC_RL_UP,   616,  30, 18, 16
-    PUSHBUTTON      "Move Down", IDC_RL_DOWN, 616,  52, 18, 16
+                    8, 40, 600, 242
+    PUSHBUTTON      "Move Up",   IDC_RL_UP,   616,  40, 18, 16
+    PUSHBUTTON      "Move Down", IDC_RL_DOWN, 616,  62, 18, 16
     LTEXT           "Rules are checked top to bottom; use the check box to enable/disable a rule.",
                     IDC_RL_HINT,  8, 290, 480, 11
     DEFPUSHBUTTON   "Close",     IDCANCEL,    572, 298, 60, 16

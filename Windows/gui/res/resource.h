@@ -109,6 +109,9 @@
 #define IDC_RL_UP                  406
 #define IDC_RL_DOWN                407
 #define IDC_RL_HINT                408
+#define IDC_RL_SEARCH              409   // rule search box
+#define IDC_RL_CLEAR               410   // clears the search
+#define IDC_RL_COUNT               411   // "n of m rules" while a search is active
 
 // Proxification Rule (edit) sub-dialog
 #define IDD_RULE                   420

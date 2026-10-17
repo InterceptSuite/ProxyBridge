@@ -378,10 +378,84 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 // Proxification Rules
-// List of rules with check-box enable/disable, Add.../Clone/Edit.../Remove and
-// Move Up / Move Down ordering. The rule fields live in the IDD_RULE sub-dialog.
+// List of rules with check-box enable/disable, Add.../Clone/Edit.../Remove, Move Up / Move Down ordering and a
+// search box. The rule fields live in the IDD_RULE sub-dialog.
 
 static BOOL g_rulesRefreshing = FALSE;   // guards the checkbox-change notification during refill
+
+// Search. The list shows only the rules that contain EVERY word typed in the search box (case-insensitive) in
+// their name, applications, hosts, ports, protocol, action or proxy. g_rlMap[row] is the index in g_profile.rule
+// of the rule shown at that list row: every action works on rule indexes, never on row numbers, so Edit, Clone,
+// Remove and the enable check boxes are correct while the list is filtered.
+#define RL_MAX_WORDS 8
+#define RL_WORD_LEN  64
+static int     g_rlMap[PB_MAX_RULE];
+static int     g_rlMapN = 0;
+static wchar_t g_rlWord[RL_MAX_WORDS][RL_WORD_LEN];
+static int     g_rlWordN = 0;
+
+// The text shown in the "Proxy" column (also searched).
+static void RuleProxyLabel(const PBRule* r, wchar_t* cfg, int cch)
+{
+    if (_wcsicmp(r->action, L"PROXY") == 0)
+    {
+        const PBConfig* c = NULL;
+        for (int k = 0; k < g_profile.cfgCount; k++)
+            if (g_profile.cfg[k].storedId == r->cfgStoredId) { c = &g_profile.cfg[k]; break; }
+        if (c) _snwprintf_s(cfg, cch, _TRUNCATE, L"%s  %s  %s:%s", c->name[0] ? c->name : c->type, c->type, c->host, c->port);
+        else   _snwprintf_s(cfg, cch, _TRUNCATE, L"#%u (missing)", r->cfgStoredId);
+        cfg[cch - 1] = 0;
+    }
+    else lstrcpynW(cfg, L"\x2014", cch);   // em dash for Direct/Block
+}
+
+static void RulesSetFilterText(const wchar_t* text)
+{
+    g_rlWordN = 0;
+    const wchar_t* p = text ? text : L"";
+    while (*p && g_rlWordN < RL_MAX_WORDS)
+    {
+        while (*p && *p <= L' ') p++;
+        if (!*p) break;
+        int n = 0;
+        while (*p && *p > L' ') { if (n < RL_WORD_LEN - 1) g_rlWord[g_rlWordN][n++] = *p; p++; }
+        g_rlWord[g_rlWordN][n] = 0;
+        g_rlWordN++;
+    }
+}
+
+static BOOL RuleMatchesFilter(const PBRule* r)
+{
+    if (g_rlWordN == 0) return TRUE;
+    wchar_t label[200]; RuleProxyLabel(r, label, 200);
+    const wchar_t* name = r->name[0] ? r->name : L"ProxyBridge Rule";
+    size_t cap = wcslen(name) + wcslen(r->proc) + wcslen(r->hosts) + wcslen(r->ports) + wcslen(r->proto) + wcslen(r->action) + wcslen(label) + 16;
+    wchar_t* hay = (wchar_t*)malloc(cap * sizeof(wchar_t));
+    if (!hay) return TRUE;                                  // out of memory: show the rule rather than hide it
+    _snwprintf_s(hay, cap, _TRUNCATE, L"%s\n%s\n%s\n%s\n%s\n%s\n%s", name, r->proc, r->hosts, r->ports, r->proto, r->action, label);
+    BOOL ok = TRUE;
+    for (int i = 0; i < g_rlWordN && ok; i++) ok = ContainsCI(hay, g_rlWord[i]);
+    free(hay);
+    return ok;
+}
+
+static int RowOfRuleIndex(int idx)
+{
+    for (int i = 0; i < g_rlMapN; i++) if (g_rlMap[i] == idx) return i;
+    return -1;
+}
+static int SelectedRuleIndex(HWND lv)
+{
+    int row = ListView_GetNextItem(lv, -1, LVNI_SELECTED);
+    return (row >= 0 && row < g_rlMapN) ? g_rlMap[row] : -1;
+}
+static void SelectRuleIndex(HWND lv, int idx)
+{
+    int row = RowOfRuleIndex(idx);
+    if (row < 0) return;
+    ListView_SetItemState(lv, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_EnsureVisible(lv, row, FALSE);
+}
 
 static void InitRulesList(HWND lv)
 {
@@ -396,37 +470,141 @@ static void InitRulesList(HWND lv)
     SetWindowSubclass(lv, ListDarkSubProc, 3, 0);
     FillColumns(lv, 8);
 }
+
+// "n of m rules" while a search is active; reordering is only offered on the full list.
+static void RulesUpdateChrome(HWND dlg)
+{
+    BOOL filtered = g_rlWordN > 0;
+    wchar_t txt[160]; txt[0] = 0;
+    if (filtered) _snwprintf_s(txt, ARRAYSIZE(txt), _TRUNCATE, T(S_RULES_COUNT), g_rlMapN, g_profile.ruleCount);
+    SetDlgItemTextW(dlg, IDC_RL_COUNT, txt);
+    EnableWindow(GetDlgItem(dlg, IDC_RL_UP),    !filtered);
+    EnableWindow(GetDlgItem(dlg, IDC_RL_DOWN),  !filtered);
+    EnableWindow(GetDlgItem(dlg, IDC_RL_CLEAR), filtered);
+}
+
 static void RefreshRulesList(HWND lv)
 {
     g_rulesRefreshing = TRUE;
     ListView_DeleteAllItems(lv);
-    for (int i = 0; i < g_profile.ruleCount; i++)
+    g_rlMapN = 0;
+    for (int i = 0; i < g_profile.ruleCount && g_rlMapN < PB_MAX_RULE; i++)
+        if (RuleMatchesFilter(&g_profile.rule[i])) g_rlMap[g_rlMapN++] = i;
+    for (int row = 0; row < g_rlMapN; row++)
     {
-        PBRule* r = &g_profile.rule[i];
+        const PBRule* r = &g_profile.rule[g_rlMap[row]];
         LVITEMW it; ZeroMemory(&it, sizeof(it));
-        it.mask = LVIF_TEXT; it.iItem = i; it.pszText = (LPWSTR)L"";
+        it.mask = LVIF_TEXT; it.iItem = row; it.pszText = (LPWSTR)L"";
         ListView_InsertItem(lv, &it);
-        ListView_SetItemText(lv, i, 1, r->name[0] ? r->name : (LPWSTR)L"ProxyBridge Rule");
-        ListView_SetItemText(lv, i, 2, r->proc);
-        ListView_SetItemText(lv, i, 3, r->hosts);
-        ListView_SetItemText(lv, i, 4, r->ports);
-        ListView_SetItemText(lv, i, 5, r->proto);
-        ListView_SetItemText(lv, i, 6, r->action);
-        wchar_t cfg[200];
-        if (_wcsicmp(r->action, L"PROXY") == 0)
-        {
-            const PBConfig* c = NULL;
-            for (int k = 0; k < g_profile.cfgCount; k++)
-                if (g_profile.cfg[k].storedId == r->cfgStoredId) { c = &g_profile.cfg[k]; break; }
-            if (c) _snwprintf_s(cfg, 200, _TRUNCATE, L"%s  %s  %s:%s", c->name[0] ? c->name : c->type, c->type, c->host, c->port);
-            else   _snwprintf_s(cfg, 200, _TRUNCATE, L"#%u (missing)", r->cfgStoredId);
-            cfg[199] = 0;
-        }
-        else lstrcpynW(cfg, L"\x2014", 200);   // em dash for Direct/Block
-        ListView_SetItemText(lv, i, 7, cfg);
-        ListView_SetCheckState(lv, i, r->enabled ? TRUE : FALSE);
+        ListView_SetItemText(lv, row, 1, r->name[0] ? (LPWSTR)r->name : (LPWSTR)L"ProxyBridge Rule");
+        ListView_SetItemText(lv, row, 2, (LPWSTR)r->proc);
+        ListView_SetItemText(lv, row, 3, (LPWSTR)r->hosts);
+        ListView_SetItemText(lv, row, 4, (LPWSTR)r->ports);
+        ListView_SetItemText(lv, row, 5, (LPWSTR)r->proto);
+        ListView_SetItemText(lv, row, 6, (LPWSTR)r->action);
+        wchar_t cfg[200]; RuleProxyLabel(r, cfg, 200);
+        ListView_SetItemText(lv, row, 7, cfg);
+        ListView_SetCheckState(lv, row, r->enabled ? TRUE : FALSE);
     }
     g_rulesRefreshing = FALSE;
+    RulesUpdateChrome(GetParent(lv));
+}
+
+// Re-reads the search box and refilters, keeping the selected rule selected when it is still shown.
+static void RulesApplyFilterFromBox(HWND dlg)
+{
+    HWND lv = GetDlgItem(dlg, IDC_RL_LIST);
+    wchar_t text[256];
+    GetDlgItemTextW(dlg, IDC_RL_SEARCH, text, ARRAYSIZE(text));
+    int keep = SelectedRuleIndex(lv);
+    RulesSetFilterText(text);
+    RefreshRulesList(lv);
+    SelectRuleIndex(lv, keep);
+}
+
+static void RulesFocusSearch(HWND dlg, wchar_t typed)
+{
+    HWND e = GetDlgItem(dlg, IDC_RL_SEARCH);
+    SetFocus(e);
+    if (typed)
+    {
+        wchar_t s[2] = { typed, 0 };
+        SendMessageW(e, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);          // type-to-search: append at the end
+        SendMessageW(e, EM_REPLACESEL, TRUE, (LPARAM)s);
+    }
+    else SendMessageW(e, EM_SETSEL, 0, (LPARAM)-1);                  // Ctrl+F: select the old text
+}
+
+static void RulesFocusList(HWND dlg)
+{
+    HWND lv = GetDlgItem(dlg, IDC_RL_LIST);
+    if (g_rlMapN <= 0) return;
+    if (ListView_GetNextItem(lv, -1, LVNI_SELECTED) < 0)
+        ListView_SetItemState(lv, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    SetFocus(lv);
+}
+
+// Search box keys: Enter / Down go to the list, Esc clears the text (and only closes the dialog when empty).
+static LRESULT CALLBACK RuleSearchProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref)
+{
+    (void)ref;
+    HWND dlg = GetParent(h);
+    switch (m)
+    {
+    case WM_GETDLGCODE:
+    {
+        LRESULT r = DefSubclassProc(h, m, w, l);
+        const MSG* ms = (const MSG*)l;
+        if (ms && ms->message == WM_KEYDOWN)
+        {
+            if (ms->wParam == VK_RETURN || ms->wParam == VK_DOWN) r |= DLGC_WANTMESSAGE;
+            else if (ms->wParam == VK_ESCAPE && GetWindowTextLengthW(h) > 0) r |= DLGC_WANTMESSAGE;
+        }
+        return r;
+    }
+    case WM_KEYDOWN:
+        if (w == VK_RETURN || w == VK_DOWN) { RulesFocusList(dlg); return 0; }
+        if (w == VK_ESCAPE && GetWindowTextLengthW(h) > 0) { SetWindowTextW(h, L""); return 0; }   // EN_CHANGE refilters
+        if (w == 'F' && GetKeyState(VK_CONTROL) < 0) { SendMessageW(h, EM_SETSEL, 0, (LPARAM)-1); return 0; }
+        break;
+    case WM_CHAR:
+        if (w == VK_RETURN || w == VK_ESCAPE) return 0;               // no beep
+        break;
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(h, RuleSearchProc, id);
+        break;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+
+// List keys: Ctrl+F jumps to the search box, any printable character starts a search (type-to-search),
+// Esc clears an active search.
+static LRESULT CALLBACK RuleListProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref)
+{
+    (void)ref;
+    HWND dlg = GetParent(h);
+    switch (m)
+    {
+    case WM_GETDLGCODE:
+    {
+        LRESULT r = DefSubclassProc(h, m, w, l);
+        const MSG* ms = (const MSG*)l;
+        if (ms && ms->message == WM_KEYDOWN && ms->wParam == VK_ESCAPE && g_rlWordN > 0) r |= DLGC_WANTMESSAGE;
+        return r;
+    }
+    case WM_KEYDOWN:
+        if (w == 'F' && GetKeyState(VK_CONTROL) < 0) { RulesFocusSearch(dlg, 0); return 0; }
+        if (w == VK_ESCAPE && g_rlWordN > 0) { SetDlgItemTextW(dlg, IDC_RL_SEARCH, L""); return 0; }
+        break;
+    case WM_CHAR:
+        // Space is left to the list (it toggles the check box of the selected rule).
+        if (w > L' ' && w != 0x7F && GetKeyState(VK_CONTROL) >= 0) { RulesFocusSearch(dlg, (wchar_t)w); return 0; }
+        break;
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(h, RuleListProc, id);
+        break;
+    }
+    return DefSubclassProc(h, m, w, l);
 }
 
 // Append one application name to a "; "-separated list, respecting the existing separator.
@@ -644,8 +822,7 @@ static void SwapRules(HWND lv, int a, int b)
         g_api.MoveRuleToPosition(g_profile.rule[b].nativeId, (UINT32)(b + 1));
     SaveActive();
     RefreshRulesList(lv);
-    ListView_SetItemState(lv, b, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-    ListView_EnsureVisible(lv, b, FALSE);
+    SelectRuleIndex(lv, b);
 }
 
 INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
@@ -662,12 +839,18 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_RL_DOWN,   T(S_BTN_DOWN));
         SetDlgItemTextW(dlg, IDC_RL_HINT,   T(S_RULES_HINT));
         SetDlgItemTextW(dlg, IDCANCEL,      T(S_BTN_CLOSE));
+        SetDlgItemTextW(dlg, IDC_RL_CLEAR,  L"\x2715");             // multiplication X
         InitDarkMode(dlg);
         InitRulesList(GetDlgItem(dlg, IDC_RL_LIST));
+        g_rlWordN = 0; g_rlMapN = 0;                                  // always open with the full list
+        SendDlgItemMessageW(dlg, IDC_RL_SEARCH, EM_LIMITTEXT, 255, 0);
+        SendDlgItemMessageW(dlg, IDC_RL_SEARCH, EM_SETCUEBANNER, TRUE, (LPARAM)T(S_RULES_SEARCH));
+        SetWindowSubclass(GetDlgItem(dlg, IDC_RL_SEARCH), RuleSearchProc, 4, 0);
+        SetWindowSubclass(GetDlgItem(dlg, IDC_RL_LIST),   RuleListProc,   5, 0);
         RefreshRulesList(GetDlgItem(dlg, IDC_RL_LIST));
         return TRUE;
     case WM_SIZE:
-        FillColumns(GetDlgItem(dlg, IDC_RL_LIST), 9);
+        FillColumns(GetDlgItem(dlg, IDC_RL_LIST), 8);
         return FALSE;
     PB_DARK_CTLCOLORS;
     case WM_NOTIFY:
@@ -682,10 +865,11 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         {
             NMLISTVIEW* nlv = (NMLISTVIEW*)lp;
             if ((nlv->uChanged & LVIF_STATE) && (nlv->uNewState & LVIS_STATEIMAGEMASK) &&
-                nlv->iItem >= 0 && nlv->iItem < g_profile.ruleCount)
+                nlv->iItem >= 0 && nlv->iItem < g_rlMapN)
             {
+                int ri = g_rlMap[nlv->iItem];                         // row -> rule index
                 BOOL checked = ListView_GetCheckState(lv, nlv->iItem);
-                PBRule* r = &g_profile.rule[nlv->iItem];
+                PBRule* r = &g_profile.rule[ri];
                 if ((BOOL)r->enabled != checked)
                 {
                     r->enabled = checked ? 1 : 0;
@@ -699,9 +883,16 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND:
     {
         HWND lv = GetDlgItem(dlg, IDC_RL_LIST);
-        int sel = ListView_GetNextItem(lv, -1, LVNI_SELECTED);
+        int sel = SelectedRuleIndex(lv);                              // index in g_profile.rule, not a row number
         switch (LOWORD(wp))
         {
+        case IDC_RL_SEARCH:
+            if (HIWORD(wp) == EN_CHANGE) RulesApplyFilterFromBox(dlg);
+            return TRUE;
+        case IDC_RL_CLEAR:
+            SetDlgItemTextW(dlg, IDC_RL_SEARCH, L"");                 // EN_CHANGE refilters
+            SetFocus(GetDlgItem(dlg, IDC_RL_SEARCH));
+            return TRUE;
         case IDC_RL_ADD:
         {
             if (g_profile.ruleCount >= PB_MAX_RULE) { MessageBoxW(dlg, L"Rule limit reached.", APP_TITLE, MB_OK); return TRUE; }
@@ -713,7 +904,14 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_RULE), dlg, RuleEditDlgProc, (LPARAM)&r) == 1)
             {
                 UINT32 id = EngineAddRule(&r);          // appended at the end of the engine list
-                if (id) { r.nativeId = id; g_profile.rule[g_profile.ruleCount++] = r; SaveActive(); RefreshRulesList(lv); }
+                if (id)
+                {
+                    r.nativeId = id; g_profile.rule[g_profile.ruleCount++] = r; SaveActive();
+                    // a new rule that the active search hides would look like it was lost: show everything instead
+                    if (g_rlWordN > 0 && !RuleMatchesFilter(&r)) SetDlgItemTextW(dlg, IDC_RL_SEARCH, L"");
+                    RefreshRulesList(lv);
+                    SelectRuleIndex(lv, g_profile.ruleCount - 1);
+                }
                 else MessageBoxW(dlg, T(S_ERR_ADDRULE), APP_TITLE, MB_OK | MB_ICONERROR);
             }
             return TRUE;
@@ -730,7 +928,7 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             g_profile.rule[sel + 1] = r; g_profile.ruleCount++;
             g_api.MoveRuleToPosition(id, (UINT32)(sel + 2));   // slot it right after the source
             SaveActive(); RefreshRulesList(lv);
-            ListView_SetItemState(lv, sel + 1, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            SelectRuleIndex(lv, sel + 1);
             return TRUE;
         }
         case IDC_RL_EDIT:
@@ -742,7 +940,7 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 g_profile.rule[sel] = r;
                 EngineEditRule(&r);
                 SaveActive(); RefreshRulesList(lv);
-                ListView_SetItemState(lv, sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                SelectRuleIndex(lv, sel);              // stays unselected if the edit made it stop matching the search
             }
             return TRUE;
         }
@@ -755,8 +953,8 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             SaveActive(); RefreshRulesList(lv);
             return TRUE;
         }
-        case IDC_RL_UP:   if (sel > 0) SwapRules(lv, sel, sel - 1); return TRUE;
-        case IDC_RL_DOWN: if (sel >= 0 && sel < g_profile.ruleCount - 1) SwapRules(lv, sel, sel + 1); return TRUE;
+        case IDC_RL_UP:   if (g_rlWordN == 0 && sel > 0) SwapRules(lv, sel, sel - 1); return TRUE;
+        case IDC_RL_DOWN: if (g_rlWordN == 0 && sel >= 0 && sel < g_profile.ruleCount - 1) SwapRules(lv, sel, sel + 1); return TRUE;
         case IDCANCEL: EndDialog(dlg, 0); return TRUE;
         }
         return FALSE;

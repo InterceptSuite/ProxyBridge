@@ -218,6 +218,13 @@ ProxyBridge allows you to export selected rules to a `.pbprofile` JSON file and 
 - See routing status per connection: **PROXY**, **DIRECT**, or **BLOCK**
 - Search and filter by process name, IP, port, or routing status
 
+**Searching a long rule list:** the **Proxy Rules** window has a search box at the top right. The list shows only
+the rules that contain **every** word you type (case-insensitive) in their name, applications, hosts, ports,
+protocol, action or proxy, for example `chrome github` or `192.168 proxy`. Press **Ctrl+F** to jump to the box,
+just start typing while the list has focus, **Enter** or **Down** to go to the matching rules, and **Esc** (or the
+**x** button) to clear the search. Edit, Clone, Remove and the enable check boxes work on the rules you see;
+Move Up / Move Down are only available when no search is active, because the order of a partial list is ambiguous.
+
 **Note:** Adding a rule with action **PROXY** while no proxy is configured will fall back to a direct connection. Configure at least one proxy server before using PROXY rules.
 
 ### Command Line Interface (CLI)
