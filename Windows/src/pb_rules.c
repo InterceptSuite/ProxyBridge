@@ -671,6 +671,12 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
 // DeleteRule/MoveRule from the GUI thread cannot free a node/string mid-match.
 RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
 {
+    if (!g_proxy_enabled)                      // paused: no rule applies
+    {
+        g_tl_rule_localhost = FALSE;
+        if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
+        return RULE_ACTION_DIRECT;
+    }
     AcquireSRWLockShared(&g_rules_lock);
     RuleAction action = match_rule_inner(process_name, dest_ip, dest_port, is_udp, out_proxy_config_id);
     ReleaseSRWLockShared(&g_rules_lock);
@@ -762,6 +768,12 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
 
 RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
 {
+    if (!g_proxy_enabled)                      // paused: no rule applies
+    {
+        g_tl_rule_localhost = FALSE;
+        if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
+        return RULE_ACTION_DIRECT;
+    }
     AcquireSRWLockShared(&g_rules_lock);
     RuleAction action = match_rule_v6_inner(process_name, dest_ip6, dest_port, is_udp, out_proxy_config_id);
     ReleaseSRWLockShared(&g_rules_lock);

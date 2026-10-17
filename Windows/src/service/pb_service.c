@@ -171,6 +171,7 @@ static BOOL Dispatch(const BYTE *req, DWORD reqLen, PbW *resp)
 
     case PBOP_SET_TRAFFIC_LOG:  { UINT32 v = PbR_U32(&r); if (!r.ok) return FALSE; g_api.SetTrafficLoggingEnabled(v != 0); break; }
     case PBOP_CLEAR_CONN_LOGS:  g_api.ClearConnectionLogs(); break;
+    case PBOP_SET_ENABLED:      { UINT32 v = PbR_U32(&r); if (!r.ok) return FALSE; g_api.SetEnabled(v != 0); break; }
     case PBOP_START: ret = g_api.Start(); break;
     case PBOP_STOP:  ret = g_api.Stop();  break;
     default: return FALSE;

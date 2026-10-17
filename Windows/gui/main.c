@@ -126,6 +126,7 @@ static BOOL      g_started = FALSE;
 static PBProfile g_profile;
 static wchar_t   g_activeProfile[PB_NAME_MAX] = L"Default";
 static BOOL      g_trafficLog = TRUE, g_closeToTray = TRUE;
+static BOOL      g_proxyEnabled = TRUE;   // main switch; not saved: ProxyBridge always starts enabled
 static BOOL      g_startup = FALSE;   // "Run at Startup" (schtasks logon task)
 static BOOL      g_autoClear = TRUE;  // auto-clear logs past a line threshold to save memory
 #define AUTO_CLEAR_LINES 500
@@ -331,7 +332,7 @@ static void SwitchToProfile(const wchar_t* name)
 
 static void UpdateTitle(void)
 {
-    wchar_t t[128]; _snwprintf_s(t, 128, _TRUNCATE, L"%s - %s", APP_TITLE, g_activeProfile);
+    wchar_t t[160]; _snwprintf_s(t, 160, _TRUNCATE, L"%s - %s%s", APP_TITLE, g_activeProfile, g_proxyEnabled ? L"" : T(S_TITLE_PAUSED));
     SetWindowTextW(g_hMain, t);
 }
 
@@ -356,6 +357,8 @@ static void BuildMainMenu(HWND hwnd)
     HMENU bar = CreateMenu();
 
     HMENU proxy = CreatePopupMenu();
+    AppendMenuW(proxy, MF_STRING, IDM_PROXY_ENABLE,   T(S_M_ENABLE));       // main on/off switch
+    AppendMenuW(proxy, MF_SEPARATOR, 0, NULL);
     AppendMenuW(proxy, MF_STRING, IDM_PROXY_SETTINGS, T(S_M_PROXY_SETTINGS));
     AppendMenuW(proxy, MF_STRING, IDM_PROXY_RULES,    T(S_M_PROXY_RULES));
     AppendMenuW(proxy, MF_STRING, IDM_LOG_FILTERS,    T(S_M_LOGFILTERS));
@@ -452,6 +455,14 @@ static void TrayAdd(HWND hwnd)
     // NIM_ADD fails if the shell's tray is not ready yet
     // broadcast re-adds the icon once the taskbar actually appears
     g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_tray);
+}
+static void TrayUpdateTip(void)
+{
+    if (!g_trayAdded) return;
+    _snwprintf_s(g_tray.szTip, ARRAYSIZE(g_tray.szTip), _TRUNCATE, L"%s%s", APP_TITLE, g_proxyEnabled ? L"" : T(S_TITLE_PAUSED));
+    g_tray.uFlags = NIF_TIP;
+    Shell_NotifyIconW(NIM_MODIFY, &g_tray);
+    g_tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
 }
 static void TrayRemove(void) { if (g_trayAdded) { Shell_NotifyIconW(NIM_DELETE, &g_tray); g_trayAdded = FALSE; } }
 static void ShowMainWindow(HWND hwnd) { ShowWindow(hwnd, SW_SHOW); ShowWindow(hwnd, SW_RESTORE); SetForegroundWindow(hwnd); }
@@ -556,6 +567,7 @@ static void SelectTab(int idx)
 static void SyncMenuChecks(HWND hwnd)
 {
     HMENU m = GetMenu(hwnd);
+    CheckMenuItem(m, IDM_PROXY_ENABLE,    MF_BYCOMMAND | (g_proxyEnabled ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_SET_TRAFFICLOG,  MF_BYCOMMAND | (g_trafficLog ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_SET_CLOSETOTRAY, MF_BYCOMMAND | (g_closeToTray? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_SET_STARTUP,     MF_BYCOMMAND | (g_startup    ? MF_CHECKED : MF_UNCHECKED));
@@ -872,6 +884,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             POINT pt; GetCursorPos(&pt);
             HMENU pm = CreatePopupMenu();
             AppendMenuW(pm, MF_STRING, IDM_TRAY_SHOW, T(S_TRAY_SHOW));
+            AppendMenuW(pm, MF_STRING | (g_proxyEnabled ? MF_CHECKED : MF_UNCHECKED), IDM_PROXY_ENABLE, T(S_M_ENABLE));
             AppendMenuW(pm, MF_SEPARATOR, 0, NULL);
             AppendMenuW(pm, MF_STRING, IDM_TRAY_EXIT, T(S_TRAY_EXIT));
             SetForegroundWindow(hwnd);
@@ -893,6 +906,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
         case IDM_PROXY_SETTINGS: DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_SERVERS), hwnd, ServersDlgProc); return 0;
         case IDM_PROXY_RULES:    DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_RULES),   hwnd, RulesDlgProc);   return 0;
+        case IDM_PROXY_ENABLE:
+            g_proxyEnabled = !g_proxyEnabled;
+            g_api.SetEnabled(g_proxyEnabled);
+            UpdateTitle(); TrayUpdateTip(); SyncMenuChecks(hwnd);
+            return 0;
         case IDM_SET_TRAFFICLOG:
             g_trafficLog = !g_trafficLog; g_profile.trafficLogging = g_trafficLog;
             g_api.SetTrafficLoggingEnabled(g_trafficLog); SaveActive(); SyncMenuChecks(hwnd); return 0;
@@ -1183,6 +1201,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     // Wire callbacks + toggles, add configs (before Start so the UDP relay starts), start,
     // then add rules.
     g_api.SetTrafficLoggingEnabled(g_trafficLog);
+    g_api.SetEnabled(g_proxyEnabled);
     g_api.SetLogCallback(PBLogCb);
     g_api.SetConnectionCallback(PBConnCb);
     ApplyConfigs();

@@ -128,6 +128,7 @@ static BOOL IpcMoveRule(UINT32 id, UINT32 pos) { PBIPC_BEGIN(PBOP_MOVE_RULE); Pb
 static UINT32 IpcGetRulePos(UINT32 id) { PBIPC_BEGIN(PBOP_GET_RULE_POS); PbW_U32(&_w, id); PBIPC_END(); }
 static void IpcSetTrafficLog(BOOL v)  { PBIPC_BEGIN(PBOP_SET_TRAFFIC_LOG); PbW_U32(&_w, v != 0); PbIpcCall(_b, _w.len); }
 static void IpcClearConnLogs(void)    { PBIPC_BEGIN(PBOP_CLEAR_CONN_LOGS); PbIpcCall(_b, _w.len); }
+static void IpcSetEnabled(BOOL v)     { PBIPC_BEGIN(PBOP_SET_ENABLED);     PbW_U32(&_w, v != 0); PbIpcCall(_b, _w.len); }
 static void IpcSetLogCallback(PBLogCallback cb)               { g_ipcLogCb = cb; }
 static void IpcSetConnectionCallback(PBConnectionCallback cb) { g_ipcConnCb = cb; }
 static BOOL IpcStart(void) { PBIPC_BEGIN(PBOP_START); PBIPC_END(); }
@@ -244,7 +245,7 @@ static int PB_LoadService(PBApi* api)
     api->MoveRuleToPosition = IpcMoveRule;         api->GetRulePosition = IpcGetRulePos;
     api->SetLogCallback = IpcSetLogCallback;
     api->SetConnectionCallback = IpcSetConnectionCallback;
-    api->SetTrafficLoggingEnabled = IpcSetTrafficLog;
+    api->SetTrafficLoggingEnabled = IpcSetTrafficLog;   api->SetEnabled = IpcSetEnabled;
     api->ClearConnectionLogs = IpcClearConnLogs;   api->Start = IpcStart; api->Stop = IpcStop;
     return PB_IPC_OK;
 }

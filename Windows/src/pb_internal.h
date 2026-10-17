@@ -197,6 +197,7 @@ extern HANDLE cleanup_thread;
 extern PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE];
 extern volatile BOOL g_has_active_rules;
 extern volatile BOOL g_has_domain_rules;
+extern volatile BOOL g_proxy_enabled;   // FALSE = paused: new connections are neither proxied nor blocked (existing ones carry on)
 extern SOCKET udp_relay_socket;
 extern SOCKET udp_relay_socket6;
 extern volatile BOOL running;

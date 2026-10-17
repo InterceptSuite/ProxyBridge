@@ -10,7 +10,7 @@
 #define APP_VERSION PB_VER_STRW   // defined in res/resource.h (single source of truth)
 
 enum {
-    S_M_PROXY, S_M_PROXY_SETTINGS, S_M_PROXY_RULES,
+    S_M_PROXY, S_M_PROXY_SETTINGS, S_M_PROXY_RULES, S_M_ENABLE, S_TITLE_PAUSED,
     S_M_PROFILE, S_M_NEWPROFILE, S_M_DELPROFILE, S_M_IMPORT, S_M_EXPORT, S_M_SWITCH,
     S_M_SETTINGS, S_CHK_LOCALHOST, S_M_TRAFFIC, S_M_TRAY, S_M_LANG, S_M_LANG_EN, S_M_LANG_ZH,
     S_M_CLEARCONN, S_M_CLEARACT, S_M_HELP, S_M_ABOUT, S_M_DOCS, S_M_STARTUP,
@@ -47,6 +47,8 @@ static const wchar_t* const g_strings[S_COUNT][2] = {
     /* S_M_PROXY            */ { L"&Proxy", L"代理(&P)" },
     /* S_M_PROXY_SETTINGS   */ { L"Proxy &Settings...", L"代理设置(&S)..." },
     /* S_M_PROXY_RULES      */ { L"Proxy &Rules...", L"代理规则(&R)..." },
+    /* S_M_ENABLE           */ { L"&Enable ProxyBridge", L"启用 ProxyBridge(&E)" },
+    /* S_TITLE_PAUSED       */ { L"  (PAUSED)", L"  (已暂停)" },
     /* S_M_PROFILE          */ { L"P&rofile", L"配置文件(&R)" },
     /* S_M_NEWPROFILE       */ { L"&New Profile...", L"新建配置(&N)..." },
     /* S_M_DELPROFILE       */ { L"&Delete Current Profile", L"删除当前配置(&D)" },

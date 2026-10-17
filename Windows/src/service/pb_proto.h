@@ -19,7 +19,7 @@
 #define PB_SERVICE_NAME  L"ProxyBridgeSvc"
 #define PB_PIPE_CTL      L"\\\\.\\pipe\\ProxyBridgeCtl"
 #define PB_PIPE_EVT      L"\\\\.\\pipe\\ProxyBridgeEvt"
-#define PB_PROTO_VERSION 2   // 2: per-rule localhost flag; PBOP_SET_LOCALHOST removed
+#define PB_PROTO_VERSION 3   // 3: PBOP_SET_ENABLED (main switch); 2: per-rule localhost flag
 #define PB_MSG_MAX       (64u * 1024u)
 #define PB_STR_MAX       (32u * 1024u)
 #define PB_NULL_STR      0xFFFFFFFFu
@@ -40,7 +40,8 @@ enum {
     PBOP_SET_TRAFFIC_LOG,     // bool -> 0
     PBOP_CLEAR_CONN_LOGS,     // () -> 0
     PBOP_START,               // () -> bool
-    PBOP_STOP                 // () -> bool
+    PBOP_STOP,                // () -> bool
+    PBOP_SET_ENABLED          // bool -> 0   (main switch: 0 pauses all rules for new connections)
 };
 
 enum {

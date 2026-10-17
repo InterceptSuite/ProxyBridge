@@ -34,6 +34,7 @@ volatile BOOL g_has_active_rules = FALSE;
 // Set when at least one enabled rule carries a domain filter. Gates the DNS-cache
 // lookup in match_rule so setups without domain rules pay zero extra cost.
 volatile BOOL g_has_domain_rules = FALSE;
+volatile BOOL g_proxy_enabled = TRUE;
 SOCKET udp_relay_socket = INVALID_SOCKET;
 SOCKET udp_relay_socket6 = INVALID_SOCKET;
 volatile BOOL running = FALSE;
@@ -1033,6 +1034,18 @@ DWORD WINAPI packet_processor(LPVOID arg)
     }
 
     return 0;
+}
+
+// Main on/off switch. FALSE pauses ProxyBridge without stopping the capture driver: every NEW connection is
+// sent directly, and no rule (proxy or block) applies. Connections that are already being proxied keep working
+// until they end. TRUE (the default) applies the rules again.
+PROXYBRIDGE_API void ProxyBridge_SetEnabled(BOOL enable)
+{
+    BOOL was = g_proxy_enabled;
+    g_proxy_enabled = enable ? TRUE : FALSE;
+    if (was != g_proxy_enabled)
+        log_message(enable ? "ProxyBridge enabled: rules apply to new connections"
+                           : "ProxyBridge paused: new connections go direct (connections already proxied continue)");
 }
 
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback)

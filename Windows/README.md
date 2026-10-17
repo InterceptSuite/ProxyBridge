@@ -225,6 +225,12 @@ just start typing while the list has focus, **Enter** or **Down** to go to the m
 **x** button) to clear the search. Edit, Clone, Remove and the enable check boxes work on the rules you see;
 Move Up / Move Down are only available when no search is active, because the order of a partial list is ambiguous.
 
+**Pausing ProxyBridge (main switch):** untick **Proxy → Enable ProxyBridge** (or right-click the tray icon and untick
+**Enable ProxyBridge**) to switch every rule off without closing the app. While paused, new connections go out
+directly: proxy rules **and block rules** do not apply, and the window title and tray tooltip show "(PAUSED)".
+Connections that were already being proxied keep working until they end. Tick the item again to apply the rules
+to new connections. ProxyBridge always starts enabled; the switch is not remembered between runs.
+
 **Note:** Adding a rule with action **PROXY** while no proxy is configured will fall back to a direct connection. Configure at least one proxy server before using PROXY rules.
 
 ### Command Line Interface (CLI)
