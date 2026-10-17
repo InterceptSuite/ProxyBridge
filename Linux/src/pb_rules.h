@@ -4,7 +4,9 @@
 
 #include "pb_internal.h"
 
-#define PB_MAX_PATTERNS 64
+#define PB_MAX_PATTERNS 64          // process and port lists
+#define PB_MAX_HOST_PATTERNS 1024   // Target Host list (IPs, ranges and domains together)
+#define PB_HOSTS_MAX 8192           // longest Target Host text, including the terminating NUL
 
 enum { PB_HOST_V4_RANGE = 1, PB_HOST_V4_BOX, PB_HOST_V6_RANGE };
 
@@ -24,7 +26,7 @@ struct pb_rule {
     RuleAction   action;
     uint32_t     proxy_id;         // action == PROXY: 0 = default proxy
 
-    char process_src[512], hosts_src[512], ports_src[512];   // original text, kept for the UI / export
+    char process_src[512], hosts_src[PB_HOSTS_MAX], ports_src[512];   // original text, kept for the UI / export
 
     bool any_proc;
     char (*procs)[256];  int nprocs;

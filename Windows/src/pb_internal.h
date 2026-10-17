@@ -25,7 +25,7 @@
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 1024
-#define VERSION "4.1.0"
+#define VERSION "4.2.0"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 30000
 // Single packet-processor thread eliminates TCP packet reordering.
@@ -53,6 +53,7 @@ typedef struct PROCESS_RULE {
     RuleProtocol protocol;  // TCP, UDP, or BOTH
     RuleAction action;
     UINT32 proxy_config_id;  // Which proxy config to route this rule through (0 = first available)
+    BOOL localhost_via_proxy; // TRUE: connections to localhost (127.x / ::1) that match this rule are proxied; FALSE: they go direct
     BOOL enabled;
     struct PROCESS_RULE *next;
 } PROCESS_RULE;
@@ -196,6 +197,7 @@ extern HANDLE cleanup_thread;
 extern PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE];
 extern volatile BOOL g_has_active_rules;
 extern volatile BOOL g_has_domain_rules;
+extern volatile BOOL g_proxy_enabled;   // FALSE = paused: new connections are neither proxied nor blocked (existing ones carry on)
 extern SOCKET udp_relay_socket;
 extern SOCKET udp_relay_socket6;
 extern volatile BOOL running;
@@ -207,7 +209,9 @@ extern SRWLOCK             g_dns_cache_lock;
 extern volatile LONG port_decided_bitmap[2048];  // 8 KB
 extern volatile LONG port_direct_bitmap[2048];  // 8 KB
 extern UINT16 g_local_relay_port;
-extern BOOL g_localhost_via_proxy;  // default disabled for security - most proxy server block localhost for ssrf and also many app might not work if localhost trafic goes to remote server if proxy server is on diffrent machine
+// Set by match_rule*_inner on the calling thread: the "localhost via proxy" flag of the rule that
+// produced the last verdict (FALSE when nothing matched). Read right after check_process_rule*().
+extern __declspec(thread) BOOL g_tl_rule_localhost;
 extern LogCallback g_log_callback;
 extern ConnectionCallback g_connection_callback;
 extern char  *g_pidtbl_buf;

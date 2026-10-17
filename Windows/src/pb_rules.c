@@ -38,8 +38,11 @@ static DWORD retry_tcp_pid(DWORD pid, BOOL ipv6, UINT32 src_ip, const UINT8 *src
     return pid;
 }
 
+__declspec(thread) BOOL g_tl_rule_localhost = FALSE;
+
 RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id)
 {
+    g_tl_rule_localhost = FALSE;
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
 
@@ -503,6 +506,34 @@ BOOL match_domain_filter(const PROCESS_RULE *rule, const char *domain)
     return match_domain_list(rule->target_domains, domain);
 }
 
+// Target Hosts (IPs, ranges, patterns) and Target Domains (hostnames) act as ONE list of hosts: a
+// connection matches when its IP matches an IP entry OR its resolved name matches a domain entry.
+// A side that is empty or "*" adds no restriction by itself; when both are, every host matches.
+static BOOL rule_has_ip_filter(const PROCESS_RULE *rule)
+{
+    return rule->target_hosts != NULL && rule->target_hosts[0] != '\0' && strcmp(rule->target_hosts, "*") != 0;
+}
+
+static BOOL rule_host_match(const PROCESS_RULE *rule, UINT32 dest_ip, const char *dst_domain)
+{
+    BOOL has_ip = rule_has_ip_filter(rule), has_dom = rule_has_domain_filter(rule);
+    if (!has_ip && !has_dom)
+        return TRUE;
+    if (has_ip && match_ip_list(rule->target_hosts, dest_ip))
+        return TRUE;
+    return has_dom && dst_domain != NULL && dst_domain[0] != '\0' && match_domain_list(rule->target_domains, dst_domain);
+}
+
+static BOOL rule_host_match_v6(const PROCESS_RULE *rule, const UINT8 dest_ip6[16], const char *dst_domain)
+{
+    BOOL has_ip = rule_has_ip_filter(rule), has_dom = rule_has_domain_filter(rule);
+    if (!has_ip && !has_dom)
+        return TRUE;
+    if (has_ip && match_ip_list_v6(rule->target_hosts, dest_ip6))
+        return TRUE;
+    return has_dom && dst_domain != NULL && dst_domain[0] != '\0' && match_domain_list(rule->target_domains, dst_domain);
+}
+
 BOOL is_broadcast_or_multicast(UINT32 ip)
 {
     // note: Localhost (127.x.x.x) is now supported for proxying
@@ -583,11 +614,11 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
             if (has_ip_filter || has_port_filter || has_domain_filter)
             {
                 // Filtered wildcard - check if it matches
-                if (match_ip_list(rule->target_hosts, dest_ip) &&
-                    match_port_list(rule->target_ports, dest_port) &&
-                    match_domain_filter(rule, dst_domain))
+                if (rule_host_match(rule, dest_ip, dst_domain) &&
+                    match_port_list(rule->target_ports, dest_port))
                 {
                     // Matched! Return this rule's action
+                    g_tl_rule_localhost = rule->localhost_via_proxy;
                     if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
                     return rule->action;
                 }
@@ -609,12 +640,12 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
         if (match_process_list(rule->process_name, process_name))
         {
             // Process matched! Check IP, port and domain filters
-            if (match_ip_list(rule->target_hosts, dest_ip) &&
-                match_port_list(rule->target_ports, dest_port) &&
-                match_domain_filter(rule, dst_domain))
+            if (rule_host_match(rule, dest_ip, dst_domain) &&
+                    match_port_list(rule->target_ports, dest_port))
             {
                 // All filters matched! Return this rule's action
-                if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
+                g_tl_rule_localhost = rule->localhost_via_proxy;
+                    if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
                 return rule->action;
             }
         }
@@ -625,11 +656,13 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
     // No specific rule matched, use wildcard if available
     if (wildcard_rule != NULL)
     {
+        g_tl_rule_localhost = wildcard_rule->localhost_via_proxy;
         if (out_proxy_config_id != NULL) *out_proxy_config_id = wildcard_rule->proxy_config_id;
         return wildcard_rule->action;
     }
 
     // No rule matched at all
+    g_tl_rule_localhost = FALSE;
     if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
     return RULE_ACTION_DIRECT;
 }
@@ -638,6 +671,12 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
 // DeleteRule/MoveRule from the GUI thread cannot free a node/string mid-match.
 RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
 {
+    if (!g_proxy_enabled)                      // paused: no rule applies
+    {
+        g_tl_rule_localhost = FALSE;
+        if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
+        return RULE_ACTION_DIRECT;
+    }
     AcquireSRWLockShared(&g_rules_lock);
     RuleAction action = match_rule_inner(process_name, dest_ip, dest_port, is_udp, out_proxy_config_id);
     ReleaseSRWLockShared(&g_rules_lock);
@@ -684,10 +723,10 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
 
             if (has_ip_filter || has_port_filter || has_domain_filter)
             {
-                if (match_ip_list_v6(rule->target_hosts, dest_ip6) &&
-                    match_port_list(rule->target_ports, dest_port) &&
-                    match_domain_filter(rule, dst_domain))
+                if (rule_host_match_v6(rule, dest_ip6, dst_domain) &&
+                    match_port_list(rule->target_ports, dest_port))
                 {
+                    g_tl_rule_localhost = rule->localhost_via_proxy;
                     if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
                     return rule->action;
                 }
@@ -703,11 +742,11 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
 
         if (match_process_list(rule->process_name, process_name))
         {
-            if (match_ip_list_v6(rule->target_hosts, dest_ip6) &&
-                match_port_list(rule->target_ports, dest_port) &&
-                match_domain_filter(rule, dst_domain))
+            if (rule_host_match_v6(rule, dest_ip6, dst_domain) &&
+                    match_port_list(rule->target_ports, dest_port))
             {
-                if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
+                g_tl_rule_localhost = rule->localhost_via_proxy;
+                    if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
                 return rule->action;
             }
         }
@@ -717,16 +756,24 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
 
     if (wildcard_rule != NULL)
     {
+        g_tl_rule_localhost = wildcard_rule->localhost_via_proxy;
         if (out_proxy_config_id != NULL) *out_proxy_config_id = wildcard_rule->proxy_config_id;
         return wildcard_rule->action;
     }
 
+    g_tl_rule_localhost = FALSE;
     if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
     return RULE_ACTION_DIRECT;
 }
 
 RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, UINT32 *out_proxy_config_id)
 {
+    if (!g_proxy_enabled)                      // paused: no rule applies
+    {
+        g_tl_rule_localhost = FALSE;
+        if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
+        return RULE_ACTION_DIRECT;
+    }
     AcquireSRWLockShared(&g_rules_lock);
     RuleAction action = match_rule_v6_inner(process_name, dest_ip6, dest_port, is_udp, out_proxy_config_id);
     ReleaseSRWLockShared(&g_rules_lock);
@@ -735,6 +782,7 @@ RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UIN
 
 RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id)
 {
+    g_tl_rule_localhost = FALSE;
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
 
@@ -780,7 +828,7 @@ RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UI
     return action;
 }
 
-PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id)
+PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id, BOOL localhost_via_proxy)
 {
     if (process_name == NULL || process_name[0] == '\0')
         return 0;
@@ -793,6 +841,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
     strncpy_s(rule->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
     rule->protocol = protocol;
     rule->proxy_config_id = proxy_config_id;
+    rule->localhost_via_proxy = localhost_via_proxy;
     rule->target_hosts = NULL;
     rule->target_ports = NULL;
     rule->target_domains = NULL;
@@ -1000,7 +1049,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_DeleteRule(UINT32 rule_id)
     return found;
 }
 
-PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id)
+PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id, BOOL localhost_via_proxy)
 {
     if (rule_id == 0 || process_name == NULL || target_hosts == NULL || target_ports == NULL)
         return FALSE;
@@ -1040,6 +1089,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_na
             rule->protocol = protocol;
             rule->action = action;
             rule->proxy_config_id = proxy_config_id;
+            rule->localhost_via_proxy = localhost_via_proxy;
             found = TRUE;
             break;
         }

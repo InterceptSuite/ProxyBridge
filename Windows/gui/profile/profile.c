@@ -11,13 +11,147 @@
 // UTF-8 <-> UTF-16
 static void u2w(const char* s, wchar_t* out, int cch)
 {
-    if (!s) { if (cch) out[0] = 0; return; }
-    MultiByteToWideChar(CP_UTF8, 0, s, -1, out, cch);
+    if (cch <= 0) return;
+    out[0] = 0;
+    if (!s) return;
+    // Convert at most cch-1 source bytes: a UTF-16 string is never longer than its UTF-8 source, so the
+    // result always fits (an over-long value is cut, never overflows or stays unterminated).
+    size_t sl = strlen(s);
+    if (sl > (size_t)(cch - 1)) sl = (size_t)(cch - 1);
+    if (sl == 0) return;
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, (int)sl, out, cch - 1);
+    out[n > 0 ? n : 0] = 0;
 }
 static void w2u(const wchar_t* w, char* out, int cch)
 {
-    if (!w) { if (cch) out[0] = 0; return; }
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, out, cch, NULL, NULL);
+    if (cch <= 0) return;
+    out[0] = 0;
+    if (!w) return;
+    if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, out, cch, NULL, NULL)) out[0] = 0;   // too small: empty, never unterminated
+}
+
+// ---- Target Domains list helpers (see profile.h) ----
+void PB_ListNormalize(wchar_t* s)
+{
+    if (!s) return;
+    wchar_t* w = s;            // write position; never passes the read position, so this is in place
+    const wchar_t* r = s;
+    BOOL any = FALSE;
+    while (*r)
+    {
+        while (*r && (*r == L';' || *r == L',' || *r <= L' ')) r++;   // separators, blanks, line breaks, controls
+        if (!*r) break;
+        if (any) *w++ = L';';
+        wchar_t* lastKept = w;                                          // end of the entry without trailing blanks
+        while (*r && *r != L';' && *r != L',')
+        {
+            wchar_t c = *r++;
+            if (c < L' ') continue;                                     // a line break/tab inside an entry is ignored
+            *w++ = c;
+            if (c != L' ') lastKept = w;
+        }
+        w = lastKept;
+        any = TRUE;
+    }
+    *w = 0;
+}
+
+void PB_ListFormat(const wchar_t* in, wchar_t* out, size_t cch)
+{
+    if (!out || cch == 0) return;
+    size_t o = 0;
+    for (const wchar_t* p = in ? in : L""; *p && o + 1 < cch; p++)
+    {
+        out[o++] = *p;
+        if (*p == L';')
+        {
+            if (o + 3 > cch) break;
+            out[o++] = L'\r'; out[o++] = L'\n';
+        }
+    }
+    out[o] = 0;
+}
+
+// ---- Target Hosts: IPs and domains as one list (see profile.h) ----
+// An entry is an address pattern when it is made of digits and . - / * (IPv4 forms such as 10.0.0.0/8,
+// 192.168.*.*, 10.1-5.*.7, 1.2.3.4-1.2.3.9) or, if it contains ':', of hex digits and : . - / * (IPv6).
+// Everything else (github.com, *.github.com) is a domain name.
+static BOOL IsIpToken(const wchar_t* s, size_t n)
+{
+    BOOL colon = FALSE, digitOrStar = FALSE;
+    for (size_t i = 0; i < n; i++) if (s[i] == L':') colon = TRUE;
+    for (size_t i = 0; i < n; i++)
+    {
+        wchar_t c = s[i];
+        BOOL digit = (c >= L'0' && c <= L'9');
+        BOOL hex   = (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
+        BOOL punct = (c == L'.' || c == L'-' || c == L'/' || c == L'*' || c == L':');
+        if (digit || c == L'*') digitOrStar = TRUE;
+        if (!(digit || punct || (colon && hex))) return FALSE;
+    }
+    return digitOrStar;
+}
+
+static BOOL HostsPresent(const wchar_t* s)
+{
+    return s && s[0] && !(s[0] == L'*' && s[1] == 0);
+}
+
+void PB_HostsMerge(const wchar_t* ips, const wchar_t* doms, wchar_t* out, size_t cch)
+{
+    if (!out || cch == 0) return;
+    out[0] = 0;
+    BOOL a = HostsPresent(ips), d = HostsPresent(doms);
+    if (!a && !d) { if (cch >= 2) { out[0] = L'*'; out[1] = 0; } return; }
+    size_t la = a ? wcslen(ips) : 0, ld = d ? wcslen(doms) : 0;
+    size_t total = la + ((a && d) ? 1 : 0) + ld;
+    wchar_t* t = (wchar_t*)malloc((total + 1) * sizeof(wchar_t));
+    if (!t) { if (cch >= 2) { out[0] = L'*'; out[1] = 0; } return; }
+    size_t o = 0;
+    if (a) { memcpy(t, ips, la * sizeof(wchar_t)); o = la; }
+    if (a && d) t[o++] = L';';
+    if (d) { memcpy(t + o, doms, ld * sizeof(wchar_t)); o += ld; }
+    t[o] = 0;
+    if (total <= cch - 1) memcpy(out, t, (total + 1) * sizeof(wchar_t));
+    else
+    {
+        // too long for the buffer: keep whole entries only
+        memcpy(out, t, (cch - 1) * sizeof(wchar_t));
+        out[cch - 1] = 0;
+        if (t[cch - 1] != L';') { wchar_t* semi = wcsrchr(out, L';'); if (semi) *semi = 0; else out[0] = 0; }
+    }
+    free(t);
+    if (!out[0] && cch >= 2) { out[0] = L'*'; out[1] = 0; }
+}
+
+void PB_HostsSplit(const wchar_t* merged, wchar_t* ips, size_t ipsCch, wchar_t* doms, size_t domsCch)
+{
+    if (ipsCch)  ips[0] = 0;
+    if (domsCch) doms[0] = 0;
+    size_t io = 0, dd = 0;
+    BOOL any = FALSE;
+    const wchar_t* p = merged ? merged : L"";
+    while (*p)
+    {
+        while (*p == L';' || *p == L',' || (*p && *p <= L' ')) p++;
+        if (!*p) break;
+        const wchar_t* s = p;
+        while (*p && *p != L';' && *p != L',') p++;
+        const wchar_t* e = p;
+        while (e > s && e[-1] <= L' ') e--;
+        size_t n = (size_t)(e - s);
+        if (n == 0) continue;
+        if (n == 1 && s[0] == L'*') { any = TRUE; continue; }
+        BOOL isIp = IsIpToken(s, n);
+        wchar_t* out = isIp ? ips : doms; size_t* pos = isIp ? &io : &dd; size_t cch = isIp ? ipsCch : domsCch;
+        size_t need = n + (*pos ? 1 : 0);
+        if (*pos + need + 1 > cch) continue;                 // cannot happen with correctly sized buffers; never overflows
+        if (*pos) out[(*pos)++] = L';';
+        memcpy(out + *pos, s, n * sizeof(wchar_t)); *pos += n; out[*pos] = 0;
+    }
+    if (any || (!io && !dd)) io = dd = 0;
+    if (!io && ipsCch  >= 2) { ips[0]  = L'*'; ips[1]  = 0; }
+    if (!dd && domsCch >= 2) { doms[0] = L'*'; doms[1] = 0; }
 }
 
 // paths
@@ -144,7 +278,6 @@ void PB_ProfileDefaults(PBProfile* p, const wchar_t* name)
 {
     (void)name;
     ZeroMemory(p, sizeof(*p));
-    p->localhostViaProxy = 0;
     p->trafficLogging    = 1;
     p->autoClearLogs     = 1;
     p->closeToTray       = 1;
@@ -186,7 +319,9 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
     JVal* root = json_parse(txt, len);
     if (root && root->type == J_OBJ)
     {
-        p->localhostViaProxy = json_bool(root, "LocalhostViaProxy", 0);
+        // Older profiles had one global "LocalhostViaProxy"; it is now per rule. Use the old value as
+        // each rule's default so an upgraded profile keeps behaving the same.
+        int oldGlobalLocalhost = json_bool(root, "LocalhostViaProxy", 0);
         p->trafficLogging    = json_bool(root, "IsTrafficLoggingEnabled", 1);
         p->autoClearLogs     = json_bool(root, "AutoClearConnectionLogs", 1);
         p->closeToTray       = json_bool(root, "CloseToTray", 1);
@@ -219,12 +354,25 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
                 PBRule* ru = &p->rule[p->ruleCount++];
                 u2w(json_str(r, "Name", "ProxyBridge Rule"), ru->name, 128);
                 u2w(json_str(r, "ProcessName", "*"), ru->proc, PB_APPS_MAX);
-                u2w(json_str(r, "TargetHosts", "*"), ru->hosts, 256);
                 u2w(json_str(r, "TargetPorts", "*"), ru->ports, 128);
-                u2w(json_str(r, "TargetDomains", "*"), ru->domains, 256);
+                {
+                    // the file keeps IPs and domains in two keys; the GUI shows them as one list
+                    wchar_t* wi = (wchar_t*)malloc(PB_HOSTS_MAX * sizeof(wchar_t));
+                    wchar_t* wd = (wchar_t*)malloc(PB_HOSTS_MAX * sizeof(wchar_t));
+                    if (wi && wd)
+                    {
+                        u2w(json_str(r, "TargetHosts", "*"), wi, PB_HOSTS_MAX);
+                        u2w(json_str(r, "TargetDomains", "*"), wd, PB_HOSTS_MAX);
+                        PB_ListNormalize(wi); PB_ListNormalize(wd);     // older/hand-edited files may hold stray line breaks
+                        PB_HostsMerge(wi, wd, ru->hosts, PB_HOSTS_MAX);
+                    }
+                    else lstrcpynW(ru->hosts, L"*", PB_HOSTS_MAX);
+                    free(wi); free(wd);
+                }
                 u2w(json_str(r, "Protocol", "TCP"), ru->proto, 8);
                 u2w(json_str(r, "Action", "PROXY"), ru->action, 16);
                 ru->enabled = json_bool(r, "IsEnabled", 1);
+                ru->localhost = json_bool(r, "LocalhostViaProxy", oldGlobalLocalhost);
                 ru->cfgStoredId = (UINT32)json_long(r, "ProxyConfigId", 0);
             }
 
@@ -250,9 +398,13 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
 
 static void put_kv_str(StrBuf* b, const char* indent, const char* key, const wchar_t* wval, const char* trail)
 {
-    char tmp[PB_APPS_MAX * 3 + 4]; w2u(wval, tmp, sizeof(tmp));   // UTF-8 worst case ~3 bytes/char
+    // UTF-8 worst case is 3 bytes per UTF-16 unit; sized from the actual string so nothing is cut or overflows
+    size_t cap = (wval ? wcslen(wval) : 0) * 3 + 4;
+    char* tmp = (char*)malloc(cap);
+    if (tmp) w2u(wval, tmp, (int)cap);
     sb_put(b, indent); sb_put(b, "\""); sb_put(b, key); sb_put(b, "\": ");
-    sb_json_str(b, tmp); sb_put(b, trail);
+    sb_json_str(b, tmp ? tmp : ""); sb_put(b, trail);
+    free(tmp);
 }
 
 BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
@@ -263,7 +415,6 @@ BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
     sb_put(&b, "{\n");
     sb_put(&b, "  \"Version\": \"1.0\",\n");
     put_kv_str(&b, "  ", "Name", name, ",\n");
-    sb_put(&b, "  \"LocalhostViaProxy\": ");       sb_put(&b, p->localhostViaProxy ? "true" : "false"); sb_put(&b, ",\n");
     sb_put(&b, "  \"IsTrafficLoggingEnabled\": ");  sb_put(&b, p->trafficLogging ? "true" : "false");    sb_put(&b, ",\n");
     sb_put(&b, "  \"AutoClearConnectionLogs\": ");  sb_put(&b, p->autoClearLogs ? "true" : "false");     sb_put(&b, ",\n");
     put_kv_str(&b, "  ", "Language", p->language, ",\n");
@@ -296,12 +447,22 @@ BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
         sb_put(&b, i ? ",\n" : "\n"); sb_put(&b, "    {\n");
         put_kv_str(&b, "      ", "Name", r->name, ",\n");
         put_kv_str(&b, "      ", "ProcessName", r->proc, ",\n");
-        put_kv_str(&b, "      ", "TargetHosts", r->hosts, ",\n");
-        put_kv_str(&b, "      ", "TargetPorts", r->ports, ",\n");
-        put_kv_str(&b, "      ", "TargetDomains", r->domains, ",\n");
+        {
+            // IPs -> TargetHosts, domain names -> TargetDomains (the format macOS, Linux and older versions read)
+            size_t hn = wcslen(r->hosts) + 2;
+            wchar_t* wi = (wchar_t*)malloc(hn * sizeof(wchar_t));
+            wchar_t* wd = (wchar_t*)malloc(hn * sizeof(wchar_t));
+            if (wi && wd) PB_HostsSplit(r->hosts, wi, hn, wd, hn);
+            else { if (wi) wcscpy_s(wi, hn, L"*"); if (wd) wcscpy_s(wd, hn, L"*"); }
+            put_kv_str(&b, "      ", "TargetHosts", wi ? wi : L"*", ",\n");
+            put_kv_str(&b, "      ", "TargetPorts", r->ports, ",\n");
+            put_kv_str(&b, "      ", "TargetDomains", wd ? wd : L"*", ",\n");
+            free(wi); free(wd);
+        }
         put_kv_str(&b, "      ", "Protocol", r->proto, ",\n");
         put_kv_str(&b, "      ", "Action", r->action, ",\n");
         sb_put(&b, "      \"IsEnabled\": "); sb_put(&b, r->enabled ? "true" : "false"); sb_put(&b, ",\n");
+        sb_put(&b, "      \"LocalhostViaProxy\": "); sb_put(&b, r->localhost ? "true" : "false"); sb_put(&b, ",\n");
         snprintf(tmp, sizeof(tmp), "%u", r->cfgStoredId);
         sb_put(&b, "      \"ProxyConfigId\": "); sb_put(&b, tmp); sb_put(&b, "\n");
         sb_put(&b, "    }");

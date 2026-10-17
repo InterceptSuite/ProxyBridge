@@ -17,7 +17,7 @@
 #pragma comment(lib, "advapi32.lib")
 
 
-#define VERSION "4.1.0"
+#define VERSION "4.2.0"
 #define MAX_PROXY_CONFIGS 16
 #define MAX_RULES         256
 
@@ -28,12 +28,11 @@ typedef uint32_t (*pfnAddProxyConfig)(int type, const char* ip, uint16_t port,
 typedef uint32_t (*pfnAddRule)(const char* process, const char* hosts,
                                const char* ports, const char* domains,
                                int protocol, int action,
-                               uint32_t config_id);
+                               uint32_t config_id, int localhost_via_proxy);
 typedef int  (*pfnDisableRule)(uint32_t rule_id);
 typedef void (*pfnSetLogCallback)(void (*cb)(const char*));
 typedef void (*pfnSetConnectionCallback)(void (*cb)(const char*, DWORD,
                                           const char*, uint16_t, const char*));
-typedef void (*pfnSetLocalhostViaProxy)(int enable);
 typedef void (*pfnSetTrafficLogging)(int enable);
 typedef int  (*pfnStart)(void);
 typedef int  (*pfnStop)(void);
@@ -43,7 +42,6 @@ static pfnAddRule               g_AddRule        = NULL;
 static pfnDisableRule           g_DisableRule    = NULL;
 static pfnSetLogCallback        g_SetLog         = NULL;
 static pfnSetConnectionCallback g_SetConn        = NULL;
-static pfnSetLocalhostViaProxy  g_SetLocalhost   = NULL;
 static pfnSetTrafficLogging     g_SetTraffic     = NULL;
 static pfnStart                 g_Start          = NULL;
 static pfnStop                  g_Stop           = NULL;
@@ -64,15 +62,16 @@ typedef struct {
     char     process_name[256];
     char     target_hosts[512];
     char     target_ports[256];
-    char     target_domains[512];  // "*", "google.com", "*.google.com;*.gstatic.com"
+    char     target_domains[8192]; // "*", "google.com", "*.google.com;*.gstatic.com" (long lists)
     int      protocol;        // 0=TCP, 1=UDP, 2=BOTH
     int      action;          // 0=PROXY, 1=DIRECT, 2=BLOCK
     int      is_enabled;
     uint32_t proxy_config_id; // maps to PBProxyConfig.profile_id
+    int      localhost_via_proxy; // 1 = localhost (127.x / ::1) traffic matching this rule is proxied too
 } PBRule;
 
 typedef struct {
-    int         localhost_via_proxy;
+    int         localhost_via_proxy;   // legacy global key; only the default for rules that lack their own
     int         traffic_logging;
     PBProxyConfig configs[MAX_PROXY_CONFIGS];
     int         num_configs;
@@ -258,6 +257,97 @@ static const char* jfind(const char* json, const char* key)
 }
 
 // Extract a JSON string value for key into out[size]. Returns true on success.
+// Same cleanup the GUI does for Target Domains: drop line breaks/control characters, trim blanks around
+// ';' / ',', drop empty entries, join with ';'. In place; the text never grows.
+static void normalize_list(char* s)
+{
+    char* w = s; const char* r = s; bool any = false;
+    while (*r)
+    {
+        while (*r && (*r == ';' || *r == ',' || (unsigned char)*r <= ' ')) r++;
+        if (!*r) break;
+        if (any) *w++ = ';';
+        char* lastKept = w;
+        while (*r && *r != ';' && *r != ',')
+        {
+            char c = *r++;
+            if ((unsigned char)c < ' ') continue;
+            *w++ = c;
+            if (c != ' ') lastKept = w;
+        }
+        w = lastKept;
+        any = true;
+    }
+    *w = '\0';
+}
+
+// IPs and domain names are one list in the GUI but two keys in the profile (TargetHosts / TargetDomains) and in
+// the engine. An entry is an address pattern when it is made of digits and . - / * (or, with ':', hex digits and
+// : . - / *); everything else is a domain name.
+static bool is_ip_token(const char* s, size_t n)
+{
+    bool colon = false, digit_or_star = false;
+    for (size_t i = 0; i < n; i++) if (s[i] == ':') colon = true;
+    for (size_t i = 0; i < n; i++)
+    {
+        char c = s[i];
+        bool digit = (c >= '0' && c <= '9');
+        bool hex   = (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        bool punct = (c == '.' || c == '-' || c == '/' || c == '*' || c == ':');
+        if (digit || c == '*') digit_or_star = true;
+        if (!(digit || punct || (colon && hex))) return false;
+    }
+    return digit_or_star;
+}
+
+static void copy_list(char* dst, size_t cap, const char* src)
+{
+    if (strlen(src) < cap) { strcpy(dst, src); return; }
+    memcpy(dst, src, cap - 1); dst[cap - 1] = '\0';          // too long: keep whole entries only
+    char* semi = strrchr(dst, ';');
+    if (semi) *semi = '\0'; else dst[0] = '\0';
+}
+
+// Re-sorts both lists by entry type, so a domain written in TargetHosts (or an address in TargetDomains)
+// still works. Each result is "*" when it has no entries, and both are "*" when the list contains "*".
+static void sort_hosts(char* hosts, size_t hcap, char* doms, size_t dcap)
+{
+    size_t cap = strlen(hosts) + strlen(doms) + 4;
+    char* ips = (char*)malloc(cap); char* dm = (char*)malloc(cap);
+    if (!ips || !dm) { free(ips); free(dm); return; }
+    ips[0] = dm[0] = '\0';
+    size_t io = 0, dd = 0; bool any = false;
+    // A side that is empty or just "*" means "no restriction from this key" and adds no entries; a "*" next
+    // to other entries means any host.
+    bool has_hosts = hosts[0] && strcmp(hosts, "*") != 0;
+    bool has_doms  = doms[0]  && strcmp(doms,  "*") != 0;
+    for (int pass = 0; pass < 2; pass++)
+    {
+        if (pass == 0 ? !has_hosts : !has_doms) continue;
+        const char* p = pass ? doms : hosts;
+        while (*p)
+        {
+            while (*p == ';' || *p == ',' || (*p && (unsigned char)*p <= ' ')) p++;
+            if (!*p) break;
+            const char* st = p;
+            while (*p && *p != ';' && *p != ',') p++;
+            const char* e = p;
+            while (e > st && (unsigned char)e[-1] <= ' ') e--;
+            size_t n = (size_t)(e - st);
+            if (n == 0) continue;
+            if (n == 1 && st[0] == '*') { any = true; continue; }
+            bool ip = is_ip_token(st, n);
+            char* out = ip ? ips : dm; size_t* pos = ip ? &io : &dd;
+            if (*pos) out[(*pos)++] = ';';
+            memcpy(out + *pos, st, n); *pos += n; out[*pos] = '\0';
+        }
+    }
+    if (any) io = dd = 0;
+    copy_list(hosts, hcap, io ? ips : "*");
+    copy_list(doms,  dcap, dd ? dm  : "*");
+    free(ips); free(dm);
+}
+
 static bool jstr(const char* json, const char* key, char* out, size_t size)
 {
     if (size == 0) return false;
@@ -462,6 +552,9 @@ static bool load_profile(const char* path, PBProfile* prof)
             jstr(buf, "TargetHosts", r->target_hosts,  sizeof(r->target_hosts));
             jstr(buf, "TargetPorts", r->target_ports,  sizeof(r->target_ports));
             jstr(buf, "TargetDomains", r->target_domains, sizeof(r->target_domains));
+            normalize_list(r->target_domains);   // profiles may hold line breaks (formatting only)
+            normalize_list(r->target_hosts);
+            sort_hosts(r->target_hosts, sizeof(r->target_hosts), r->target_domains, sizeof(r->target_domains));
 
             char ps[16] = {0};
             jstr(buf, "Protocol", ps, sizeof(ps));
@@ -476,6 +569,7 @@ static bool load_profile(const char* path, PBProfile* prof)
             else                                  r->action = 0;
 
             r->is_enabled      = jbool(buf, "IsEnabled", true) ? 1 : 0;
+            r->localhost_via_proxy = jbool(buf, "LocalhostViaProxy", prof->localhost_via_proxy != 0) ? 1 : 0;
             r->proxy_config_id = (uint32_t)jint(buf, "ProxyConfigId", 0);
 
             free(buf);
@@ -513,7 +607,7 @@ static bool load_dll(void)
 
     // use only the resolved absolute path no bare-name fallback to prevent
     // DLL hijacking via current working directory.
-    g_hDll = LoadLibraryExA(dll_path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    g_hDll = LoadLibraryExA(dll_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!g_hDll)
     {
         fprintf(stderr, "ERROR: Cannot load ProxyBridgeCore.dll (error %lu)\n",
@@ -527,7 +621,6 @@ static bool load_dll(void)
     LOAD_FN(pfnDisableRule,           g_DisableRule,    "ProxyBridge_DisableRule");
     LOAD_FN(pfnSetLogCallback,        g_SetLog,         "ProxyBridge_SetLogCallback");
     LOAD_FN(pfnSetConnectionCallback, g_SetConn,        "ProxyBridge_SetConnectionCallback");
-    LOAD_FN(pfnSetLocalhostViaProxy,  g_SetLocalhost,   "ProxyBridge_SetLocalhostViaProxy");
     LOAD_FN(pfnSetTrafficLogging,     g_SetTraffic,     "ProxyBridge_SetTrafficLoggingEnabled");
     LOAD_FN(pfnStart,                 g_Start,          "ProxyBridge_Start");
     LOAD_FN(pfnStop,                  g_Stop,           "ProxyBridge_Stop");
@@ -939,7 +1032,7 @@ int main(int argc, char* argv[])
 
     // ── Load profile ──────────────────────────────────────────────────────────
     printf("Loading profile: %s\n", profile_path);
-    PBProfile prof;
+    static PBProfile prof;   // large (many rules x long domain lists): keep it off the stack
     if (!load_profile(profile_path, &prof))
         return 1;
 
@@ -961,7 +1054,6 @@ int main(int argc, char* argv[])
     if (g_verbose != 0) outq_start();
     if (g_verbose == 1 || g_verbose == 3) g_SetLog(log_cb);
     if (g_verbose == 2 || g_verbose == 3) g_SetConn(conn_cb);
-    g_SetLocalhost(prof.localhost_via_proxy);
     g_SetTraffic(prof.traffic_logging);
 
     // ── Add proxy configs, map profile IDs to DLL-assigned IDs ───────────────
@@ -1019,7 +1111,7 @@ int main(int argc, char* argv[])
         const char* domains = r->target_domains[0] ? r->target_domains : "*";
 
         uint32_t rid = g_AddRule(proc, hosts, ports, domains,
-                                 r->protocol, r->action, dll_cfg_id);
+                                 r->protocol, r->action, dll_cfg_id, r->localhost_via_proxy);
         if (rid == 0)
         {
             fprintf(stderr, "  [%d] WARNING: Failed to add rule (%s)\n",

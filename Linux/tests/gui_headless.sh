@@ -20,6 +20,7 @@ python3 "$HERE/fake_dns.py" $DNSIP "$DLOG" >/dev/null 2>&1 & DNSP=$!
 broadwayd :9 >/dev/null 2>&1 & BW=$!
 sleep 1.5
 
+# Seeded in the format of the previous GUI versions, so the first start also exercises the migration to .pbprofile files.
 # profile "Default": proxy a (default) + b; "Alt": curl goes through b instead
 write_cfg() { # active-profile
 mkdir -p "$WORK/cfg"
@@ -50,7 +51,8 @@ chmod 600 "$WORK/cfg/config.ini"
 }
 
 run_gui() { # active profile
-  write_cfg "$1"
+  if [ ! -d "$WORK/cfg/profiles" ]; then write_cfg "$1"
+  else printf '{ "ActiveProfileName": "%s" }\n' "$1" > "$WORK/cfg/settings.json"; fi
   GDK_BACKEND=broadway BROADWAY_DISPLAY=:9 PROXYBRIDGE_CONFIG_DIR="$WORK/cfg" LD_LIBRARY_PATH="$LIBDIR" "$GUI" > "$WORK/gui.out" 2>&1 & GUI_PID=$!
   for _ in $(seq 60); do "${BPFTOOL:-bpftool}" prog show 2>/dev/null | grep -q pb_connect4 && break; kill -0 $GUI_PID 2>/dev/null || break; sleep 0.25; done
   sleep 1
@@ -79,8 +81,29 @@ run_gui Alt
 out=$(curl -s -m 5 http://192.0.2.7/);        has "Alt profile: same rule now goes through proxy b" "$out" "hello-from-B dst=192.0.2.7:80"
 out=$(curl -s -m 2 http://198.51.100.7/ 2>&1; echo "rc=$?"); [[ "$out" != *hello-from* ]] && ok "Alt profile does not apply rules of the Default profile" || bad "Default rules leaked into Alt"
 stop_gui
-grep -q "^\[PROFILE:Default\]" "$WORK/cfg/config.ini" && grep -q "^\[PROFILE:Alt\]" "$WORK/cfg/config.ini" && ok "both profiles preserved in the config after the GUI saved it" || bad "profiles lost from the config"
-[ "$(stat -c %a "$WORK/cfg/config.ini")" = 600 ] && ok "config file mode is 0600" || bad "config file mode"
+P="$WORK/cfg/profiles"
+[ -f "$P/Default.pbprofile" ] && [ -f "$P/Alt.pbprofile" ] && ok "the old config.ini was converted to one .pbprofile per profile" || bad "profiles not written: $(ls "$WORK/cfg" "$P")"
+[ -f "$WORK/cfg/config.ini.bak" ] && [ ! -f "$WORK/cfg/config.ini" ] && ok "config.ini was set aside as config.ini.bak" || bad "config.ini handling"
+grep -q '"ActiveProfileName": "Alt"' "$WORK/cfg/settings.json" && ok "settings.json remembers the active profile" || bad "settings.json: $(cat "$WORK/cfg/settings.json")"
+grep -q '"ProxyConfigs"' "$P/Default.pbprofile" && grep -q '"TargetDomains": "\*.example.test"' "$P/Default.pbprofile" && grep -q '"Version": "1.0"' "$P/Default.pbprofile" \
+  && ok "the saved profile uses the Windows/macOS format (domain rule in TargetDomains)" || bad "profile format: $(head -40 "$P/Default.pbprofile")"
+grep -q '"IsTrafficLoggingEnabled": true' "$P/Default.pbprofile" && grep -q '"DnsViaProxy": true' "$P/Default.pbprofile" \
+  && [ "$(grep -c . "$WORK/cfg/settings.json")" -le 4 ] && ! grep -q Dns "$WORK/cfg/settings.json" \
+  && ok "logging and DNS switches live in the profile; settings.json only names the active profile" || bad "switches placement"
+[ "$(stat -c %a "$P/Default.pbprofile")" = 600 ] && [ "$(stat -c %a "$P")" = 700 ] && ok "profile files are 0600 in a 0700 directory" || bad "profile permissions"
+
+echo "== a profile exported by the Windows app, dropped into the profiles directory"
+cat > "$P/From Windows.pbprofile" <<'JSON'
+{ "Version": "1.0", "LocalhostViaProxy": false, "IsTrafficLoggingEnabled": true,
+  "ProxyConfigs": [ { "Id": 5, "Type": "socks5", "Host": "127.0.0.1", "Port": "19080", "Username": "", "Password": "", "SendDomainToProxy": true } ],
+  "ProxyRules": [ { "ProcessName": "curl", "TargetHosts": "192.0.2.0/24", "TargetPorts": "*", "TargetDomains": "", "Protocol": "TCP", "Action": "PROXY", "IsEnabled": true, "ProxyConfigId": 5 } ] }
+JSON
+run_gui "From Windows"
+out=$(curl -s -m 5 http://192.0.2.9/);        has "rule and proxy imported from the Windows file are applied" "$out" "hello-from-A dst=192.0.2.9:80"
+stop_gui
+out=$(PROXYBRIDGE_CONFIG_DIR="$WORK/cfg" LD_LIBRARY_PATH="$LIBDIR" "$LIBDIR/ProxyBridge" --list-profiles 2>&1)
+has "the CLI lists the GUI's profiles" "$out" "From Windows"
+[ "$(stat -c %a "$P/From Windows.pbprofile")" = 600 ] && ok "the dropped-in file was tightened to 0600" || bad "dropped-in file mode"
 
 echo; echo "passed=$PASS failed=$FAIL"
-[ "$FAIL" = 0 ] || { echo "---- gui output"; cat "$WORK/gui.out"; echo "---- config"; cat "$WORK/cfg/config.ini"; exit 1; }
+[ "$FAIL" = 0 ] || { echo "---- gui output"; cat "$WORK/gui.out"; echo "---- config"; ls -lR "$WORK/cfg"; exit 1; }

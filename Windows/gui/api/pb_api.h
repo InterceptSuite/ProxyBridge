@@ -26,17 +26,17 @@ typedef BOOL   (*PFN_DeleteProxyConfig)(UINT32);
 typedef int    (*PFN_TestProxyConfig)(UINT32, const char*, unsigned short, char*, size_t);
 typedef void   (*PBTestLogCallback)(const char* line, void* user);
 typedef int    (*PFN_TestProxyConfigEx)(UINT32, const char*, unsigned short, PBTestLogCallback, void*);
-typedef UINT32 (*PFN_AddRule)(const char*, const char*, const char*, const char*, PBRuleProtocol, PBRuleAction, UINT32);
+typedef UINT32 (*PFN_AddRule)(const char*, const char*, const char*, const char*, PBRuleProtocol, PBRuleAction, UINT32, BOOL);
 typedef BOOL   (*PFN_EnableRule)(UINT32);
 typedef BOOL   (*PFN_DisableRule)(UINT32);
 typedef BOOL   (*PFN_DeleteRule)(UINT32);
-typedef BOOL   (*PFN_EditRule)(UINT32, const char*, const char*, const char*, const char*, PBRuleProtocol, PBRuleAction, UINT32);
+typedef BOOL   (*PFN_EditRule)(UINT32, const char*, const char*, const char*, const char*, PBRuleProtocol, PBRuleAction, UINT32, BOOL);
 typedef BOOL   (*PFN_MoveRuleToPosition)(UINT32, UINT32);
 typedef UINT32 (*PFN_GetRulePosition)(UINT32);
-typedef void   (*PFN_SetLocalhostViaProxy)(BOOL);
 typedef void   (*PFN_SetLogCallback)(PBLogCallback);
 typedef void   (*PFN_SetConnectionCallback)(PBConnectionCallback);
 typedef void   (*PFN_SetTrafficLoggingEnabled)(BOOL);
+typedef void   (*PFN_SetEnabled)(BOOL);
 typedef void   (*PFN_ClearConnectionLogs)(void);
 typedef BOOL   (*PFN_Start)(void);
 typedef BOOL   (*PFN_Stop)(void);
@@ -56,10 +56,10 @@ typedef struct {
     PFN_EditRule                  EditRule;
     PFN_MoveRuleToPosition        MoveRuleToPosition;
     PFN_GetRulePosition           GetRulePosition;
-    PFN_SetLocalhostViaProxy      SetLocalhostViaProxy;
     PFN_SetLogCallback            SetLogCallback;
     PFN_SetConnectionCallback     SetConnectionCallback;
     PFN_SetTrafficLoggingEnabled  SetTrafficLoggingEnabled;
+    PFN_SetEnabled                SetEnabled;
     PFN_ClearConnectionLogs       ClearConnectionLogs;
     PFN_Start                     Start;
     PFN_Stop                      Stop;
@@ -80,10 +80,9 @@ static BOOL PB_LoadDirect(PBApi* api)
     for (DWORD i = n; i > 0; i--) { if (path[i - 1] == L'\\') { path[i] = 0; break; } }
     lstrcatW(path, L"ProxyBridgeCore.dll");
 
-    api->dll = LoadLibraryW(path);
-#ifndef PB_NO_SEARCH_FALLBACK
-    if (!api->dll) api->dll = LoadLibraryW(L"ProxyBridgeCore.dll"); // fallback to search path
-#endif
+    // Absolute path only, and its dependencies (WinDivert.dll) come from that folder or System32:
+    // never from the current directory or PATH (DLL planting).
+    api->dll = LoadLibraryExW(path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!api->dll) return FALSE;
 
     #define PB_BIND(field, name) \
@@ -102,10 +101,10 @@ static BOOL PB_LoadDirect(PBApi* api)
     PB_BIND(EditRule,                 "EditRule");
     PB_BIND(MoveRuleToPosition,       "MoveRuleToPosition");
     PB_BIND(GetRulePosition,          "GetRulePosition");
-    PB_BIND(SetLocalhostViaProxy,     "SetLocalhostViaProxy");
     PB_BIND(SetLogCallback,           "SetLogCallback");
     PB_BIND(SetConnectionCallback,    "SetConnectionCallback");
     PB_BIND(SetTrafficLoggingEnabled, "SetTrafficLoggingEnabled");
+    PB_BIND(SetEnabled,               "SetEnabled");
     PB_BIND(ClearConnectionLogs,      "ClearConnectionLogs");
     PB_BIND(Start,                    "Start");
     PB_BIND(Stop,                     "Stop");

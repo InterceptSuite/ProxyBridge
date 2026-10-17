@@ -15,6 +15,7 @@
 #define PB_MAX_RULE    128
 #define PB_MAX_FILTER  64
 #define PB_NAME_MAX    64
+#define PB_HOSTS_MAX   8192   // Target Hosts: one ";"-separated list of IPs and domain names (8191 characters + NUL)
 #define PB_APPS_MAX    1024   // Applications field: holds a "; "-separated list of many exes
 
 typedef struct {
@@ -33,12 +34,12 @@ typedef struct {
     UINT32  nativeId;              // id returned by AddRule after apply
     wchar_t name[128];            // friendly label (GUI-only; not sent to the core)
     wchar_t proc[PB_APPS_MAX];
-    wchar_t hosts[256];
+    wchar_t hosts[PB_HOSTS_MAX];  // IPs, ranges and domain names together ("*" = any host)
     wchar_t ports[128];
-    wchar_t domains[256];
     wchar_t proto[8];             // "TCP" | "UDP" | "BOTH"
     wchar_t action[16];           // "PROXY" | "DIRECT" | "BLOCK"
     int     enabled;
+    int     localhost;            // 1 = connections to localhost (127.x / ::1) matching this rule are proxied too
     UINT32  cfgStoredId;          // ProxyConfigId as written in the profile
 } PBRule;
 
@@ -53,7 +54,6 @@ typedef struct PBProfile PBProfile;
 UINT32 PB_AllocConfigId(PBProfile* p);
 
 typedef struct PBProfile {
-    int      localhostViaProxy;
     int      trafficLogging;
     int      autoClearLogs;
     int      closeToTray;
@@ -64,6 +64,21 @@ typedef struct PBProfile {
     PBRule   rule[PB_MAX_RULE]; int ruleCount;
     PBFilter filter[PB_MAX_FILTER]; int filterCount;
 } PBProfile;
+
+// Target Hosts list helpers. Line breaks only exist in the editor for readability:
+//   PB_ListNormalize - in place; removes line breaks/tabs/control characters, trims blanks around the
+//                      separators (';' or ','), drops empty entries and joins with ';'. Never grows the text.
+//   PB_ListFormat    - writes the list with a line break after every ';' (cch must be >= 3 * len + 1).
+void PB_ListNormalize(wchar_t* s);
+void PB_ListFormat(const wchar_t* in, wchar_t* out, size_t cch);
+
+// The profile file (and the engine) keep IPs and domain names in two keys, TargetHosts and TargetDomains; the
+// GUI shows them as one list.
+//   PB_HostsMerge - TargetHosts + TargetDomains (either may be "" or "*") -> one list ("*" if both are empty).
+//   PB_HostsSplit - one list -> IP-like entries and domain entries. Each output is "*" when it has no entries,
+//                   and both are "*" when the list contains "*". cch of each output must be >= len(merged) + 2.
+void PB_HostsMerge(const wchar_t* ips, const wchar_t* doms, wchar_t* out, size_t cch);
+void PB_HostsSplit(const wchar_t* merged, wchar_t* ips, size_t ipsCch, wchar_t* doms, size_t domsCch);
 
 // settings.json (active profile pointer). Other settings fields are preserved on write.
 void PB_GetActiveProfile(wchar_t* out, int cch);

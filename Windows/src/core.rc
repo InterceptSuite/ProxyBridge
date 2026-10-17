@@ -1,0 +1,4 @@
+#define PB_FILE_DESC "ProxyBridge core engine"
+#define PB_ORIG_NAME "ProxyBridgeCore.dll"
+#define PB_FTYPE     VFT_DLL
+#include "../gui/res/pbver.inc"

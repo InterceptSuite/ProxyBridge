@@ -13,6 +13,7 @@ Universal proxy client for Linux applications - Route any application through SO
     - [Basic Usage](#basic-usage)
     - [Command Line Options](#command-line-options)
     - [Rule Format](#rule-format)
+  - [Profiles](#profiles)
 - [Use Cases](#use-cases)
 - [Current Limitations](#current-limitations)
 - [Things to Note](#things-to-note)
@@ -89,6 +90,7 @@ The GTK3-based GUI provides:
 - Proxy configuration (SOCKS5/HTTP with authentication)
 - Visual rule management with process selection
 - Real-time connection monitoring
+- Profiles: create, switch, duplicate, rename, delete, **import and export** `.pbprofile` files (the Windows/macOS format, see [Profiles](#profiles))
 - Import/Export rules (JSON format compatible with Windows/macOS)
 - DNS via Proxy toggle
 
@@ -193,6 +195,11 @@ OPTIONS:
                            curl;wget:10.0.0.0/8:*:TCP:DIRECT
                            *:*:53:UDP:PROXY=tor
 
+  --profile <name|file>  Load proxies and rules from a .pbprofile (a file path, or the name of a profile saved
+                         by the GUI). Same format as the Windows and macOS apps; repeatable, and can be
+                         combined with --proxy and --rule. Disabled rules are skipped.
+  --list-profiles        List the profiles saved by the GUI and exit
+
   --dns-via-proxy <bool> Route DNS queries through the proxy (true/false/1/0, default true)
 
   --verbose <level>      0 none (default), 1 logs, 2 connections, 3 both
@@ -202,6 +209,9 @@ OPTIONS:
   --help, -h             Show this help message
 
 EXAMPLES:
+  sudo cli/ProxyBridge --profile work
+  sudo cli/ProxyBridge --profile ./myconfig.pbprofile --verbose 2
+
   sudo cli/ProxyBridge --rule curl:*:*:TCP:PROXY
 
   sudo cli/ProxyBridge --proxy socks5://192.168.1.10:1080 --proxy work=http://proxy.corp:8080 \
@@ -261,6 +271,42 @@ Rules are evaluated **in order and the first match wins** (put specific rules be
 - A local proxy is never proxied through itself: processes that listen on a configured proxy address (for example Burp, mitmproxy, Tor or `ssh -D` on 127.0.0.1) are exempted automatically, so a rule with process `*` cannot create a loop. The exemption is per process, not per program, and is refreshed every two seconds
 - Press `Ctrl+C` to stop ProxyBridge; the kernel hooks are removed automatically, even if ProxyBridge crashes
 
+### Profiles
+
+A profile is a named set of proxies and rules. The GUI keeps any number of them (Proxy menu, **Profiles**: Switch, New, Duplicate, Rename, Delete, **Import**, **Export**), and the CLI runs one with `--profile`.
+Profiles are stored in the **same `.pbprofile` JSON format as the Windows and macOS apps**, so a file exported on one platform imports on the others:
+
+```bash
+sudo ProxyBridge --profile work                    # a profile saved by the GUI (see --list-profiles)
+sudo ProxyBridge --profile ~/exported.pbprofile    # any .pbprofile file, e.g. exported from the Windows GUI
+sudo ProxyBridge --profile work --rule "curl:*:*:TCP:DIRECT"   # profile first, then extra proxies and rules
+```
+
+```json
+{
+  "Version": "1.0",
+  "Name": "work",
+  "IsTrafficLoggingEnabled": true,
+  "DnsViaProxy": true,
+  "DefaultProxyId": 1,
+  "ProxyConfigs": [
+    { "Id": 1, "Name": "corp", "Type": "SOCKS5", "Host": "proxy.corp", "Port": "1080", "Username": "", "Password": "", "SendDomainToProxy": false },
+    { "Id": 2, "Name": "web",  "Type": "HTTP",   "Host": "10.0.0.2",   "Port": "8080", "Username": "bob", "Password": "secret" }
+  ],
+  "ProxyRules": [
+    { "ProcessName": "firefox;chrome", "TargetHosts": "*", "TargetPorts": "80;443", "TargetDomains": "*.github.com",
+      "Protocol": "TCP", "Action": "PROXY", "IsEnabled": true, "ProxyConfigId": 2 }
+  ]
+}
+```
+
+- Rules point at proxies by `ProxyConfigId`; `0` means the default proxy (`DefaultProxyId`, otherwise the first proxy). A rule that names a proxy that is not in the file makes the profile invalid, rather than silently routing somewhere else.
+- Linux keeps domain names in the host list. On export they are written to `TargetDomains` (as the Windows app does) and merged back on import.
+- Fields this version has no use for (`LocalhostViaProxy`, `LogFilters`, `SendDomainToProxy`, ...) are ignored on import. `DnsViaProxy` and `DefaultProxyId` are Linux additions that other apps ignore. The CLI takes DNS-via-proxy from the profile unless `--dns-via-proxy` is given, and uses `--verbose` instead of the logging flag.
+- Disabled rules (`"IsEnabled": false`) are kept in the GUI and skipped by the CLI.
+- **GUI storage:** `/etc/proxybridge/profiles/<name>.pbprofile` (one file per profile) and `/etc/proxybridge/settings.json`, which holds only the name of the active profile. Everything else, including the *Enable Traffic Logging* and *DNS via Proxy* switches, is saved inside the profile, so switching profiles switches those too. The directory is `0700` and the files `0600`, because they hold proxy passwords; exported files are `0600` as well, and the CLI warns when a profile with credentials is readable by others. The `config.ini` of earlier versions is converted on the first start and kept as `config.ini.bak`.
+- Files are limited to 4 MiB, 256 proxies and 4096 rules; malformed files are rejected with the reason, never partly applied.
+
 ## Domain rules
 
 Applications resolve a name themselves and then connect to an IP address, so the kernel only ever sees the address. To apply domain rules ProxyBridge builds, like the macOS version, an **IP → domain-name map from the DNS answers the application received**:
@@ -288,7 +334,7 @@ Add as many `--proxy` entries (CLI) or proxies (GUI) as you need; each rule choo
 - **Redirected UDP flows** are addressed by a loopback flow address that the relay maps back to the original destination. These addresses are not secret (they are visible in `/proc/net/udp`), so on a **multi-user host** another local user can send datagrams to the relay's UDP port and have them forwarded to a destination that some other process is already talking to, through the same proxy. Run ProxyBridge on machines you trust locally.
 - A rule that needs a proxy that does not exist **blocks** instead of letting traffic through.
 - The relay listens on loopback only (UDP is additionally bound to the `lo` device). Other network namespaces (containers) are never redirected.
-- Proxy passwords are kept in `/etc/proxybridge/config.ini` (mode 0600, root). On the command line, `--proxy user:pass@host` is wiped from the process list after parsing, but a shell history can still keep it; prefer the GUI or a config file for secrets.
+- Proxy passwords are kept in the profile files under `/etc/proxybridge/profiles/` (mode 0600, directory 0700, root). On the command line, `--proxy user:pass@host` is wiped from the process list after parsing, but a shell history can still keep it; prefer the GUI or a profile file for secrets.
 
 ## Use Cases
 
@@ -519,10 +565,12 @@ MIT License - See LICENSE file for details
 ```bash
 cd Linux && ./build.sh                            # builds in a temp dir, final files land in Linux/output/
 cd src && make test-rules BUILD_DIR=/tmp/pbt      # rule engine + DNS parser tests (no root needed)
+profile/tests/run_tests.sh                        # .pbprofile reader/writer incl. fuzzing, under ASan/UBSan (no root needed)
 cd tests && ./run_relay_test.sh both              # relay tests, plain and ASan/UBSan (no root needed)
 cd ../../tests && sudo ./e2e.sh                   # end-to-end with real kernel hooks (root); uses Linux/output, override with PB_DIR=
 sudo ./e2e_domains.sh                             # domain rules with a real resolver client (root, needs dig)
 sudo ./e2e_rules.sh                               # every rule form + every proxy type, incl. HTTP auth and UDP rules (root)
+sudo ./e2e_profile.sh                             # `ProxyBridge --profile`: Windows-format profiles on the live datapath (root)
 sudo ./api_live.sh                                # library API: edit/move/disable/delete rules and proxies on the live datapath (root)
 sudo BPFTOOL=$(command -v bpftool) ./e2e_security.sh   # relay hand-off cannot be hijacked from another loopback address (root)
 sudo ./churn.sh 3000                              # rule/proxy churn with live traffic: memory, fds and threads must stay flat (root)
@@ -530,5 +578,5 @@ sudo ./e2e_openssh.sh                             # interoperability with a real
 sudo NODE=$(command -v node) NEXUS_JS=/path/to/nexus-proxy/script.js ./e2e_nexus.sh   # against Nexus Proxy, a real forwarding SOCKS5 server with UDP (root)
 sudo ./scale.sh 10000                             # 10,000 concurrent proxied connections (root)
 sudo ./gui_headless.sh <ProxyBridgeGUI> <libdir>  # the real GTK GUI under the Broadway backend (root, needs broadwayd)
-cd ../gui/tests && gcc -I../../src -I.. -D_GNU_SOURCE $(pkg-config --cflags gtk+-3.0) config_test.c ../gui_config.c -o /tmp/config_test $(pkg-config --libs gtk+-3.0) && /tmp/config_test   # GUI config/profile tests
+gui/tests/run_tests.sh                            # GUI config/profile storage, JSON and event-queue tests (ASan, UBSan, TSan; no root needed)
 ```

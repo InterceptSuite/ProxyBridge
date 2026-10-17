@@ -66,18 +66,20 @@ function Compile-MSVC {
               "/arch:SSE2 /fp:fast /GS /guard:cf /Qpar " +
               "/I`"$WinDivertPath\include`" " +
               "$SourceFiles " +
+              "src\core.res " +
               "/LD " +
               "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /NXCOMPAT " +
               "/LIBPATH:`"$WinDivertPath\$Arch`" " +
               "WinDivert.lib ws2_32.lib iphlpapi.lib " +
               "/OUT:$OutputDLL"
 
-    $cmd = "`"$vcvarsPath`" $Arch >nul && cl.exe $clArgs"
+    $cmd = "`"$vcvarsPath`" $Arch >nul && rc /nologo /fo src\core.res src\core.rc && cl.exe $clArgs"
 
     Write-Host "Command: cl.exe $clArgs" -ForegroundColor Gray
 
     $result = cmd /c $cmd '2>&1'
     $exitCode = $LASTEXITCODE
+    Remove-Item "src\core.res" -Force -ErrorAction SilentlyContinue
 
     Write-Host $result
 
@@ -243,16 +245,18 @@ if ($success) {
         $cliArgs = "/nologo /O2 /Ot /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
                    "/D_WINSOCK_DEPRECATED_NO_WARNINGS /D_WIN32_WINNT=0x0601 /DNDEBUG " +
                    "/arch:SSE2 /fp:fast /GS /guard:cf /Qpar " +
-                   "cli\main.c " +
+                   "cli\main.c cli\cli.res " +
                    "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /NXCOMPAT /SUBSYSTEM:CONSOLE " +
                    "winhttp.lib shell32.lib advapi32.lib " +
                    "/OUT:ProxyBridge_CLI.exe"
 
-        $cliCmd = "`"$script:foundVcvarsPath`" $script:foundArch >nul && cl.exe $cliArgs"
+        $cliCmd = "`"$script:foundVcvarsPath`" $script:foundArch >nul && rc /nologo /fo cli\cli.res cli\cli.rc && cl.exe $cliArgs"
         Write-Host "Command: cl.exe $cliArgs" -ForegroundColor Gray
 
         $cliOut = cmd /c $cliCmd '2>&1'
-        if ($LASTEXITCODE -eq 0) {
+        $cliExit = $LASTEXITCODE
+        Remove-Item "cli\cli.res" -Force -ErrorAction SilentlyContinue
+        if ($cliExit -eq 0) {
             Move-Item "ProxyBridge_CLI.exe" -Destination $OutputDir -Force
             Write-Host "  CLI built: ProxyBridge_CLI.exe" -ForegroundColor Gray
             Remove-Item "*.obj" -Force -ErrorAction SilentlyContinue
@@ -270,13 +274,15 @@ if ($success) {
     Write-Host "`nBuilding service..." -ForegroundColor Green
     if ($script:foundVcvarsPath -and (Test-Path $script:foundVcvarsPath)) {
         $svcArgs = "/nologo /O2 /GL /Gy /W4 /MT /GS /guard:cf /sdl /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE " +
-                   "src\service\pb_service.c " +
+                   "src\service\pb_service.c src\service\svc.res " +
                    "/link /LTCG /OPT:REF /OPT:ICF /RELEASE /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf /CETCOMPAT /SUBSYSTEM:CONSOLE " +
                    "advapi32.lib " +
                    "/OUT:ProxyBridgeSvc.exe"
-        $svcCmd = "`"$script:foundVcvarsPath`" $script:foundArch >nul && cl.exe $svcArgs"
+        $svcCmd = "`"$script:foundVcvarsPath`" $script:foundArch >nul && rc /nologo /fo src\service\svc.res src\service\svc.rc && cl.exe $svcArgs"
         $svcOut = cmd /c $svcCmd '2>&1'
-        if ($LASTEXITCODE -eq 0) {
+        $svcExit = $LASTEXITCODE
+        Remove-Item "src\service\svc.res" -Force -ErrorAction SilentlyContinue
+        if ($svcExit -eq 0) {
             Move-Item "ProxyBridgeSvc.exe" -Destination $OutputDir -Force
             Write-Host "  Service built: ProxyBridgeSvc.exe" -ForegroundColor Gray
             Remove-Item "*.obj" -Force -ErrorAction SilentlyContinue

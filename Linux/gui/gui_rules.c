@@ -151,7 +151,16 @@ static void open_rule_dialog(RuleData *rule) {
     gtk_box_pack_start(GTK_BOX(proc_box), proc_entry, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(proc_box), browse_btn, FALSE, FALSE, 0);
 
-    GtkWidget *host_entry = gtk_entry_new();
+    // Target Host: multiline for long lists. Line breaks are only for readability and are stripped before
+    // the text reaches the engine; ';' stays the separator.
+    GtkWidget *host_view = gtk_text_view_new();
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(host_view), GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_accepts_tab(GTK_TEXT_VIEW(host_view), FALSE);
+    GtkWidget *host_entry = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(host_entry), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(host_entry), GTK_SHADOW_IN);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(host_entry), 90);
+    gtk_container_add(GTK_CONTAINER(host_entry), host_view);
     GtkWidget *port_entry = gtk_entry_new();
     GtkWidget *proto_combo = combo_new("TCP", "UDP", "BOTH", NULL);
     GtkWidget *action_combo = combo_new("PROXY", "DIRECT", "BLOCK", NULL);
@@ -168,7 +177,11 @@ static void open_rule_dialog(RuleData *rule) {
     g_signal_connect(action_combo, "changed", G_CALLBACK(on_action_changed), proxy_combo);
 
     gtk_entry_set_text(GTK_ENTRY(proc_entry), rule ? rule->process_name : "");
-    gtk_entry_set_text(GTK_ENTRY(host_entry), rule ? rule->target_hosts : "*");
+    {
+        char *shown = list_format(rule && rule->target_hosts && *rule->target_hosts ? rule->target_hosts : "*");
+        gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(host_view)), shown, -1);
+        g_free(shown);
+    }
     gtk_entry_set_text(GTK_ENTRY(port_entry), rule ? rule->target_ports : "*");
     gtk_combo_box_set_active(GTK_COMBO_BOX(proto_combo), rule ? (int)rule->protocol : RULE_PROTOCOL_BOTH);
     gtk_combo_box_set_active(GTK_COMBO_BOX(action_combo), rule ? (int)rule->action : RULE_ACTION_PROXY);
@@ -177,7 +190,7 @@ static void open_rule_dialog(RuleData *rule) {
     grid_row(grid, 0, "Process Name:", proc_box);
     gtk_grid_attach(GTK_GRID(grid), hint_label("Example: firefox; chrome; /usr/bin/wget"), 1, 1, 1, 1);
     grid_row(grid, 2, "Target Host:", host_entry);
-    gtk_grid_attach(GTK_GRID(grid), hint_label("Example: 192.168.1.*; 10.0.0.0/8; 10.0.0.1-10.0.0.50; github.com; *.github.com; * (domains are matched via DNS answers)"), 1, 3, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), hint_label("Example: 192.168.1.*; 10.0.0.0/8; 10.0.0.1-10.0.0.50; github.com; *.github.com; * (domains are matched via DNS answers). Long lists are fine; line breaks are for readability only, separate entries with ;"), 1, 3, 1, 1);
     grid_row(grid, 4, "Target Port:", port_entry);
     gtk_grid_attach(GTK_GRID(grid), hint_label("Example: 80; 443; 8000-8080; *"), 1, 5, 1, 1);
     grid_row(grid, 6, "Protocol:", proto_combo);
@@ -196,9 +209,17 @@ static void open_rule_dialog(RuleData *rule) {
         ProxyData *pd = (action == RULE_ACTION_PROXY && psel > 0) ? g_list_nth_data(g_proxies_list, psel - 1) : NULL;
         char err[256] = "";
 
-        saved = save_rule(rule, gtk_entry_get_text(GTK_ENTRY(proc_entry)), gtk_entry_get_text(GTK_ENTRY(host_entry)),
+        GtkTextBuffer *hbuf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(host_view));
+        GtkTextIter hs, he;
+        gtk_text_buffer_get_bounds(hbuf, &hs, &he);
+        char *raw_hosts = gtk_text_buffer_get_text(hbuf, &hs, &he, FALSE);
+        char *clean_hosts = list_normalize(raw_hosts);
+        g_free(raw_hosts);
+
+        saved = save_rule(rule, gtk_entry_get_text(GTK_ENTRY(proc_entry)), clean_hosts,
                           gtk_entry_get_text(GTK_ENTRY(port_entry)), proto < 0 ? RULE_PROTOCOL_BOTH : (RuleProtocol)proto,
                           action < 0 ? RULE_ACTION_PROXY : (RuleAction)action, pd ? pd->name : NULL, err, sizeof(err)) != NULL;
+        g_free(clean_hosts);
         if (saved) {
             save_config();
             refresh_rules_ui();

@@ -1,5 +1,5 @@
 !define PRODUCT_NAME "ProxyBridge"
-!define PRODUCT_VERSION "4.1.0"
+!define PRODUCT_VERSION "4.2.0"
 !define PRODUCT_PUBLISHER "InterceptSuite"
 !define PRODUCT_WEB_SITE "https://github.com/InterceptSuite/ProxyBridge"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
@@ -8,7 +8,7 @@
 Unicode True
 
 ; Version Information
-VIProductVersion "4.1.0.0"
+VIProductVersion "4.2.0.0"
 VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
@@ -86,6 +86,11 @@ Section "MainSection" SEC01
   File "..\output\ProxyBridgeSvc.exe"
   File "..\output\WinDivert.dll"
   File "..\output\WinDivert64.sys"
+
+  ; The service runs as SYSTEM from this folder, so ordinary users must never be able to modify it
+  ; (a folder chosen outside Program Files, e.g. D:\Tools, is usually writable by every user).
+  ; SYSTEM and Administrators: full control; Users: read/execute. SIDs, so it works on any language.
+  nsExec::ExecToLog 'icacls "$INSTDIR" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"'
 
   ; Remove leftover native libraries from the old C#/Avalonia GUI. The native C GUI
   ; does not use them; without this an upgrade would keep these stale DLLs behind.

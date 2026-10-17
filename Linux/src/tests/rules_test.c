@@ -92,6 +92,28 @@ int main(void)
     r = R("", "github.com;*.github.com", ""); CHECK(r.ndomains == 2); pb_rule_free(&r);
     CHECK(pb_domain_match("a?c.com", "abc.com")); CHECK(!pb_domain_match("a?c.com", "abbc.com")); CHECK(pb_domain_match("*", "x.y"));
     CHECK(bad("", "bad name.com", ""));
+
+    {   // long Target Host lists: hundreds of domains, up to PB_HOSTS_MAX - 1 characters, and the limits themselves
+        static char big[PB_HOSTS_MAX + 64];
+        size_t o = 0; int n = 0;
+        while (o + 24 < 7000) { o += (size_t)snprintf(big + o, sizeof big - o, "host%d.example.org;", n++); }
+        r = R("", big, ""); CHECK(r.ndomains == n); CHECK(r.hosts_src[0] == 'h');
+        CHECK(pb_rule_match_dest(&r, AF_INET, (a4(a, "1.2.3.4"), a), 443, (const char *[]){ "host77.example.org" }, 1));
+        CHECK(!pb_rule_match_dest(&r, AF_INET, (a4(a, "1.2.3.4"), a), 443, (const char *[]){ "other.example.org" }, 1));
+        pb_rule_free(&r);
+
+        struct pb_rule t; char e[128];
+        memset(big, 'a', PB_HOSTS_MAX); big[PB_HOSTS_MAX] = 0;                  // 8192 characters: rejected by the length limit
+        CHECK(!pb_rule_parse(&t, "", big, "", e, sizeof e)); CHECK(strstr(e, "too long") != NULL);
+
+        for (int k = 0; k < 2; k++) {                                            // exactly PB_MAX_HOST_PATTERNS entries parse, one more is rejected
+            o = 0;
+            for (int i = 0; i < PB_MAX_HOST_PATTERNS + k; i++) o += (size_t)snprintf(big + o, sizeof big - o, "x.y;");
+            if (k == 0) { CHECK(pb_rule_parse(&t, "", big, "", e, sizeof e)); pb_rule_free(&t); }
+            else        { CHECK(!pb_rule_parse(&t, "", big, "", e, sizeof e)); CHECK(strstr(e, "too many") != NULL); }
+        }
+        CHECK(bad("a1;a2;a3;a4;a5;a6;a7;a8;a9;a10;a11;a12;a13;a14;a15;a16;a17;a18;a19;a20;a21;a22;a23;a24;a25;a26;a27;a28;a29;a30;a31;a32;a33;a34;a35;a36;a37;a38;a39;a40;a41;a42;a43;a44;a45;a46;a47;a48;a49;a50;a51;a52;a53;a54;a55;a56;a57;a58;a59;a60;a61;a62;a63;a64;a65", "", ""));   // process list limit unchanged
+    }
     printf(fails ? "RULES TESTS FAILED (%d)\n" : "rules tests passed\n", fails);
     return fails != 0;
 }

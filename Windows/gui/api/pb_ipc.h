@@ -117,18 +117,18 @@ static int IpcTestProxyConfigEx(UINT32 id, const char* host, unsigned short port
     return rc;
 }
 
-static UINT32 IpcAddRule(const char* proc, const char* hosts, const char* ports, const char* domains, PBRuleProtocol pr, PBRuleAction ac, UINT32 cfg)
-{ PBIPC_BEGIN(PBOP_ADD_RULE); PbW_Str(&_w, proc); PbW_Str(&_w, hosts); PbW_Str(&_w, ports); PbW_Str(&_w, domains); PbW_U32(&_w, pr); PbW_U32(&_w, ac); PbW_U32(&_w, cfg); PBIPC_END(); }
-static BOOL IpcEditRule(UINT32 id, const char* proc, const char* hosts, const char* ports, const char* domains, PBRuleProtocol pr, PBRuleAction ac, UINT32 cfg)
-{ PBIPC_BEGIN(PBOP_EDIT_RULE); PbW_U32(&_w, id); PbW_Str(&_w, proc); PbW_Str(&_w, hosts); PbW_Str(&_w, ports); PbW_Str(&_w, domains); PbW_U32(&_w, pr); PbW_U32(&_w, ac); PbW_U32(&_w, cfg); PBIPC_END(); }
+static UINT32 IpcAddRule(const char* proc, const char* hosts, const char* ports, const char* domains, PBRuleProtocol pr, PBRuleAction ac, UINT32 cfg, BOOL localhost)
+{ PBIPC_BEGIN(PBOP_ADD_RULE); PbW_Str(&_w, proc); PbW_Str(&_w, hosts); PbW_Str(&_w, ports); PbW_Str(&_w, domains); PbW_U32(&_w, pr); PbW_U32(&_w, ac); PbW_U32(&_w, cfg); PbW_U32(&_w, localhost != 0); PBIPC_END(); }
+static BOOL IpcEditRule(UINT32 id, const char* proc, const char* hosts, const char* ports, const char* domains, PBRuleProtocol pr, PBRuleAction ac, UINT32 cfg, BOOL localhost)
+{ PBIPC_BEGIN(PBOP_EDIT_RULE); PbW_U32(&_w, id); PbW_Str(&_w, proc); PbW_Str(&_w, hosts); PbW_Str(&_w, ports); PbW_Str(&_w, domains); PbW_U32(&_w, pr); PbW_U32(&_w, ac); PbW_U32(&_w, cfg); PbW_U32(&_w, localhost != 0); PBIPC_END(); }
 static BOOL IpcEnableRule(UINT32 id)  { PBIPC_BEGIN(PBOP_ENABLE_RULE);  PbW_U32(&_w, id); PBIPC_END(); }
 static BOOL IpcDisableRule(UINT32 id) { PBIPC_BEGIN(PBOP_DISABLE_RULE); PbW_U32(&_w, id); PBIPC_END(); }
 static BOOL IpcDeleteRule(UINT32 id)  { PBIPC_BEGIN(PBOP_DELETE_RULE);  PbW_U32(&_w, id); PBIPC_END(); }
 static BOOL IpcMoveRule(UINT32 id, UINT32 pos) { PBIPC_BEGIN(PBOP_MOVE_RULE); PbW_U32(&_w, id); PbW_U32(&_w, pos); PBIPC_END(); }
 static UINT32 IpcGetRulePos(UINT32 id) { PBIPC_BEGIN(PBOP_GET_RULE_POS); PbW_U32(&_w, id); PBIPC_END(); }
-static void IpcSetLocalhost(BOOL v)   { PBIPC_BEGIN(PBOP_SET_LOCALHOST);   PbW_U32(&_w, v != 0); PbIpcCall(_b, _w.len); }
 static void IpcSetTrafficLog(BOOL v)  { PBIPC_BEGIN(PBOP_SET_TRAFFIC_LOG); PbW_U32(&_w, v != 0); PbIpcCall(_b, _w.len); }
 static void IpcClearConnLogs(void)    { PBIPC_BEGIN(PBOP_CLEAR_CONN_LOGS); PbIpcCall(_b, _w.len); }
+static void IpcSetEnabled(BOOL v)     { PBIPC_BEGIN(PBOP_SET_ENABLED);     PbW_U32(&_w, v != 0); PbIpcCall(_b, _w.len); }
 static void IpcSetLogCallback(PBLogCallback cb)               { g_ipcLogCb = cb; }
 static void IpcSetConnectionCallback(PBConnectionCallback cb) { g_ipcConnCb = cb; }
 static BOOL IpcStart(void) { PBIPC_BEGIN(PBOP_START); PBIPC_END(); }
@@ -154,13 +154,40 @@ static void PbIpcTryStartService(void)
     CloseServiceHandle(scm);
 }
 
+// Any user can create a named pipe, so a process other than our service could be listening on
+// the pipe name (it would then receive the proxy credentials we send). Only talk to the process
+// that the Service Control Manager says is running ProxyBridgeSvc. (A standard user cannot open a
+// SYSTEM process to read its path, but may query a service's status, which includes its PID.)
+static BOOL PbIpcServerIsOurs(HANDLE h)
+{
+    ULONG pid = 0;
+    if (!GetNamedPipeServerProcessId(h, &pid) || pid == 0) return FALSE;
+    BOOL ok = FALSE;
+    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm)
+    {
+        SC_HANDLE svc = OpenServiceW(scm, PB_SERVICE_NAME, SERVICE_QUERY_STATUS);
+        if (svc)
+        {
+            SERVICE_STATUS_PROCESS st; DWORD need = 0;
+            if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&st, sizeof(st), &need))
+                ok = (st.dwProcessId == pid);
+            CloseServiceHandle(svc);
+        }
+        CloseServiceHandle(scm);
+    }
+    return ok;
+}
+
 static HANDLE PbIpcOpen(const wchar_t* name, DWORD access, DWORD* err)
 {
     for (int tries = 0; tries < 20; tries++)
     {
-        HANDLE h = CreateFileW(name, access, 0, NULL, OPEN_EXISTING, 0, NULL);
+        // SECURITY_IDENTIFICATION: even a rogue server could not impersonate us.
+        HANDLE h = CreateFileW(name, access, 0, NULL, OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
         if (h != INVALID_HANDLE_VALUE)
         {
+            if (!PbIpcServerIsOurs(h)) { CloseHandle(h); *err = ERROR_BAD_PIPE; return INVALID_HANDLE_VALUE; }
             DWORD mode = PIPE_READMODE_MESSAGE;
             SetNamedPipeHandleState(h, &mode, NULL, NULL);
             return h;
@@ -216,9 +243,9 @@ static int PB_LoadService(PBApi* api)
     api->EnableRule = IpcEnableRule;               api->DisableRule = IpcDisableRule;
     api->DeleteRule = IpcDeleteRule;               api->EditRule = IpcEditRule;
     api->MoveRuleToPosition = IpcMoveRule;         api->GetRulePosition = IpcGetRulePos;
-    api->SetLocalhostViaProxy = IpcSetLocalhost;   api->SetLogCallback = IpcSetLogCallback;
+    api->SetLogCallback = IpcSetLogCallback;
     api->SetConnectionCallback = IpcSetConnectionCallback;
-    api->SetTrafficLoggingEnabled = IpcSetTrafficLog;
+    api->SetTrafficLoggingEnabled = IpcSetTrafficLog;   api->SetEnabled = IpcSetEnabled;
     api->ClearConnectionLogs = IpcClearConnLogs;   api->Start = IpcStart; api->Stop = IpcStop;
     return PB_IPC_OK;
 }

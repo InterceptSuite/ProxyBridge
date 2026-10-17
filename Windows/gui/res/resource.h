@@ -6,11 +6,11 @@
 // (exe Properties → Details). Also mirror the numeric form in res\app.manifest's
 // <assemblyIdentity version="..."> when bumping.
 #define PB_VER_MAJOR 4
-#define PB_VER_MINOR 1
+#define PB_VER_MINOR 2
 #define PB_VER_PATCH 0
 #define PB_VER_BUILD 0
-#define PB_VER_STR   "4.1.0"     // narrow, for the .rc VERSIONINFO strings
-#define PB_VER_STRW  L"4.1.0"    // wide, for the C/About UI
+#define PB_VER_STR   "4.2.0"     // narrow, for the .rc VERSIONINFO strings
+#define PB_VER_STRW  L"4.2.0"    // wide, for the C/About UI
 
 #define IDI_APPICON                 101
 
@@ -18,7 +18,6 @@
 #define IDR_MAINMENU                200
 #define IDM_PROXY_SETTINGS          201
 #define IDM_PROXY_RULES             202
-#define IDM_SET_LOCALHOST           210
 #define IDM_SET_TRAFFICLOG          211
 #define IDM_SET_CLOSETOTRAY         212
 #define IDM_SET_STARTUP             215
@@ -27,6 +26,7 @@
 #define IDM_ZOOM_IN                 223
 #define IDM_ZOOM_OUT                224
 #define IDM_ZOOM_RESET              225
+#define IDM_PROXY_ENABLE            226   // main on/off switch
 #define IDM_PROFILE_RENAME          244
 
 // Log Filters (list) dialog
@@ -110,6 +110,9 @@
 #define IDC_RL_UP                  406
 #define IDC_RL_DOWN                407
 #define IDC_RL_HINT                408
+#define IDC_RL_SEARCH              409   // rule search box
+#define IDC_RL_CLEAR               410   // clears the search
+#define IDC_RL_COUNT               411   // "n of m rules" while a search is active
 
 // Proxification Rule (edit) sub-dialog
 #define IDD_RULE                   420
@@ -117,23 +120,22 @@
 #define IDC_RE_APPS                422
 #define IDC_RE_HOSTS               423
 #define IDC_RE_PORTS               424
-#define IDC_RE_DOMAINS             425
 #define IDC_RE_PROTO               426
 #define IDC_RE_ACTION              427
 #define IDC_RE_L_APPS              430
 #define IDC_RE_L_HOSTS             431
 #define IDC_RE_L_PORTS             432
-#define IDC_RE_L_DOMAINS           433
 #define IDC_RE_L_PROTO             434
 #define IDC_RE_L_ACTION            435
 #define IDC_RE_BROWSE              436
 #define IDC_RE_EX_APPS             437
 #define IDC_RE_EX_HOSTS            438
 #define IDC_RE_EX_PORTS            439
-#define IDC_RE_EX_DOMAINS          440
 #define IDC_RE_UDPNOTE             441
 #define IDC_RE_NAME                442   // friendly name edit
 #define IDC_RE_L_NAME              443   // "Name:" label
+#define IDC_RE_LOCALHOST           444   // "also proxy localhost" checkbox
+#define IDC_RE_EX_LOCAL            445   // its hint text
 
 // Name-input dialog (new profile)
 #define IDD_NAME                   500

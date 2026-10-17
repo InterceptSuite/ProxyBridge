@@ -11,6 +11,7 @@ guint status_context_id;
 GList *g_rules_list = NULL;
 bool g_chk_logging = true;
 bool g_chk_dns = true;
+static GtkWidget *log_item, *dns_item;
 
 static void on_log_traffic_toggled(GtkCheckMenuItem *item, gpointer data) {
     bool active = gtk_check_menu_item_get_active(item);
@@ -24,6 +25,14 @@ static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
     ProxyBridge_SetDnsViaProxy(active);
     g_chk_dns = active;
     save_config();
+}
+
+// the switches belong to the profile: after a profile change, show and apply the new profile's values
+void gui_sync_switches() {
+    ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
+    ProxyBridge_SetDnsViaProxy(g_chk_dns);
+    if (log_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_item), g_chk_logging);
+    if (dns_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_item), g_chk_dns);
 }
 
 // same feed as windows/mac: https://download.interceptsuite.com/proxybridge.json
@@ -318,11 +327,12 @@ static GtkWidget *add_menu_item(GtkWidget *menu, const char *label, GCallback cb
     return item;
 }
 
-static void add_check_item(GtkWidget *menu, const char *label, bool active, GCallback cb) {
+static GtkWidget *add_check_item(GtkWidget *menu, const char *label, bool active, GCallback cb) {
     GtkWidget *item = gtk_check_menu_item_new_with_label(label);
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), active);
     g_signal_connect(item, "toggled", cb, NULL);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    return item;
 }
 
 static void add_separator(GtkWidget *menu) {
@@ -396,8 +406,8 @@ int main(int argc, char *argv[]) {
     add_menu_item(proxy_menu, "Proxy Rules...", G_CALLBACK(on_proxy_rules_clicked));
     add_menu_item(proxy_menu, "Profiles...", G_CALLBACK(on_profiles_clicked));
     add_separator(proxy_menu);
-    add_check_item(proxy_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
-    add_check_item(proxy_menu, "DNS via Proxy", g_chk_dns, G_CALLBACK(on_dns_proxy_toggled));
+    log_item = add_check_item(proxy_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
+    dns_item = add_check_item(proxy_menu, "DNS via Proxy", g_chk_dns, G_CALLBACK(on_dns_proxy_toggled));
     add_separator(proxy_menu);
     start_item = add_menu_item(proxy_menu, "Start Engine", G_CALLBACK(on_start_engine));
     stop_item = add_menu_item(proxy_menu, "Stop Engine", G_CALLBACK(on_stop_engine));
