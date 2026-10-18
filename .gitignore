@@ -130,3 +130,4 @@ Windows/*.obj
 Windows/**/*.obj
 Windows/gui/*.res
 Windows/**/*.res
+Windows/tests/out/

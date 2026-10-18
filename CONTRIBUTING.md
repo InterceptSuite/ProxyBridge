@@ -175,6 +175,23 @@ All compiled files are placed in `Windows/output/` directory:
 - `WinDivert.dll`, `WinDivert64.sys` - WinDivert files
 - `ProxyBridge-Setup-4.2.0.exe` - Installer (if NSIS installed)
 
+**Running the tests:**
+```powershell
+cd ProxyBridge/Windows
+.\tests\run_tests.ps1                 # build and run everything (exit code 0 = all passed)
+.\tests\run_tests.ps1 -SkipUi         # without the two GUI tests (no desktop session)
+.\tests\run_tests.ps1 -Only test_engine,test_cli
+```
+The tests are small console programs in `Windows/tests/` compiled from the real source files; they never load the
+WinDivert driver or reach the internet (only the WinDivert headers and import library are needed; a few tests use
+loopback sockets or private named pipes). They cover rule matching, profiles and the JSON parser, the DNS reply parser,
+the SOCKS5/HTTP handshakes against a fake proxy, the service's request handler and pipe permissions, the connection
+table, the CLI helpers, and the GUI windows (created for real, with a stubbed engine). A set of static checks also
+verifies that the version number agrees everywhere and that the installer script keeps its safety properties. The `Build Windows` workflow runs the same script on every push and pull
+request, before the build. **Please add or update a test when you change behavior**, for example a new rule-matching
+case in `test_engine.c`, a profile-format change in `test_profile.c`, or a new window feature in `test_rules_ui.c` /
+`test_main_ui.c`.
+
 **Project Structure:**
 - `Windows/src/` - C library core (ProxyBridge.c, ProxyBridge.h)
   - `ProxyBridge.c` - Main packet interception logic
@@ -185,6 +202,7 @@ All compiled files are placed in `Windows/output/` directory:
   - `main.c` - CLI application for headless operation
 - `Windows/installer/` - NSIS installer script
   - `ProxyBridge.nsi` - Installer configuration
+- `Windows/tests/` - Test programs and `run_tests.ps1` (run by the Windows workflow)
 - `Windows/compile.ps1` - Build script
 - `Windows/output/` - Compiled binaries (created by compile.ps1)
 

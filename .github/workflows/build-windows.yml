@@ -2,9 +2,9 @@ name: Build Windows
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ master, dev ]
   pull_request:
-    branches: [ main, dev ]
+    branches: [ master, dev ]
   workflow_dispatch:
 
 permissions:
@@ -65,6 +65,31 @@ jobs:
           exit 1
         }
       shell: pwsh
+
+    # Tests build from the real sources and never load the WinDivert driver or touch the network, so they run on
+    # a hosted runner. They run before the build so a failing change is reported first. See Windows\tests\.
+    - name: Run tests (engine, profiles, parsers, service, proxy protocols, CLI, static checks)
+      run: |
+        cd Windows
+        .\tests\run_tests.ps1 -SkipUi
+      shell: pwsh
+
+    # The GUI tests create real windows (the Proxy Rules window and the main window) and need a desktop session;
+    # they are a separate step so a runner without one is easy to tell apart from a real failure.
+    - name: Run GUI tests (Proxy Rules window, main window, dialogs)
+      run: |
+        cd Windows
+        .\tests\run_tests.ps1 -Only test_rules_ui,test_main_ui,test_dialogs_ui
+      shell: pwsh
+
+    - name: Upload test output on failure
+      if: failure()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ProxyBridge-Test-Output-${{ github.sha }}
+        path: Windows/tests/out/*.txt
+        if-no-files-found: ignore
+        retention-days: 7
 
     - name: Build project
       run: |
