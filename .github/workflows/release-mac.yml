@@ -3,9 +3,14 @@ permissions:
   contents: write
 
 on:
-  release:
-    types: [published, created]
+  # manual only, so creating a release no longer triggers every OS build. create
+  # the release, then run just the workflow for the OS you want against its tag.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and attach the installer to (e.g. v4.1.0)'
+        required: true
+        type: string
 
 jobs:
   build-and-release:
@@ -13,11 +18,13 @@ jobs:
     permissions:
       contents: write
       actions: read
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner)
+    if: github.actor == github.repository_owner
     
     steps:
     - name: Checkout code
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      with:
+        ref: ${{ inputs.tag }}
     
     - name: Set up Xcode
       uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
@@ -180,7 +187,7 @@ jobs:
         chmod +x build.sh
         bash build.sh
 
-        PKG_VERSION="3.2.0"
+        PKG_VERSION=$(grep -m1 '^VERSION=' build.sh | cut -d'"' -f2)
         PKG_UNSIGNED="output/ProxyBridge-v${PKG_VERSION}-Universal-Installer.pkg"
         PKG_SIGNED="output/ProxyBridge-v${PKG_VERSION}-Universal-Installer-signed.pkg"
 
@@ -223,11 +230,11 @@ jobs:
         echo "PKG signed, notarized and stapled successfully"
 
     - name: Upload PKG to Release
-      if: github.event_name == 'release'
       run: |
-        gh release upload "${{ github.event.release.tag_name }}" MacOS/ProxyBridge/output/ProxyBridge-*.pkg --clobber
+        gh release upload "$TAG" MacOS/ProxyBridge/output/ProxyBridge-*.pkg --clobber
       env:
         GH_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag }}
 
     - name: Upload PKG Artifact
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

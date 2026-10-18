@@ -231,6 +231,13 @@ directly: proxy rules **and block rules** do not apply, and the window title and
 Connections that were already being proxied keep working until they end. Tick the item again to apply the rules
 to new connections. ProxyBridge always starts enabled; the switch is not remembered between runs.
 
+**Connections log - one row per connection or per destination:** by default the Connections log shows a connection
+only once for each identical (application, destination IP, destination port, action), which keeps it short: an app
+that opens 50 connections to the same server gets one row. Tick **Settings → Log Every Connection** to log **every new
+TCP connection** and **every new UDP flow** instead (a UDP flow is one local port talking to one destination; it is
+logged again only after 30 seconds of silence, so busy or blocked UDP senders do not flood the log). The setting is
+saved per profile. It only changes what is listed: rules are applied to the same connections either way.
+
 **Note:** Adding a rule with action **PROXY** while no proxy is configured will fall back to a direct connection. Configure at least one proxy server before using PROXY rules.
 
 ### Command Line Interface (CLI)

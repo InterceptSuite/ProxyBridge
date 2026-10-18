@@ -26,7 +26,7 @@ enum LoginItem {
     }
 }
 
-@main
+// no @main here, main.swift starts this for a normal launch (and the command line mode otherwise)
 struct ProxyBridgeGUIApp: App {
     @StateObject private var viewModel = ProxyBridgeViewModel()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -265,11 +265,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    // if close-to-menu-bar is off, quitting on last window close matches the
-    // windows "close = exit" behavior. when on, the window only hides so this
-    // never fires.
+    // never let AppKit decide this. it counts every window, including the one
+    // behind the menu bar item, and on macOS 26 dismissing that menu looks like
+    // the last window closing, so the app quit when you clicked away from it
+    // (#233). the main window's own close decides instead, see windowWillClose.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return !closeToMenuBar
+        return false
+    }
+
+    // close-to-menu-bar off: closing the main window quits, matching the windows
+    // "close = exit" behavior. when on, windowShouldClose hides the window instead
+    // so this never fires.
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window === AppDelegate.mainWindow,
+              !closeToMenuBar else { return }
+        NSApp.terminate(nil)
     }
 
     // the window's close button, hide to the menu bar instead of closing when enabled

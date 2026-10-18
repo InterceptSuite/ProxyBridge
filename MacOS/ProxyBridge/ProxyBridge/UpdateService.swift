@@ -30,6 +30,62 @@ struct VersionInfo {
     let error: String?
 }
 
+// completes the async download exactly once, whichever callback fires first
+private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate {
+    var continuation: CheckedContinuation<URL, Error>?
+    private let destination: URL
+    private let progress: (Double) -> Void
+    private var lastReported = 0.0
+    private var finished = false
+    private let lock = NSLock()
+
+    init(destination: URL, progress: @escaping (Double) -> Void) {
+        self.destination = destination
+        self.progress = progress
+    }
+
+    private func finish(_ result: Result<URL, Error>) {
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        finished = true
+        let cont = continuation
+        continuation = nil
+        lock.unlock()
+        cont?.resume(with: result)
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let value = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        // at most ~100 updates over the whole download
+        if value - lastReported >= 0.01 || value >= 1 {
+            lastReported = value
+            DispatchQueue.main.async { self.progress(value) }
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        guard let http = downloadTask.response as? HTTPURLResponse, http.statusCode == 200 else {
+            finish(.failure(NSError(domain: "UpdateService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Download failed"])))
+            return
+        }
+        do {
+            // the temp file is deleted as soon as this returns, so move it now
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: location, to: destination)
+            DispatchQueue.main.async { self.progress(1.0) }
+            finish(.success(destination))
+        } catch {
+            finish(.failure(error))
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error { finish(.failure(error)) }
+    }
+}
+
 class UpdateService {
     private let manifestUrl = "https://download.interceptsuite.com/proxybridge.json"
 
@@ -71,56 +127,27 @@ class UpdateService {
             throw NSError(domain: "UpdateService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid download URL"])
         }
 
-        let (asyncBytes, response) = try await URLSession.shared.bytes(from: url)
+        // only ever the last path component, so a crafted name can't leave the temp folder
+        var safeName = URL(fileURLWithPath: fileName).lastPathComponent
+        if safeName.isEmpty || safeName == "." || safeName == ".." { safeName = "ProxyBridge-Installer.pkg" }
+        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(safeName)
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200 else {
-            throw NSError(domain: "UpdateService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Download failed"])
+        // a download task streams to disk in the system's own buffers. the old loop
+        // walked the file one byte at a time through an async sequence, which burned
+        // a core for the whole download and held the entire pkg in memory
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForResource = 900
+        let delegate = DownloadDelegate(destination: fileURL, progress: progress)
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.setValue("ProxyBridge-UpdateChecker", forHTTPHeaderField: "User-Agent")
+
+        return try await withCheckedThrowingContinuation { continuation in
+            delegate.continuation = continuation
+            session.downloadTask(with: request).resume()
         }
-
-        let totalBytes = response.expectedContentLength
-        let tempDir = FileManager.default.temporaryDirectory
-        let fileURL = tempDir.appendingPathComponent(fileName)
-
-        try? FileManager.default.removeItem(at: fileURL)
-
-        var downloadedBytes: Int64 = 0
-        var data = Data()
-        if totalBytes > 0 { data.reserveCapacity(Int(totalBytes)) }
-
-        // collect into a buffer and flush in chunks, and only report progress
-        // every ~256kb so we aren't hopping to the main actor for every byte
-        var buffer = [UInt8]()
-        buffer.reserveCapacity(65536)
-        let progressStep: Int64 = 256 * 1024
-        var lastReported: Int64 = 0
-
-        for try await byte in asyncBytes {
-            buffer.append(byte)
-            downloadedBytes += 1
-
-            if buffer.count >= 65536 {
-                data.append(contentsOf: buffer)
-                buffer.removeAll(keepingCapacity: true)
-            }
-
-            if totalBytes > 0, downloadedBytes - lastReported >= progressStep {
-                lastReported = downloadedBytes
-                let progressValue = Double(downloadedBytes) / Double(totalBytes)
-                await MainActor.run { progress(progressValue) }
-            }
-        }
-
-        if !buffer.isEmpty {
-            data.append(contentsOf: buffer)
-        }
-
-        if totalBytes > 0 {
-            await MainActor.run { progress(1.0) }
-        }
-
-        try data.write(to: fileURL)
-        return fileURL
     }
 
     func installUpdateAndQuit(installerPath: URL) {
@@ -135,7 +162,7 @@ class UpdateService {
         if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
             return "v\(version)"
         }
-        return "v3.1"
+        return "v4.1.0"
     }
 
     private func isNewerVersion(_ latest: String, _ current: String) -> Bool {

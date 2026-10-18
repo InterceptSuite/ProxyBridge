@@ -1,0 +1,39 @@
+#!/bin/sh
+# Runs as root after the ProxyBridge package is installed. Installs the `proxybridge` command, a
+# short launcher that starts the app's own executable in command line mode (there is no second
+# binary). A failure here must never fail the installation of the app, so it always exits 0.
+#
+# Fixed paths on purpose: this runs as root, so nothing from the environment is trusted.
+# (tests copy the script and replace these two lines)
+APP_EXECUTABLE="/Applications/ProxyBridge.app/Contents/MacOS/ProxyBridge"
+BIN_DIR="/usr/local/bin"
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+umask 022
+LINK="$BIN_DIR/proxybridge"
+
+[ -x "$APP_EXECUTABLE" ] || exit 0
+
+# never write through a link: a link planted in place of the folder or the command
+# would make this root script overwrite whatever it points at
+[ -L "$BIN_DIR" ] && exit 0
+mkdir -p "$BIN_DIR" 2>/dev/null || exit 0
+[ -L "$LINK" ] && rm -f "$LINK" 2>/dev/null
+
+# write to a new private file, then move it into place in one step, so a running or
+# half-written launcher is never seen
+TMP="$(mktemp "$BIN_DIR/.proxybridge.XXXXXX" 2>/dev/null)" || exit 0
+cat > "$TMP" <<LAUNCHER 2>/dev/null || { rm -f "$TMP"; exit 0; }
+#!/bin/sh
+# ProxyBridge command line, installed by the ProxyBridge package.
+APP="$APP_EXECUTABLE"
+if [ ! -x "\$APP" ]; then
+    echo "ProxyBridge is not installed (expected \$APP)" >&2
+    exit 1
+fi
+exec "\$APP" --cli "\$@"
+LAUNCHER
+chmod 755 "$TMP" 2>/dev/null
+mv -f "$TMP" "$LINK" 2>/dev/null || rm -f "$TMP"
+exit 0

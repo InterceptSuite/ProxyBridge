@@ -1,0 +1,178 @@
+name: PR Check
+
+# Checks every pull request against the rules in CONTRIBUTING.md:
+#   - wrong base branch (not `dev`)        -> closed with a short, friendly comment
+#   - missing issue / template details     -> `needs-details` label + a friendly comment listing what is missing
+# Maintainers (owner, members, collaborators), branches pushed to this repository, and bots are skipped.
+#
+# pull_request_target runs with the base repository's permissions, so this workflow must NEVER check out or
+# run code from the pull request. It only reads the pull request through the API.
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check pull request
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const number = pr.number;
+            const author = pr.user.login;
+            const MARK = '<!-- pr-check:v1 -->';
+            const LABEL = 'needs-details';
+            const blob = (path) => `https://github.com/${owner}/${repo}/blob/dev/${path}`;
+            const CONTRIBUTING = blob('CONTRIBUTING.md');
+
+            // ---- who is exempt: maintainers, branches in this repository, bots
+            const sameRepo = pr.head.repo && pr.head.repo.full_name === pr.base.repo.full_name;
+            if (pr.user.type === 'Bot' || sameRepo || ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(pr.author_association)) {
+              core.info(`Skipping ${author}: maintainer, same-repository branch or bot`);
+              return;
+            }
+
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
+            const existing = comments.find((c) => c.body && c.body.includes(MARK));
+
+            const hasLabel = (pr.labels || []).some((l) => l.name === LABEL);
+            async function removeLabel() {
+              if (!hasLabel) return;
+              try { await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: LABEL }); } catch (e) { core.info(`label not removed: ${e.message}`); }
+            }
+            async function upsertComment(text) {
+              const body = `${MARK}\n${text}`;
+              if (existing) {
+                if (existing.body !== body) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number: number, body });
+              }
+            }
+
+            // ---- 1. wrong base branch: close with a comment
+            if (pr.base.ref !== 'dev') {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: number,
+                body: `Thank you for taking the time to contribute! 🙏\n\nPull requests need to be opened against the **\`dev\`** branch. \`${pr.base.ref}\` only changes when we publish a release, so we have to close this one. Please open a new pull request against \`dev\`. The reasons and the other steps are in [CONTRIBUTING.md](${CONTRIBUTING}).`,
+              });
+              await github.rest.pulls.update({ owner, repo, pull_number: number, state: 'closed' });
+              return;
+            }
+
+            // ---- 2. template details
+            const problems = [];
+            const raw = pr.body || '';
+            const text = raw.replace(/<!--[\s\S]*?-->/g, '');   // text the contributor actually wrote
+            const lines = text.split('\n');
+            const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+            // body of the "## <title>" section, up to the next heading
+            function section(title) {
+              const start = lines.findIndex((l) => /^#{1,6}\s/.test(l) && l.toLowerCase().includes(title.toLowerCase()));
+              if (start < 0) return null;
+              let end = lines.length;
+              for (let i = start + 1; i < lines.length; i++) if (/^#{1,6}\s/.test(lines[i])) { end = i; break; }
+              return lines.slice(start + 1, end).join('\n');
+            }
+            const hasText = (s) => !!s && s.replace(/[^\p{L}\p{N}]/gu, '').length > 0;
+            // answer written after the "**label...**" of a field, up to the next field
+            function answer(sec, key) {
+              const m = sec.match(new RegExp('\\*\\*[^*\\n]*' + esc(key) + '[^*\\n]*\\*\\*([\\s\\S]*?)(?=\\n\\s*[-*]\\s+\\*\\*|$)', 'i'));
+              return m ? m[1] : null;
+            }
+            function requireFields(sec, title, fields) {
+              if (sec === null) { problems.push(`The **${title}** section is missing. Please use the pull request template.`); return; }
+              const missing = fields.filter(([key]) => !hasText(answer(sec, key))).map(([, name]) => name);
+              if (missing.length) problems.push(`**${title}**: please answer ${missing.map((m) => `"${m}"`).join(', ')}.`);
+            }
+
+            // which platforms the pull request touches
+            const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: number, per_page: 100 });
+            const touches = (prefix) => files.some((f) => f.filename.startsWith(prefix));
+            const macos = touches('MacOS/');
+
+            // what the pull request does
+            const what = section('What does this pull request do');
+            if (what === null) problems.push('The **pull request template** is missing (or its sections were removed). Please use it: it tells us what changed, why and how you tested it.');
+            else if (what.replace(/[^\p{L}\p{N}]/gu, '').length < 20) problems.push('**What does this pull request do?** is empty or too short. Please describe what you changed and why.');
+
+            // tests
+            requireFields(section('Tests'), 'Tests', [
+              ['run the tests locally', 'Did you run the tests locally?'],
+              ['result or output', 'Result or output'],
+              ['anything fail', 'Did anything fail?'],
+              ['new tests added', 'New tests added'],
+              ['tests removed or changed', 'Tests removed or changed'],
+            ]);
+
+            // macOS changes need the signing and testing details
+            if (macos) {
+              requireFields(section('macOS signing and testing'), 'macOS signing and testing', [
+                ['macos version and chip', 'macOS version and chip'],
+                ['xcode version', 'Xcode version'],
+                ['how you signed', 'How you signed the app'],
+                ['signed app', 'Did the signed app run correctly?'],
+              ]);
+            }
+
+            // linked issue, commented on first, and someone replied before the pull request was opened
+            const refs = new Set();
+            for (const m of text.matchAll(/(?:^|[^\w/])#(\d+)\b/g)) refs.add(Number(m[1]));
+            for (const m of text.matchAll(new RegExp(`github\\.com/${esc(owner)}/${esc(repo)}/issues/(\\d+)`, 'gi'))) refs.add(Number(m[1]));
+            refs.delete(number);
+            let issue = null;
+            for (const n of [...refs].slice(0, 5)) {
+              try {
+                const res = await github.rest.issues.get({ owner, repo, issue_number: n });
+                if (!res.data.pull_request) { issue = res.data; break; }
+              } catch (e) { core.info(`#${n} is not an issue here: ${e.message}`); }
+            }
+            if (!issue) {
+              problems.push('**Linked issue**: please link the GitHub issue this pull request is for (for example `Fixes #123`). If there is no issue yet, please open one and wait for a reply before you start.');
+            } else {
+              const thread = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: issue.number, per_page: 100 });
+              const before = (c) => new Date(c.created_at) < new Date(pr.created_at);
+              const engaged = issue.user.login === author || thread.some((c) => c.user.login === author && before(c));
+              const replied = (issue.assignees || []).some((a) => a.login === author)
+                || thread.some((c) => c.user.login !== author && c.user.type !== 'Bot' && before(c));
+              if (!engaged) problems.push(`**Linked issue #${issue.number}**: we can't see a comment from you on it before this pull request, saying you would work on it. Please comment on the issue first.`);
+              else if (!replied) problems.push(`**Linked issue #${issue.number}**: we can't see a reply from a maintainer on it yet. Please wait for a reply before you start, so we can confirm it is not already done and fits the project.`);
+            }
+
+            // ---- result
+            if (!problems.length) {
+              if (existing) await upsertComment('✅ Thank you, the required details are there now. A maintainer will take a look when there is time.');
+              await removeLabel();
+              return;
+            }
+            try { await github.rest.issues.getLabel({ owner, repo, name: LABEL }); }
+            catch (e) { await github.rest.issues.createLabel({ owner, repo, name: LABEL, color: 'fbca04', description: 'The pull request is missing details required by CONTRIBUTING.md' }); }
+            if (!hasLabel) await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: [LABEL] });
+
+            const templates = [
+              `[Windows](${blob('.github/PULL_REQUEST_TEMPLATE/windows.md')})`,
+              `[macOS](${blob('.github/PULL_REQUEST_TEMPLATE/macos.md')})`,
+              `[Linux](${blob('.github/PULL_REQUEST_TEMPLATE/linux.md')})`,
+            ].join(', ');
+            await upsertComment([
+              'Thank you for the pull request! 🙌 A few details are still missing before we can review it:',
+              '',
+              ...problems.map((p) => `- ${p}`),
+              '',
+              `Please edit the description of this pull request to add them. This comment updates by itself when you do. If you are not sure why we ask for these, [CONTRIBUTING.md](${CONTRIBUTING}) explains it. Templates: ${templates}.`,
+            ].join('\n'));

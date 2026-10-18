@@ -38,7 +38,11 @@ RequestExecutionLevel admin
 !insertmacro MUI_PAGE_INSTFILES
 
 ; Finish page offers to launch ProxyBridge - checkbox is checked by default.
-!define MUI_FINISHPAGE_RUN "$INSTDIR\ProxyBridge.exe"
+; The installer runs elevated, and a program it starts directly would inherit administrator rights. ProxyBridge is
+; meant to run as a normal user (the engine service does the privileged work), so launch it through Explorer, which
+; starts it with the signed-in user's normal rights.
+!define MUI_FINISHPAGE_RUN
+!define MUI_FINISHPAGE_RUN_FUNCTION LaunchAppAsUser
 !define MUI_FINISHPAGE_RUN_TEXT "Run ProxyBridge now"
 !insertmacro MUI_PAGE_FINISH
 
@@ -46,6 +50,10 @@ RequestExecutionLevel admin
 !insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "English"
+
+Function LaunchAppAsUser
+  Exec '"$WINDIR\explorer.exe" "$INSTDIR\ProxyBridge.exe"'
+FunctionEnd
 
 Section "MainSection" SEC01
   ; A running ProxyBridge locks the files we need to overwrite. Detect it and ask

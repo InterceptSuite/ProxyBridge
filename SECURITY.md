@@ -2,15 +2,23 @@
 
 ## Supported Versions
 
-We actively support the following versions of ProxyBridge with security updates:
+We actively support the following versions of ProxyBridge with security updates. Each platform has its own release line:
 
-| Version | Supported          | Platform |
-| ------- | ------------------ | -------- |
-| 4.0.x   | :white_check_mark: | Windows, macOS, Linux |
-| 3.x     | :x:                | Windows, macOS |
-| < 3.0   | :x:                | All      |
+| Platform | Supported version | Supported          |
+| -------- | ----------------- | ------------------ |
+| Windows  | 4.2.x             | :white_check_mark: |
+| macOS    | 4.1.x             | :white_check_mark: |
+| Linux    | 4.x.x             | :white_check_mark: |
 
-**Note:** Only the latest release line (4.0.x) receives security updates. Please upgrade to the latest version to ensure you have all security fixes.
+Older releases are **not supported** and do not receive security updates:
+
+| Platform | Not supported            |
+| -------- | ------------------------ |
+| Windows  | 4.1.x and earlier        |
+| macOS    | 4.0.x and earlier        |
+| Linux    | earlier than 4.0.0       |
+
+**Note:** Only the latest release line of each platform receives security updates. Please upgrade to the latest version of your platform to ensure you have all security fixes.
 
 ## Reporting a Vulnerability
 
@@ -85,10 +93,16 @@ ProxyBridge operates with the following security considerations:
 - **Requires System Extension approval** via System Settings
 - **Network Extension runs as system daemon** - operates at network layer with elevated privileges
 - **App Sandbox** for main GUI application with limited permissions
+- **Two providers in one extension process:**
+  - an **app proxy provider** (transparent proxy) that redirects matching TCP and UDP flows to the configured proxy
+  - a **DNS proxy provider** that forwards the system's UDP DNS queries unchanged to the real resolver and records which domain names resolved to which IP addresses, so domain rules and the "Let proxy resolve DNS (send hostname)" option work. This table is kept **in memory only** (it is not written to disk) and is cleared when the extension starts and stops
 - **Network Extension Entitlements:**
-  - `com.apple.developer.networking.networkextension` (app-proxy-provider-systemextension)
+  - `com.apple.developer.networking.networkextension` - the app and extension are signed with the full set of Network Extension capabilities that Apple's provisioning grants. ProxyBridge itself only uses the app proxy provider and the DNS proxy provider (`app-proxy-provider-systemextension`, `dns-proxy-systemextension`)
+  - `com.apple.developer.system-extension.install` (app) to install the System Extension
   - `com.apple.security.network.client` and `com.apple.security.network.server`
-  - `com.apple.security.application-groups` for inter-process communication
+  - `com.apple.security.application-groups`
+- **Hardened runtime** is enabled for both the app and the extension
+- **Command line mode** - the app's own executable also runs without a window when started with options (`proxybridge --profile ...`). It is not a separate program, so it has the same signature, entitlements and sandbox. Profiles are read by name or from standard input and are not accepted as command line arguments, so proxy credentials do not appear in the process list. The `proxybridge` command is a short shell launcher installed by the package
 - **Credential storage** - proxy credentials and configuration stored in **UserDefaults** (not Keychain)
   - UserDefaults stored at: `~/Library/Containers/com.interceptsuite.ProxyBridge/Data/Library/Preferences/`
   - **Not encrypted** - stored in plaintext plist format
@@ -131,6 +145,34 @@ ProxyBridge operates with the following security considerations:
      - Swift standard library
    - **Monitoring:** We track security advisories for all dependencies
    - **Update Policy:** Dependencies are updated when security issues are published
+
+### Accepted Risks
+
+These are known and have been reviewed. We have decided to accept them, usually because the alternative would break a feature or the platform does not allow a better option. Please take them into account when deciding where to use ProxyBridge.
+
+1. **Proxy credentials are stored in plaintext** (see Known Limitations above). We do not plan to move them to the Keychain or Credential Manager at this time.
+2. **Exported profiles contain proxy credentials.** Exporting a profile (`.pbprofile`) on macOS and Windows writes each proxy's username and password into the file in plaintext, and the Linux profile format has the same fields. Treat an exported profile like a password file: do not post it in issues, chat or repositories.
+3. **Updates are not verified beyond HTTPS.** The built-in update check and download use HTTPS to `download.interceptsuite.com`. The macOS app does not additionally verify a signature or hash of the downloaded installer before opening it (the installer itself is code-signed and notarized). If the update server were compromised, a manifest and its hash could be changed together, so an extra hash would not change that. If you want stronger assurance, skip the built-in update and download the installer from the official sources listed below.
+4. **macOS requests the full Network Extension entitlement set.** See "macOS Architecture". Only the app proxy and DNS proxy providers are used.
+5. **Imported rules and profiles are not strictly validated** (macOS). Only import rule and profile files from sources you trust.
+6. **No heartbeat between the macOS app and its extension.** If the app crashes or is force-quit, the System Extension keeps its rules and proxy settings until the app is started again or the extension is stopped. Traffic that matches a proxy rule keeps being sent to the configured proxy. Quitting the app normally clears the rules and settings.
+7. **A proxy that is down is not bypassed.** If a rule sends traffic to a proxy that cannot be reached or returns an error, the application's connection fails and the error is logged. ProxyBridge does not silently send that traffic direct. Remove the rule to let the application connect directly.
+
+### Known Issues
+
+#### All platforms
+- **UDP only works through SOCKS5 proxies.** HTTP proxies cannot carry UDP. UDP traffic that matches a rule pointing to an HTTP proxy is sent direct (macOS logs a one-time error for this). If you need UDP to be proxied, use a SOCKS5 proxy that supports UDP ASSOCIATE.
+- **Hostnames are sent to proxies by default.** The "Let proxy resolve DNS (send hostname)" option (on by default for new proxies) makes ProxyBridge hand the proxy the host name an application looked up instead of the IP address. Turn it off for a proxy that should only receive IP addresses or that cannot resolve the names your computer can.
+
+#### macOS
+- **UDP rules match on the process only.** macOS does not tell the extension where a UDP flow is going when it is created, so the target host and port of a UDP rule are not used for matching. A UDP rule applies to all UDP traffic of the matched process. This is a macOS limitation.
+- **Clients that half-close cannot receive a reply.** A client that sends data, closes only its sending side and then waits for a reply (for example `nc` with piped input) does not get the reply through a transparent proxy flow, because macOS closes the flow itself. Clients that keep the connection open are not affected.
+- **The legacy Network Extension connection API is deprecated by Apple** (macOS 15) but is still used by the extension. It works on all supported macOS versions. Migration depends on the minimum macOS version we support.
+- **Fixed in 4.1.x (not in 4.0.x and earlier):**
+  - UDP flows could keep their proxy connections open after the application closed them, using memory and file descriptors, and could cause high CPU use (#239, #226)
+  - the installer asked Apple silicon Macs to install Rosetta
+  - the app quit when the menu bar icon's menu was dismissed (#233)
+  - the About page showed an old version number (#231)
 
 ## Security Best Practices for Users
 
@@ -229,6 +271,6 @@ We thank the security research community for helping keep ProxyBridge secure. Sp
 
 ---
 
-**Last Updated:** July 2026
+**Last Updated:** October 2026
 
 Thank you for helping keep ProxyBridge and our users safe! 🛡️

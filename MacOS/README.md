@@ -12,6 +12,7 @@ ProxyBridge is a transparent proxy application for macOS that allows you to rout
   - [Proxy Rules](#proxy-rules)
   - [Exporting and Importing Rules](#exporting-and-importing-rules)
 - [Usage](#usage)
+  - [Command Line (CLI)](#command-line-cli)
 - [Limitations](#limitations)
 - [Building from Source](#building-from-source)
 - [License](#license)
@@ -355,6 +356,39 @@ Connection logs are available in the main window, showing:
 - **Proxy Rules** - Manage traffic routing rules
 - **Help** - Check for updates and about information
 - **Quit** - Exit ProxyBridge
+
+### Command Line (CLI)
+
+ProxyBridge can run without a window, like the Windows CLI. There is **no second program**: the CLI is the same executable as the app, started with command line options. Started normally (Finder, Dock) it is the app.
+
+The installer adds a short command, `proxybridge`, so it works from any folder in Terminal:
+
+```bash
+proxybridge --list-profiles                     # profiles saved in the app (* = the one the app uses)
+proxybridge --profile Default --verbose 2       # run a saved profile, show connections
+cat ~/work.pbprofile | proxybridge --profile - --verbose 3   # run a profile exported from the app
+proxybridge --update                            # check for updates
+proxybridge --version
+```
+
+If the command is not found, run the executable directly (it needs no setup): `/Applications/ProxyBridge.app/Contents/MacOS/ProxyBridge --cli --help`.
+
+| Option | |
+|--------|---|
+| `--profile <name>` | Run a profile saved in the app |
+| `--profile -` | Read a profile (`.pbprofile` exported from the app) from standard input |
+| `--list-profiles` | List the saved profiles and exit |
+| `--verbose <0-3>` | 0 silent (default), 1 log messages, 2 connections, 3 both |
+| `--update` | Check for updates |
+| `--version`, `-h` / `--help` | Show the version / the help |
+
+It runs in the foreground until you press **Ctrl+C**, which clears the rules and stops the tunnel.
+
+**Things to know**
+- **The extension has to be approved once.** The first run asks macOS to activate the system extension and to allow the network configuration, and **waits** until you approve them in *System Settings > Privacy & Security*. After that (or on a Mac where your administrator pre-approved them) it starts without any prompt, and it shares the approval with the app. It cannot be approved over SSH on a Mac nobody has set up yet, the prompt appears on the Mac's screen.
+- **Quit the app first.** Only one of the app and the CLI can control the extension at a time, so the CLI refuses to start while the app is running.
+- **Profiles are read by name or from standard input**, because the app is sandboxed and can't open arbitrary file paths. A profile exported on Windows uses a different layout and can't be loaded here.
+- The app must be installed in `/Applications` (macOS only activates the extension from there). The installer package creates the `proxybridge` command; it is a three-line launcher in `/usr/local/bin`, not another binary.
 
 ## Limitations
 

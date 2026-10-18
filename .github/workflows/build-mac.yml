@@ -163,7 +163,7 @@ jobs:
         chmod +x build.sh
         bash build.sh
 
-        PKG_VERSION="3.2.0"
+        PKG_VERSION=$(grep -m1 '^VERSION=' build.sh | cut -d'"' -f2)
         PKG_UNSIGNED="output/ProxyBridge-v${PKG_VERSION}-Universal-Installer.pkg"
         PKG_SIGNED="output/ProxyBridge-v${PKG_VERSION}-Universal-Installer-signed.pkg"
 

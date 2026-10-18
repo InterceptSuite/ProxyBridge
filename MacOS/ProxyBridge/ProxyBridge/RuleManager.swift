@@ -76,23 +76,60 @@ struct RuleManager {
         session: NETunnelProviderSession,
         completion: @escaping (Bool, Int) -> Void
     ) {
-        clearRules(session: session) { _, _ in
-            loadRulesFromUserDefaults(session: session, completion: completion)
-        }
+        applyRulesFromUserDefaults(session: session, completion: completion)
     }
 
     static func loadRulesFromUserDefaults(
         session: NETunnelProviderSession,
         completion: @escaping (Bool, Int) -> Void
     ) {
+        applyRulesFromUserDefaults(session: session, completion: completion)
+    }
+
+    // the whole saved list goes to the extension in one message and replaces the
+    // running list atomically, so there is no moment where rules are missing
+    private static func applyRulesFromUserDefaults(
+        session: NETunnelProviderSession,
+        completion: @escaping (Bool, Int) -> Void
+    ) {
         let rules = UserDefaults.standard.array(forKey: "proxyRules") as? [[String: Any]] ?? []
-        guard !rules.isEmpty else {
-            completion(true, 0)
-            return
+        applyRules(session: session, rules: rules, completion: completion)
+    }
+
+    // replaces the extension's rule list with these rules (as saved by the app). also used
+    // by the command line, which has its rules in memory instead of in the preferences
+    static func applyRules(
+        session: NETunnelProviderSession,
+        rules: [[String: Any]],
+        completion: @escaping (Bool, Int) -> Void
+    ) {
+        let payload: [[String: Any]] = rules.map { rule in
+            [
+                "processNames": rule["processNames"] as? String ?? "",
+                "targetHosts": rule["targetHosts"] as? String ?? "",
+                "targetPorts": rule["targetPorts"] as? String ?? "",
+                "ruleProtocol": rule["protocol"] as? String ?? "BOTH",
+                "ruleAction": rule["action"] as? String ?? "DIRECT",
+                "enabled": rule["enabled"] as? Bool ?? true
+            ]
         }
-        // add one at a time so rule order matches the saved order and the
-        // running counter isn't touched from concurrent completion handlers
-        addRulesInOrder(session: session, rules: rules, index: 0, added: 0, completion: completion)
+
+        sendMessage(session: session, action: "setRules", params: ["rules": payload]) { success, result in
+            if success {
+                let count = result?["count"] as? Int ?? payload.count
+                DispatchQueue.main.async { completion(true, count) }
+                return
+            }
+            // an extension that predates setRules answers nothing, fall back to
+            // clear + add one by one (leaves a short gap while it runs)
+            clearRules(session: session) { _, _ in
+                guard !rules.isEmpty else {
+                    DispatchQueue.main.async { completion(true, 0) }
+                    return
+                }
+                addRulesInOrder(session: session, rules: rules, index: 0, added: 0, completion: completion)
+            }
+        }
     }
 
     private static func addRulesInOrder(

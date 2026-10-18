@@ -5,6 +5,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION="4.1.0"
 
+# the pkg name/version here and the version shown in the app (About page, bundle)
+# come from different places, make a mismatch fail the build instead of shipping it
+PROJECT_VERSIONS=$(grep "MARKETING_VERSION" "$SCRIPT_DIR/ProxyBridge.xcodeproj/project.pbxproj" | sed -E 's/.*= *([^;]+);.*/\1/' | sort -u)
+if [ "$PROJECT_VERSIONS" != "$VERSION" ]; then
+    echo "Version mismatch: build.sh VERSION=$VERSION but MARKETING_VERSION in the Xcode project is: $(echo $PROJECT_VERSIONS)"
+    exit 1
+fi
+
 if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
 fi
@@ -51,9 +59,13 @@ echo "Creating installer package..."
 pkgbuild --analyze --root build/component build/component.plist
 /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" build/component.plist
 
+# scripts/postinstall installs the `proxybridge` command (a launcher for the app's own executable).
+# an installer script that is not executable is skipped silently, so check it here
+[ -x "$SCRIPT_DIR/scripts/postinstall" ] || { echo "ERROR: scripts/postinstall is not executable (chmod +x)"; exit 1; }
 pkgbuild \
     --root build/component \
     --component-plist build/component.plist \
+    --scripts "$SCRIPT_DIR/scripts" \
     --identifier com.interceptsuite.ProxyBridge \
     --version "$VERSION" \
     --install-location /Applications \
@@ -64,7 +76,9 @@ cat > build/distribution.xml << 'EOF'
 <installer-gui-script minSpecVersion="1">
     <title>ProxyBridge</title>
     <pkg-ref id="com.interceptsuite.ProxyBridge"/>
-    <options customize="never" require-scripts="false"/>
+    <!-- without hostArchitectures the Installer on Apple silicon assumes an Intel-only package and offers to
+         install Rosetta. the app and the extension are universal (verified above), so say so -->
+    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
     <choices-outline>
         <line choice="default">
             <line choice="com.interceptsuite.ProxyBridge"/>

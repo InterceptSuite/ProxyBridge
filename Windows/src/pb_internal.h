@@ -197,6 +197,7 @@ extern HANDLE cleanup_thread;
 extern PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE];
 extern volatile BOOL g_has_active_rules;
 extern volatile BOOL g_has_domain_rules;
+extern volatile BOOL g_log_every_connection;   // TRUE: the Connections log is not de-duplicated (every new TCP connection, every new UDP flow)
 extern volatile BOOL g_proxy_enabled;   // FALSE = paused: new connections are neither proxied nor blocked (existing ones carry on)
 extern SOCKET udp_relay_socket;
 extern SOCKET udp_relay_socket6;
@@ -375,6 +376,9 @@ void remove_connection(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 void cleanup_stale_connections(void);
 BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
 void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action);
+// Should this connection get a row in the Connections log? Default: only the first of identical (process, destination,
+// port, action). With g_log_every_connection: every new TCP connection, and one row per UDP flow (again after 30 s of silence).
+BOOL connection_log_wanted(DWORD pid, UINT32 dest_key, UINT16 dest_port, UINT16 src_port, BOOL is_udp, RuleAction action);
 void clear_logged_connections(void);
 
 // ---- pb_relay.c ----

@@ -496,6 +496,8 @@ BOOL is_connection_already_logged(DWORD pid, UINT32 dest_ip, UINT16 dest_port, R
 
 void add_logged_connection(DWORD pid, UINT32 dest_ip, UINT16 dest_port, RuleAction action)
 {
+    if (g_log_every_connection) return;   // not de-duplicating: nothing to remember
+
     AcquireSRWLockExclusive(&lock);
 
     // Use the running counter instead of re-walking the whole list on every add.
@@ -554,3 +556,45 @@ void clear_logged_connections(void)
     ReleaseSRWLockExclusive(&lock);
 }
 
+// ---- "Log every connection" ----
+// Off (default): the Connections log shows a connection once per (process, destination, port, action), see
+// is_connection_already_logged(). On: every new TCP connection is logged (the caller asks only on the SYN), and a UDP
+// flow - identified by process, local port, destination and action - is logged once, and again only after it has been
+// silent for 30 s, so a busy UDP flow or a blocked sender does not flood the log.
+volatile BOOL g_log_every_connection = FALSE;
+
+#define UDP_LOGFLOW_SIZE     512
+#define UDP_LOGFLOW_QUIET_MS 30000
+typedef struct { BOOL used; DWORD pid; UINT32 dkey; UINT16 sport, dport; UINT8 action; ULONGLONG t; } UDP_LOGFLOW;
+static UDP_LOGFLOW g_udp_logflow[UDP_LOGFLOW_SIZE];
+
+BOOL connection_log_wanted(DWORD pid, UINT32 dest_key, UINT16 dest_port, UINT16 src_port, BOOL is_udp, RuleAction action)
+{
+    if (!g_log_every_connection)
+        return !is_connection_already_logged(pid, dest_key, dest_port, action);
+    if (!is_udp)
+        return TRUE;
+
+    ULONGLONG now = GetTickCount64();
+    BOOL want = TRUE;
+    int slot = -1, oldest = 0;
+    AcquireSRWLockExclusive(&lock);
+    for (int i = 0; i < UDP_LOGFLOW_SIZE; i++)
+    {
+        UDP_LOGFLOW *f = &g_udp_logflow[i];
+        if (!f->used) { if (slot < 0) slot = i; continue; }
+        if (f->pid == pid && f->dkey == dest_key && f->sport == src_port && f->dport == dest_port && f->action == (UINT8)action)
+        {
+            want = (now - f->t) >= UDP_LOGFLOW_QUIET_MS;     // same flow: only after a quiet period
+            f->t = now;
+            ReleaseSRWLockExclusive(&lock);
+            return want;
+        }
+        if (f->t < g_udp_logflow[oldest].t) oldest = i;
+    }
+    if (slot < 0) slot = oldest;                              // table full: recycle the longest-silent flow
+    UDP_LOGFLOW *n = &g_udp_logflow[slot];
+    n->used = TRUE; n->pid = pid; n->dkey = dest_key; n->sport = src_port; n->dport = dest_port; n->action = (UINT8)action; n->t = now;
+    ReleaseSRWLockExclusive(&lock);
+    return want;
+}

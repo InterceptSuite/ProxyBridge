@@ -1,58 +1,48 @@
 import Foundation
+import Network
 
-// Shared IP -> domain map, populated by the DNS proxy and read by the transparent
-// proxy. The two providers can run in separate processes, so the map lives in a
-// file in the app group container. Each process keeps an in-memory copy; the
-// reader reloads only when the file's mtime changes.
+// Shared IP -> domain map, filled by the DNS proxy and read by the transparent
+// proxy. Both providers are loaded into the same extension process, so a plain
+// in-memory map is enough. It used to be mirrored to a json file in the app group
+// container, which meant a full serialize and write on every new address, a stat
+// on every connection, a re-parse on every change, and a list of the sites that
+// were visited sitting on disk.
 final class DNSMapStore {
     static let shared = DNSMapStore()
 
-    private let appGroup = "group.com.interceptsuite.ProxyBridge"
-    private let fileURL: URL?
-    private let lock = NSLock()
-    private var map: [String: Set<String>] = [:]   // ip -> domains
-    private var order: [String] = []               // insertion order for eviction
-    private let maxEntries = 1024
-    private var lastMtime: Date?
-
-    // the file is rewritten at most once per persistInterval no matter how many
-    // lookups land, and the reader only stats it once per reloadCheckInterval,
-    // domains(forIP:) runs for every new connection
-    private let persistInterval: TimeInterval = 1.0
-    private let reloadCheckInterval: TimeInterval = 1.0
-    private var persistScheduled = false
-    private var lastReloadCheck = Date.distantPast
-    private let ioQueue = DispatchQueue(label: "com.interceptsuite.ProxyBridge.dnsmap", qos: .utility)
-
-    private init() {
-        fileURL = FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
-            .appendingPathComponent("dnsmap.json")
+    private struct Entry {
+        let name: String
+        var seen: TimeInterval   // system uptime when a DNS answer last mentioned it
     }
 
-    // wipe the map and its file. called on start so browsing domains don't
-    // linger on disk across sessions.
+    private let lock = NSLock()
+    private var map: [String: [Entry]] = [:]    // ip -> domains, newest last
+    private var order: [String] = []            // ips in insertion order, for eviction
+    private let maxEntries = 1024
+    private let maxDomainsPerIP = 8             // a cdn address can serve many names
+
+    private init() {}
+
+    // wipe the map. called on start/stop. it also removes the file older versions
+    // wrote, so an upgrade doesn't leave that browsing history behind.
     func clear() {
         lock.lock()
         map.removeAll()
         order.removeAll()
-        lastMtime = nil
         lock.unlock()
-        if let fileURL = fileURL { try? FileManager.default.removeItem(at: fileURL) }
+        removeLegacyFile()
     }
 
-    // writer side (DNS proxy): remember that these IPs resolved for this domain
-    func record(domain: String, ips: [String]) {
+    // DNS proxy: remember that these IPs resolved for this domain
+    func record(domain: String, ips: [String], now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         let name = domain.lowercased()
         guard !name.isEmpty, !ips.isEmpty else { return }
 
-        var changed = false
         lock.lock()
         for ip in ips {
             if map[ip] == nil {
                 map[ip] = []
                 order.append(ip)
-                changed = true
                 if order.count > maxEntries {
                     // drop a batch at once so the O(n) removal isn't paid per insert
                     let overflow = order.count - maxEntries + 64
@@ -60,74 +50,58 @@ final class DNSMapStore {
                     order.removeFirst(min(overflow, order.count))
                 }
             }
-            if map[ip]?.insert(name).inserted == true { changed = true }
-        }
-        // only touch the file when something actually changed, most resolutions
-        // are repeats of already-known domains
-        let shouldSchedule = changed && !persistScheduled
-        if shouldSchedule { persistScheduled = true }
-        lock.unlock()
-
-        if shouldSchedule {
-            ioQueue.asyncAfter(deadline: .now() + persistInterval) { [weak self] in
-                self?.persist()
+            var domains = map[ip] ?? []
+            if let existing = domains.firstIndex(where: { $0.name == name }) {
+                // seen again, make it the newest and refresh its age
+                domains.remove(at: existing)
+            } else if domains.count >= maxDomainsPerIP {
+                domains.removeFirst()
             }
+            domains.append(Entry(name: name, seen: now))
+            map[ip] = domains
         }
+        lock.unlock()
     }
 
-    // reader side (transparent proxy): domains that resolved to this ip, if any
+    // transparent proxy: domains that resolved to this ip, newest first
     func domains(forIP ip: String) -> [String] {
-        reloadIfChanged()
         lock.lock()
         defer { lock.unlock() }
-        return Array(map[ip] ?? [])
+        guard let domains = map[ip] else { return [] }
+        return domains.reversed().map { $0.name }
     }
 
-    private func persist() {
+    // the name a proxy should get instead of the ip ("let proxy resolve DNS"). the
+    // newest name for this address, only if a DNS answer mentioned it within maxAge
+    // seconds (the windows app uses the same 5 minutes), and only if it is a
+    // plain host name that is safe to put in a CONNECT line
+    func latestDomain(forIP ip: String, maxAge: TimeInterval, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> String? {
         lock.lock()
-        persistScheduled = false
-        let snapshot = map
-        lock.unlock()
-
-        guard let fileURL = fileURL else { return }
-        let plain = snapshot.mapValues { Array($0) }
-        guard let data = try? JSONSerialization.data(withJSONObject: plain) else { return }
-        try? data.write(to: fileURL, options: .atomic)
-
-        // remember our own write so the reader doesn't parse back what it already has
-        let mtime = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate]) as? Date
-        lock.lock()
-        lastMtime = mtime
-        lock.unlock()
+        defer { lock.unlock() }
+        guard let newest = map[ip]?.last, now - newest.seen <= maxAge,
+              DNSMapStore.isSafeHostname(newest.name) else { return nil }
+        return newest.name
     }
 
-    private func reloadIfChanged() {
-        guard let fileURL = fileURL else { return }
-
-        lock.lock()
-        let now = Date()
-        if now.timeIntervalSince(lastReloadCheck) < reloadCheckInterval {
-            lock.unlock()
-            return
+    // names come straight out of DNS packets, so they can hold any byte. only
+    // letters, digits, '.', '-' and '_' go to a proxy (a space or CRLF would
+    // inject into the http CONNECT request), and an ip literal isn't a name
+    static func isSafeHostname(_ name: String) -> Bool {
+        guard !name.isEmpty, name.utf8.count <= 253, !name.hasPrefix("."), !name.hasSuffix(".") else { return false }
+        for byte in name.utf8 {
+            switch byte {
+            case 0x30...0x39, 0x61...0x7A, 0x41...0x5A, 0x2E, 0x2D, 0x5F: continue
+            default: return false
+            }
         }
-        lastReloadCheck = now
-        lock.unlock()
+        if IPv4Address(name) != nil || IPv6Address(name) != nil { return false }
+        return true
+    }
 
-        let mtime = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.modificationDate]) as? Date
-        lock.lock()
-        let needsReload = mtime != nil && mtime != lastMtime
-        if needsReload { lastMtime = mtime }
-        lock.unlock()
-
-        guard needsReload,
-              let data = try? Data(contentsOf: fileURL),
-              let plain = try? JSONSerialization.jsonObject(with: data) as? [String: [String]] else {
-            return
-        }
-        lock.lock()
-        map = plain.mapValues { Set($0) }
-        // keep eviction order in step with the loaded map
-        order = Array(plain.keys)
-        lock.unlock()
+    private func removeLegacyFile() {
+        guard let url = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: "group.com.interceptsuite.ProxyBridge")?
+            .appendingPathComponent("dnsmap.json") else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 }

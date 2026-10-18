@@ -1,9 +1,14 @@
 name: Release ProxyBridge Windows
 
 on:
-  release:
-    types: [published, created]
+  # manual only, so creating a release no longer triggers every OS build. create
+  # the release, then run just the workflow for the OS you want against its tag.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and attach the installer to (e.g. v4.1.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -14,11 +19,13 @@ jobs:
     permissions:
       contents: write
       actions: read
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner)
+    if: github.actor == github.repository_owner
 
     steps:
     - name: Checkout code
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      with:
+        ref: ${{ inputs.tag }}
 
     - name: Verify WinDivert installation
       run: |
@@ -45,16 +52,16 @@ jobs:
       shell: pwsh
 
     - name: Upload installer to release
-      if: github.event_name == 'release'
       run: |
-        gh release upload "${{ github.event.release.tag_name }}" (Get-ChildItem Windows/output/ProxyBridge-Setup-*.exe) --clobber
+        gh release upload "$env:TAG" (Get-ChildItem Windows/output/ProxyBridge-Setup-*.exe) --clobber
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag }}
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
-        name: ProxyBridge-Release-${{ github.event.release.tag_name }}
+        name: ProxyBridge-Release-${{ inputs.tag }}
         path: Windows/output/
         retention-days: 90
