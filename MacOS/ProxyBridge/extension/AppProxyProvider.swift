@@ -482,6 +482,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         let port: Int
         let username: String?
         let password: String?
+        let sendDomain: Bool   // hand the proxy the host name instead of the ip when it is known
     }
     private var storedProxyConfigs: [String: StoredProxyConfig] = [:]
     private let proxyLock = NSLock()
@@ -710,7 +711,9 @@ class AppProxyProvider: NETransparentProxyProvider {
                     storedProxyConfigs[id] = StoredProxyConfig(
                         type: type, host: host, port: port,
                         username: configDict["proxyUsername"] as? String,
-                        password: configDict["proxyPassword"] as? String
+                        password: configDict["proxyPassword"] as? String,
+                        // an app that doesn't send the key keeps the old behavior (ip)
+                        sendDomain: configDict["sendDomainToProxy"] as? Bool ?? false
                     )
                 }
                 proxyLock.unlock()
@@ -1419,7 +1422,19 @@ class AppProxyProvider: NETransparentProxyProvider {
         return (Data(payload), destHost, destPort)
     }
     
-    private func proxyTCPFlow(_ flow: NEAppProxyTCPFlow, destination: String, port: UInt16, config: StoredProxyConfig) {
+    // how long a DNS answer stays good enough to name a destination for the proxy
+    private static let dnsNameMaxAge: TimeInterval = 300
+
+    private func proxyTCPFlow(_ flow: NEAppProxyTCPFlow, destination originalDestination: String, port: UInt16, config: StoredProxyConfig) {
+        // "let proxy resolve DNS", per proxy like the windows app: when the app
+        // resolved this address through our DNS proxy, ask the proxy for the name
+        // (socks5 domain address / CONNECT host:port) and fall back to the ip
+        var destination = originalDestination
+        if config.sendDomain,
+           IPv4Address(originalDestination) != nil || IPv6Address(originalDestination) != nil,
+           let name = DNSMapStore.shared.latestDomain(forIP: originalDestination, maxAge: AppProxyProvider.dnsNameMaxAge) {
+            destination = name
+        }
         let proxyEndpoint = NWHostEndpoint(hostname: config.host, port: String(config.port))
         let proxyConnection = createTCPConnection(to: proxyEndpoint, enableTLS: false, tlsParameters: nil, delegate: nil)
         armHandshakeTimeout(flow: flow, connection: proxyConnection)
