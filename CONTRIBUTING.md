@@ -4,13 +4,62 @@ Thank you for your interest in contributing to ProxyBridge! We welcome contribut
 
 ## Table of Contents
 
+- [Read This Before You Open a Pull Request](#read-this-before-you-open-a-pull-request)
 - [Code of Conduct](#code-of-conduct)
 - [How Can I Contribute?](#how-can-i-contribute)
 - [Development Setup](#development-setup)
+- [Testing](#testing)
 - [Pull Request Process](#pull-request-process)
 - [Coding Standards](#coding-standards)
 - [Reporting Bugs](#reporting-bugs)
 - [Suggesting Features](#suggesting-features)
+
+## Read This Before You Open a Pull Request
+
+> [!IMPORTANT]
+> **Thank you for wanting to contribute!** Please take a couple of minutes to read this short guide before you start.
+> Pull requests that don't follow it are hard for us to review, so they are usually closed straight away, sometimes without a detailed reply. It is nothing personal. We simply want to protect your time and ours.
+
+### Why we ask for this
+
+We would love to receive your work, and a pull request that follows this guide is warmly welcome. Here is why we ask for a little preparation up front:
+
+- **It looks like one small project, but it is a bigger one.** ProxyBridge is a single repository, but it holds **three different applications with three different code bases**: Windows, macOS and Linux. They share a goal, not code, and they use different languages, drivers, APIs, builds and tests. **One person maintains all of them**, and more platforms (such as Android and iOS) are planned. If you use ProxyBridge on one platform, it is natural to see it as one app. From our side it is three, with more to come.
+- **We want the full picture from the pull request itself.** With this much code on this many platforms, we cannot always tell from a bare pull request what it is for, how it was tested, or whether we already know about it. The template, the linked issue and your test details give us that before we start reviewing.
+- **We keep open the work we have already talked about.** Those are pull requests for a bug or feature we already know about, where someone said on the issue that they would fix it and how, and where the testing is shown. That is why we ask you to comment on the issue first.
+- **The goal is to save effort, yours and ours.** We want to avoid pull requests that don't fit the project's goals, fix something that is already fixed on another branch, or add a bug fix or feature we didn't know about. Those take a lot of time to review and nobody benefits.
+
+If you are unsure about anything, just ask on the issue. That is exactly what it is there for.
+
+### The five things to know
+
+**1. Please open your pull request against `dev`.**
+- Fork the `dev` branch, create your branch from it, and open the pull request against `dev`.
+- `master` only changes when we publish a release. A pull request opened against any other branch is closed right away, usually without a comment, so please double-check the target branch before you create it.
+
+**2. Please fill in the pull request template.**
+- The template tells us **what** you changed, **how**, **why**, **which platform** and **how you tested it**. We need those details to review your work.
+- Use the template for your platform (see [Pull request templates](#pull-request-templates-and-the-automatic-check)). It also asks what tests you ran locally and what the result was, even though the checks on GitHub run too.
+- An **automatic check** looks at every pull request. If something is missing it adds a `needs-details` label and a friendly comment that lists exactly what to add. If the template is removed, if sections are deleted, or if the requested details stay empty, we are not able to review the pull request and it will be closed.
+
+**3. Please link an issue, and comment on it before you start.**
+
+A link to an issue on its own is not enough. Before you write the code, please:
+
+1. **comment on the issue**, saying you would like to fix the bug or add the feature, and
+2. **wait for a maintainer to reply.**
+
+Why: many features and fixes are already done on `dev`, on another branch, or locally on our side, and unreleased work is not visible to you. Some issues are not valid or are not part of the project's goals. A quick comment first saves **you** from building something we cannot use. The automatic check looks at the linked issue: it should exist, show a comment from you before the pull request was opened, and show a reply from someone else. A pull request with no linked issue, or for an issue that was not discussed first, cannot be accepted. Opening a new issue and a pull request at the same time does not count as asking first. If an issue already exists, please comment on it instead of opening a duplicate.
+
+**4. macOS: please sign and test it yourself.**
+- The macOS app needs Apple signing to run its system extension, so we can only accept macOS changes that **you** were able to build, sign and test on a real Mac. See [macOS](#macos) and [Testing](#testing).
+- We are not able to sign, build or test macOS changes on your behalf.
+- macOS has its own test suite in [`MacOS/tests`](MacOS/tests). It runs **locally**, not in GitHub Actions, because a person has to approve the system extension on the Mac. Please tell us in your pull request what you tested and what the results were (macOS version, chip, how you signed, which tests you ran, the output).
+- If you can't sign the app, that is completely fine. Describe the bug or idea on the issue instead, and we will take care of it in a future release.
+
+**5. Please make sure the existing tests pass on every platform.**
+- Pull requests for **all** platforms need to pass the existing tests and checks. See [Testing](#testing) for what runs on each platform.
+- When you fix a bug or change behavior and the platform has a test suite (Linux and macOS do), a new test for it is very welcome.
 
 ## Code of Conduct
 
@@ -49,41 +98,7 @@ Feature suggestions are welcome! Please provide:
 
 ### Pull Requests
 
-**IMPORTANT: Open an Issue and WAIT for a Reply Before You Start Coding**
-
-Please read this carefully - it is the most common source of wasted effort.
-
-1. **Create a GitHub Issue First - then wait for maintainer confirmation**
-   - Before writing **any** code, **open a GitHub issue** describing the bug you want to fix or the feature you want to add.
-   - **Then stop and wait for a maintainer to reply.** Do **not** start coding, and do **not** open a pull request yet.
-   - The whole point of the issue is to let us tell you *before you invest time* whether:
-     - The feature/fix is **already implemented** in the `dev` branch (not yet released, so you can't see it).
-     - It is **already being worked on** by someone else or by us right now.
-     - It **doesn't align** with the project's goals and would be declined regardless of quality.
-   - Only once a maintainer confirms it's not already done / in progress and that it fits the project should you fork, code, and open a PR.
-
-   > [!WARNING]
-   > **Opening an issue and a pull request at the same time defeats the purpose.**
-   > Several contributors have forked, built a feature, opened a brand-new issue, and immediately opened a PR for it in one go. By then the work is already done - so if the feature was already implemented, already in progress, or out of scope, **your effort is wasted and the PR will be closed.** The issue exists so we can catch that *beforehand*. Please wait for our reply on the issue before you build anything.
-
-   - If a GitHub issue for the bug/feature **already exists**:
-     - Comment on it saying you'd like to work on it and wait for a maintainer to assign it / give the go-ahead.
-     - **Do NOT create a duplicate issue.**
-
-2. **Fork the `dev` Branch**
-   - **Always fork and create pull requests against the `dev` branch**
-   - **NEVER create pull requests against the `master` branch**
-   - The `master` branch is only updated with new releases
-   - All development work happens in the `dev` branch
-   - Pull requests to `master` will be **automatically rejected**
-
-3. **macOS Code Changes - Apple Developer Account Required**
-   - If you are making changes to macOS code, you **MUST**:
-     - Have a valid Apple Developer account ($99/year)
-     - Have tested your code changes and verified they work as expected
-     - Have proper code signing configured (see Apple Signing section below)
-   - **Pull requests with untested macOS code will NOT be merged**
-   - If you don't have an Apple Developer account and cannot test your changes, your PR will be rejected
+Read [Read This Before You Open a Pull Request](#read-this-before-you-open-a-pull-request) first. In short: pull request to **`dev`** only, **complete template**, a **linked issue you commented on first**, **signed macOS testing** for macOS changes, and **all existing tests passing**.
 
 **Standard Pull Request Process:**
 
@@ -176,12 +191,13 @@ All compiled files are placed in `Windows/output/` directory:
 ### macOS
 
 **Prerequisites:**
-- Xcode 15.0 or later
-- macOS 13.0 (Ventura) or later
-- Swift 5.9+
+- A Mac with a recent macOS and **Xcode 16 or later** (the project uses file-system synchronized groups, which need Xcode 16+; we build with the latest stable Xcode)
+- The app supports **macOS 13.0 (Ventura) or later** (that is the project's deployment target) and builds universal (`arm64` and `x86_64`)
+- Swift language mode 5 (`SWIFT_VERSION = 5.0`). **No third-party libraries**: the app uses only Apple frameworks (SwiftUI, AppKit, NetworkExtension, SystemExtensions, ServiceManagement)
 - Git
-- **Valid Apple Developer Account** (required for code signing)
+- **Valid Apple Developer Account** (required for code signing and for the System Extension)
 - **Provisioning Profiles** installed on your system
+- For the macOS tests: **Python 3** and a **C compiler** (both come with the Xcode command line tools)
 
 **Apple Developer Account & Code Signing:**
 
@@ -262,6 +278,15 @@ macOS development requires a valid Apple Developer account with proper signing c
 
    **Note:** The `config/` folder is in `.gitignore` to keep your credentials private.
 
+   **Bundle identifiers:** the identifiers and the app group used by the project (`com.interceptsuite.ProxyBridge`, `com.interceptsuite.ProxyBridge.extension`, `group.com.interceptsuite.ProxyBridge`) belong to InterceptSuite's Apple team, so your team cannot sign with them. Use **your own identifiers** for local signing and testing. Set them in your `config/Signing-Config-*.xcconfig` files and update every place that refers to them. Find all of them with:
+
+   ```bash
+   cd MacOS/ProxyBridge
+   grep -rn "com.interceptsuite" . --exclude-dir=output --exclude-dir=build
+   ```
+
+   The places that matter are `ProxyBridge.xcodeproj/project.pbxproj`, the two `*Release.entitlements` files, `extension/AppProxyProvider.swift` (the extension skips its own traffic by bundle ID), `ProxyBridge/ProxyBridgeViewModel.swift` (the app activates the extension by ID) and `extension/DNSMapStore.swift` (app group). **Do not include your identifier or signing changes in your pull request.**
+
 **Setup:**
 ```bash
 # Clone the repository (dev branch)
@@ -324,12 +349,16 @@ You **MUST** create a **Release build** for the Network Extension to function pr
 
    **What build.sh does:**
    - Checks for `output/ProxyBridge.app` (exits if not found)
-   - Creates PKG installer: `output/ProxyBridge-v3.1-Universal-Installer.pkg`
-   - Optionally signs and notarizes the PKG (requires .env file with credentials)
+   - Checks that the app and the extension are **universal** (`arm64` and `x86_64`)
+   - Checks that `VERSION` at the top of `build.sh` matches `MARKETING_VERSION` in the Xcode project (it fails if they differ, so bump both together when the version changes)
+   - Creates the PKG installer `output/ProxyBridge-v<VERSION>-Universal-Installer.pkg`. Its `distribution.xml` declares `hostArchitectures="x86_64,arm64"`, so Apple silicon Macs do not ask to install Rosetta. Keep that attribute
+   - Optionally signs and notarizes the PKG (requires a `.env` file with credentials). Without it you get an unsigned PKG, which is fine for local testing
 
 **Output:**
 - `MacOS/ProxyBridge/output/ProxyBridge.app` - Release build (from Xcode Archive)
-- `MacOS/ProxyBridge/output/ProxyBridge-v3.1-Universal-Installer.pkg` - PKG installer (from build.sh)
+- `MacOS/ProxyBridge/output/ProxyBridge-v<VERSION>-Universal-Installer.pkg` - PKG installer (from build.sh)
+
+**Re-installing a rebuilt extension:** macOS only replaces an installed system extension when its version changes. When you rebuild the same version for testing, raise `CURRENT_PROJECT_VERSION` of the **extension** target (in the Xcode project) so the new build replaces the old one. Do not include that bump in your pull request.
 
 **Project Structure:**
 - `MacOS/ProxyBridge/ProxyBridge/` - SwiftUI main app
@@ -340,6 +369,68 @@ You **MUST** create a **Release build** for the Network Extension to function pr
 - `proxybridge-app.xcconfig` - Template config (in project root)
 - `proxybridge-ext.xcconfig` - Template config (in project root)
 
+### Linux
+
+**Prerequisites** (Debian/Ubuntu package names, the same ones the CI uses):
+`build-essential gcc make clang curl linux-tools-common linux-tools-generic libbpf-dev libelf-dev zlib1g-dev libgtk-3-dev pkg-config`
+
+On Ubuntu `bpftool` is installed with `linux-tools-*` and is not on `PATH`. Point `BPFTOOL` at it (for example `/usr/lib/linux-tools/<kernel>/bpftool`) if the build cannot find it.
+
+```bash
+git clone -b dev https://github.com/InterceptSuite/ProxyBridge.git
+cd ProxyBridge/Linux
+WERROR=1 ./build.sh        # builds the library, the CLI and the GUI, results land in Linux/output/
+```
+
+The CI builds with `WERROR=1`, so your change must compile warning-free. See [`Linux/README.md`](Linux/README.md) for usage and the full list of tests.
+
+## Testing
+
+Every pull request must pass the existing tests and checks for the platform it touches. The checks that run automatically on pull requests are in [`.github/workflows`](.github/workflows); the tests that need a real machine are run by you, locally.
+
+| Platform | Runs automatically (GitHub Actions) | You run locally |
+|----------|--------------------------------------|-----------------|
+| **Windows** | `Build Windows` (`compile.ps1 -NoSign`), the Windows tests and `CodeQL` | Test your change on a real Windows machine and describe it in the pull request |
+| **Linux** | `Build Linux` (unit tests, then the build with `WERROR=1`) and `CodeQL` | The root-only end-to-end tests in `Linux/tests` when your change touches the kernel hooks, relay, rules or DNS (see `Linux/README.md`) |
+| **macOS** | `CodeQL`. The signed `Build macOS` workflow uses our signing secrets, which GitHub does not give to pull requests from forks, so its signing steps cannot run for them | **The whole macOS test suite (below). Required.** |
+
+**Linux tests that run in CI** (you can run them too, no root needed):
+
+```bash
+Linux/profile/tests/run_tests.sh                       # .pbprofile reader/writer, including fuzzing under ASan/UBSan
+cd Linux/src && make test-rules BUILD_DIR=/tmp/pbt     # rule engine and DNS parser tests
+cd tests && ./run_relay_test.sh plain                  # relay tests
+```
+
+### macOS tests
+
+The macOS tests are in [`MacOS/tests`](MacOS/tests) (see its `README.md` for details). They are **not** run in GitHub Actions: the system extension has to be approved by a person on the Mac, which CI cannot do. **You run them on your own signed build and report the results in your pull request.**
+
+1. **Logic tests** - no installed extension needed, they take seconds:
+
+   ```bash
+   MacOS/tests/logic/run.sh
+   ```
+
+   They compile the matcher and DNS-map tests against the real extension sources and run them.
+
+2. **End-to-end tests** - run against your **signed** app with the system extension approved:
+   1. Install your signed build, start it and approve the system extension and the network configuration when macOS asks.
+   2. In the app, create a new profile and import `MacOS/tests/pbtest.pbprofile` (it adds five local test proxies and ten rules). Make it the active profile. The test rules redirect `curl`, `nc`, `openssl` and `pbudp` traffic, so switch back to your normal profile afterwards.
+   3. Run:
+
+      ```bash
+      sudo -v                              # lets the leaks check run without a prompt
+      python3 MacOS/tests/pbtest.py        # about 5 minutes
+      python3 MacOS/tests/pbtest.py --slow # also the 2.5 minute idle-UDP test
+      ```
+
+   The suites cover routing (SOCKS5, HTTP, auth, DIRECT, BLOCK, UDP), proxy reply parsing, per-proxy hostnames, 300 parallel TCP connections and UDP flows (memory must stay flat), DNS, and a `leaks` check on the extension.
+
+3. **Add a test** when you fix a bug or change behavior in the extension: extend `MacOS/tests/pbtest.py` / `servers.py`, or add a logic test in `MacOS/tests/logic`.
+
+**What your macOS pull request must show:** macOS version and chip (Apple silicon or Intel), Xcode version, how you signed the build, which test suites you ran and their result (paste the summary lines), and screenshots or logs for any GUI change.
+
 ## Pull Request Process
 
 1. **Update documentation** - if your changes affect user-facing features
@@ -349,10 +440,47 @@ You **MUST** create a **Release build** for the Network Extension to function pr
 5. **One feature per PR** - keep pull requests focused
 6. **Sign your commits** - use `git commit -s`
 
+### Pull request templates and the automatic check
+
+Pull request descriptions are plain Markdown (GitHub does not support forms for pull requests the way it does for issues), so we kept the template short: type your answer after each question. There is **no checkbox to tick by hand**.
+
+**Pick the template for your platform.** The default template opens automatically. For a platform template, add `?template=<name>.md` to the address of the "Open a pull request" page:
+
+| Platform | Template | Address ending |
+|----------|----------|----------------|
+| Any / cross-platform | the default | (nothing to add) |
+| Windows | `.github/PULL_REQUEST_TEMPLATE/windows.md` | `?template=windows.md` |
+| macOS | `.github/PULL_REQUEST_TEMPLATE/macos.md` | `?template=macos.md` |
+| Linux | `.github/PULL_REQUEST_TEMPLATE/linux.md` | `?template=linux.md` |
+
+**Every template asks about your local tests**, because the GitHub checks do not replace them:
+- Did you run the tests locally (which ones, on which system)?
+- What was the result or output?
+- Did anything fail, and why?
+- Did you add any new tests?
+- Did you remove or change any tests?
+
+The **macOS template** also asks for your macOS version and chip, your Xcode version, how you signed the app, and whether the signed app ran correctly with your change. If your pull request changes anything under `MacOS/`, this part is required whichever template you started from.
+
+**What the automatic check does** (workflow `PR Check`):
+
+| Situation | What happens |
+|-----------|--------------|
+| The pull request targets a branch other than `dev` | It is **closed with a short comment** asking you to open a new one against `dev` |
+| No linked issue, or the issue was not discussed first | `needs-details` label and a friendly comment |
+| Template removed, or required details missing or left empty | `needs-details` label and a friendly comment listing what to add |
+| Everything is there | Nothing. The comment updates and the label is removed once you fix your description |
+
+Maintainers, branches pushed to this repository, and bots are not checked.
+
 ### PR Checklist
 
-- [ ] Code builds without errors
-- [ ] All tests pass
+- [ ] The pull request targets **`dev`**
+- [ ] The **pull request template is fully filled in** (nothing removed, nothing left empty)
+- [ ] It links a GitHub issue, and I **commented on that issue and heard back from a maintainer before I started**
+- [ ] Code builds without errors (and without warnings on Linux, `WERROR=1`)
+- [ ] **All existing tests and checks pass** for the platforms I changed
+- [ ] **macOS changes only:** I signed the app myself, tested it on a real Mac, ran the macOS tests, and described the results in the pull request
 - [ ] Documentation updated
 - [ ] No merge conflicts
 - [ ] Commit messages are clear
