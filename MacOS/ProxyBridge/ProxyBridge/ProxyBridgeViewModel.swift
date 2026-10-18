@@ -37,6 +37,9 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         let port: Int
         let username: String?
         let password: String?
+        // same as the windows app: true = the proxy gets the host name the app resolved
+        // (socks5h / CONNECT host:port), false = it gets the ip. per proxy, on by default
+        var sendDomain: Bool
 
         // name is optional, show type and host:port either way
         var displayName: String {
@@ -44,7 +47,8 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             return name.isEmpty ? server : "\(name) = \(server)"
         }
 
-        init(id: String = UUID().uuidString, name: String = "", type: String, host: String, port: Int, username: String?, password: String?) {
+        init(id: String = UUID().uuidString, name: String = "", type: String, host: String, port: Int, username: String?, password: String?, sendDomain: Bool = true) {
+            self.sendDomain = sendDomain
             self.id = id
             self.name = name
             self.type = type
@@ -63,6 +67,8 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             self.port = try c.decode(Int.self, forKey: .port)
             self.username = try c.decodeIfPresent(String.self, forKey: .username)
             self.password = try c.decodeIfPresent(String.self, forKey: .password)
+            // proxies saved before this option existed behave like the windows default
+            self.sendDomain = try c.decodeIfPresent(Bool.self, forKey: .sendDomain) ?? true
         }
     }
     
@@ -674,7 +680,8 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
                 "id": config.id,
                 "proxyType": config.type,
                 "proxyHost": config.host,
-                "proxyPort": config.port
+                "proxyPort": config.port,
+                "sendDomainToProxy": config.sendDomain
             ]
             if let u = config.username { dict["proxyUsername"] = u }
             if let p = config.password { dict["proxyPassword"] = p }

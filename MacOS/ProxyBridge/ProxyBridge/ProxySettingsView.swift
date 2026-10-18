@@ -180,6 +180,7 @@ struct ProxyConfigEditorView: View {
     @State private var proxyPort = ""
     @State private var username = ""
     @State private var password = ""
+    @State private var sendDomain = true
     @State private var validationError = ""
 
     private let proxyTypes = ["http", "socks5"]
@@ -230,6 +231,14 @@ struct ProxyConfigEditorView: View {
                     }
                     .padding(.vertical, 8)
 
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Let proxy resolve DNS (send hostname)", isOn: $sendDomain)
+                        Text("On: the proxy gets the host name the app looked up. Off: it gets the IP address. Turn it off for a proxy that can't resolve the names your Mac can.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 8)
+
                     if !validationError.isEmpty {
                         HStack {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
@@ -254,7 +263,7 @@ struct ProxyConfigEditorView: View {
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
         }
-        .frame(width: 500, height: 520)
+        .frame(width: 500, height: 610)
         .onAppear {
             if let e = existing {
                 configName = e.name
@@ -263,6 +272,7 @@ struct ProxyConfigEditorView: View {
                 proxyPort = String(e.port)
                 username = e.username ?? ""
                 password = e.password ?? ""
+                sendDomain = e.sendDomain
             }
             validateInputs()
         }
@@ -316,7 +326,8 @@ struct ProxyConfigEditorView: View {
             host: proxyHost,
             port: port,
             username: username.isEmpty ? nil : username,
-            password: password.isEmpty ? nil : password
+            password: password.isEmpty ? nil : password,
+            sendDomain: sendDomain
         )
         if existing != nil {
             viewModel.updateProxyConfig(config)
