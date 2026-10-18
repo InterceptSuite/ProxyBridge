@@ -19,7 +19,7 @@ jobs:
     permissions:
       contents: write
       actions: read
-    if: github.actor == github.repository_owner
+    if: github.actor == 'Anof-cyber'
 
     steps:
     - name: Checkout code
