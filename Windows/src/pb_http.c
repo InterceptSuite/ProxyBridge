@@ -44,6 +44,9 @@ int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port, const 
             host_part, dest_port, host_part, dest_port);
     }
 
+    // snprintf returns the length it WOULD have written: a request that did not fit (very long credentials or
+    // host name) must be refused, never sent with that length, or send() would read past the buffer.
+    if (len < 0 || len >= (int)sizeof(request)) return -1;
     if (send(s, request, len, 0) != len) return -1;
 
     len = recv(s, response, sizeof(response) - 1, 0);
@@ -103,6 +106,13 @@ int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_CONFIG 
             host_part, dest_port, host_part, dest_port);
     }
 
+    // snprintf returns the length it WOULD have written: refuse a request that did not fit instead of letting
+    // send() read past the buffer (very long credentials + a long cached host name).
+    if (len < 0 || len >= (int)sizeof(request))
+    {
+        log_message("HTTP: CONNECT request too long for the buffer (credentials or host name too long)");
+        return -1;
+    }
     if (send(s, request, len, 0) != len)
     {
         log_message("HTTP: Failed to send CONNECT request");
