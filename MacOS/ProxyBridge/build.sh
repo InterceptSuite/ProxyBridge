@@ -72,7 +72,9 @@ cat > build/distribution.xml << 'EOF'
 <installer-gui-script minSpecVersion="1">
     <title>ProxyBridge</title>
     <pkg-ref id="com.interceptsuite.ProxyBridge"/>
-    <options customize="never" require-scripts="false"/>
+    <!-- without hostArchitectures the Installer on Apple silicon assumes an Intel-only package and offers to
+         install Rosetta. the app and the extension are universal (verified above), so say so -->
+    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
     <choices-outline>
         <line choice="default">
             <line choice="com.interceptsuite.ProxyBridge"/>
