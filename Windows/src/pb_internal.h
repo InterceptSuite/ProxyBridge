@@ -24,7 +24,8 @@
 #define MAXBUF 0xFFFF
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
-#define MAX_PROCESS_NAME 1024
+#define MAX_PROCESS_NAME 1024        // one process image name / path read from the OS
+#define MAX_RULE_PROCESS_LIST 24576  // a rule's Applications list in UTF-8: 8191 UTF-16 characters at up to 3 bytes each
 #define VERSION "4.2.0"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 30000
@@ -46,7 +47,7 @@
 
 typedef struct PROCESS_RULE {
     UINT32 rule_id;
-    char process_name[MAX_PROCESS_NAME];
+    char process_name[MAX_RULE_PROCESS_LIST];
     char *target_hosts;   // Dynamic: IP filter "*", "192.168.*.*", "10.0.0.1;172.16.0.0"
     char *target_ports;   // Dynamic: Port filter "*", "80", "80;443", "8000-9000"
     char *target_domains; // Dynamic: Domain filter "*", "google.com", "*.google.com;*.gstatic.com" ("" or "*" = no domain restriction)

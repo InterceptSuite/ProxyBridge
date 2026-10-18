@@ -830,7 +830,8 @@ RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UI
 
 PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id, BOOL localhost_via_proxy)
 {
-    if (process_name == NULL || process_name[0] == '\0')
+    // a list that does not fit is refused: cutting it would silently drop or mangle programs
+    if (process_name == NULL || process_name[0] == '\0' || strnlen_s(process_name, MAX_RULE_PROCESS_LIST) >= MAX_RULE_PROCESS_LIST)
         return 0;
 
     PROCESS_RULE *rule = (PROCESS_RULE *)malloc(sizeof(PROCESS_RULE));
@@ -838,7 +839,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
         return 0;
 
     rule->rule_id = g_next_rule_id++;
-    strncpy_s(rule->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
+    strncpy_s(rule->process_name, sizeof(rule->process_name), process_name, _TRUNCATE);
     rule->protocol = protocol;
     rule->proxy_config_id = proxy_config_id;
     rule->localhost_via_proxy = localhost_via_proxy;
@@ -1051,7 +1052,8 @@ PROXYBRIDGE_API BOOL ProxyBridge_DeleteRule(UINT32 rule_id)
 
 PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id, BOOL localhost_via_proxy)
 {
-    if (rule_id == 0 || process_name == NULL || target_hosts == NULL || target_ports == NULL)
+    if (rule_id == 0 || process_name == NULL || target_hosts == NULL || target_ports == NULL ||
+        strnlen_s(process_name, MAX_RULE_PROCESS_LIST) >= MAX_RULE_PROCESS_LIST)
         return FALSE;
 
     // NULL/"" domains means "no restriction" -> stored as "*"
@@ -1077,7 +1079,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_na
     {
         if (rule->rule_id == rule_id)
         {
-            strncpy_s(rule->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
+            strncpy_s(rule->process_name, sizeof(rule->process_name), process_name, _TRUNCATE);
 
             free(rule->target_hosts);
             free(rule->target_ports);

@@ -137,8 +137,18 @@
 #define IDC_RE_L_NAME              443   // "Name:" label
 #define IDC_RE_LOCALHOST           444   // "also proxy localhost" checkbox
 #define IDC_RE_EX_LOCAL            445   // its hint text
+#define IDC_RE_RUNNING             446   // "Running..." (pick from running programs)
 
 // Name-input dialog (new profile)
+// Running-programs picker
+#define IDD_PROCPICK               800
+#define IDC_PP_SEARCH              801
+#define IDC_PP_REFRESH             802
+#define IDC_PP_LIST                803
+#define IDC_PP_FULLPATH            804
+#define IDC_PP_STATUS              805
+#define IDC_PP_NOTE                806
+
 #define IDD_NAME                   500
 #define IDC_NAME_EDIT              501
 #define IDC_NAME_PROMPT            502

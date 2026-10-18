@@ -59,7 +59,7 @@ typedef struct {
 } PBProxyConfig;
 
 typedef struct {
-    char     process_name[256];
+    char     process_name[8192];   // Applications list: many programs separated by ";"
     char     target_hosts[512];
     char     target_ports[256];
     char     target_domains[8192]; // "*", "google.com", "*.google.com;*.gstatic.com" (long lists)

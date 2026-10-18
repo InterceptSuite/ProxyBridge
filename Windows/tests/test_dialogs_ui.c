@@ -19,6 +19,19 @@ static void Combo(int id, int sel) { SendDlgItemMessageW(g_dlg, id, CB_SETCURSEL
 static int  ComboSel(int id) { return (int)SendDlgItemMessageW(g_dlg, id, CB_GETCURSEL, 0, 0); }
 static int  ComboCount(int id) { return (int)SendDlgItemMessageW(g_dlg, id, CB_GETCOUNT, 0, 0); }
 
+static PPRow* g_fakeRows; static AppList g_ppResult;
+static int FakeEnum(PPRow** out) { *out = (PPRow*)malloc(3 * sizeof(PPRow)); memcpy(*out, g_fakeRows, 3 * sizeof(PPRow)); return 3; }
+static VOID CALLBACK PickTimer(HWND h, UINT m, UINT_PTR id, DWORD t)
+{
+    (void)h; (void)m; (void)t;
+    HWND d = FindWindowW(L"#32770", T(S_DLG_PROCPICK));
+    if (!d) return;
+    KillTimer(NULL, id);
+    HWND lv = GetDlgItem(d, IDC_PP_LIST);
+    for (int i = 0; i < ListView_GetItemCount(lv); i++) ListView_SetItemState(lv, i, LVIS_SELECTED, LVIS_SELECTED);
+    SendMessageW(d, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), (LPARAM)GetDlgItem(d, IDOK));
+}
+
 static HWND OpenRuleEditor(PBRule* r)
 {
     HWND d = CreateDialogParamW(g_hInst, MAKEINTRESOURCEW(IDD_RULE), NULL, RuleEditDlgProc, (LPARAM)r);
@@ -104,6 +117,56 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
       SendMessageW(g_dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), (LPARAM)GetDlgItem(g_dlg, IDCANCEL));
       CHECK(!wcscmp(r.name, L"keep") && !wcscmp(r.hosts, L"1.1.1.1"));
       DestroyWindow(g_dlg); }
+
+    /* ================= Applications list: Browse / Running helpers ================= */
+    { PBRule r; ZeroMemory(&r, sizeof r); lstrcpynW(r.proc, L"*", 256); lstrcpynW(r.hosts, L"*", PB_HOSTS_MAX); lstrcpynW(r.ports, L"*", 128); lstrcpynW(r.proto, L"BOTH", 8); lstrcpynW(r.action, L"DIRECT", 16);
+      g_dlg = OpenRuleEditor(&r);
+      static wchar_t t[PB_APPS_MAX]; int bad = -1, dup = -1;
+      const wchar_t* one[] = { L"curl.exe", L"Chrome.exe" };
+      CHECK(AppendApps(g_dlg, one, 2, &bad, &dup) == 2 && bad == 0);                                        /* "*" gives way to the first entry */
+      Get(IDC_RE_APPS, t, PB_APPS_MAX);  CHECK(!wcscmp(t, L"curl.exe; Chrome.exe"));
+      const wchar_t* two[] = { L"CHROME.EXE", L"edge.exe", L"a;b.exe", L"" };
+      CHECK(AppendApps(g_dlg, two, 4, &bad, &dup) == 1 && bad == 2 && dup == 1);                            /* duplicate (any case) skipped, unusable names refused */
+      Get(IDC_RE_APPS, t, PB_APPS_MAX);  CHECK(!wcscmp(t, L"curl.exe; Chrome.exe; edge.exe"));
+      /* a nearly full list: a name that does not fit is refused whole, never cut */
+      static wchar_t big[PB_APPS_MAX]; int k = 0; for (; k < PB_APPS_MAX - 12; k++) big[k] = L'x'; big[k] = 0;
+      SendDlgItemMessageW(g_dlg, IDC_RE_APPS, EM_LIMITTEXT, 0, 0);
+      Set(IDC_RE_APPS, big);
+      const wchar_t* tail[] = { L"averylongname.exe", L"a.exe" };
+      CHECK(AppendApps(g_dlg, tail, 2, &bad, &dup) == 1 && bad == 1);
+      Get(IDC_RE_APPS, t, PB_APPS_MAX);  CHECK(wcslen(t) < PB_APPS_MAX && wcsstr(t, L"; a.exe") && !wcsstr(t, L"averylong"));
+      DestroyWindow(g_dlg); }
+
+    /* ================= running-programs picker (fake process list) ================= */
+    {
+      static PPRow fake[3]; g_fakeRows = fake;
+      lstrcpynW(fake[0].name, L"alpha.exe", 260); lstrcpynW(fake[0].path, L"C:\\Apps\\alpha.exe", MAX_PATH); fake[0].pid = 4242; fake[0].instances = 3;
+      lstrcpynW(fake[1].name, L"beta.exe", 260);  lstrcpynW(fake[1].path, L"C:\\My, Apps\\beta.exe", MAX_PATH); fake[1].pid = 77; fake[1].instances = 1;   /* comma: unusable as a path in the list */
+      lstrcpynW(fake[2].name, L"gamma.exe", 260); fake[2].pid = 9; fake[2].instances = 1;                                                                   /* path unreadable */
+      g_ppEnumerate = FakeEnum;
+      g_dlg = CreateDialogParamW(g_hInst, MAKEINTRESOURCEW(IDD_PROCPICK), NULL, ProcPickDlgProc, (LPARAM)&g_ppResult);
+      ShowWindow(g_dlg, SW_SHOW);
+      HWND lv = GetDlgItem(g_dlg, IDC_PP_LIST);
+      CHECK(ListView_GetItemCount(lv) == 3 && !IsWindowEnabled(GetDlgItem(g_dlg, IDOK)));                   /* Add needs a selection */
+      wchar_t t[64]; ListView_GetItemText(lv, 0, 1, t, 64); CHECK(!wcscmp(t, L"4242  (+2)"));              /* PID shown for reference only */
+      Set(IDC_PP_SEARCH, L"APPS alp");  CHECK(ListView_GetItemCount(lv) == 1);                              /* every word, name or path, any case */
+      Set(IDC_PP_SEARCH, L"");          CHECK(ListView_GetItemCount(lv) == 3);
+      ListView_SetItemState(lv, 0, LVIS_SELECTED, LVIS_SELECTED);
+      CHECK(IsWindowEnabled(GetDlgItem(g_dlg, IDOK)));
+      CHECK(!wcscmp(PPChoose(&fake[0], FALSE), L"alpha.exe") && !wcscmp(PPChoose(&fake[0], TRUE), L"C:\\Apps\\alpha.exe"));
+      CHECK(!wcscmp(PPChoose(&fake[1], TRUE), L"beta.exe") && !wcscmp(PPChoose(&fake[2], TRUE), L"gamma.exe"));   /* fall back to the name */
+      DestroyWindow(g_dlg);
+      /* modal run: select everything and press Add - the result holds names, never PIDs */
+      SetTimer(NULL, 1, 50, PickTimer);
+      CHECK(DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_PROCPICK), NULL, ProcPickDlgProc, (LPARAM)&g_ppResult) == 1);
+      CHECK(g_ppResult.n == 3 && !wcscmp(g_ppResult.v[0], L"alpha.exe") && !wcscmp(g_ppResult.v[1], L"beta.exe") && !wcscmp(g_ppResult.v[2], L"gamma.exe"));
+      AppListFree(&g_ppResult);
+      /* the real enumerator finds this very program with its path */
+      PPRow* rows = NULL; int n = PPEnumerateReal(&rows); BOOL me = FALSE;
+      wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);
+      for (int i = 0; i < n; i++) if (!_wcsicmp(rows[i].path, exe)) me = TRUE;
+      CHECK(n > 3 && me); free(rows);
+    }
 
     /* ================= proxy servers list ================= */
     g_dlg = CreateDialogParamW(hInst, MAKEINTRESOURCEW(IDD_SERVERS), NULL, ServersDlgProc, 0);

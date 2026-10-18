@@ -112,5 +112,19 @@ int main(void)
       CHECK(big != 0 && m4("longlist.exe", "10.5.249.1", 1) == RULE_ACTION_BLOCK && m4("longlist.exe", "10.5.249.2", 1) == RULE_ACTION_DIRECT);
       ProxyBridge_DeleteRule(big); }
 
+    /* a long Applications list (many programs, ~7000 characters) is kept whole and still matches its last entry */
+    { char procs[8192]; size_t o = 0; for (int i = 0; i < 600; i++) o += sprintf_s(procs + o, sizeof procs - o, "prog%03d.exe;", i);
+      sprintf_s(procs + o, sizeof procs - o, "lastone.exe");
+      UINT32 id = ProxyBridge_AddRule(procs, "*", "*", "*", RULE_PROTOCOL_BOTH, RULE_ACTION_BLOCK, 0, FALSE);
+      CHECK(id != 0 && m4("lastone.exe", "8.8.8.8", 80) == RULE_ACTION_BLOCK && m4("prog300.exe", "8.8.8.8", 80) == RULE_ACTION_BLOCK && m4("lastone2.exe", "8.8.8.8", 80) == RULE_ACTION_DIRECT);
+      ProxyBridge_DeleteRule(id); }
+
+    /* a list that cannot fit is refused, never cut in the middle of a program name */
+    { static char huge[MAX_RULE_PROCESS_LIST + 16]; memset(huge, 'a', sizeof huge - 1); huge[sizeof huge - 1] = 0;
+      CHECK(ProxyBridge_AddRule(huge, "*", "*", "*", RULE_PROTOCOL_BOTH, RULE_ACTION_BLOCK, 0, FALSE) == 0);
+      UINT32 ok = ProxyBridge_AddRule("ok.exe", "*", "*", "*", RULE_PROTOCOL_BOTH, RULE_ACTION_BLOCK, 0, FALSE);
+      CHECK(ok != 0 && !ProxyBridge_EditRule(ok, huge, "*", "*", "*", RULE_PROTOCOL_BOTH, RULE_ACTION_BLOCK, 0, FALSE) && m4("ok.exe", "8.8.8.8", 80) == RULE_ACTION_BLOCK);
+      ProxyBridge_DeleteRule(ok); }
+
     return pbtest_done("test_rules_match");
 }

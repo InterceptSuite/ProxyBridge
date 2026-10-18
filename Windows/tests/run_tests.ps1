@@ -74,7 +74,7 @@ $clUni   = "/utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS"
 $clCore  = "/Isrc $wdInc /DPROXYBRIDGE_EXPORTS /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS"
 $lnCore  = "$wdLib WinDivert.lib ws2_32.lib iphlpapi.lib advapi32.lib"
 $lnProf  = 'user32.lib advapi32.lib shell32.lib'
-$lnGui   = '/SUBSYSTEM:CONSOLE /ENTRY:wWinMainCRTStartup user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib winhttp.lib advapi32.lib dwmapi.lib uxtheme.lib'
+$lnGui   = '/SUBSYSTEM:CONSOLE /ENTRY:wWinMainCRTStartup user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib winhttp.lib advapi32.lib dwmapi.lib uxtheme.lib ole32.lib uuid.lib'
 $prof    = 'gui\profile\profile.c'
 $res     = "$Out\app.res"
 

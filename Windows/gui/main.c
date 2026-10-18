@@ -18,6 +18,8 @@
 #include <tlhelp32.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#define COBJMACROS
+#include <shobjidl.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <stdio.h>
@@ -33,6 +35,8 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "uxtheme.lib")
 
