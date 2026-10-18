@@ -1,0 +1,154 @@
+{
+  "closeToMenuBar": false,
+  "name": "PBTest",
+  "proxyConfigs": [
+    {
+      "host": "127.0.0.1",
+      "id": "pbtest-socks-1080",
+      "name": "pbtest socks5",
+      "port": 1080,
+      "sendDomain": true,
+      "type": "socks5"
+    },
+    {
+      "host": "127.0.0.1",
+      "id": "pbtest-socks-1081",
+      "name": "pbtest socks5 auth",
+      "password": "pbpass",
+      "port": 1081,
+      "sendDomain": true,
+      "type": "socks5",
+      "username": "pbtest"
+    },
+    {
+      "host": "127.0.0.1",
+      "id": "pbtest-socks-1082",
+      "name": "pbtest black hole",
+      "port": 1082,
+      "sendDomain": true,
+      "type": "socks5"
+    },
+    {
+      "host": "127.0.0.1",
+      "id": "pbtest-http-8080",
+      "name": "pbtest http",
+      "port": 8080,
+      "sendDomain": true,
+      "type": "http"
+    },
+    {
+      "host": "127.0.0.1",
+      "id": "pbtest-http-8081",
+      "name": "pbtest http auth",
+      "password": "pbpass",
+      "port": 8081,
+      "sendDomain": true,
+      "type": "http",
+      "username": "pbtest"
+    }
+  ],
+  "proxyRules": [
+    {
+      "action": "pbtest-socks-1080",
+      "enabled": true,
+      "localId": "pbtest-rule-01",
+      "name": "",
+      "processNames": "curl",
+      "protocol": "TCP",
+      "targetHosts": "example.com",
+      "targetPorts": "*"
+    },
+    {
+      "action": "pbtest-http-8081",
+      "enabled": true,
+      "localId": "pbtest-rule-02",
+      "name": "",
+      "processNames": "curl",
+      "protocol": "TCP",
+      "targetHosts": "example.net",
+      "targetPorts": "*"
+    },
+    {
+      "action": "pbtest-http-8080",
+      "enabled": true,
+      "localId": "pbtest-rule-03",
+      "name": "",
+      "processNames": "curl",
+      "protocol": "TCP",
+      "targetHosts": "example.org",
+      "targetPorts": "*"
+    },
+    {
+      "action": "DIRECT",
+      "enabled": true,
+      "localId": "pbtest-rule-04",
+      "name": "",
+      "processNames": "curl",
+      "protocol": "TCP",
+      "targetHosts": "www.iana.org",
+      "targetPorts": "*"
+    },
+    {
+      "action": "pbtest-socks-1082",
+      "enabled": true,
+      "localId": "pbtest-rule-05",
+      "name": "",
+      "processNames": "curl",
+      "protocol": "TCP",
+      "targetHosts": "neverssl.com",
+      "targetPorts": "*"
+    },
+    {
+      "action": "pbtest-socks-1081",
+      "enabled": true,
+      "localId": "pbtest-rule-06",
+      "name": "",
+      "processNames": "nc",
+      "protocol": "TCP",
+      "targetHosts": "*",
+      "targetPorts": "80"
+    },
+    {
+      "action": "pbtest-socks-1080",
+      "enabled": true,
+      "localId": "pbtest-rule-07",
+      "name": "",
+      "processNames": "pbudp",
+      "protocol": "UDP",
+      "targetHosts": "*",
+      "targetPorts": "*"
+    },
+    {
+      "action": "pbtest-socks-1081",
+      "enabled": true,
+      "localId": "pbtest-rule-08",
+      "name": "",
+      "processNames": "nc",
+      "protocol": "UDP",
+      "targetHosts": "*",
+      "targetPorts": "*"
+    },
+    {
+      "action": "BLOCK",
+      "enabled": true,
+      "localId": "pbtest-rule-09",
+      "name": "",
+      "processNames": "openssl",
+      "protocol": "BOTH",
+      "targetHosts": "*",
+      "targetPorts": "*"
+    },
+    {
+      "action": "pbtest-http-8080",
+      "enabled": true,
+      "localId": "pbtest-rule-10",
+      "name": "",
+      "processNames": "nc",
+      "protocol": "TCP",
+      "targetHosts": "192.0.2.20;192.0.2.21",
+      "targetPorts": "22"
+    }
+  ],
+  "runAtStartup": false,
+  "trafficLoggingEnabled": true
+}
