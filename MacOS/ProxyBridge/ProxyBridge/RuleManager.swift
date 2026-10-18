@@ -93,6 +93,16 @@ struct RuleManager {
         completion: @escaping (Bool, Int) -> Void
     ) {
         let rules = UserDefaults.standard.array(forKey: "proxyRules") as? [[String: Any]] ?? []
+        applyRules(session: session, rules: rules, completion: completion)
+    }
+
+    // replaces the extension's rule list with these rules (as saved by the app). also used
+    // by the command line, which has its rules in memory instead of in the preferences
+    static func applyRules(
+        session: NETunnelProviderSession,
+        rules: [[String: Any]],
+        completion: @escaping (Bool, Int) -> Void
+    ) {
         let payload: [[String: Any]] = rules.map { rule in
             [
                 "processNames": rule["processNames"] as? String ?? "",

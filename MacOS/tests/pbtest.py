@@ -17,8 +17,11 @@ suites: functional  rule routing, SOCKS5/HTTP/auth, DIRECT, BLOCK, UDP, stuck-ha
         dns         200 uncached DNS lookups through the DNS proxy
         idle        40 idle UDP flows must be reaped after ~2 minutes (slow)
         leaks       `leaks` on the extension must report 0 (needs `sudo -v` first, or SUDO_ASKPASS)
+        cli         the command line mode: runs pbtest.pbprofile through `ProxyBridge --cli` from /Applications,
+                    traffic must be redirected, Ctrl+C must clear everything. Not in the default set: the app
+                    must be QUIT and the installed build must have the CLI
 Environment: PB_NTP_IP (default: time.apple.com resolved once), PB_EVENTS (event log path)."""
-import atexit, concurrent.futures as cf, json, os, random, socket, subprocess, sys, threading, time
+import atexit, concurrent.futures as cf, json, os, random, signal, socket, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORK = os.path.join(HERE, "work")
@@ -316,7 +319,50 @@ def leaks():
     check("L1 leaks reports 0 leaks in the extension", " 0 leaks for 0 total leaked bytes" in line, line.strip() or "no result")
 
 
-SUITES = {"functional": functional, "replies": replies, "hostnames": hostnames, "stress": stress, "dns": dns, "idle": idle, "leaks": leaks}
+def cli():
+    print("\n== command line mode ==")
+    app = "/Applications/ProxyBridge.app/Contents/MacOS/ProxyBridge"
+    if not os.path.exists(app):
+        print("SKIP cli: /Applications/ProxyBridge.app is not installed"); return
+    if subprocess.run(["pgrep", "-x", "ProxyBridge"], capture_output=True).returncode == 0:
+        print("SKIP cli: quit the ProxyBridge app first, the CLI refuses to run next to it"); return
+    v = subprocess.run([app, "--cli", "--version"], capture_output=True, text=True)
+    check("C1 --version", v.returncode == 0 and v.stdout.startswith("ProxyBridge CLI "), v.stdout.strip() or v.stderr.strip())
+    bad = subprocess.run([app, "--cli", "--bogus"], capture_output=True, text=True)
+    check("C2 unknown option exits with 2 and a message", bad.returncode == 2 and "Unknown option" in bad.stderr, f"exit {bad.returncode}")
+    profile = open(os.path.join(HERE, "pbtest.pbprofile")).read()
+    proc = subprocess.Popen([app, "--cli", "--profile", "-", "--verbose", "3"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc.stdin.write(profile); proc.stdin.close()
+    lines, ready = [], False
+    t_end = time.time() + 120          # the first run can wait for the extension to be approved
+    while time.time() < t_end and proc.poll() is None:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        lines.append(line.rstrip())
+        if "Redirecting traffic" in line:
+            ready = True; break
+    check("C3 profile applied and redirecting", ready, " | ".join(lines[-4:]))
+    if not ready:
+        proc.terminate(); return
+    time.sleep(2)
+    scenario("C4 curl example.com goes through SOCKS5 1080 while the CLI runs", CURL + ["https://example.com"], ("connect", "socks1080", 443), client_ok=HTTP_OK)
+    scenario("C5 BLOCK rule is enforced (openssl)", ["openssl", "s_client", "-connect", "example.net:443"], ("connect", None, None), timeout=15, inp=b"",
+             client_ok=lambda rc, o, e: b"BEGIN CERTIFICATE" not in o)
+    second = subprocess.run([app, "--cli", "--profile", "-"], input=profile, capture_output=True, text=True, timeout=30)
+    check("C6 a second CLI is refused", second.returncode != 0 and "already running" in second.stderr, second.stderr.strip()[:80])
+    proc.send_signal(signal.SIGINT)
+    try:
+        proc.wait(timeout=20); out = proc.stdout.read()
+    except subprocess.TimeoutExpired:
+        proc.kill(); out = ""
+    check("C7 Ctrl+C stops it cleanly", proc.returncode == 0 and "Rules cleared" in "\n".join(lines) + out, f"exit {proc.returncode}")
+    time.sleep(1)
+    scenario("C8 after Ctrl+C curl example.com is no longer redirected", CURL + ["https://example.com"], ("connect", None, None), client_ok=HTTP_OK)
+
+
+SUITES = {"cli": cli, "functional": functional, "replies": replies, "hostnames": hostnames, "stress": stress, "dns": dns, "idle": idle, "leaks": leaks}
 DEFAULT = ["functional", "replies", "hostnames", "stress", "dns", "leaks"]
 
 
@@ -332,7 +378,9 @@ def main():
             sys.exit(f"unknown suite {w!r}, see --help")
     build_pbudp()
     start_servers()
-    preflight()
+    # every suite but `cli` needs the test rules already active (imported in the app). `cli` activates them itself
+    if any(w.split(":")[0] != "cli" for w in wanted):
+        preflight()
     print("extension:", ext_pid(), snap())
     for w in wanted:
         name, _, arg = w.partition(":")

@@ -54,6 +54,7 @@ If the rules are not active it stops with a message instead of failing every tes
 | `dns` | 200 uncached lookups through the DNS proxy all return the right answer |
 | `idle` | 40 idle UDP flows are reaped after about 2 minutes while the app still holds the sockets |
 | `leaks` | `leaks` on the extension reports 0 (the extension is a root process, so this needs sudo) |
+| `cli` | the command line mode (`ProxyBridge --cli`): version and error handling, a profile piped in over standard input redirects traffic, a BLOCK rule works, a second CLI is refused, Ctrl+C clears everything. **Not in the default set:** quit the app first, and the build installed in `/Applications` must include the CLI |
 
 ### Hostname suite with a box unticked
 

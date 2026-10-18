@@ -102,6 +102,7 @@ ProxyBridge operates with the following security considerations:
   - `com.apple.security.network.client` and `com.apple.security.network.server`
   - `com.apple.security.application-groups`
 - **Hardened runtime** is enabled for both the app and the extension
+- **Command line mode** - the app's own executable also runs without a window when started with options (`proxybridge --profile ...`). It is not a separate program, so it has the same signature, entitlements and sandbox. Profiles are read by name or from standard input and are not accepted as command line arguments, so proxy credentials do not appear in the process list. The `proxybridge` command is a short shell launcher installed by the package
 - **Credential storage** - proxy credentials and configuration stored in **UserDefaults** (not Keychain)
   - UserDefaults stored at: `~/Library/Containers/com.interceptsuite.ProxyBridge/Data/Library/Preferences/`
   - **Not encrypted** - stored in plaintext plist format

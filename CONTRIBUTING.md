@@ -412,7 +412,7 @@ The macOS tests are in [`MacOS/tests`](MacOS/tests) (see its `README.md` for det
    MacOS/tests/logic/run.sh
    ```
 
-   They compile the matcher and DNS-map tests against the real extension sources and run them.
+   They compile the matcher, DNS-map and command line tests (option parsing, profile loading) against the real sources and run them.
 
 2. **End-to-end tests** - run against your **signed** app with the system extension approved:
    1. Install your signed build, start it and approve the system extension and the network configuration when macOS asks.
@@ -427,7 +427,9 @@ The macOS tests are in [`MacOS/tests`](MacOS/tests) (see its `README.md` for det
 
    The suites cover routing (SOCKS5, HTTP, auth, DIRECT, BLOCK, UDP), proxy reply parsing, per-proxy hostnames, 300 parallel TCP connections and UDP flows (memory must stay flat), DNS, and a `leaks` check on the extension.
 
-3. **Add a test** when you fix a bug or change behavior in the extension: extend `MacOS/tests/pbtest.py` / `servers.py`, or add a logic test in `MacOS/tests/logic`.
+   If you change the **command line mode** (`CLIArguments.swift`, `CLIProfile.swift`, `CLIRunner.swift`), also run `python3 MacOS/tests/pbtest.py cli` with the ProxyBridge app **quit**.
+
+3. **Add a test** when you fix a bug or change behavior in the extension or the CLI: extend `MacOS/tests/pbtest.py` / `servers.py`, or add a logic test in `MacOS/tests/logic`.
 
 **What your macOS pull request must show:** macOS version and chip (Apple silicon or Intel), Xcode version, how you signed the build, which test suites you ran and their result (paste the summary lines), and screenshots or logs for any GUI change.
 

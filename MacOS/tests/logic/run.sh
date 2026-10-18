@@ -4,6 +4,7 @@
 set -e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXT="$HERE/../../ProxyBridge/extension"
+APP="$HERE/../../ProxyBridge/ProxyBridge"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -17,3 +18,4 @@ run_test() {   # <test file> <extension sources...>
 
 run_test matcher_tests.swift "$EXT/AppProxyProvider.swift" "$EXT/DNSMapStore.swift"
 run_test dnsmap_tests.swift "$EXT/DNSMapStore.swift"
+run_test cli_tests.swift "$APP/CLIArguments.swift" "$APP/CLIProfile.swift" "$APP/CLIText.swift"

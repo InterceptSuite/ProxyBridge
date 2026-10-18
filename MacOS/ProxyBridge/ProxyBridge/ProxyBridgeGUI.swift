@@ -26,7 +26,7 @@ enum LoginItem {
     }
 }
 
-@main
+// no @main here, main.swift starts this for a normal launch (and the command line mode otherwise)
 struct ProxyBridgeGUIApp: App {
     @StateObject private var viewModel = ProxyBridgeViewModel()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate

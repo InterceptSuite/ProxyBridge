@@ -59,9 +59,13 @@ echo "Creating installer package..."
 pkgbuild --analyze --root build/component build/component.plist
 /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" build/component.plist
 
+# scripts/postinstall installs the `proxybridge` command (a launcher for the app's own executable).
+# an installer script that is not executable is skipped silently, so check it here
+[ -x "$SCRIPT_DIR/scripts/postinstall" ] || { echo "ERROR: scripts/postinstall is not executable (chmod +x)"; exit 1; }
 pkgbuild \
     --root build/component \
     --component-plist build/component.plist \
+    --scripts "$SCRIPT_DIR/scripts" \
     --identifier com.interceptsuite.ProxyBridge \
     --version "$VERSION" \
     --install-location /Applications \
