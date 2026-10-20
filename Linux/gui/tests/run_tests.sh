@@ -17,5 +17,10 @@ gcc -O2 -Wall -Wextra -I. tests/events_test.c gui_events.c -o "$OUT/events_plain
 time "$OUT/events_plain"
 gcc -g -Wall -Wextra -fsanitize=address,undefined -I. tests/events_test.c gui_events.c -o "$OUT/events_asan" -pthread
 ASAN_OPTIONS=detect_leaks=1 "$OUT/events_asan"
-gcc -g -O1 -Wall -Wextra -fsanitize=thread -I. tests/events_test.c gui_events.c -o "$OUT/events_tsan" -pthread
-setarch "$(uname -m)" -R "$OUT/events_tsan"
+# TSan needs ASLR switched off (setarch -R), which some containers forbid
+if setarch "$(uname -m)" -R true 2>/dev/null; then
+    gcc -g -O1 -Wall -Wextra -fsanitize=thread -I. tests/events_test.c gui_events.c -o "$OUT/events_tsan" -pthread
+    setarch "$(uname -m)" -R "$OUT/events_tsan"
+else
+    echo "skipping the ThreadSanitizer run: setarch -R is not permitted here"
+fi

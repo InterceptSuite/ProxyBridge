@@ -89,7 +89,7 @@ sudo ProxyBridgeGUI
 The GTK3-based GUI provides:
 - Proxy configuration (SOCKS5/HTTP with authentication)
 - Visual rule management with process selection
-- Real-time connection monitoring
+- Real-time connection monitoring, a **Live Connections** tab (every proxied TCP connection and UDP flow with its process, destination, proxy, age and bytes), and *Log Every Connection* / *Enable ProxyBridge* switches in the Proxy menu
 - Profiles: create, switch, duplicate, rename, delete, **import and export** `.pbprofile` files (the Windows/macOS format, see [Profiles](#profiles))
 - Import/Export rules (JSON format compatible with Windows/macOS)
 - DNS via Proxy toggle
@@ -203,6 +203,13 @@ OPTIONS:
                          combined with --proxy and --rule. Disabled rules are skipped.
   --list-profiles        List the profiles saved by the GUI and exit
 
+  --test-proxy <host[:port]>  Check every configured proxy against that target (reach it, open a tunnel and log in,
+                         load a page, time tunnels, probe UDP), print the steps and exit 0 only if all work.
+                         Needs no root. Example: --proxy socks5://127.0.0.1:1080 --test-proxy example.com:80
+
+  --log-every-connection <bool>  Show every new connection in the connection log (--verbose 2/3) instead of one
+                         line per application, destination and action (default false; a profile can set it)
+
   --dns-via-proxy <bool> Route DNS queries through the proxy (true/false/1/0, default true)
 
   --verbose <level>      0 none (default), 1 logs, 2 connections, 3 both
@@ -308,7 +315,7 @@ sudo ProxyBridge --profile work --rule "curl:*:*:TCP:DIRECT"   # profile first, 
 
 - Rules point at proxies by `ProxyConfigId`; `0` means the default proxy (`DefaultProxyId`, otherwise the first proxy). A rule that names a proxy that is not in the file makes the profile invalid, rather than silently routing somewhere else.
 - Linux keeps domain names in the host list. On export they are written to `TargetDomains` (as the Windows app does) and merged back on import.
-- Fields this version has no use for (`LogFilters`, ...) are ignored on import. `DnsViaProxy` and `DefaultProxyId` are Linux additions that other apps ignore. `Name` (proxies and rules), `SendDomainToProxy` (per proxy, default `true`) and `LocalhostViaProxy` (per rule, default `false`) mean the same as in the Windows app; a top-level `LocalhostViaProxy` from older profiles is the default for rules that have none of their own. The CLI takes DNS-via-proxy from the profile unless `--dns-via-proxy` is given, and uses `--verbose` instead of the logging flag.
+- Fields this version has no use for (`LogFilters`, ...) are ignored on import. `DnsViaProxy` and `DefaultProxyId` are Linux additions that other apps ignore. `LogEveryConnection` is the same per-profile setting as in the Windows app. `Name` (proxies and rules), `SendDomainToProxy` (per proxy, default `true`) and `LocalhostViaProxy` (per rule, default `false`) mean the same as in the Windows app; a top-level `LocalhostViaProxy` from older profiles is the default for rules that have none of their own. The CLI takes DNS-via-proxy from the profile unless `--dns-via-proxy` is given, and uses `--verbose` instead of the logging flag.
 - Disabled rules (`"IsEnabled": false`) are kept in the GUI and skipped by the CLI.
 - **GUI storage:** `/etc/proxybridge/profiles/<name>.pbprofile` (one file per profile) and `/etc/proxybridge/settings.json`, which holds only the name of the active profile. Everything else, including the *Enable Traffic Logging* and *DNS via Proxy* switches, is saved inside the profile, so switching profiles switches those too. The directory is `0700` and the files `0600`, because they hold proxy passwords; exported files are `0600` as well, and the CLI warns when a profile with credentials is readable by others. The `config.ini` of earlier versions is converted on the first start and kept as `config.ini.bak`.
 - Files are limited to 4 MiB, 256 proxies and 4096 rules; malformed files are rejected with the reason, never partly applied.
@@ -335,6 +342,29 @@ Cost: DNS from covered processes takes one extra loopback hop (about +90 µs per
 - **Names.** Every proxy and every rule can carry a name (the GUI shows it, profiles store it).
 - **DNS via proxy, per proxy** (*SendDomainToProxy*, on by default, like Windows and macOS). When a connection goes to an address whose name the application resolved, the proxy is asked for the *name* (SOCKS5 domain address, or `CONNECT host:port`), so the proxy does the resolving. Off sends the IP address (`?dns=local` on the command line). The name comes from the application's own unencrypted DNS answers (the DNS tap that already powers domain rules; DoH/DoT bypass it), the most recent lookup for that address wins, and without a known name the IP is sent. UDP datagrams always carry the IP. Names are checked before they reach a proxy, so a hostile DNS answer cannot inject anything into a request. This is separate from the menu switch **DNS via Proxy**, which decides whether DNS queries themselves are routed through the rules.
 - **Also proxy localhost traffic, per rule** (*LocalhostViaProxy*, off by default, PROXY rules only). Without it a PROXY rule leaves connections to this computer (`127.0.0.0/8`, `::1`) direct, as on Windows, which is usually what you want. With it, matching loopback TCP and UDP connections go to the proxy, for example to inspect a local application in an intercepting proxy. First match still wins: a PROXY rule without the option stops the walk and the connection stays local. Differences from Windows: BLOCK and DIRECT rules never touch loopback, and DNS to a local resolver (port 53, e.g. `127.0.0.53`) is never proxied, so a broad rule cannot break name resolution.
+
+## Connection log, live connections and the main switch
+
+- **Connection log.** By default a connection is listed once per application, destination, port, protocol and action, so a program that opens 50 connections to one server gets one line. *Log Every Connection* (`--log-every-connection true`, saved per profile) lists every new TCP connection and every new UDP flow instead; a UDP flow is listed again after 30 seconds of silence. Each decision appears exactly once, whether the kernel or the relay made it.
+- **Live Connections** (GUI tab, `ProxyBridge_GetFlows()` in the library): the TCP connections and UDP flows being relayed through a proxy right now, newest first, with process, PID, destination (the name the application resolved when known), proxy, age and payload bytes in each direction. Direct and blocked traffic never reaches the relay and is not listed.
+- **Enable ProxyBridge** (Proxy menu, `ProxyBridge_SetEnabled()`): the main switch. Off pauses every rule for *new* connections; connections already relayed keep running.
+- **Testing a proxy.** The Test button in the proxy settings and `--test-proxy host[:port]` run the same five steps: reach the proxy, open a tunnel and log in, load a page (port 80), time three more tunnels, and probe UDP ASSOCIATE. Only the first two decide success; a page, latency or UDP problem is a warning. The exit code is 0 only when every configured proxy works.
+
+## Compared with the Windows app (4.3.0)
+
+| Feature | Linux |
+|---|---|
+| Multiple proxies, per-rule proxy, default proxy | yes |
+| TCP and UDP (SOCKS5 UDP ASSOCIATE), IPv4 and IPv6 destinations | yes (UDP: IPv4, or connected IPv6 sockets; unconnected IPv6 UDP fails closed) |
+| Rules by process, address, CIDR, range, wildcard, port, protocol, domain | yes |
+| Rule names, proxy names, enable/disable, reorder, import/export | yes |
+| Per-proxy *DNS via proxy* (`SendDomainToProxy`) | yes |
+| Per-rule *Also proxy localhost traffic* (`LocalhostViaProxy`) | yes (BLOCK/DIRECT never touch loopback) |
+| Profiles in the `.pbprofile` format, CLI `--profile` | yes |
+| Detailed proxy check (reach, login, page, latency, UDP) | yes (GUI Test button, `--test-proxy`) |
+| Live connections | yes (GUI tab, `ProxyBridge_GetFlows`) |
+| Log Every Connection, main on/off switch | yes |
+| Hide/Show log filters (`LogFilters`), auto-clear logs, font zoom, language, close to tray, start with the OS, update check on start-up | not implemented (a `LogFilters` list in an imported profile is ignored) |
 
 ## Multiple proxies
 
@@ -372,10 +402,12 @@ Add as many `--proxy` entries (CLI) or proxies (GUI) as you need; each rule choo
 
 ## Things to Note
 
+- **Stalled proxies do not hold everything up.** Connections that need a handshake with their proxy are served by a pool of workers that starts with 8 and grows to 64 while handshakes queue up (extra workers leave after 20 idle seconds). No single proxy may occupy more than 48 workers at once, so a proxy that accepts connections and then never answers (up to the 10 s handshake timeout each) cannot delay connections that use another proxy.
+
 - **DNS Traffic Handling**: with `--dns-via-proxy true` (default) DNS (port 53) follows your rules like any other traffic; with `false`, DNS always uses a direct connection regardless of rules.
 
 - **Automatic Direct Routing**: Certain IP addresses and ports automatically use direct connection regardless of proxy rules:
-  - **Loopback** (127.0.0.0/8, ::1) and **0.0.0.0/8**
+  - **Loopback** (127.0.0.0/8, ::1) and **0.0.0.0/8**, unless a PROXY rule has *Also proxy localhost traffic* (then only that rule's matches are proxied, and never port 53 or the relay itself)
   - **Multicast / broadcast / reserved** (224.0.0.0 and above, ff00::/8) and IPv6 link-local (fe80::/10)
   - **DHCP ports** (UDP 67, 68) - Dynamic Host Configuration Protocol
 
@@ -583,6 +615,13 @@ cd ../../tests && sudo ./e2e.sh                   # end-to-end with real kernel 
 sudo ./e2e_domains.sh                             # domain rules with a real resolver client (root, needs dig)
 sudo ./e2e_rules.sh                               # every rule form + every proxy type, incl. HTTP auth and UDP rules (root)
 sudo ./e2e_profile.sh                             # `ProxyBridge --profile`: Windows-format profiles on the live datapath (root)
+sudo ./e2e_faults.sh                              # misbehaving SOCKS5/HTTP proxies: every failure code, stalls, early closes, 255-byte logins, 4 MiB integrity, a dead proxy cannot starve a healthy one (root)
+sudo ./e2e_udp.sh                                 # UDP through SOCKS5 UDP ASSOCIATE: normal and malformed proxies, sizes, many sockets, BLOCK/DIRECT/HTTP, IPv6 (root)
+sudo ./e2e_rules_diff.sh                          # random rule sets vs an independent reference: kernel fast path and slow path, TCP and UDP (root)
+sudo ./e2e_logging.sh                             # connection log: de-duplication, log-every-connection, one line per decision (root)
+./e2e_checker.sh                                  # `--test-proxy` against working and broken proxies (no root)
+sudo ./gui_ui.sh                                  # drives the real windows and dialogs: proxies, rules, profiles, file choosers, menus, engine (root, needs broadwayd)
+sudo ./coverage.sh                                # line coverage of everything above plus the unit tests; `./coverage.sh unit` needs no root
 sudo ./e2e_parity.sh                              # per-proxy host-name sending and per-rule localhost, incl. a hostile DNS name (root, needs dig)
 sudo ./api_live.sh                                # library API: edit/move/disable/delete rules and proxies on the live datapath (root)
 sudo BPFTOOL=$(command -v bpftool) ./e2e_security.sh   # relay hand-off cannot be hijacked from another loopback address (root)

@@ -74,6 +74,17 @@ static void test_parity_fields(void)
     free(json);
     pbp_free(&p);
     pbp_free(&q);
+
+    // LogEveryConnection: off unless the file says so, and it survives a round trip
+    CHECK(parse("{}", &p, err) == 0 && !p.log_every);
+    pbp_free(&p);
+    CHECK(parse("{ \"LogEveryConnection\": true }", &p, err) == 0 && p.log_every);
+    json = pbp_serialize(&p);
+    CHECK(json && strstr(json, "\"LogEveryConnection\": true"));
+    CHECK(pbp_parse(json, strlen(json), &q, err, sizeof err) == 0 && q.log_every);
+    free(json);
+    pbp_free(&p);
+    pbp_free(&q);
 }
 
 static void test_roundtrip(void)

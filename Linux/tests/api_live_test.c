@@ -2,6 +2,7 @@
 // Needs root and the fake proxies running (tests/api_live.sh starts them).
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -95,6 +96,67 @@ int main(void)
     check("Start again", ProxyBridge_Start());
     sleep(1);
     expect("rules and proxies survived Stop/Start", "192.0.2.5", "hello-from-C");
+
+    printf("== main switch and per-object options\n");
+    ProxyBridge_SetEnabled(false);
+    expect("paused: new connections are not redirected", "192.0.2.5", NULL);
+    ProxyBridge_SetEnabled(true);
+    expect("enabled again", "192.0.2.5", "hello-from-C");
+    check("SetProxySendDomain on a known proxy", ProxyBridge_SetProxySendDomain(pa2, false) && ProxyBridge_SetProxySendDomain(pa2, true));
+    check("SetRuleLocalhost on a known rule", ProxyBridge_SetRuleLocalhost(r1, true) && ProxyBridge_SetRuleLocalhost(r1, false));
+    expect("traffic still flows after changing the options", "192.0.2.5", "hello-from-C");
+    ProxyBridge_ClearConnectionLogs();
+    ProxyBridge_SetLogEveryConnection(true);
+    ProxyBridge_SetLogEveryConnection(false);
+
+    printf("== live connections\n");
+    {
+        FILE *f = fopen("/tmp/pb_api_live_hold.py", "w");
+        if (f) {
+            fputs("import socket, time\n"
+                  "a = socket.socket(); a.connect(('192.0.2.30', 8888)); a.sendall(b'x' * 1000)\n"
+                  "b = socket.socket(); b.connect(('192.0.2.31', 8888))\n"
+                  "u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.connect(('192.0.2.32', 5300)); u.send(b'hello'); u.send(b'again')\n"
+                  "print('ready', flush=True)\n"
+                  "time.sleep(6)\n", f);
+            fclose(f);
+        }
+        uint32_t fr1 = ProxyBridge_AddRule("python3*", "192.0.2.30-192.0.2.31", "8888", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, pb2, err, sizeof err);
+        uint32_t fr2 = ProxyBridge_AddRule("python3*", "192.0.2.32", "5300", RULE_PROTOCOL_UDP, RULE_ACTION_PROXY, pb2, err, sizeof err);
+        check("rules for the holder process", fr1 && fr2);
+        FILE *kid = popen("python3 /tmp/pb_api_live_hold.py", "r");
+        char line[64] = "";
+        check("holder process started", kid && fgets(line, sizeof line, kid) && strncmp(line, "ready", 5) == 0);
+        sleep(2);                                              /* UDP flows are published once a second */
+        ProxyBridgeFlow fl[PB_FLOWS_MAX];
+        uint32_t n = ProxyBridge_GetFlows(fl, PB_FLOWS_MAX);
+        int tcp = 0, udp = 0;
+        bool good = true;
+        uint64_t sent_max = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            if (strncmp(fl[i].name, "python3", 7) != 0) continue;
+            good &= fl[i].proxy_id == pb2 && fl[i].age_ms < 10000 && fl[i].id != 0 && !fl[i].is_ipv6;
+            if (fl[i].is_udp) { udp++; good &= fl[i].port == 5300 && strcmp(fl[i].host, "192.0.2.32") == 0 && fl[i].sent >= 10; }
+            else { tcp++; good &= fl[i].port == 8888 && strncmp(fl[i].host, "192.0.2.3", 9) == 0; if (fl[i].sent > sent_max) sent_max = fl[i].sent; }
+        }
+        check("GetFlows lists the two held TCP connections and the UDP flow", tcp == 2 && udp == 1);
+        check("...with proxy, destination, process name and age", good);
+        check("...and the payload counters (sent >= 1000)", sent_max >= 1000);
+        check("GetFlows with max 1 returns one entry", ProxyBridge_GetFlows(fl, 1) == 1);
+        check("GetFlows with no buffer returns 0", ProxyBridge_GetFlows(NULL, 10) == 0 && ProxyBridge_GetFlows(fl, 0) == 0);
+        if (kid) pclose(kid);                                  /* the holder exits: its connections close */
+        int left = 99;
+        for (int i = 0; i < 40 && left; i++) {
+            usleep(100000);
+            n = ProxyBridge_GetFlows(fl, PB_FLOWS_MAX);
+            left = 0;
+            for (uint32_t k = 0; k < n; k++) if (!fl[k].is_udp && strncmp(fl[k].name, "python3", 7) == 0) left++;
+        }
+        check("closed connections leave the list", left == 0);
+        ProxyBridge_DeleteRule(fr1);
+        ProxyBridge_DeleteRule(fr2);
+        unlink("/tmp/pb_api_live_hold.py");
+    }
 
     printf("== proxy test helper\n");
     char buf[512] = "";
