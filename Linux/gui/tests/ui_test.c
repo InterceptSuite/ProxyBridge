@@ -766,9 +766,76 @@ static void feed_case(const char *name, const char *content, int first_response,
     g_free(last_msg); last_msg = NULL;
     if (second_ok) arm("msg", msg_then_ok, NULL, first_response);
     else arm_msg(first_response);
-    activate("Check for Updates");
+    activate("Check for Updates...");
     CHECK_HAS(second_ok ? first_msg : last_msg, want);
     g_free(path); g_free(url);
+}
+
+static GtkWidget *find_menubar(GtkWidget *w) {
+    if (GTK_IS_MENU_BAR(w)) return w;
+    if (!GTK_IS_CONTAINER(w)) return NULL;
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(w));
+    GtkWidget *hit = NULL;
+    for (GList *k = kids; k && !hit; k = k->next) hit = find_menubar(k->data);
+    g_list_free(kids);
+    return hit;
+}
+
+// labels of a menu's items joined with ";" (separators as "-"), or of the menu bar's menus
+static char *menu_labels(GtkWidget *shell) {
+    GString *out = g_string_new("");
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(shell));
+    for (GList *k = kids; k; k = k->next) {
+        if (GTK_IS_SEPARATOR_MENU_ITEM(k->data)) g_string_append(out, "-;");
+        else g_string_append_printf(out, "%s;", gtk_menu_item_get_label(GTK_MENU_ITEM(k->data)));
+    }
+    g_list_free(kids);
+    return g_string_free(out, FALSE);
+}
+
+static char *submenu_labels(const char *top) {
+    GtkWidget *bar = find_menubar(window);
+    char *res = NULL;
+    GList *kids = bar ? gtk_container_get_children(GTK_CONTAINER(bar)) : NULL;
+    for (GList *k = kids; k && !res; k = k->next)
+        if (strcmp(gtk_menu_item_get_label(GTK_MENU_ITEM(k->data)), top) == 0)
+            res = menu_labels(gtk_menu_item_get_submenu(GTK_MENU_ITEM(k->data)));
+    g_list_free(kids);
+    return res ? res : g_strdup("(missing)");
+}
+
+// the menu bar is laid out like the Windows app's: Proxy, Profile, Settings, Help
+static void menus_scenario(void) {
+    STEP("menu bar");
+    GtkWidget *bar = find_menubar(window);
+    CHECK(bar != NULL);
+    char *top = bar ? menu_labels(bar) : g_strdup("");
+    CHECK_STR(top, "Proxy;Profile;Settings;Help;");
+    g_free(top);
+    char *m = submenu_labels("Proxy");
+    CHECK_STR(m, "Enable ProxyBridge;Start Engine;Stop Engine;-;Proxy Settings...;Proxy Rules...;Log Filters...;-;Exit;");
+    g_free(m);
+    m = submenu_labels("Profile");
+    CHECK_STR(m, "New Profile...;Duplicate Profile...;Rename Profile...;Delete Profile...;-;Import Profile...;Export Profile...;-;Switch Profile;");
+    g_free(m);
+    m = submenu_labels("Settings");
+    CHECK_STR(m, "Enable Traffic Logging;Start at Boot (systemd service);Auto-clear Logs;Log Every Connection;Check for Updates on Startup;-;Zoom In;Zoom Out;Reset Zoom;");
+    g_free(m);
+    m = submenu_labels("Help");
+    CHECK_STR(m, "Documentation;Check for Updates...;-;About;");
+    g_free(m);
+
+    // Help > Documentation opens the same page as the Windows app (the test build records the address instead of starting a browser)
+    char *log = tmp_path("opened_urls.txt");
+    unlink(log);
+    setenv("PB_OPEN_URL_LOG", log, 1);
+    activate("Documentation");
+    char *seen = NULL;
+    CHECK(g_file_get_contents(log, &seen, NULL, NULL));
+    CHECK_STR(seen, "https://proxybridge.interceptsuite.com/docs/\n");
+    g_free(seen);
+    g_free(log);
+    unsetenv("PB_OPEN_URL_LOG");
 }
 
 static void updates_scenario(void) {
@@ -788,6 +855,21 @@ static void updates_scenario(void) {
     feed_case("feed_unsafe.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"http://insecure.test/x\", \"release_notes\": \"javascript:alert(1)\"}}",
               GTK_RESPONSE_ACCEPT, "Version 9.9.9 is available", true);
     CHECK_HAS(last_msg, "No safe https url");
+    // a feed that points at the project's release page: "Open in Browser" opens exactly that page
+    {
+        char *log = tmp_path("opened_release.txt");
+        unlink(log);
+        setenv("PB_OPEN_URL_LOG", log, 1);
+        feed_case("feed_project.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"https://github.com/InterceptSuite/ProxyBridge/releases/download/v9.9.9/x.tar.gz\", \"release_notes\": \"https://github.com/InterceptSuite/ProxyBridge/releases/tag/v9.9.9\"}}",
+                  GTK_RESPONSE_ACCEPT, "Version 9.9.9 is available", false);
+        pump(100);
+        char *seen = NULL;
+        CHECK(g_file_get_contents(log, &seen, NULL, NULL));
+        CHECK_STR(seen, "https://github.com/InterceptSuite/ProxyBridge/releases/tag/v9.9.9\n");
+        g_free(seen);
+        g_free(log);
+        unsetenv("PB_OPEN_URL_LOG");
+    }
     // ...and, since the browser runs as root, only the project's own pages: a feed pointing elsewhere is not opened
     feed_case("feed_foreign.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"https://evil.example/x\", \"release_notes\": \"https://evil.example/n\"}}",
               GTK_RESPONSE_ACCEPT, "Version 9.9.9 is available", true);
@@ -1277,6 +1359,8 @@ static void ui_main(void) {
     pump(300);
     CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Default");
     CHECK(menu_item("Proxy Settings...") && menu_item("Proxy Rules..."));
+
+    menus_scenario();
 
     printf("== proxy settings\n");
     arm("dlg_proxies", proxies_body, NULL, 0);

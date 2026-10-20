@@ -258,6 +258,23 @@ static UpdateInfo *update_lookup(void) {
     return u;
 }
 
+// Opens an address in the default browser. The tests build records the address in a file instead (no browser in a test display).
+static void open_in_browser(const char *url) {
+#ifdef PB_TEST_HOOKS
+    const char *log = getenv("PB_OPEN_URL_LOG");
+    if (log && *log) {
+        FILE *f = fopen(log, "a");
+        if (f) { fprintf(f, "%s\n", url); fclose(f); }
+        return;
+    }
+#endif
+    GError *uri_err = NULL;
+    if (!gtk_show_uri_on_window(GTK_WINDOW(window), url, GDK_CURRENT_TIME, &uri_err)) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not open browser: %s", uri_err ? uri_err->message : "unknown");
+        if (uri_err) g_error_free(uri_err);
+    }
+}
+
 // Main thread. A user-started check reports everything; a start-up check only speaks up when a newer version exists.
 static void update_show(UpdateInfo *u) {
     if (u->problem) {
@@ -288,13 +305,16 @@ static void update_show(UpdateInfo *u) {
         if (!url) {
             show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "No safe https url in update feed.");
         } else {
-            GError *uri_err = NULL;
-            if (!gtk_show_uri_on_window(GTK_WINDOW(window), url, GDK_CURRENT_TIME, &uri_err)) {
-                show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not open browser: %s", uri_err ? uri_err->message : "unknown");
-                if (uri_err) g_error_free(uri_err);
-            }
+            open_in_browser(url);
         }
     }
+}
+
+// same address as the Windows app's Help > Documentation
+#define DOCS_URL "https://proxybridge.interceptsuite.com/docs/"
+
+static void on_documentation(GtkWidget *widget, gpointer data) {
+    open_in_browser(DOCS_URL);
 }
 
 static void on_check_update(GtkWidget *widget, gpointer data) {
@@ -598,19 +618,16 @@ int main(int argc, char *argv[]) {
     // never gets pointer events from) the menu would stay on top of it: close it as soon as this window loses focus.
     g_signal_connect(window, "notify::is-active", G_CALLBACK(on_active_changed), menubar);
     g_signal_connect(window, "focus-out-event", G_CALLBACK(on_focus_out), menubar);
+    // The same four menus as the Windows app: Proxy, Profile, Settings, Help
     GtkWidget *proxy_menu = add_submenu(menubar, "Proxy");
-    add_menu_item(proxy_menu, "Proxy Settings...", G_CALLBACK(on_proxy_configure));
-    add_menu_item(proxy_menu, "Proxy Rules...", G_CALLBACK(on_proxy_rules_clicked));
-    add_separator(proxy_menu);
-    log_item = add_check_item(proxy_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
-    every_item = add_check_item(proxy_menu, "Log Every Connection", g_chk_log_every, G_CALLBACK(on_log_every_toggled));
-    clear_item = add_check_item(proxy_menu, "Auto-clear Logs", g_chk_auto_clear, G_CALLBACK(on_auto_clear_toggled));
-    add_menu_item(proxy_menu, "Log Filters...", G_CALLBACK(on_log_filters_clicked));
-    enable_item = add_check_item(proxy_menu, "Enable ProxyBridge", true, G_CALLBACK(on_enable_toggled));
-    add_separator(proxy_menu);
-    boot_item = add_check_item(proxy_menu, "Start at Boot (systemd service)", boot_is_enabled(), G_CALLBACK(on_boot_toggled));
+    enable_item = add_check_item(proxy_menu, "Enable ProxyBridge", true, G_CALLBACK(on_enable_toggled));      // the main on/off switch
     start_item = add_menu_item(proxy_menu, "Start Engine", G_CALLBACK(on_start_engine));
     stop_item = add_menu_item(proxy_menu, "Stop Engine", G_CALLBACK(on_stop_engine));
+    add_separator(proxy_menu);
+    add_menu_item(proxy_menu, "Proxy Settings...", G_CALLBACK(on_proxy_configure));
+    add_menu_item(proxy_menu, "Proxy Rules...", G_CALLBACK(on_proxy_rules_clicked));
+    add_menu_item(proxy_menu, "Log Filters...", G_CALLBACK(on_log_filters_clicked));
+    add_separator(proxy_menu);
     add_menu_item(proxy_menu, "Exit", G_CALLBACK(on_window_destroy));
     // like the Windows app: Profile is a menu of its own and every item acts at once on the active profile
     GtkWidget *profile_menu = add_submenu(menubar, "Profile");
@@ -627,20 +644,27 @@ int main(int argc, char *argv[]) {
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(switch_item), switch_menu);
     gtk_menu_shell_append(GTK_MENU_SHELL(profile_menu), switch_item);
     rebuild_switch_menu(NULL);
-    GtkWidget *view_menu = add_submenu(menubar, "View");
+    GtkWidget *settings_menu = add_submenu(menubar, "Settings");
+    log_item = add_check_item(settings_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
+    boot_item = add_check_item(settings_menu, "Start at Boot (systemd service)", boot_is_enabled(), G_CALLBACK(on_boot_toggled));
+    clear_item = add_check_item(settings_menu, "Auto-clear Logs", g_chk_auto_clear, G_CALLBACK(on_auto_clear_toggled));
+    every_item = add_check_item(settings_menu, "Log Every Connection", g_chk_log_every, G_CALLBACK(on_log_every_toggled));
+    update_item = add_check_item(settings_menu, "Check for Updates on Startup", g_chk_updates, G_CALLBACK(on_update_startup_toggled));
+    add_separator(settings_menu);
     GtkAccelGroup *accel = gtk_accel_group_new();
     gtk_window_add_accel_group(GTK_WINDOW(window), accel);
-    GtkWidget *zin = add_menu_item(view_menu, "Zoom In", G_CALLBACK(on_zoom_in));
-    GtkWidget *zout = add_menu_item(view_menu, "Zoom Out", G_CALLBACK(on_zoom_out));
-    GtkWidget *zreset = add_menu_item(view_menu, "Reset Zoom", G_CALLBACK(on_zoom_reset));
+    GtkWidget *zin = add_menu_item(settings_menu, "Zoom In", G_CALLBACK(on_zoom_in));
+    GtkWidget *zout = add_menu_item(settings_menu, "Zoom Out", G_CALLBACK(on_zoom_out));
+    GtkWidget *zreset = add_menu_item(settings_menu, "Reset Zoom", G_CALLBACK(on_zoom_reset));
     gtk_widget_add_accelerator(zin, "activate", accel, GDK_KEY_plus, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
     gtk_widget_add_accelerator(zin, "activate", accel, GDK_KEY_equal, GDK_CONTROL_MASK, GTK_ACCEL_MASK);
     gtk_widget_add_accelerator(zout, "activate", accel, GDK_KEY_minus, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
     gtk_widget_add_accelerator(zreset, "activate", accel, GDK_KEY_0, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
-    GtkWidget *about_menu = add_submenu(menubar, "About");
-    add_menu_item(about_menu, "About", G_CALLBACK(on_about));
-    add_menu_item(about_menu, "Check for Updates", G_CALLBACK(on_check_update));
-    update_item = add_check_item(about_menu, "Check for Updates on Startup", g_chk_updates, G_CALLBACK(on_update_startup_toggled));
+    GtkWidget *help_menu = add_submenu(menubar, "Help");
+    add_menu_item(help_menu, "Documentation", G_CALLBACK(on_documentation));
+    add_menu_item(help_menu, "Check for Updates...", G_CALLBACK(on_check_update));
+    add_separator(help_menu);
+    add_menu_item(help_menu, "About", G_CALLBACK(on_about));
     gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
 
     GtkWidget *notebook = gtk_notebook_new();
