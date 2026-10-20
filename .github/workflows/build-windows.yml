@@ -110,6 +110,18 @@ jobs:
         .\tests\e2e\run_e2e.ps1 -PbDir .\output
       shell: pwsh
 
+    # The same idea for the parts around the engine: it runs the real installer, the ProxyBridge Service, the app's own
+    # client code (Live Connections, pause, logging switches, rule changes, permissions), the real app and the real
+    # uninstaller. It installs ProxyBridge on the runner, so it runs after the step above. Best effort, same reasons.
+    # See Windows\tests\e2e\run_e2e_service.ps1.
+    - name: Real-traffic end-to-end tests, installer and service (best effort)
+      continue-on-error: true
+      timeout-minutes: 25
+      run: |
+        cd Windows
+        .\tests\e2e\run_e2e_service.ps1 -PbDir .\output
+      shell: pwsh
+
     - name: Upload end-to-end logs
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -120,6 +132,9 @@ jobs:
           Windows/tests/e2e/out/*.err
           Windows/tests/e2e/out/*.out
           Windows/tests/e2e/out/*.pbprofile
+          Windows/tests/e2e/out_service/*.log
+          Windows/tests/e2e/out_service/*.err
+          Windows/tests/e2e/out_service/*.out
         if-no-files-found: ignore
         retention-days: 7
 
