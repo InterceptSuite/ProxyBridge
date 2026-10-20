@@ -127,7 +127,7 @@ jobs:
         cd Linux/output
         # capture output first: `cmd | grep -q` can fail under pipefail when grep exits early (SIGPIPE)
         help_out="$(LD_LIBRARY_PATH="$PWD" ./ProxyBridge --help)"
-        grep -q -- "--proxy" <<<"$help_out" && echo "✓ CLI runs and shows its help"
+        grep -q -- "--profile" <<<"$help_out" && echo "✓ CLI runs and shows its help"
         cli_deps="$(LD_LIBRARY_PATH="$PWD" ldd ./ProxyBridge)"
         grep -q libproxybridge <<<"$cli_deps" && echo "✓ CLI links libproxybridge.so"
         # the GUI must carry an $ORIGIN runpath so it finds the library in its own directory
@@ -154,7 +154,7 @@ jobs:
         run_in() { # image, install command
           echo "::group::$1"
           docker run --rm -v "$out:/out:ro" "$1" sh -c "$2 >/dev/null 2>&1 &&
-            LD_LIBRARY_PATH=/out /out/ProxyBridge --help | grep -q -- '--proxy' && echo 'CLI starts' &&
+            LD_LIBRARY_PATH=/out /out/ProxyBridge --help | grep -q -- '--profile' && echo 'CLI starts' &&
             missing=\$(LD_LIBRARY_PATH=/out ldd /out/ProxyBridge /out/libproxybridge.so /out/ProxyBridgeGUI 2>&1 | grep 'not found' || true) &&
             if [ -n \"\$missing\" ]; then echo \"missing: \$missing\"; exit 1; fi && echo 'all libraries resolve'"
           echo "::endgroup::"
