@@ -115,7 +115,7 @@ public class SvcDrv {
 }
 '@
 
-function Svc([string]$cmd, [int]$ms = 20000) { $r = $script:driver.Cmd($cmd, $ms); return $r }
+function Svc([string]$cmd, [int]$ms = 20000) { $r = $script:driver.Cmd($cmd, $ms); return ,$r }   # the comma keeps a one-line answer an array
 function Svc-Id([string]$cmd) { $r = Svc $cmd; if ($r.Count -ge 1 -and $r[0] -match "^OK`t(\d+)$") { return [int]$Matches[1] }; return 0 }
 function Svc-Ok([string]$cmd) { $r = Svc $cmd; return ($r.Count -ge 1 -and $r[0] -like 'OK*') }
 function Get-Flows {
@@ -129,6 +129,7 @@ function Get-Flows {
     }
     return $out
 }
+function Conn-Text([string]$proc) { (@($script:driver.Events() | Where-Object { $_ -match "^EVT`tCONN`t[^`t]*$([regex]::Escape($proc))`t" }) -join ' | ') -replace "`t", ' ' }
 function Conn-Events([string]$proc) { @($script:driver.Events() | Where-Object { $_ -match "^EVT`tCONN`t[^`t]*$([regex]::Escape($proc))`t" }).Count }
 function Probe([string]$exe = $svcClient) { ((& $exe --probe 2>&1 | Out-String).Trim() -split "`n")[0].Trim() }
 
@@ -293,7 +294,7 @@ try {
 
     $null = Svc-Ok 'clearlogs'; $null = Svc-Ok "logall`t0"
     $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
-    Check 'Log Every Connection off: a program with no rule is not logged' ((Conn-Events 'pbe_nomatch.exe') -eq 0) "$(Conn-Events 'pbe_nomatch.exe') events"
+    Check 'Log Every Connection off: a program with no rule is not logged' ((Conn-Events 'pbe_nomatch.exe') -eq 0) (Conn-Text 'pbe_nomatch.exe')
     $null = Svc-Ok "logall`t1"
     $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
     Check 'Log Every Connection on: that connection is logged' ((Conn-Events 'pbe_nomatch.exe') -ge 1) "$(Conn-Events 'pbe_nomatch.exe') events"
@@ -305,7 +306,7 @@ try {
     $null = Svc-Ok "traffic`t0"; Start-Sleep -Seconds 1
     $before = Conn-Events 'pbe_svc.exe'; $bo = Count $logOpen '[CONNECT]'
     $r = Get-Ok $exe.svc 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
-    Check 'Traffic logging off: nothing is logged, but the traffic still goes through the proxy' ((Conn-Events 'pbe_svc.exe') -eq $before -and (Count $logOpen '[CONNECT]') -gt $bo)
+    Check 'Traffic logging off: nothing is logged, but the traffic still goes through the proxy' ((Conn-Events 'pbe_svc.exe') -eq $before -and (Count $logOpen '[CONNECT]') -gt $bo) "events $before -> $(Conn-Events 'pbe_svc.exe'); last: $((Conn-Text 'pbe_svc.exe') -replace '^.*\| ','')"
     $null = Svc-Ok "traffic`t1"
 
     # ---- editing rules while running
@@ -357,7 +358,9 @@ try {
         Check 'The app connected to the service (the service is busy for others)' ((Probe) -match 'BUSY')
         Via-Open 'The profile rule is applied: the program goes through the proxy' $exe.gui
         [void]$gui.CloseMainWindow()
-        if (-not $gui.WaitForExit(15000)) { Stop-Process -Id $gui.Id -Force; Check 'The app closes when asked' $false 'had to be killed' } else { Check 'The app closes when asked' $true }
+        # closing the window sends the app to the tray (it keeps running); end it the hard way, like quitting from a crash
+        Start-Sleep -Seconds 2
+        if (-not $gui.HasExited) { Stop-Process -Id $gui.Id -Force }
         Start-Sleep -Seconds 3
         Check 'The service keeps running after the app closed' ((Get-Service ProxyBridgeSvc).Status -eq 'Running')
         Direct-Open 'After the app closed the engine is released (no proxy)' $exe.gui
