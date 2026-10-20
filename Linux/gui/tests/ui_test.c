@@ -1230,8 +1230,34 @@ static void make_fake_systemctl(const char *path, const char *log)
     g_free(script);
 }
 
+// With the service, Start at Boot is a setting the service keeps in settings.json: it applies the active profile when it starts and
+// keeps routing after the window closes. The unit itself is installed (and enabled) by the installer.
+static bool settings_boot_flag(void)
+{
+    char *p = g_build_filename(getenv("PROXYBRIDGE_CONFIG_DIR"), "settings.json", NULL), *text = NULL;
+    bool on = g_file_get_contents(p, &text, NULL, NULL) && strstr(text, "\"StartAtBoot\": true");
+    g_free(text); g_free(p);
+    return on;
+}
+
+static void boot_service_scenario(void)
+{
+    STEP("start at boot (through the service)");
+    GtkWidget *item = menu_item("Start at Boot (systemd service)");
+    CHECK(item != NULL && !gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(item)) && !settings_boot_flag());
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+    CHECK(g_chk_boot && settings_boot_flag());
+    CHECK_STR(g_active_profile, g_active_profile);            // the active profile is kept in the same file
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), FALSE);
+    CHECK(!g_chk_boot && !settings_boot_flag());
+    switch_to_profile("Zoomed");
+    switch_to_profile("Default");
+    CHECK(!settings_boot_flag());                              // switching profiles does not touch it
+}
+
 static void boot_scenario(void)
 {
+    if (pbc_is_service()) { boot_service_scenario(); return; }
     STEP("start at boot");
     char *units = tmp_path("units"), *fake = tmp_path("systemctl"), *calls = tmp_path("systemctl.log");
     g_mkdir_with_parents(units, 0755);
@@ -1246,34 +1272,23 @@ static void boot_scenario(void)
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
     char *text = NULL;
     CHECK(g_file_get_contents(unit, &text, NULL, NULL));
-    // the unit names the stored profile FILE by its absolute path (a bare name would be resolved against the service's cwd)
-    char *def_path = profile_path("Default"), *zoom_path = profile_path("Zoomed");
-    char *want_default = g_strdup_printf("ExecStart=\"/usr/local/bin/ProxyBridge\" --profile \"%s\"", def_path);
-    CHECK_HAS(text, want_default);
-    CHECK(def_path[0] == '/' && strstr(text, "LimitNOFILE=1048576") && strstr(text, "NoNewPrivileges=yes"));
-    g_free(want_default);
+    // the unit runs the service; which profile it starts is the one the window saved as active (settings.json), so the unit itself
+    // never changes when profiles are switched
+    CHECK_HAS(text, "ExecStart=\"/usr/local/bin/ProxyBridge\" --daemon\n");
+    CHECK(!strstr(text, "--profile") && strstr(text, "LimitNOFILE=1048576") && strstr(text, "NoNewPrivileges=yes") && strstr(text, "RuntimeDirectory=proxybridge"));
     g_free(text);
     char *log = NULL;
     g_file_get_contents(calls, &log, NULL, NULL);
     CHECK_HAS(log, "enable proxybridge.service");
     g_free(log);
 
-    // another active profile is what the service runs after the next boot
+    char *before = NULL, *after = NULL;
+    CHECK(g_file_get_contents(unit, &before, NULL, NULL));
     switch_to_profile("Zoomed");
     CHECK_STR(g_active_profile, "Zoomed");
-    CHECK(g_file_get_contents(unit, &text, NULL, NULL));
-    char *want_zoom = g_strdup_printf("--profile \"%s\"", zoom_path);
-    CHECK_HAS(text, want_zoom);
-    g_free(want_zoom);
-    g_free(text);
     switch_to_profile("Default");
-    CHECK(g_file_get_contents(unit, &text, NULL, NULL));
-    char *want_def2 = g_strdup_printf("--profile \"%s\"", def_path);
-    CHECK_HAS(text, want_def2);
-    g_free(want_def2);
-    g_free(text);
-    g_free(def_path);
-    g_free(zoom_path);
+    CHECK(g_file_get_contents(unit, &after, NULL, NULL) && strcmp(before, after) == 0);
+    g_free(before); g_free(after);
 
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), FALSE);
     CHECK(!g_file_test(unit, G_FILE_TEST_EXISTS));

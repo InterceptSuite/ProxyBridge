@@ -21,7 +21,7 @@ LIBS = -lproxybridge -lpthread
 endif
 
 TARGET = $(BUILD_DIR)/ProxyBridge
-OBJECTS = $(BUILD_DIR)/main.o $(BUILD_DIR)/pb_profile.o
+OBJECTS = $(BUILD_DIR)/main.o $(BUILD_DIR)/daemon.o $(BUILD_DIR)/pb_profile.o $(BUILD_DIR)/pb_ipc.o $(BUILD_DIR)/pb_unit.o
 
 all: $(TARGET)
 
@@ -32,6 +32,12 @@ $(TARGET): $(OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 $(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/pb_unit.o: ../src/pb_unit.c ../src/pb_unit.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/pb_ipc.o: ../src/pb_ipc.c ../src/pb_ipc.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/pb_profile.o: ../profile/pb_profile.c ../profile/pb_profile.h | $(BUILD_DIR)

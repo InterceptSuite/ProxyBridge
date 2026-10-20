@@ -79,8 +79,10 @@ int   pbp_save_file(const char *path, const struct pbp_profile *p, char *err, si
 
 // settings.json next to the profiles holds the name of the active profile and the update check switch (both are not per profile);
 // everything else lives in the profile files.
-int   pbp_settings_load(const char *path, char **active, bool *check_updates);   // -1 if missing or unreadable
-int   pbp_settings_save(const char *path, const char *active, bool check_updates, char *err, size_t errlen);
+// start_at_boot: the ProxyBridge service applies the active profile when it starts, and keeps routing after the window is closed
+// (default false: the service stays idle until a window asks, and routing stops when that window closes).
+int   pbp_settings_load(const char *path, char **active, bool *check_updates, bool *start_at_boot);   // -1 if missing or unreadable; either bool may be NULL
+int   pbp_settings_save(const char *path, const char *active, bool check_updates, bool start_at_boot, char *err, size_t errlen);
 
 // Does a connection pass the filters? Excludes run first (any match hides); then, if there are Include filters, one must match.
 // protocol: "TCP"/"UDP"; action: "Direct"/"Proxy"/"Blocked".

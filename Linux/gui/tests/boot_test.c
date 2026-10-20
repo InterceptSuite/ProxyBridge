@@ -33,11 +33,12 @@ int main(void)
     char *t;
 
     // unit text
-    t = boot_unit_text("/x/ProxyBridge", "Work", &err);                                       // a name would resolve against the service's cwd
+    t = boot_unit_text("x/ProxyBridge", &err);                                                // a relative path would resolve against the service's cwd
     CHECK(t == NULL && err && strstr(err, "absolute"));
     g_free(err); err = NULL;
-    t = boot_unit_text("/usr/local/bin/ProxyBridge", "/etc/proxybridge/profiles/Work.pbprofile", &err);
-    CHECK(t && strstr(t, "LimitNOFILE=1048576") && strstr(t, "NoNewPrivileges=yes") && strstr(t, "ProtectSystem=strict") && strstr(t, "ProtectHome=read-only"));
+    t = boot_unit_text("/usr/local/bin/ProxyBridge", &err);
+    CHECK(t && strstr(t, "LimitNOFILE=1048576") && strstr(t, "NoNewPrivileges=yes") && strstr(t, "ProtectSystem=strict") && strstr(t, "ProtectHome=yes") &&
+          strstr(t, "RuntimeDirectory=proxybridge") && strstr(t, "ReadWritePaths=/etc/proxybridge\n"));
     g_free(t);
 
     // only root-owned, root-writable-only paths may be started at boot
@@ -50,83 +51,72 @@ int main(void)
     char *lnk = g_build_filename(dir, "lnk", NULL);
     CHECK(symlink("/usr/bin/true", lnk) == 0 && !boot_path_trusted(lnk, &why)); g_free(why); why = NULL; g_free(lnk);
 
-    t = boot_unit_text("/usr/local/bin/ProxyBridge", "/etc/proxybridge/profiles/Work.pbprofile", &err);
-    CHECK(t && strstr(t, "ExecStart=\"/usr/local/bin/ProxyBridge\" --profile \"/etc/proxybridge/profiles/Work.pbprofile\"\n") && strstr(t, "WantedBy=multi-user.target") &&
-          strstr(t, "After=network-online.target") && strstr(t, "Restart=on-failure"));
+    t = boot_unit_text("/usr/local/bin/ProxyBridge", &err);
+    CHECK(t && strstr(t, "ExecStart=\"/usr/local/bin/ProxyBridge\" --daemon\n") && strstr(t, "WantedBy=multi-user.target") &&
+          strstr(t, "After=network-online.target") && strstr(t, "Restart=on-failure") && !strstr(t, "--profile"));
     g_free(t);
-    t = boot_unit_text("/x/ProxyBridge", "/p/a \"b\" \\c %h $HOME", &err);
-    CHECK(t && strstr(t, "--profile \"/p/a \\\"b\\\" \\\\c %%h $$HOME\"\n"));                  // quoting that systemd understands
+    t = boot_unit_text("/x/a \"b\" \\c %h $HOME/ProxyBridge", &err);
+    CHECK(t && strstr(t, "ExecStart=\"/x/a \\\"b\\\" \\\\c %%h $$HOME/ProxyBridge\" --daemon\n"));            // quoting that systemd understands
     g_free(t);
-    t = boot_unit_text("/x/ProxyBridge", "/p/line\nbreak", &err);
+    t = boot_unit_text("/x/Proxy\nBridge", &err);
     CHECK(t == NULL && err && strstr(err, "control characters"));
     g_free(err); err = NULL;
-    t = boot_unit_text("/x/ProxyBridge", "/p/tab\there", &err);
+    t = boot_unit_text("/x/Proxy\tBridge", &err);
     CHECK(t == NULL);
-    g_free(err); err = NULL;
-    t = boot_unit_text("/x/Proxy\nBridge", "/p/ok", &err);
-    CHECK(t == NULL && err);
     g_free(err); err = NULL;
 
     // enable
     CHECK(!boot_is_enabled());
-    CHECK(boot_set(true, "/etc/proxybridge/profiles/Work.pbprofile", &err) && err == NULL);
+    CHECK(boot_set(true, &err) && err == NULL);
     CHECK(boot_is_enabled());
     char *content = slurp(unit);
-    CHECK(strstr(content, "ExecStart=\"/opt/pb dir/ProxyBridge\" --profile \"/etc/proxybridge/profiles/Work.pbprofile\"\n"));       // a path with a space is quoted
+    CHECK(strstr(content, "ExecStart=\"/opt/pb dir/ProxyBridge\" --daemon\n"));       // a path with a space is quoted
     struct stat st;
     CHECK(stat(unit, &st) == 0 && (st.st_mode & 0777) == 0644);
     char *log = slurp(calls);
     CHECK(strstr(log, "daemon-reload") && strstr(log, "enable proxybridge.service"));
     g_free(content); g_free(log);
 
-    // another active profile rewrites the unit
-    CHECK(boot_refresh("/etc/proxybridge/profiles/Home.pbprofile", &err));
-    content = slurp(unit);
-    CHECK(strstr(content, "--profile \"/etc/proxybridge/profiles/Home.pbprofile\"") && !strstr(content, "/etc/proxybridge/profiles/Work.pbprofile"));
-    g_free(content);
-
     // disable
     g_unlink(calls);
-    CHECK(boot_set(false, "/etc/proxybridge/profiles/Home.pbprofile", &err));
+    CHECK(boot_set(false, &err));
     CHECK(!boot_is_enabled());
     log = slurp(calls);
     CHECK(strstr(log, "disable proxybridge.service") && strstr(log, "daemon-reload"));
     g_free(log);
     g_unlink(calls);
-    CHECK(boot_refresh("/etc/proxybridge/profiles/Work.pbprofile", &err) && !boot_is_enabled());                                  // refresh does not enable anything
-    CHECK(boot_set(false, "/etc/proxybridge/profiles/Work.pbprofile", &err));                                                     // disabling twice is fine and runs nothing
+    CHECK(boot_set(false, &err));                                                     // disabling twice is fine and runs nothing
     log = slurp(calls);
     CHECK(strlen(log) == 0);
     g_free(log);
 
     // a failing systemctl: report it and leave no unit behind
     setenv("FAKE_FAIL", "enable", 1);
-    CHECK(!boot_set(true, "/etc/proxybridge/profiles/Work.pbprofile", &err) && err && strstr(err, "systemctl enable") && strstr(err, "boom"));
+    CHECK(!boot_set(true, &err) && err && strstr(err, "systemctl enable") && strstr(err, "boom"));
     CHECK(!boot_is_enabled());
     g_free(err); err = NULL;
     setenv("FAKE_FAIL", "daemon-reload", 1);
-    CHECK(!boot_set(true, "/etc/proxybridge/profiles/Work.pbprofile", &err) && err && strstr(err, "daemon-reload"));
+    CHECK(!boot_set(true, &err) && err && strstr(err, "daemon-reload"));
     CHECK(!boot_is_enabled());
     g_free(err); err = NULL;
     unsetenv("FAKE_FAIL");
-    CHECK(boot_set(true, "/etc/proxybridge/profiles/Work.pbprofile", &err));
+    CHECK(boot_set(true, &err));
     setenv("FAKE_FAIL", "disable", 1);
-    CHECK(!boot_set(false, "/etc/proxybridge/profiles/Work.pbprofile", &err) && err && strstr(err, "disable"));
+    CHECK(!boot_set(false, &err) && err && strstr(err, "disable"));
     CHECK(boot_is_enabled());                                                                 // still enabled: the disable failed
     g_free(err); err = NULL;
     unsetenv("FAKE_FAIL");
-    CHECK(boot_set(false, "/etc/proxybridge/profiles/Work.pbprofile", &err));
+    CHECK(boot_set(false, &err));
 
     // systemctl missing, and a directory that cannot be written
     setenv("PROXYBRIDGE_SYSTEMCTL", "/nonexistent/systemctl", 1);
-    CHECK(!boot_set(true, "/etc/proxybridge/profiles/Work.pbprofile", &err) && err && strstr(err, "could not run"));
+    CHECK(!boot_set(true, &err) && err && strstr(err, "could not run"));
     CHECK(!boot_is_enabled());
     g_free(err); err = NULL;
     setenv("PROXYBRIDGE_SYSTEMCTL", fake, 1);
     setenv("PROXYBRIDGE_SYSTEMD_DIR", "/nonexistent/dir", 1);
-    CHECK(!boot_set(true, "/etc/proxybridge/profiles/Work.pbprofile", &err) && err && strstr(err, "cannot write"));
+    CHECK(!boot_set(true, &err) && err && strstr(err, "cannot write"));
     g_free(err); err = NULL;
-    CHECK(!boot_set(true, "/p/bad\nname", &err) && err && strstr(err, "control characters"));
     g_free(err);
 
     char *cmd = g_strdup_printf("rm -rf %s", dir);

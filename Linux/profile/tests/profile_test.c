@@ -195,22 +195,23 @@ static void test_settings(void)
     CHECK(mkdtemp(dir) != NULL);
     snprintf(path, sizeof path, "%s/settings.json", dir);
     char *active = NULL;
-    bool upd = false;
-    CHECK(pbp_settings_load(path, &active, &upd) == -1);                                         // no file yet
-    CHECK(pbp_settings_save(path, "Work", true, err, sizeof err) == 0);
-    CHECK(pbp_settings_load(path, &active, &upd) == 0 && active && !strcmp(active, "Work") && upd);
-    CHECK(pbp_settings_save(path, "Home \"x\"", false, err, sizeof err) == 0);
-    upd = true;
-    CHECK(pbp_settings_load(path, &active, &upd) == 0 && !strcmp(active, "Home \"x\"") && !upd);
+    bool upd = false, boot = false;
+    CHECK(pbp_settings_load(path, &active, &upd, &boot) == -1);                                         // no file yet
+    CHECK(pbp_settings_save(path, "Work", true, true, err, sizeof err) == 0);
+    CHECK(pbp_settings_load(path, &active, &upd, &boot) == 0 && active && !strcmp(active, "Work") && upd && boot);
+    CHECK(pbp_settings_save(path, "Home \"x\"", false, false, err, sizeof err) == 0);
+    upd = true; boot = true;
+    CHECK(pbp_settings_load(path, &active, &upd, &boot) == 0 && !strcmp(active, "Home \"x\"") && !upd && !boot);
     FILE *f = fopen(path, "w");
     fputs("{ \"ActiveProfileName\": \"Only\" }", f);                                          // an older file without the switch
     fclose(f);
-    upd = false;
-    CHECK(pbp_settings_load(path, &active, &upd) == 0 && !strcmp(active, "Only") && upd);        // defaults to on
+    upd = false; boot = true;
+    CHECK(pbp_settings_load(path, &active, &upd, &boot) == 0 && !strcmp(active, "Only") && upd && !boot);        // update check defaults to on, start at boot to off
+    CHECK(pbp_settings_load(path, &active, NULL, NULL) == 0);                                              // either switch may be left out
     f = fopen(path, "w");
     fputs("not json", f);
     fclose(f);
-    CHECK(pbp_settings_load(path, &active, &upd) == -1);
+    CHECK(pbp_settings_load(path, &active, &upd, &boot) == -1);
     free(active);
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);

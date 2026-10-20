@@ -8,6 +8,3 @@ Terminal=false
 Categories=Network;Security;
 StartupWMClass=ProxyBridgeGUI
 StartupNotify=false
-# The GUI needs root (start it with sudo), so it is not offered in the application grid; this file gives the running window its
-# name and icon in the dock.
-NoDisplay=true

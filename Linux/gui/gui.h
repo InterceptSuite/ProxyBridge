@@ -51,6 +51,20 @@ typedef struct {
     char *saved;            // what is on disk, to skip rewriting unchanged profiles
 } Profile;
 
+// Where profiles and settings.json are kept: files (a window with its own engine, running as root) or the ProxyBridge service.
+struct gui_store {
+    bool   (*list)(GPtrArray *names);                                   // appends g_strdup'd profile names
+    char  *(*get)(const char *name);                                    // g_malloc'd file content, or NULL
+    bool   (*put)(const char *name, const char *data, char *err, size_t errn);
+    bool   (*del)(const char *name);
+    bool   (*exists)(const char *name);
+    bool   (*settings_get)(char **active, bool *check_updates, bool *start_at_boot);   // *active g_malloc'd or NULL
+    bool   (*settings_set)(const char *active, bool check_updates, bool start_at_boot, char *err, size_t errn);
+};
+extern const struct gui_store gui_store_files;
+extern const struct gui_store pbc_store;          // pb_client.c
+void gui_store_use(const struct gui_store *s);
+
 typedef void (*RuleImportCb)(const RuleData *rule, int index, void *ud);
 
 extern GtkWidget *window;
@@ -74,6 +88,7 @@ extern bool g_chk_dns;
 extern bool g_chk_log_every;
 extern bool g_chk_auto_clear;
 extern int g_zoom;
+extern bool g_chk_boot;      // Start at Boot (settings.json): the service keeps routing after the window closes, and applies the profile at boot
 extern bool g_chk_updates;   // check for a new version when the program starts (settings.json, not per profile)
 
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...);
@@ -148,5 +163,7 @@ void on_clear_log_clicked(GtkButton *button, gpointer user_data);
 
 // Path of the stored profile file for a profile name (g_malloc'd), or NULL for an unusable name.
 char *profile_path(const char *name);
+
+#include "pb_client.h"
 
 #endif

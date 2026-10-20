@@ -119,18 +119,21 @@ static void on_boot_toggled(GtkCheckMenuItem *item, gpointer data) {
     if (boot_syncing) return;
     bool want = gtk_check_menu_item_get_active(item);
     char *err = NULL;
-    char *ppath = profile_path(g_active_profile);
-    bool set_ok = ppath && boot_set(want, ppath, &err);
-    g_free(ppath);
-    if (!set_ok) {
+    if (!pbc_boot_set(want, &err)) {
         show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not %s starting at boot: %s", want ? "enable" : "disable", err ? err : "unknown error");
         g_free(err);
         boot_syncing = true;
-        gtk_check_menu_item_set_active(item, boot_is_enabled());
+        gtk_check_menu_item_set_active(item, pbc_boot_is_enabled());
         boot_syncing = false;
         return;
     }
-    gui_log("ProxyBridge %s at boot (service proxybridge.service, profile '%s')", want ? "will start" : "will no longer start", g_active_profile);
+    g_chk_boot = want;
+    save_config();
+    if (pbc_is_service())
+        gui_log(want ? "Start at Boot is on: the service applies profile '%s' when the machine starts and keeps routing after this window is closed" :
+                       "Start at Boot is off: routing stops when this window is closed", g_active_profile);
+    else
+        gui_log("ProxyBridge %s at boot (service proxybridge.service, profile '%s')", want ? "will start" : "will no longer start", g_active_profile);
 }
 
 static void on_update_startup_toggled(GtkCheckMenuItem *item, gpointer data) {
@@ -352,7 +355,7 @@ static void on_about(GtkWidget *widget, gpointer data) {
         "<span size='xx-large' weight='bold'>ProxyBridge</span>\n"
         "<span color='gray'>Version %s</span>\n\n"
         "Universal proxy client for Linux applications\n"
-        "eBPF backend (needs root, kernel 5.11+ with BTF and cgroup v2)\n\n"
+        "eBPF backend, run by the ProxyBridge service (root);\nkernel 5.11+ with BTF and cgroup v2\n\n"
         "Author: Sourav Kalal / InterceptSuite\n\n"
         "Website: <a href=\"https://interceptsuite.com\">interceptsuite.com</a>\n"
         "GitHub: <a href=\"https://github.com/InterceptSuite/ProxyBridge\">InterceptSuite/ProxyBridge</a>\n\n"
@@ -465,8 +468,11 @@ static void shutdown_engine() {
         engine_thread = NULL;
         engine_state = engine_job.start && engine_job.ok ? ENGINE_RUNNING : ENGINE_STOPPED;
     }
-    if (engine_state == ENGINE_RUNNING) ProxyBridge_Stop();
+    // With the service the engine belongs to the service: closing the window must not switch routing off
+    // Start at Boot keeps the service routing after the window closes; without it routing ends with the window, as it always did
+    if (engine_state == ENGINE_RUNNING && (!pbc_is_service() || !g_chk_boot)) ProxyBridge_Stop();
     engine_state = ENGINE_STOPPED;
+    pbc_disconnect();
 }
 
 static GtkWidget *add_menu_item(GtkWidget *menu, const char *label, GCallback cb) {
@@ -589,13 +595,53 @@ static GtkWidget *add_flows_tab(GtkWidget *notebook) {
     return flows_page;
 }
 
+// The service went away (restarted, updated, stopped). Try again every two seconds and send the window's configuration once it is back.
+static guint reconnect_source;
+
+static gboolean reconnect_tick(gpointer data) {
+    if (!pbc_reconnect()) return G_SOURCE_CONTINUE;
+    reconnect_source = 0;
+    pbc_BeginBatch();
+    ProxyBridge_ClearRules();
+    apply_proxies_to_lib();
+    apply_rules_to_lib();
+    pbc_EndBatch();
+    gui_sync_switches();
+    ProxyBridge_SetEnabled(gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(enable_item)));
+    set_engine_state(pbc_service_engine_running() ? ENGINE_RUNNING : ENGINE_STOPPED);
+    gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "Connected to the ProxyBridge service again.");
+    gui_log("connected to the ProxyBridge service again");
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean service_lost_idle(gpointer data) {
+    if (reconnect_source) return G_SOURCE_REMOVE;
+    gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "Lost the connection to the ProxyBridge service. Trying to reconnect...");
+    gui_log("lost the connection to the ProxyBridge service; trying to reconnect");
+    set_engine_state(ENGINE_STOPPED);
+    reconnect_source = g_timeout_add_seconds(2, reconnect_tick, NULL);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_service_lost(void) {            // reader thread
+    g_idle_add(service_lost_idle, NULL);
+}
+
 int main(int argc, char *argv[]) {
-    if (getuid() != 0) {
+    setenv("GSETTINGS_BACKEND", "memory", 1);
+    // Prefer the ProxyBridge service: the window then needs no root. Without a service, a window started as root runs the engine itself.
+    char link_err[256] = "";
+    int link = pbc_connect(NULL, link_err, sizeof link_err);
+    if (link == PBC_CONNECTED) {
+        gui_store_use(&pbc_store);
+    } else if (link == PBC_REFUSED || getuid() != 0) {
         gtk_init(&argc, &argv);
-        show_message(NULL, GTK_MESSAGE_ERROR, "ProxyBridge must be run as root (sudo).");
+        if (link == PBC_REFUSED)
+            show_message(NULL, GTK_MESSAGE_ERROR, "%s\n\nIf this is a permissions problem, add your user to the group that may control ProxyBridge:\n    sudo usermod -aG proxybridge $USER", link_err);
+        else
+            show_message(NULL, GTK_MESSAGE_ERROR, "The ProxyBridge service is not running.\n\nStart it with:\n    sudo systemctl enable --now proxybridge\n\n(or run this window with sudo to use ProxyBridge without the service).");
         return 1;
     }
-    setenv("GSETTINGS_BACKEND", "memory", 1);
     load_config();
     gtk_init(&argc, &argv);
 
@@ -646,7 +692,7 @@ int main(int argc, char *argv[]) {
     rebuild_switch_menu(NULL);
     GtkWidget *settings_menu = add_submenu(menubar, "Settings");
     log_item = add_check_item(settings_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
-    boot_item = add_check_item(settings_menu, "Start at Boot (systemd service)", boot_is_enabled(), G_CALLBACK(on_boot_toggled));
+    boot_item = add_check_item(settings_menu, "Start at Boot (systemd service)", pbc_boot_is_enabled(), G_CALLBACK(on_boot_toggled));
     clear_item = add_check_item(settings_menu, "Auto-clear Logs", g_chk_auto_clear, G_CALLBACK(on_auto_clear_toggled));
     every_item = add_check_item(settings_menu, "Log Every Connection", g_chk_log_every, G_CALLBACK(on_log_every_toggled));
     update_item = add_check_item(settings_menu, "Check for Updates on Startup", g_chk_updates, G_CALLBACK(on_update_startup_toggled));
@@ -689,8 +735,16 @@ int main(int argc, char *argv[]) {
     ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
     ProxyBridge_SetDnsViaProxy(g_chk_dns);
     ProxyBridge_SetLogEveryConnection(g_chk_log_every);
+    pbc_BeginBatch();                       // the service loads the whole configuration at once, never half of it
     apply_proxies_to_lib();
     apply_rules_to_lib();
+    pbc_EndBatch();
+    if (pbc_is_service()) {
+        pbc_set_lost_callback(on_service_lost);
+        pbc_replay_history(lib_log_callback);   // what the service did before this window opened
+        ProxyBridge_SetEnabled(true);           // "Enable ProxyBridge" always starts on; the service may have been left paused by an earlier window
+        gui_log("connected to the ProxyBridge service%s", g_chk_boot ? " (Start at Boot is on: it keeps routing when this window is closed)" : "");
+    }
 
     g_unix_signal_add(SIGINT, on_unix_signal, NULL);
     g_unix_signal_add(SIGTERM, on_unix_signal, NULL);
@@ -698,7 +752,8 @@ int main(int argc, char *argv[]) {
     gtk_widget_show_all(window);
     update_status_info();
     status_source = g_timeout_add_seconds(1, status_tick, NULL);
-    engine_request(true);
+    if (pbc_is_service()) set_engine_state(pbc_service_engine_running() ? ENGINE_RUNNING : ENGINE_STOPPED);   // it may already be routing (Start at Boot)
+    engine_request(true);                                                                                       // does nothing when it is
     apply_zoom_css();
     if (g_chk_updates && !pb_gui_ready_hook) gui_check_updates_on_startup();
     if (pb_gui_ready_hook) pb_gui_ready_hook();

@@ -35,6 +35,7 @@ static struct {
     pthread_mutex_t maint_mu;
     pthread_cond_t maint_cv;
     uint64_t warned[16]; size_t nwarned;
+    int batch; bool batch_dirty;         // BeginBatch/EndBatch: changes reach the kernel datapath once, at the end
     LogCallback log_cb;
     ConnectionCallback conn_cb;
     ConnectionCallbackEx conn_cb_ex;
@@ -328,6 +329,7 @@ static void sync_locked(void)
 {
     rebuild_views_locked();
     if (!G.running) return;
+    if (G.batch > 0) { G.batch_dirty = true; return; }
     if (pb_bpf_sync(G.views, G.nviews) != 0) pb_core_log("failed to apply rules to the kernel datapath");
     pb_bpf_set_flags(atomic_load(&G.traffic_logging), atomic_load(&G.dns_via_proxy));
     rearm_all_locked();
@@ -854,6 +856,23 @@ void ProxyBridge_ClearConnectionLogs(void)
 
 void ProxyBridge_SetLogEveryConnection(bool enable) { atomic_store(&G.log_every, enable); }
 
+void ProxyBridge_BeginBatch(void)
+{
+    pthread_rwlock_wrlock(&G.lock);
+    G.batch++;
+    pthread_rwlock_unlock(&G.lock);
+}
+
+void ProxyBridge_EndBatch(void)
+{
+    pthread_rwlock_wrlock(&G.lock);
+    if (G.batch > 0 && --G.batch == 0 && G.batch_dirty) {
+        G.batch_dirty = false;
+        sync_locked();
+    }
+    pthread_rwlock_unlock(&G.lock);
+}
+
 void ProxyBridge_SetEnabled(bool enable)
 {
     atomic_store(&G.paused, !enable);
@@ -903,7 +922,11 @@ bool ProxyBridge_Start(void)
 
     pb_bpf_set_paused(atomic_load(&G.paused));
     pthread_rwlock_wrlock(&G.lock);
+    int held = G.batch;                // starting always loads everything, even inside a batch
+    G.batch = 0;
     sync_locked();
+    G.batch = held;
+    G.batch_dirty = false;
     pthread_rwlock_unlock(&G.lock);
     pb_core_log("ProxyBridge started (eBPF datapath, relay tcp:%u udp:%u)", pb_relay_tcp_port(), pb_relay_udp_port());
     return true;

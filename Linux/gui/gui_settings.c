@@ -480,14 +480,6 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
 }
 
 static void update_profile_ui() {
-    char *boot_err = NULL;
-    char *ppath = profile_path(g_active_profile);
-    bool refreshed = ppath && boot_refresh(ppath, &boot_err);         // the boot service runs the active profile
-    g_free(ppath);
-    if (!refreshed) {
-        gui_log("could not update the boot service: %s", boot_err ? boot_err : "unknown error");
-        g_free(boot_err);
-    }
     char *title = g_strdup_printf("ProxyBridge - %s", g_active_profile);
     gtk_window_set_title(GTK_WINDOW(window), title);
     g_free(title);
@@ -499,9 +491,11 @@ static void update_profile_ui() {
 
 // engine keeps running, only its proxies and rules are replaced
 static void reapply_active_profile() {
+    ProxyBridge_BeginBatch();                  // the datapath sees the new profile all at once, never a half-built one
     ProxyBridge_ClearRules();
     apply_proxies_to_lib();
     apply_rules_to_lib();
+    ProxyBridge_EndBatch();
     gui_sync_switches();
     save_config();
     refresh_rules_window();

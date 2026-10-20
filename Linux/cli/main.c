@@ -9,6 +9,9 @@
 #include <sys/auxv.h>
 #include "../src/ProxyBridge.h"
 #include "../profile/pb_profile.h"
+#include "../src/pb_ipc.h"
+#include "daemon.h"
+#include "../src/pb_unit.h"
 
 #define UPDATE_FEED "https://download.interceptsuite.com/proxybridge.json"
 
@@ -61,6 +64,10 @@ static void show_help(void)
     printf("                         1 - Log messages only\n");
     printf("                         2 - Connection events only\n");
     printf("                         3 - Both logs and connections\n\n");
+    printf("  --daemon             Run as the ProxyBridge service: owns the engine and the profiles, and lets the\n");
+    printf("                       window (which then needs no root) control it. Used by proxybridge.service\n");
+    printf("  --print-unit <path>  Print the systemd unit that runs <path> --daemon (used by the installer)\n");
+    printf("  --socket <path>      With --daemon: the control socket (default %s)\n\n", PB_IPC_SOCKET_PATH);
     printf("  --version            Show version information\n");
     printf("  -?, -h, --help       Show help\n\n");
     printf("Commands:\n");
@@ -152,6 +159,8 @@ static bool is_root(void)
 int main(int argc, char *argv[])
 {
     const char* profile_arg = NULL;
+    bool daemon_mode = false;
+    const char* socket_arg = PB_IPC_SOCKET_PATH;
 
     for (int i = 1; i < argc; i++)
     {
@@ -168,6 +177,27 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[i], "--update") == 0)
         {
             return check_update();
+        }
+        else if (strcmp(argv[i], "--daemon") == 0)
+        {
+            daemon_mode = true;
+        }
+        else if (strcmp(argv[i], "--print-unit") == 0 && i + 1 < argc)
+        {
+            const char* why = NULL;
+            char* text = pb_unit_text(argv[++i], &why);
+            if (!text)
+            {
+                fprintf(stderr, "ERROR: %s\n", why ? why : "cannot build the unit");
+                return 1;
+            }
+            fputs(text, stdout);
+            free(text);
+            return 0;
+        }
+        else if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc)
+        {
+            socket_arg = argv[++i];
         }
         else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc)
         {
@@ -189,6 +219,16 @@ int main(int argc, char *argv[])
             fprintf(stderr, "Use --help for usage information\n");
             return 1;
         }
+    }
+
+    if (daemon_mode)
+    {
+        if (profile_arg)
+        {
+            fprintf(stderr, "ERROR: --daemon runs the profile the window made active; it does not take --profile.\n");
+            return 1;
+        }
+        return pb_daemon_run(socket_arg, verbose_level);
     }
 
     if (!profile_arg)

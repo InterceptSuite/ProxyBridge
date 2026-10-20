@@ -89,7 +89,7 @@ grep -q '"ActiveProfileName": "Alt"' "$WORK/cfg/settings.json" && ok "settings.j
 grep -q '"ProxyConfigs"' "$P/Default.pbprofile" && grep -q '"TargetDomains": "\*.example.test"' "$P/Default.pbprofile" && grep -q '"Version": "1.0"' "$P/Default.pbprofile" \
   && ok "the saved profile uses the Windows/macOS format (domain rule in TargetDomains)" || bad "profile format: $(head -40 "$P/Default.pbprofile")"
 grep -q '"IsTrafficLoggingEnabled": true' "$P/Default.pbprofile" && grep -q '"DnsViaProxy": true' "$P/Default.pbprofile" \
-  && [ "$(grep -c . "$WORK/cfg/settings.json")" -le 4 ] && ! grep -q Dns "$WORK/cfg/settings.json" \
+  && [ "$(grep -c . "$WORK/cfg/settings.json")" -le 5 ] && ! grep -q Dns "$WORK/cfg/settings.json" \
   && ok "logging and DNS switches live in the profile; settings.json only names the active profile" || bad "switches placement"
 [ "$(stat -c %a "$P/Default.pbprofile")" = 600 ] && [ "$(stat -c %a "$P")" = 700 ] && ok "profile files are 0600 in a 0700 directory" || bad "profile permissions"
 

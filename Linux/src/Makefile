@@ -56,10 +56,11 @@ $(TARGET): $(OBJECTS) exports.map
 $(BUILD_DIR)/%.o: %.c pb_internal.h ProxyBridge.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-test-rules: tests/rules_test.c tests/dns_test.c tests/proc_test.c pb_rules.c pb_rules.h pb_dns.c pb_dns.h pb_proc.c pb_proc.h | $(BUILD_DIR)
+test-rules: tests/rules_test.c tests/dns_test.c tests/proc_test.c tests/ipc_test.c pb_rules.c pb_rules.h pb_dns.c pb_dns.h pb_proc.c pb_proc.h pb_ipc.c pb_ipc.h | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -g -fsanitize=address,undefined -D_GNU_SOURCE tests/rules_test.c pb_rules.c -o $(BUILD_DIR)/rules_test && $(BUILD_DIR)/rules_test
 	$(CC) -Wall -Wextra -g -fsanitize=address,undefined -D_GNU_SOURCE tests/dns_test.c pb_dns.c -o $(BUILD_DIR)/dns_test && $(BUILD_DIR)/dns_test
 	$(CC) -Wall -Wextra -g -fsanitize=address,undefined -D_GNU_SOURCE tests/proc_test.c pb_proc.c -o $(BUILD_DIR)/proc_test && $(BUILD_DIR)/proc_test
+	$(CC) -Wall -Wextra -g -fsanitize=address,undefined -D_GNU_SOURCE tests/ipc_test.c pb_ipc.c -o $(BUILD_DIR)/ipc_test && $(BUILD_DIR)/ipc_test
 
 # Downloads, verifies and builds zlib, libelf (from elfutils) and libbpf (cached); prints nothing. `make -s libbpf-path` prints
 # the directory to use as LIBBPF_DIR. Every download is checked against a pinned SHA-256.

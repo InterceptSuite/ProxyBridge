@@ -752,7 +752,7 @@ int pbp_save_file(const char *path, const struct pbp_profile *p, char *err, size
     return rc;
 }
 
-int pbp_settings_load(const char *path, char **active, bool *check_updates)
+int pbp_settings_load(const char *path, char **active, bool *check_updates, bool *start_at_boot)
 {
     char err[200];
     FILE *f = fopen(path, "r");
@@ -769,18 +769,20 @@ int pbp_settings_load(const char *path, char **active, bool *check_updates)
         char *a = jtext(&root, "ActiveProfileName");
         if (a && *a) { free(*active); *active = a; } else free(a);
         if (check_updates) *check_updates = jbool(&root, "CheckForUpdatesOnStartup", true);
+        if (start_at_boot) *start_at_boot = jbool(&root, "StartAtBoot", false);
     } else rc = -1;
     jfree(&root);
     free(buf);
     return rc;
 }
 
-int pbp_settings_save(const char *path, const char *active, bool check_updates, char *err, size_t errlen)
+int pbp_settings_save(const char *path, const char *active, bool check_updates, bool start_at_boot, char *err, size_t errlen)
 {
     struct sb b = {0};
     sb_puts(&b, "{\n");
     sb_kv(&b, "  ", "ActiveProfileName", active ? active : "", ",\n");
-    sb_puts(&b, check_updates ? "  \"CheckForUpdatesOnStartup\": true\n}\n" : "  \"CheckForUpdatesOnStartup\": false\n}\n");
+    sb_puts(&b, check_updates ? "  \"CheckForUpdatesOnStartup\": true,\n" : "  \"CheckForUpdatesOnStartup\": false,\n");
+    sb_puts(&b, start_at_boot ? "  \"StartAtBoot\": true\n}\n" : "  \"StartAtBoot\": false\n}\n");
     if (b.oom) { free(b.p); snprintf(err, errlen, "out of memory"); return -1; }
     int rc = pbp_write_file(path, b.p, err, errlen);
     free(b.p);

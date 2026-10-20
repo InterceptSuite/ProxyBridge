@@ -1,4 +1,5 @@
 #include "gui_boot.h"
+#include "pb_unit.h"
 #include <fcntl.h>
 #include <glib/gstdio.h>
 #include <string.h>
@@ -77,43 +78,16 @@ static char *cli_path(char **error) {
     return cli;
 }
 
-// systemd's own quoting for one ExecStart word: backslash, double quote, % (specifier) and $ (variable) are escaped
-static void quote_word(GString *out, const char *s) {
-    g_string_append_c(out, '"');
-    for (; *s; s++) {
-        if (*s == '\\' || *s == '"') g_string_append_c(out, '\\');
-        else if (*s == '%') g_string_append_c(out, '%');
-        else if (*s == '$') g_string_append_c(out, '$');
-        g_string_append_c(out, *s);
-    }
-    g_string_append_c(out, '"');
-}
-
-char *boot_unit_text(const char *cli, const char *profile, char **error) {
-    if (profile[0] != '/') {                  // the stored file, never a name: a name is resolved relative to the service's cwd
-        if (error) *error = g_strdup("the profile must be given as an absolute path");
+char *boot_unit_text(const char *cli, char **error) {
+    const char *why = NULL;
+    char *text = pb_unit_text(cli, &why);
+    if (!text) {
+        if (error) *error = g_strdup(why ? why : "cannot build the unit");
         return NULL;
     }
-    for (const char *p = profile; *p; p++)
-        if ((unsigned char)*p < 0x20 || *p == 0x7f) {
-            if (error) *error = g_strdup("the profile name contains control characters and cannot be used in a service file");
-            return NULL;
-        }
-    for (const char *p = cli; *p; p++)
-        if ((unsigned char)*p < 0x20 || *p == 0x7f) {
-            if (error) *error = g_strdup("the program path contains control characters");
-            return NULL;
-        }
-    GString *s = g_string_new("[Unit]\nDescription=ProxyBridge\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=");
-    quote_word(s, cli);
-    g_string_append(s, " --profile ");
-    quote_word(s, profile);
-    g_string_append(s, "\nRestart=on-failure\nRestartSec=5\n"
-        // the engine needs root for eBPF and /proc, nothing else: no new privileges, no writable system or home directories
-        "LimitNOFILE=1048576\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=read-only\nPrivateTmp=yes\nProtectKernelModules=yes\n"
-        "ProtectKernelLogs=yes\nProtectClock=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\n"
-        "\n[Install]\nWantedBy=multi-user.target\n");
-    return g_string_free(s, FALSE);
+    char *out = g_strdup(text);
+    free(text);
+    return out;
 }
 
 bool boot_is_enabled(void) {
@@ -142,10 +116,10 @@ static bool run_systemctl(const char *a, const char *b, char **error) {
     return ok;
 }
 
-static bool write_unit(const char *profile, char **error) {
+static bool write_unit(char **error) {
     char *cli = cli_path(error);
     if (!cli) return false;
-    char *text = boot_unit_text(cli, profile, error);
+    char *text = boot_unit_text(cli, error);
     g_free(cli);
     if (!text) return false;
     char *path = unit_path(), *tmp = g_strdup_printf("%s.tmp", path);
@@ -166,10 +140,10 @@ static bool write_unit(const char *profile, char **error) {
     return ok;
 }
 
-bool boot_set(bool enable, const char *profile, char **error) {
+bool boot_set(bool enable, char **error) {
     if (error) *error = NULL;
     if (enable) {
-        if (!write_unit(profile, error)) return false;
+        if (!write_unit(error)) return false;
         if (!run_systemctl("daemon-reload", NULL, error) || !run_systemctl("enable", UNIT_NAME, error)) {
             char *path = unit_path();
             g_unlink(path);                          // do not leave a unit behind that is not enabled
@@ -188,10 +162,4 @@ bool boot_set(bool enable, const char *profile, char **error) {
     if (ok && existed) run_systemctl("daemon-reload", NULL, NULL);
     g_free(path);
     return ok;
-}
-
-bool boot_refresh(const char *profile, char **error) {
-    if (error) *error = NULL;
-    if (!boot_is_enabled()) return true;
-    return write_unit(profile, error) && run_systemctl("daemon-reload", NULL, error);
 }

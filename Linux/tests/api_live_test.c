@@ -174,6 +174,37 @@ int main(void)
     buf[0] = 0; check("TestProxy against a dead proxy fails with a readable message", ProxyBridge_TestProxy(dead, "192.0.2.77", 80, buf, sizeof buf) != 0 && strlen(buf) > 5);
     printf("        (%s)\n", buf);
 
+    printf("== batch: a whole configuration reaches the datapath at once\n");
+    {
+        ProxyBridge_ClearRules();
+        uint32_t bxa = ProxyBridge_AddProxy("batch-a", PROXY_TYPE_SOCKS5, "127.0.0.1", 19080, "", "", err, sizeof err);
+        uint32_t bxb = ProxyBridge_AddProxy("batch-b", PROXY_TYPE_SOCKS5, "127.0.0.1", 19081, "bob", "pw", err, sizeof err);
+        uint32_t keep = ProxyBridge_AddRule("curl", "192.0.2.64/26", "*", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, bxa, err, sizeof err);
+        expect("a rule before the batch routes", "192.0.2.70", "hello-from-A");
+        ProxyBridge_BeginBatch();
+        ProxyBridge_ClearRules();
+        uint32_t nr = ProxyBridge_AddRule("curl", "192.0.2.128/26", "*", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, bxb, err, sizeof err);
+        check("rules can be changed inside a batch", nr != 0);
+        expect("inside a batch the datapath still has the old rules", "192.0.2.70", "hello-from-A");
+        expect("inside a batch the new rule is not active yet", "192.0.2.130", NULL);
+        ProxyBridge_BeginBatch();                              // batches nest
+        ProxyBridge_EndBatch();
+        expect("a nested batch ending does not release the outer one", "192.0.2.130", NULL);
+        ProxyBridge_EndBatch();
+        expect("when the outer batch ends the new configuration is live", "192.0.2.130", "hello-from-B");
+        expect("and the old rule is gone", "192.0.2.70", NULL);
+        ProxyBridge_EndBatch();                                // an unbalanced End is harmless
+        ProxyBridge_BeginBatch();
+        ProxyBridge_Stop();
+        check("Start inside a batch still loads everything", ProxyBridge_Start());
+        expect("rules are live after Start inside a batch", "192.0.2.130", "hello-from-B");
+        ProxyBridge_EndBatch();
+        ProxyBridge_DeleteRule(nr);
+        ProxyBridge_DeleteProxy(bxa);
+        ProxyBridge_DeleteProxy(bxb);
+        (void)keep;
+    }
+
     printf("== cleanup\n");
     ProxyBridge_ClearRules();
     expect("ClearRules: direct again", "192.0.2.5", NULL);
