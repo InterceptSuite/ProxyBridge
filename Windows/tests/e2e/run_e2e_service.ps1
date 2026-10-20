@@ -293,16 +293,16 @@ try {
     Via-Open 'Resumed: the Proxy rule applies again' $exe.svc
 
     $null = Svc-Ok 'clearlogs'; $null = Svc-Ok "logall`t0"
-    $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
-    $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'
-    $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
+    # One program opens the same connection twice (the log remembers per process, so it has to be one process).
+    function Twice($client) { & $client -s -o NUL --forbid-reuse --max-time 20 http://example.com/ --next -s -o NUL --forbid-reuse --max-time 20 http://example.com/ 2>&1 | Out-Null; Start-Sleep -Seconds 2 }
+    function Web-Events([string]$proc) { @($script:driver.Events() | Where-Object { $_ -match "^EVT`tCONN`t[^`t]*$([regex]::Escape($proc))`t\d+`t[^`t]+`t80`t" }).Count }
+    Twice $exe.nomatch
     # default: a connection is logged once per program, destination, port and action; "every connection" logs each one
-    Check 'Log Every Connection off: the same connection twice is logged once' ((Conn-Events 'pbe_nomatch.exe') -eq 1) (Conn-Text 'pbe_nomatch.exe')
-    $before = Conn-Events 'pbe_nomatch.exe'
+    Check 'Log Every Connection off: the same connection twice is logged once' ((Web-Events 'pbe_nomatch.exe') -eq 1) (Conn-Text 'pbe_nomatch.exe')
+    $before = Web-Events 'pbe_nomatch.exe'
     $null = Svc-Ok "logall`t1"
-    $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'
-    $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
-    Check 'Log Every Connection on: each of two connections is logged' ((Conn-Events 'pbe_nomatch.exe') -ge ($before + 2)) "$before -> $(Conn-Events 'pbe_nomatch.exe') events"
+    Twice $exe.nomatch
+    Check 'Log Every Connection on: each of the two connections is logged' ((Web-Events 'pbe_nomatch.exe') -ge ($before + 2)) "$before -> $(Web-Events 'pbe_nomatch.exe') events"
     $null = Svc-Ok "logall`t0"
 
     $before = Conn-Events 'pbe_svc.exe'
