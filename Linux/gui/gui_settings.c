@@ -1,4 +1,5 @@
 #include "gui.h"
+#include "gui_boot.h"
 
 GList *g_proxies_list = NULL;
 char *g_default_proxy = NULL;
@@ -22,8 +23,10 @@ typedef struct {
     uint16_t port;
     GtkTextBuffer *buffer;
     GtkWidget *btn;
-    char result[4096];
+    int result;
 } TestJob;
+
+typedef struct { GtkTextBuffer *buffer; char *line; } TestLine;
 
 void free_proxy_data(ProxyData *p) {
     if (!p) return;
@@ -57,6 +60,7 @@ void apply_proxies_to_lib() {
         char err[256] = "";
         p->id = ProxyBridge_AddProxy(p->name, p->type, p->host, p->port, p->username, p->password, err, sizeof(err));
         if (p->id == 0) gui_log("Proxy '%s' rejected: %s", p->name, err[0] ? err : "unknown error");
+        else if (!p->send_domain) ProxyBridge_SetProxySendDomain(p->id, false);
     }
     ProxyBridge_SetDefaultProxy(resolve_proxy_id(g_default_proxy));
 }
@@ -82,12 +86,24 @@ static bool port_text_valid(const char *text, int *port_out) {
     return true;
 }
 
+// the first line replaces the "Testing..." placeholder, later lines are appended
+static gboolean on_test_line(gpointer user_data) {
+    TestLine *tl = (TestLine *)user_data;
+    char *text = g_utf8_make_valid(tl->line, -1);
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(tl->buffer, &end);
+    gtk_text_buffer_insert(tl->buffer, &end, text, -1);
+    gtk_text_buffer_insert(tl->buffer, &end, "\n", 1);
+    g_free(text);
+    g_object_unref(tl->buffer);
+    g_free(tl->line);
+    g_free(tl);
+    return FALSE;
+}
+
 static gboolean on_test_done(gpointer user_data) {
     TestJob *job = (TestJob *)user_data;
-    char *text = g_utf8_make_valid(job->result, -1);
-    gtk_text_buffer_set_text(job->buffer, text, -1);
     gtk_widget_set_sensitive(job->btn, TRUE);
-    g_free(text);
     g_object_unref(job->buffer);
     g_object_unref(job->btn);
     g_free(job->host);
@@ -95,10 +111,17 @@ static gboolean on_test_done(gpointer user_data) {
     return FALSE;
 }
 
+static void test_progress(const char *line, void *user) {
+    TestJob *job = (TestJob *)user;
+    TestLine *tl = g_malloc0(sizeof *tl);
+    tl->buffer = g_object_ref(job->buffer);
+    tl->line = g_strdup(line);
+    g_idle_add(on_test_line, tl);
+}
+
 static gpointer run_test_thread(gpointer user_data) {
     TestJob *job = (TestJob *)user_data;
-    ProxyBridge_TestProxy(job->proxy_id, job->host, job->port, job->result, sizeof(job->result));
-    job->result[sizeof(job->result) - 1] = '\0';
+    job->result = ProxyBridge_TestProxyEx(job->proxy_id, job->host, job->port, test_progress, job);
     g_idle_add(on_test_done, job);
     return NULL;
 }
@@ -126,7 +149,7 @@ static void on_start_test_clicked(GtkWidget *widget, gpointer data) {
     int t_port = (int)parse_long(gtk_entry_get_text(GTK_ENTRY(info->test_port)));
     if (t_port <= 0 || t_port > 65535) t_port = 80;
 
-    gtk_text_buffer_set_text(info->output_buffer, "Testing connection... Please wait...", -1);
+    gtk_text_buffer_set_text(info->output_buffer, "", -1);
     gtk_widget_set_sensitive(info->test_btn, FALSE);
 
     TestJob *job = g_malloc0(sizeof(TestJob));
@@ -192,6 +215,7 @@ static ProxyData *proxy_edit_dialog(GtkWindow *parent, ProxyData *existing) {
                                          GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                          "Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, NULL);
     gtk_window_set_default_size(GTK_WINDOW(dialog), 420, -1);
+    gtk_widget_set_name(dialog, "dlg_proxy");
     GtkWidget *grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid), 5);
     gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
@@ -211,8 +235,15 @@ static ProxyData *proxy_edit_dialog(GtkWindow *parent, ProxyData *existing) {
     grid_row(grid, 3, "Port:", port_entry);
     grid_row(grid, 4, "Username:", user_entry);
     grid_row(grid, 5, "Password:", pass_entry);
+    GtkWidget *dns_check = gtk_check_button_new_with_label("DNS via proxy (the proxy resolves host names)");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(dns_check), existing ? existing->send_domain : TRUE);
+    gtk_grid_attach(GTK_GRID(grid), dns_check, 1, 6, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), hint_label("On: connections to a name the application resolved are sent to the proxy by name. Off: the IP address is sent. UDP always uses the IP."), 1, 7, 1, 1);
     GtkWidget *err_label = hint_label("");
-    gtk_grid_attach(GTK_GRID(grid), err_label, 0, 6, 2, 1);
+    gtk_widget_set_name(name_entry, "px_name"); gtk_widget_set_name(type_combo, "px_type"); gtk_widget_set_name(ip_entry, "px_host");
+    gtk_widget_set_name(port_entry, "px_port"); gtk_widget_set_name(user_entry, "px_user"); gtk_widget_set_name(pass_entry, "px_pass");
+    gtk_widget_set_name(dns_check, "px_dns"); gtk_widget_set_name(err_label, "px_error");
+    gtk_grid_attach(GTK_GRID(grid), err_label, 0, 8, 2, 1);
 
     gtk_combo_box_set_active(GTK_COMBO_BOX(type_combo), 1);
     if (existing) {
@@ -255,7 +286,8 @@ static ProxyData *proxy_edit_dialog(GtkWindow *parent, ProxyData *existing) {
                 id = ProxyBridge_AddProxy(name, type, host, (uint16_t)port, user, pass, err, sizeof(err));
                 ok = id != 0;
             }
-            if (!ok) msg = err[0] ? err : "Engine rejected the proxy settings.";
+            if (ok) ProxyBridge_SetProxySendDomain(id, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(dns_check)));
+            else msg = err[0] ? err : "Engine rejected the proxy settings.";
         }
         if (msg) {
             set_error_label(err_label, msg);
@@ -279,6 +311,7 @@ static ProxyData *proxy_edit_dialog(GtkWindow *parent, ProxyData *existing) {
         set_str(&p->password, pass);
         p->type = type;
         p->port = (uint16_t)port;
+        p->send_domain = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(dns_check));
 
         if (!find_proxy_by_name(g_default_proxy)) {
             set_str(&g_default_proxy, p->name);
@@ -364,6 +397,7 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
                                          GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                          "Close", GTK_RESPONSE_CLOSE, NULL);
     gtk_window_set_default_size(GTK_WINDOW(info.dialog), 650, 560);
+    gtk_widget_set_name(info.dialog, "dlg_proxies");
 
     GtkWidget *grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid), 5);
@@ -381,6 +415,7 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
         gtk_tree_view_column_set_expand(c, i == 2);
         gtk_tree_view_append_column(GTK_TREE_VIEW(info.tree), c);
     }
+    gtk_widget_set_name(info.tree, "proxy_tree");
     g_signal_connect(info.tree, "row-activated", G_CALLBACK(on_proxy_row_activated), &info);
     GtkWidget *tree_scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_widget_set_size_request(tree_scroll, -1, 180);
@@ -392,8 +427,10 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
     GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     const char *labels[] = {"Add", "Edit", "Delete", "Set Default"};
     void (*cbs[])(GtkWidget *, gpointer) = {on_proxy_add, on_proxy_edit, on_proxy_delete, on_proxy_set_default};
+    const char *bnames[] = {"px_add", "px_edit", "px_delete", "px_default"};
     for (int i = 0; i < 4; i++) {
         GtkWidget *b = gtk_button_new_with_label(labels[i]);
+        gtk_widget_set_name(b, bnames[i]);
         g_signal_connect(b, "clicked", G_CALLBACK(cbs[i]), &info);
         gtk_box_pack_start(GTK_BOX(btn_box), b, FALSE, FALSE, 0);
     }
@@ -416,13 +453,16 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
     gtk_widget_set_size_request(info.test_port, 80, -1);
     gtk_grid_attach(GTK_GRID(grid), info.test_port, 3, 4, 1, 1);
 
+    gtk_widget_set_name(info.test_host, "px_test_host"); gtk_widget_set_name(info.test_port, "px_test_port");
     info.test_btn = gtk_button_new_with_label("Start Test");
+    gtk_widget_set_name(info.test_btn, "px_test");
     g_signal_connect(info.test_btn, "clicked", G_CALLBACK(on_start_test_clicked), &info);
     gtk_grid_attach(GTK_GRID(grid), info.test_btn, 0, 5, 4, 1);
 
     GtkWidget *out_scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_widget_set_size_request(out_scroll, -1, 150);
     GtkWidget *out_view = gtk_text_view_new();
+    gtk_widget_set_name(out_view, "px_test_output");
     gtk_text_view_set_editable(GTK_TEXT_VIEW(out_view), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(out_view), TRUE);
     info.output_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(out_view));
@@ -446,6 +486,11 @@ typedef struct {
 } ProfilesInfo;
 
 static void update_profile_ui() {
+    char *boot_err = NULL;
+    if (!boot_refresh(g_active_profile, &boot_err)) {              // the boot service runs the active profile
+        gui_log("could not update the boot service: %s", boot_err ? boot_err : "unknown error");
+        g_free(boot_err);
+    }
     char *title = g_strdup_printf("ProxyBridge - %s", g_active_profile);
     gtk_window_set_title(GTK_WINDOW(window), title);
     g_free(title);
@@ -488,9 +533,11 @@ static char *selected_profile_name(ProfilesInfo *pi) {
 static char *ask_profile_name(GtkWindow *parent, const char *title, const char *initial) {
     GtkWidget *d = gtk_dialog_new_with_buttons(title, parent, GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                                "Cancel", GTK_RESPONSE_CANCEL, "OK", GTK_RESPONSE_ACCEPT, NULL);
+    gtk_widget_set_name(d, "dlg_profile_name");
     GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(d));
     gtk_container_set_border_width(GTK_CONTAINER(box), 10);
     GtkWidget *entry = gtk_entry_new();
+    gtk_widget_set_name(entry, "profile_name_entry");
     gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
     gtk_entry_set_text(GTK_ENTRY(entry), initial);
     gtk_box_pack_start(GTK_BOX(box), gtk_label_new("Profile name:"), FALSE, FALSE, 0);
@@ -639,6 +686,7 @@ void on_profiles_clicked(GtkWidget *widget, gpointer data) {
     pi.dialog = gtk_dialog_new_with_buttons("Profiles", GTK_WINDOW(window), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                             "Close", GTK_RESPONSE_CLOSE, NULL);
     gtk_window_set_default_size(GTK_WINDOW(pi.dialog), 560, 360);
+    gtk_widget_set_name(pi.dialog, "dlg_profiles");
     GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(pi.dialog));
     gtk_container_set_border_width(GTK_CONTAINER(box), 10);
 
@@ -651,6 +699,7 @@ void on_profiles_clicked(GtkWidget *widget, gpointer data) {
         gtk_tree_view_column_set_expand(c, i == 0);
         gtk_tree_view_append_column(GTK_TREE_VIEW(pi.tree), c);
     }
+    gtk_widget_set_name(pi.tree, "profile_tree");
     g_signal_connect(pi.tree, "row-activated", G_CALLBACK(on_profile_row_activated), &pi);
     GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_container_add(GTK_CONTAINER(scroll), pi.tree);
@@ -660,8 +709,10 @@ void on_profiles_clicked(GtkWidget *widget, gpointer data) {
     const char *labels[] = {"Switch", "New", "Duplicate", "Rename", "Delete", "Import...", "Export..."};
     void (*cbs[])(GtkWidget *, gpointer) = {on_profile_switch, on_profile_new, on_profile_duplicate, on_profile_rename, on_profile_delete,
                                             on_profile_import, on_profile_export};
+    const char *bnames[] = {"pf_switch", "pf_new", "pf_duplicate", "pf_rename", "pf_delete", "pf_import", "pf_export"};
     for (int i = 0; i < 7; i++) {
         GtkWidget *b = gtk_button_new_with_label(labels[i]);
+        gtk_widget_set_name(b, bnames[i]);
         g_signal_connect(b, "clicked", G_CALLBACK(cbs[i]), &pi);
         gtk_box_pack_start(GTK_BOX(btns), b, FALSE, FALSE, 0);
     }
@@ -671,4 +722,199 @@ void on_profiles_clicked(GtkWidget *widget, gpointer data) {
     gtk_widget_show_all(pi.dialog);
     gtk_dialog_run(GTK_DIALOG(pi.dialog));
     gtk_widget_destroy(pi.dialog);
+}
+
+
+// ---- connection log filters ----
+typedef struct {
+    GtkWidget *dialog, *tree;
+    GtkListStore *store;
+    struct pbp_filter *work;     // working copy; every change is applied at once
+    size_t n;
+} FiltersInfo;
+
+static void filters_commit(FiltersInfo *fi) {
+    struct pbp_filter *copy = calloc(fi->n ? fi->n : 1, sizeof *copy);
+    for (size_t i = 0; copy && i < fi->n; i++) copy[i] = pbp_filter_dup(&fi->work[i]);
+    gui_filters_replace(copy, copy ? fi->n : 0);
+    save_config();
+}
+
+static void filters_refresh(FiltersInfo *fi) {
+    gtk_list_store_clear(fi->store);
+    for (size_t i = 0; i < fi->n; i++) {
+        const struct pbp_filter *f = &fi->work[i];
+        GtkTreeIter it;
+        gtk_list_store_append(fi->store, &it);
+        gtk_list_store_set(fi->store, &it, 0, f->exclude ? "Exclude" : "Include", 1, f->process, 2, f->ip, 3, f->port, 4, f->protocol, 5, f->action, -1);
+    }
+}
+
+static bool port_pattern_ok(const char *p) {
+    if (!*p || strcasecmp(p, "All") == 0) return true;
+    for (; *p; p++) if (!g_ascii_isdigit(*p) && *p != '*' && *p != '?') return false;
+    return true;
+}
+
+// edits *f in place; false when cancelled
+static bool filter_edit_dialog(GtkWindow *parent, struct pbp_filter *f) {
+    GtkWidget *d = gtk_dialog_new_with_buttons("Log Filter", parent, GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                                               "Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, NULL);
+    gtk_widget_set_name(d, "dlg_filter");
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 6);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
+    gtk_container_set_border_width(GTK_CONTAINER(grid), 12);
+    gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(d))), grid, TRUE, TRUE, 0);
+    GtkWidget *mode = combo_new("Include", "Exclude", NULL), *proto = combo_new("All", "TCP", "UDP", NULL);
+    GtkWidget *action = combo_new("All", "Direct", "Proxy", "Blocked", NULL);
+    GtkWidget *proc = gtk_entry_new(), *ip = gtk_entry_new(), *port = gtk_entry_new();
+    gtk_entry_set_max_length(GTK_ENTRY(proc), 255);
+    gtk_entry_set_max_length(GTK_ENTRY(ip), 63);
+    gtk_entry_set_max_length(GTK_ENTRY(port), 15);
+    GtkWidget *err = hint_label("");
+    gtk_widget_set_name(mode, "flt_mode"); gtk_widget_set_name(proc, "flt_process"); gtk_widget_set_name(ip, "flt_ip");
+    gtk_widget_set_name(port, "flt_port"); gtk_widget_set_name(proto, "flt_proto"); gtk_widget_set_name(action, "flt_action");
+    gtk_widget_set_name(err, "flt_error");
+    grid_row(grid, 0, "Mode:", mode);
+    grid_row(grid, 1, "Process:", proc);
+    grid_row(grid, 2, "IP address:", ip);
+    grid_row(grid, 3, "Port:", port);
+    grid_row(grid, 4, "Protocol:", proto);
+    grid_row(grid, 5, "Action:", action);
+    gtk_grid_attach(GTK_GRID(grid), hint_label("Include shows only matching connections, Exclude hides them (Exclude wins). Patterns are case-insensitive: * and ? match anything, empty matches all."), 0, 6, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), err, 0, 7, 2, 1);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(mode), f->exclude ? 1 : 0);
+    gtk_entry_set_text(GTK_ENTRY(proc), f->process ? f->process : "");
+    gtk_entry_set_text(GTK_ENTRY(ip), f->ip ? f->ip : "");
+    gtk_entry_set_text(GTK_ENTRY(port), f->port ? f->port : "");
+    const char *protos[] = {"All", "TCP", "UDP"}, *actions[] = {"All", "Direct", "Proxy", "Blocked"};
+    int pi = 0, ai = 0;
+    for (int i = 0; i < 3; i++) if (f->protocol && !strcasecmp(f->protocol, protos[i])) pi = i;
+    for (int i = 0; i < 4; i++) if (f->action && !strcasecmp(f->action, actions[i])) ai = i;
+    gtk_combo_box_set_active(GTK_COMBO_BOX(proto), pi);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(action), ai);
+    gtk_widget_show_all(d);
+
+    bool saved = false;
+    while (!saved && gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_ACCEPT) {
+        const char *pt = gtk_entry_get_text(GTK_ENTRY(port));
+        if (!port_pattern_ok(pt)) { set_error_label(err, "Port must be digits, * or ? (or empty)."); continue; }
+        pbp_filter_clear(f);
+        f->exclude = gtk_combo_box_get_active(GTK_COMBO_BOX(mode)) == 1;
+        f->process = strdup(gtk_entry_get_text(GTK_ENTRY(proc)));
+        f->ip = strdup(gtk_entry_get_text(GTK_ENTRY(ip)));
+        f->port = strdup(pt);
+        int p2 = gtk_combo_box_get_active(GTK_COMBO_BOX(proto)), a2 = gtk_combo_box_get_active(GTK_COMBO_BOX(action));
+        f->protocol = strdup(protos[p2 < 0 ? 0 : p2]);
+        f->action = strdup(actions[a2 < 0 ? 0 : a2]);
+        saved = true;
+    }
+    gtk_widget_destroy(d);
+    return saved;
+}
+
+static int filters_selected(FiltersInfo *fi) {
+    GtkTreeModel *model;
+    GtkTreeIter it;
+    if (!gtk_tree_selection_get_selected(gtk_tree_view_get_selection(GTK_TREE_VIEW(fi->tree)), &model, &it)) return -1;
+    GtkTreePath *path = gtk_tree_model_get_path(model, &it);
+    int idx = gtk_tree_path_get_indices(path)[0];
+    gtk_tree_path_free(path);
+    return idx;
+}
+
+static void on_filter_add(GtkWidget *w, gpointer data) {
+    FiltersInfo *fi = data;
+    if (fi->n >= PBP_MAX_FILTERS) {
+        show_message(GTK_WINDOW(fi->dialog), GTK_MESSAGE_WARNING, "At most %d filters are supported.", PBP_MAX_FILTERS);
+        return;
+    }
+    struct pbp_filter f = { false, strdup(""), strdup(""), strdup(""), strdup("All"), strdup("All") };
+    if (filter_edit_dialog(GTK_WINDOW(fi->dialog), &f)) {
+        fi->work = realloc(fi->work, (fi->n + 1) * sizeof *fi->work);
+        fi->work[fi->n++] = f;
+        filters_commit(fi);
+        filters_refresh(fi);
+    } else {
+        pbp_filter_clear(&f);
+    }
+}
+
+static void on_filter_edit(GtkWidget *w, gpointer data) {
+    FiltersInfo *fi = data;
+    int i = filters_selected(fi);
+    if (i < 0) { show_message(GTK_WINDOW(fi->dialog), GTK_MESSAGE_WARNING, "Select a filter first."); return; }
+    struct pbp_filter f = pbp_filter_dup(&fi->work[i]);
+    if (filter_edit_dialog(GTK_WINDOW(fi->dialog), &f)) {
+        pbp_filter_clear(&fi->work[i]);
+        fi->work[i] = f;
+        filters_commit(fi);
+        filters_refresh(fi);
+    } else {
+        pbp_filter_clear(&f);
+    }
+}
+
+static void on_filter_delete(GtkWidget *w, gpointer data) {
+    FiltersInfo *fi = data;
+    int i = filters_selected(fi);
+    if (i < 0) { show_message(GTK_WINDOW(fi->dialog), GTK_MESSAGE_WARNING, "Select a filter first."); return; }
+    pbp_filter_clear(&fi->work[i]);
+    memmove(&fi->work[i], &fi->work[i + 1], (fi->n - (size_t)i - 1) * sizeof *fi->work);
+    fi->n--;
+    filters_commit(fi);
+    filters_refresh(fi);
+}
+
+static void on_filter_row_activated(GtkTreeView *tree, GtkTreePath *path, GtkTreeViewColumn *col, gpointer data) {
+    on_filter_edit(NULL, data);
+}
+
+void on_log_filters_clicked(GtkWidget *widget, gpointer data) {
+    FiltersInfo fi = {0};
+    size_t n = 0;
+    struct pbp_filter *cur = gui_filters(&n);
+    fi.work = calloc(n ? n : 1, sizeof *fi.work);
+    for (size_t i = 0; i < n; i++) fi.work[i] = pbp_filter_dup(&cur[i]);
+    fi.n = n;
+
+    fi.dialog = gtk_dialog_new_with_buttons("Connection Log Filters", GTK_WINDOW(window), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                                            "Close", GTK_RESPONSE_CLOSE, NULL);
+    gtk_widget_set_name(fi.dialog, "dlg_filters");
+    gtk_window_set_default_size(GTK_WINDOW(fi.dialog), 640, 380);
+    GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(fi.dialog));
+    gtk_container_set_border_width(GTK_CONTAINER(box), 10);
+    fi.store = gtk_list_store_new(6, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    fi.tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(fi.store));
+    gtk_widget_set_name(fi.tree, "filter_tree");
+    g_object_unref(fi.store);
+    const char *titles[] = {"Mode", "Process", "IP address", "Port", "Protocol", "Action"};
+    for (int i = 0; i < 6; i++) {
+        GtkTreeViewColumn *c = gtk_tree_view_column_new_with_attributes(titles[i], gtk_cell_renderer_text_new(), "text", i, NULL);
+        gtk_tree_view_column_set_resizable(c, TRUE);
+        gtk_tree_view_column_set_expand(c, i == 1 || i == 2);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(fi.tree), c);
+    }
+    g_signal_connect(fi.tree, "row-activated", G_CALLBACK(on_filter_row_activated), &fi);
+    GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
+    gtk_container_add(GTK_CONTAINER(scroll), fi.tree);
+    gtk_box_pack_start(GTK_BOX(box), hint_label("Filters hide or show lines of the connection log for new connections. They belong to the active profile."), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), scroll, TRUE, TRUE, 5);
+    GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    const char *labels[] = {"Add", "Edit", "Delete"}, *names[] = {"flt_add", "flt_edit", "flt_delete"};
+    void (*cbs[])(GtkWidget *, gpointer) = {on_filter_add, on_filter_edit, on_filter_delete};
+    for (int i = 0; i < 3; i++) {
+        GtkWidget *b = gtk_button_new_with_label(labels[i]);
+        gtk_widget_set_name(b, names[i]);
+        g_signal_connect(b, "clicked", G_CALLBACK(cbs[i]), &fi);
+        gtk_box_pack_start(GTK_BOX(btns), b, FALSE, FALSE, 0);
+    }
+    gtk_box_pack_start(GTK_BOX(box), btns, FALSE, FALSE, 5);
+    filters_refresh(&fi);
+    gtk_widget_show_all(fi.dialog);
+    gtk_dialog_run(GTK_DIALOG(fi.dialog));
+    gtk_widget_destroy(fi.dialog);
+    for (size_t i = 0; i < fi.n; i++) pbp_filter_clear(&fi.work[i]);
+    free(fi.work);
 }

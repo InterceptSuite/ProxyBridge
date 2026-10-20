@@ -40,7 +40,26 @@ static void free_profile(Profile *p) {
     g_free(p->default_proxy);
     g_free(p->name);
     free(p->saved);
+    for (size_t i = 0; i < p->nfilters; i++) pbp_filter_clear(&p->filters[i]);
+    free(p->filters);
     g_free(p);
+}
+
+struct pbp_filter pbp_filter_dup(const struct pbp_filter *f) {
+    struct pbp_filter d = { f->exclude, strdup(f->process ? f->process : ""), strdup(f->ip ? f->ip : ""), strdup(f->port ? f->port : ""),
+                            strdup(f->protocol ? f->protocol : "All"), strdup(f->action ? f->action : "All") };
+    return d;
+}
+
+void pbp_filter_clear(struct pbp_filter *f) {
+    free(f->process); free(f->ip); free(f->port); free(f->protocol); free(f->action);
+    memset(f, 0, sizeof *f);
+}
+
+static struct pbp_filter *filters_dup(const struct pbp_filter *src, size_t n) {
+    struct pbp_filter *d = calloc(n ? n : 1, sizeof *d);
+    for (size_t i = 0; d && i < n; i++) d[i] = pbp_filter_dup(&src[i]);
+    return d;
 }
 
 Profile *profile_find(const char *name) {
@@ -59,6 +78,9 @@ static void profile_sync_active() {
     p->default_proxy = g_default_proxy;
     p->logging = g_chk_logging;
     p->dns = g_chk_dns;
+    p->log_every = g_chk_log_every;
+    p->auto_clear = g_chk_auto_clear;
+    p->zoom = g_zoom;
 }
 
 static void load_globals_from(Profile *p) {
@@ -67,6 +89,10 @@ static void load_globals_from(Profile *p) {
     g_default_proxy = p->default_proxy;
     g_chk_logging = p->logging;
     g_chk_dns = p->dns;
+    g_chk_log_every = p->log_every;
+    g_chk_auto_clear = p->auto_clear;
+    g_zoom = p->zoom;
+    gui_logs_set_filters(p->filters, p->nfilters);
 }
 
 void config_free_all() {
@@ -83,6 +109,8 @@ static Profile *profile_new_empty(const char *name) {
     Profile *p = g_malloc0(sizeof(Profile));
     p->name = g_strdup(name);
     p->logging = p->dns = true;
+    p->auto_clear = true;
+    p->zoom = 100;
     g_profiles = g_list_append(g_profiles, p);
     return p;
 }
@@ -95,11 +123,14 @@ static ProxyData *copy_proxy(const ProxyData *src) {
     d->port = src->port;
     d->username = g_strdup(src->username ? src->username : "");
     d->password = g_strdup(src->password ? src->password : "");
+    d->send_domain = src->send_domain;
     return d;
 }
 
 static RuleData *copy_rule(const RuleData *src) {
     RuleData *d = g_malloc0(sizeof(RuleData));
+    d->name = g_strdup(src->name ? src->name : "");
+    d->localhost = src->localhost;
     d->process_name = g_strdup(src->process_name ? src->process_name : "");
     d->target_hosts = g_strdup(src->target_hosts ? src->target_hosts : "");
     d->target_ports = g_strdup(src->target_ports ? src->target_ports : "");
@@ -121,6 +152,11 @@ Profile *profile_create(const char *name, bool copy_active) {
         p->default_proxy = g_strdup(src->default_proxy);
         p->logging = src->logging;
         p->dns = src->dns;
+        p->log_every = src->log_every;
+        p->auto_clear = src->auto_clear;
+        p->zoom = src->zoom;
+        p->filters = filters_dup(src->filters, src->nfilters);
+        p->nfilters = src->nfilters;
     }
     return p;
 }
@@ -179,6 +215,11 @@ static void profile_to_pbp(const Profile *prof, struct pbp_profile *out) {
     out->name = prof->name;
     out->logging = prof->logging;
     out->dns_via_proxy = prof->dns;
+    out->log_every = prof->log_every;
+    out->auto_clear = prof->auto_clear;
+    out->font_zoom = prof->zoom;
+    out->filters = prof->filters;
+    out->nfilters = prof->nfilters;
     out->nproxies = g_list_length(prof->proxies);
     out->nrules = g_list_length(prof->rules);
     out->proxies = g_new0(struct pbp_proxy, out->nproxies + 1);
@@ -195,12 +236,15 @@ static void profile_to_pbp(const Profile *prof, struct pbp_profile *out) {
         x->port = p->port;
         x->user = p->username ? p->username : (char *)"";
         x->pass = p->password ? p->password : (char *)"";
+        x->send_domain = p->send_domain;
         if (prof->default_proxy && strcmp(prof->default_proxy, p->name) == 0) out->default_proxy_id = x->id;
     }
     size_t i = 0;
     for (GList *l = prof->rules; l != NULL; l = l->next) {
         RuleData *r = (RuleData *)l->data;
         struct pbp_rule *x = &out->rules[i++];
+        x->name = r->name ? r->name : (char *)"";
+        x->localhost = r->localhost;
         x->process = r->process_name ? r->process_name : (char *)"*";
         x->hosts = r->target_hosts ? r->target_hosts : (char *)"*";
         x->ports = r->target_ports ? r->target_ports : (char *)"*";
@@ -228,11 +272,14 @@ static void fill_profile_from_pbp(Profile *p, const struct pbp_profile *src) {
         px->port = x->port;
         px->username = g_strdup(x->user);
         px->password = g_strdup(x->pass);
+        px->send_domain = x->send_domain;
         p->proxies = g_list_append(p->proxies, px);
     }
     for (size_t i = 0; i < src->nrules; i++) {
         const struct pbp_rule *x = &src->rules[i];
         RuleData *r = g_malloc0(sizeof(RuleData));
+        r->name = g_strdup(x->name);
+        r->localhost = x->localhost;
         r->process_name = g_strdup(x->process);
         r->target_hosts = g_strdup(x->hosts);
         r->target_ports = g_strdup(x->ports);
@@ -248,6 +295,13 @@ static void fill_profile_from_pbp(Profile *p, const struct pbp_profile *src) {
     p->default_proxy = d ? g_strdup(d->name) : NULL;
     p->logging = src->logging;
     p->dns = src->dns_via_proxy;
+    p->log_every = src->log_every;
+    p->auto_clear = src->auto_clear;
+    p->zoom = src->font_zoom >= PBP_ZOOM_MIN && src->font_zoom <= PBP_ZOOM_MAX ? src->font_zoom : 100;
+    for (size_t i = 0; i < p->nfilters; i++) pbp_filter_clear(&p->filters[i]);
+    free(p->filters);
+    p->filters = filters_dup(src->filters, src->nfilters);
+    p->nfilters = src->nfilters;
 }
 
 bool profile_export(const Profile *prof, const char *path, char *err, size_t errlen) {
@@ -336,7 +390,7 @@ void save_config() {
         g_free(path);
     }
     char *settings = g_strdup_printf("%s/settings.json", dir);
-    if (pbp_settings_save(settings, g_active_profile, err, sizeof err) != 0)
+    if (pbp_settings_save(settings, g_active_profile, g_chk_updates, err, sizeof err) != 0)
         fprintf(stderr, "failed to save settings: %s\n", err);
     g_free(settings);
 out:
@@ -363,6 +417,7 @@ static ProxyData *parse_proxy_line(char *line) {
     px->port = (port >= 1 && port <= 65535) ? (uint16_t)port : 0;
     px->username = unesc(n > 4 ? fields[4] : "");
     px->password = unesc(n > 5 ? fields[5] : "");
+    px->send_domain = true;
     return px;
 }
 
@@ -475,6 +530,7 @@ static bool load_legacy_ini(const char *dir, char **saved_active_out) {
             px->port = (uint16_t)old_port;
             px->username = g_strdup(old_user);
             px->password = g_strdup(old_pass);
+            px->send_domain = true;
             d->proxies = g_list_append(d->proxies, px);
             g_free(d->default_proxy);
             d->default_proxy = g_strdup("default");
@@ -550,7 +606,7 @@ void load_config() {
 
     load_profile_files(dir);
     char *settings = g_strdup_printf("%s/settings.json", dir);
-    pbp_settings_load(settings, &settings_active);
+    pbp_settings_load(settings, &settings_active, &g_chk_updates);
     g_free(settings);
     if (!g_profiles) {
         migrate = load_legacy_ini(dir, &legacy_active);
@@ -572,4 +628,20 @@ void load_config() {
         g_free(to);
     }
     g_free(dir);
+}
+
+struct pbp_filter *gui_filters(size_t *n) {
+    Profile *p = profile_find(g_active_profile);
+    if (n) *n = p ? p->nfilters : 0;
+    return p ? p->filters : NULL;
+}
+
+void gui_filters_replace(struct pbp_filter *filters, size_t n) {
+    Profile *p = profile_find(g_active_profile);
+    if (!p) return;
+    for (size_t i = 0; i < p->nfilters; i++) pbp_filter_clear(&p->filters[i]);
+    free(p->filters);
+    p->filters = filters;
+    p->nfilters = n;
+    gui_logs_set_filters(p->filters, p->nfilters);
 }

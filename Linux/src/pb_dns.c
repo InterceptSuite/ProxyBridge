@@ -88,6 +88,14 @@ static void add_mapping(uint32_t ip, char names[][256], int nn, struct pb_dns_re
         if (e->n == PB_DNS_MAX_NAMES) { free(e->names[0]); memmove(&e->names[0], &e->names[1], (PB_DNS_MAX_NAMES - 1) * sizeof(char *)); e->n--; }
         e->names[e->n++] = c;
     }
+    // names[0] is the name the application asked for: keep it last, where the lookup reports "most recent"
+    for (int j = 0; j + 1 < e->n && nn > 0; j++) {
+        if (strcmp(e->names[j], names[0]) != 0) continue;
+        char *q = e->names[j];
+        memmove(&e->names[j], &e->names[j + 1], (size_t)(e->n - j - 1) * sizeof(char *));
+        e->names[e->n - 1] = q;
+        break;
+    }
     if (res) {
         bool dup = false;
         for (int i = 0; i < res->nips; i++) if (res->ips[i] == ip) dup = true;

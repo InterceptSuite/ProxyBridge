@@ -1,0 +1,3 @@
+#!/bin/sh
+# see pbl.py: the suites start the real program through this, with compact --proxy / --rule arguments
+exec python3 "$(dirname "$0")/pbl.py" "$@"

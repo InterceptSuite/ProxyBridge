@@ -44,6 +44,7 @@ struct pb_proxy {
     uint16_t  port;
     char      user[256];   // empty = no authentication
     char      pass[256];
+    bool      send_domain; // send the host name the application resolved to the proxy (the proxy resolves DNS)
 };
 
 // ---- provided by the core ----
@@ -54,6 +55,13 @@ int  pb_core_take_tcp_orig(uint32_t client_ip_be, uint16_t client_port, struct p
 
 // Original destination behind a UDP flow address (the IP_PKTINFO destination of a datagram). Does not consume.
 int  pb_core_get_udp_flow(uint32_t flow_ip_be, struct pb_orig *out);
+
+// Host name the application most recently resolved to the destination of `o` (IPv4, from the DNS tap); 0 if known.
+int  pb_core_name_for(const struct pb_orig *o, char *out, size_t n);
+
+// True when `pid` is the process serving this (local) proxy: its own connections must not be sent through itself. The periodic
+// exemption refresh normally covers this; the relay asks for connections made in the moment before it ran.
+int  pb_core_is_proxy_process(uint32_t pid, uint32_t proxy_id);
 
 // Full rule evaluation for a PB_ACT_DECIDE flow.
 void pb_core_decide(const struct pb_orig *o, struct pb_decision *out);
@@ -90,5 +98,24 @@ uint16_t pb_relay_udp_port(void);
 
 // Blocking test of a proxy: tunnels to target_host:target_port and writes a one-line result (or the error) to buf. 0 on success.
 int  pb_relay_test_proxy(const struct pb_proxy *proxy, const char *target_host, uint16_t target_port, char *buf, size_t buflen);
+
+
+// One live proxied flow as the relay knows it (TCP connection or UDP flow).
+struct pb_flow_info {
+    uint64_t id;
+    uint32_t pid;
+    uint16_t proxy_id, port;
+    uint8_t  family, udp;
+    uint8_t  addr[16];
+    uint32_t age_ms;
+    uint64_t sent, recv;            // payload bytes application -> proxy / proxy -> application
+};
+// Fills out with up to max live proxied flows, newest first; returns the count. Safe from any thread.
+int  pb_relay_flows(struct pb_flow_info *out, int max);
+
+// Multi-step proxy check for the GUI and CLI: streams human readable lines to cb. 0 = the proxy works (reachable, tunnel and login
+// accepted); -1 = cannot reach it; -2 = the tunnel or login was refused. Page load, latency and UDP findings are warnings only.
+typedef void (*pb_check_cb)(const char *line, void *user);
+int  pb_relay_check_proxy(const struct pb_proxy *proxy, const char *target_host, uint16_t target_port, pb_check_cb cb, void *user);
 
 #endif

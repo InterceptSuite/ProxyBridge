@@ -15,9 +15,11 @@ static bool parse_number(const char *s, unsigned base, unsigned long long *out, 
     unsigned long long v = 0;
     const char *p = s;
     for (;; p++) {
-        unsigned d = (unsigned)(*p - '0');
-        if (*p >= 'a' && *p <= 'f') d = (unsigned)(*p - 'a') + 10;
+        unsigned d;
+        if (*p >= '0' && *p <= '9') d = (unsigned)(*p - '0');
+        else if (*p >= 'a' && *p <= 'f') d = (unsigned)(*p - 'a') + 10;
         else if (*p >= 'A' && *p <= 'F') d = (unsigned)(*p - 'A') + 10;
+        else break;
         if (d >= base) break;
         v = v * base + d;
     }
@@ -100,6 +102,17 @@ size_t pb_proc_listeners(uint32_t ip_be, uint16_t port, uint32_t *tgids, size_t 
     }
     closedir(d);
     return n;
+}
+
+bool pb_proc_pid_listens(uint32_t pid, uint32_t ip_be, uint16_t port)
+{
+    uint64_t inodes[MAX_INODES];
+    size_t ni = listen_inodes(ip_be, port, inodes);
+    char name[24];
+    snprintf(name, sizeof name, "%u", pid);
+    for (size_t i = 0; i < ni; i++)
+        if (pid_has_socket(name, inodes[i])) return true;
+    return false;
 }
 
 bool pb_proc_is_local_ip(uint32_t ip_be)

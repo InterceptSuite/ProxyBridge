@@ -227,7 +227,7 @@ main() {
     if [ -f /usr/local/bin/ProxyBridgeGUI ]; then
        echo "  sudo ProxyBridgeGUI      (Graphical Interface)"
     fi
-    echo "  sudo ProxyBridge --proxy socks5://IP:PORT --rule \"app:*:*:TCP:PROXY\""
+    echo "  sudo ProxyBridge --profile <name or .pbprofile path>"
     echo ""
     echo "No cleanup is needed after a crash: the kernel detaches the eBPF programs automatically."
     echo ""

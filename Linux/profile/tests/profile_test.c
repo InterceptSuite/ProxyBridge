@@ -47,6 +47,179 @@ static void test_windows_sample(void)
     pbp_free(&p);
 }
 
+static void test_parity_fields(void)
+{
+    struct pbp_profile p, q;
+    char err[256];
+    // per-rule names and localhost flag, per-proxy host-name sending, and the pre-4.2 global LocalhostViaProxy as the default
+    CHECK(parse("{ \"LocalhostViaProxy\": true, \"ProxyConfigs\": ["
+                "{ \"Id\": 1, \"Type\": \"socks5\", \"Host\": \"h\", \"Port\": \"1\", \"SendDomainToProxy\": false },"
+                "{ \"Id\": 2, \"Type\": \"http\", \"Host\": \"h\", \"Port\": \"2\" } ],"
+                "\"ProxyRules\": ["
+                "{ \"Name\": \"Burp\", \"ProcessName\": \"firefox\", \"Action\": \"PROXY\", \"ProxyConfigId\": 1, \"LocalhostViaProxy\": false },"
+                "{ \"ProcessName\": \"curl\", \"Action\": \"PROXY\", \"ProxyConfigId\": 2 },"
+                "{ \"ProcessName\": \"wget\", \"Action\": \"BLOCK\" },"
+                "{ \"Name\": \"own\", \"ProcessName\": \"x\", \"Action\": \"PROXY\", \"LocalhostViaProxy\": true } ] }", &p, err) == 0);
+    CHECK(!p.proxies[0].send_domain && p.proxies[1].send_domain);          // true unless the file says otherwise
+    CHECK(!strcmp(p.rules[0].name, "Burp") && !p.rules[0].localhost);      // the rule's own value wins over the global one
+    CHECK(!strcmp(p.rules[1].name, "") && p.rules[1].localhost);           // no value of its own: the old global default
+    CHECK(!p.rules[2].localhost);                                          // only PROXY rules can proxy localhost
+    CHECK(p.rules[3].localhost);
+    char *json = pbp_serialize(&p);
+    CHECK(json && strstr(json, "\"SendDomainToProxy\": false") && strstr(json, "\"SendDomainToProxy\": true"));
+    CHECK(json && strstr(json, "\"Name\": \"Burp\"") && strstr(json, "\"LocalhostViaProxy\": true"));
+    CHECK(json && !strstr(json, "\"LocalhostViaProxy\": true,\n  \"IsTraffic"));    // no top-level flag is written any more
+    CHECK(pbp_parse(json, strlen(json), &q, err, sizeof err) == 0);
+    CHECK(!q.proxies[0].send_domain && q.proxies[1].send_domain && !q.rules[0].localhost && q.rules[1].localhost && !strcmp(q.rules[0].name, "Burp"));
+    free(json);
+    pbp_free(&p);
+    pbp_free(&q);
+
+    // LogEveryConnection: off unless the file says so, and it survives a round trip
+    CHECK(parse("{}", &p, err) == 0 && !p.log_every);
+    pbp_free(&p);
+    CHECK(parse("{ \"LogEveryConnection\": true }", &p, err) == 0 && p.log_every);
+    json = pbp_serialize(&p);
+    CHECK(json && strstr(json, "\"LogEveryConnection\": true"));
+    CHECK(pbp_parse(json, strlen(json), &q, err, sizeof err) == 0 && q.log_every);
+    free(json);
+    pbp_free(&p);
+    pbp_free(&q);
+}
+
+
+static void expect_error(const char *json, const char *needle);
+
+static struct pbp_filter flt(bool exclude, const char *proc, const char *ip, const char *port, const char *proto, const char *action)
+{
+    struct pbp_filter f = { exclude, (char *)proc, (char *)ip, (char *)port, (char *)proto, (char *)action };
+    return f;
+}
+
+static void test_gui_fields(void)
+{
+    struct pbp_profile p, q;
+    char err[256];
+    CHECK(parse("{}", &p, err) == 0 && p.auto_clear && p.font_zoom == 100 && p.nfilters == 0);
+    pbp_free(&p);
+
+    CHECK(parse("{ \"AutoClearConnectionLogs\": false, \"FontZoom\": 150, \"LogFilters\": ["
+                "{ \"Mode\": \"Exclude\", \"ProcessName\": \"chrome*\", \"Ip\": \"10.*\", \"Port\": \"443\", \"Protocol\": \"tcp\", \"Action\": \"proxy\" },"
+                "{ \"Mode\": \"Include\" },"
+                "{ \"Mode\": \"Bogus\", \"Protocol\": \"ICMP\", \"Action\": \"Maybe\", \"ProcessName\": \"x\" } ] }", &p, err) == 0);
+    CHECK(!p.auto_clear && p.font_zoom == 150 && p.nfilters == 3);
+    CHECK(p.filters[0].exclude && !strcmp(p.filters[0].process, "chrome*") && !strcmp(p.filters[0].protocol, "TCP") && !strcmp(p.filters[0].action, "Proxy"));
+    CHECK(!p.filters[1].exclude && !strcmp(p.filters[1].process, "") && !strcmp(p.filters[1].protocol, "All") && !strcmp(p.filters[1].action, "All"));
+    CHECK(!p.filters[2].exclude && !strcmp(p.filters[2].protocol, "All") && !strcmp(p.filters[2].action, "All"));      // unknown values fall back to All / Include
+    char *json = pbp_serialize(&p);
+    CHECK(json && strstr(json, "\"FontZoom\": 150") && strstr(json, "\"AutoClearConnectionLogs\": false") && strstr(json, "\"Mode\": \"Exclude\""));
+    CHECK(pbp_parse(json, strlen(json), &q, err, sizeof err) == 0 && q.nfilters == 3 && q.font_zoom == 150 && !q.auto_clear && q.filters[0].exclude);
+    free(json);
+    pbp_free(&p);
+    pbp_free(&q);
+
+    // the zoom must stay in range, whatever the file says
+    const char *zooms[] = { "59", "301", "0", "-5", "\"abc\"", "99999999999", "true" };
+    for (size_t i = 0; i < sizeof zooms / sizeof *zooms; i++) {
+        char doc[80];
+        snprintf(doc, sizeof doc, "{ \"FontZoom\": %s }", zooms[i]);
+        CHECK(parse(doc, &p, err) == 0 && p.font_zoom == 100);
+        pbp_free(&p);
+    }
+    CHECK(parse("{ \"FontZoom\": 60 }", &p, err) == 0 && p.font_zoom == 60); pbp_free(&p);
+    CHECK(parse("{ \"FontZoom\": \"300\" }", &p, err) == 0 && p.font_zoom == 300); pbp_free(&p);
+
+    expect_error("{ \"LogFilters\": 5 }", "LogFilters must be an array");
+    expect_error("{ \"LogFilters\": [ 5 ] }", "not an object");
+    {
+        char many[4096] = "{ \"LogFilters\": [";
+        for (int i = 0; i < PBP_MAX_FILTERS + 1; i++) strcat(many, i ? ",{}" : "{}");
+        strcat(many, "] }");
+        expect_error(many, "too many log filters");
+    }
+}
+
+static void test_filters(void)
+{
+    struct pbp_filter none[1] = { { 0 } };
+    CHECK(pbp_filters_pass(none, 0, "curl", "1.2.3.4", "80", "TCP", "Proxy"));                  // no filters: everything shows
+
+    struct pbp_filter ex[] = { flt(true, "chrome*", "", "", "All", "All") };
+    CHECK(!pbp_filters_pass(ex, 1, "chrome", "1.2.3.4", "80", "TCP", "Proxy"));
+    CHECK(!pbp_filters_pass(ex, 1, "CHROME-sandbox", "1.2.3.4", "80", "TCP", "Proxy"));         // case-insensitive
+    CHECK(pbp_filters_pass(ex, 1, "curl", "1.2.3.4", "80", "TCP", "Proxy"));                    // exclude-only: everything else shows
+
+    struct pbp_filter in[] = { flt(false, "curl", "", "", "All", "All"), flt(false, "", "10.0.*", "", "All", "All") };
+    CHECK(pbp_filters_pass(in, 2, "curl", "1.2.3.4", "80", "TCP", "Direct"));
+    CHECK(pbp_filters_pass(in, 2, "wget", "10.0.5.6", "80", "TCP", "Direct"));
+    CHECK(!pbp_filters_pass(in, 2, "wget", "1.2.3.4", "80", "TCP", "Direct"));                  // include filters: one must match
+
+    struct pbp_filter both[] = { flt(false, "", "10.*", "", "All", "All"), flt(true, "", "", "22", "All", "All") };
+    CHECK(pbp_filters_pass(both, 2, "ssh", "10.1.1.1", "443", "TCP", "Proxy"));
+    CHECK(!pbp_filters_pass(both, 2, "ssh", "10.1.1.1", "22", "TCP", "Proxy"));                 // exclude wins over include
+    CHECK(!pbp_filters_pass(both, 2, "ssh", "192.168.1.1", "443", "TCP", "Proxy"));
+
+    struct pbp_filter pa[] = { flt(true, "*", "*", "44?", "UDP", "Blocked") };
+    CHECK(!pbp_filters_pass(pa, 1, "x", "1.1.1.1", "443", "UDP", "Blocked"));                   // '?' and "*" patterns, protocol and action
+    CHECK(pbp_filters_pass(pa, 1, "x", "1.1.1.1", "443", "TCP", "Blocked"));
+    CHECK(pbp_filters_pass(pa, 1, "x", "1.1.1.1", "443", "UDP", "Direct"));
+    CHECK(pbp_filters_pass(pa, 1, "x", "1.1.1.1", "4433", "UDP", "Blocked"));
+    struct pbp_filter all[] = { flt(true, "All", "all", "ALL", "all", "ALL") };
+    CHECK(!pbp_filters_pass(all, 1, "anything", "9.9.9.9", "1", "UDP", "Direct"));              // the literal word All matches anything
+    CHECK(pbp_filters_pass(ex, 1, NULL, NULL, NULL, NULL, NULL));                                // missing fields do not crash
+    struct pbp_filter ip6[] = { flt(true, "", "2001:db8:*", "", "All", "All") };
+    CHECK(!pbp_filters_pass(ip6, 1, "x", "2001:db8::7", "80", "TCP", "Proxy"));
+}
+
+static void test_settings(void)
+{
+    char dir[] = "/tmp/pbp_settings_XXXXXX", path[300], err[200];
+    CHECK(mkdtemp(dir) != NULL);
+    snprintf(path, sizeof path, "%s/settings.json", dir);
+    char *active = NULL;
+    bool upd = false;
+    CHECK(pbp_settings_load(path, &active, &upd) == -1);                                         // no file yet
+    CHECK(pbp_settings_save(path, "Work", true, err, sizeof err) == 0);
+    CHECK(pbp_settings_load(path, &active, &upd) == 0 && active && !strcmp(active, "Work") && upd);
+    CHECK(pbp_settings_save(path, "Home \"x\"", false, err, sizeof err) == 0);
+    upd = true;
+    CHECK(pbp_settings_load(path, &active, &upd) == 0 && !strcmp(active, "Home \"x\"") && !upd);
+    FILE *f = fopen(path, "w");
+    fputs("{ \"ActiveProfileName\": \"Only\" }", f);                                          // an older file without the switch
+    fclose(f);
+    upd = false;
+    CHECK(pbp_settings_load(path, &active, &upd) == 0 && !strcmp(active, "Only") && upd);        // defaults to on
+    f = fopen(path, "w");
+    fputs("not json", f);
+    fclose(f);
+    CHECK(pbp_settings_load(path, &active, &upd) == -1);
+    free(active);
+    char cmd[400];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    CHECK(system(cmd) == 0);
+}
+
+static void test_update_feed(void)
+{
+    char *v, *d, *n;
+    const char *feed = "{ \"windows\": { \"version\": \"4.3.0\" }, \"linux\": { \"version\": \"4.1.0\", \"download\": \"https://x/d\", \"release_notes\": \"https://x/n\" } }";
+    CHECK(pbp_update_parse(feed, strlen(feed), &v, &d, &n) == 0 && !strcmp(v, "4.1.0") && !strcmp(d, "https://x/d") && !strcmp(n, "https://x/n"));
+    free(v); free(d); free(n);
+    const char *bare = "{ \"linux\": { \"version\": \"9\" } }";
+    CHECK(pbp_update_parse(bare, strlen(bare), &v, &d, &n) == 0 && !strcmp(v, "9") && d == NULL && n == NULL);
+    free(v);
+    const char *bad[] = { "", "not json", "[]", "{}", "{ \"linux\": 5 }", "{ \"linux\": {} }", "{ \"linux\": { \"version\": \"\" } }", "{ \"windows\": { \"version\": \"1\" } }" };
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++)
+        CHECK(pbp_update_parse(bad[i], strlen(bad[i]), &v, &d, &n) == -1 && !v && !d && !n);
+
+    CHECK(pbp_version_newer("4.0.1", "4.0.0") && pbp_version_newer("4.1.0", "4.0.9") && pbp_version_newer("5.0.0", "4.9.9"));
+    CHECK(!pbp_version_newer("4.0.0", "4.0.0") && !pbp_version_newer("3.2.0", "4.0.0"));
+    CHECK(!pbp_version_newer("4.0.0", "4.0.0-Beta") && !pbp_version_newer("4.0.0-Beta", "4.0.0"));      // a suffix is ignored
+    CHECK(pbp_version_newer("v4.0.1", "4.0.0-Beta") && pbp_version_newer("10.0.0", "9.0.0") && pbp_version_newer("4.0", "3.9.9"));
+    CHECK(!pbp_version_newer("", "1.0.0") && !pbp_version_newer("junk", "0.0.0") && !pbp_version_newer(NULL, "1.0.0"));
+    CHECK(pbp_version_newer("1.0.0", "") && pbp_version_newer("99999999999999999999.0.0", "1.0.0"));
+}
+
 static void test_roundtrip(void)
 {
     struct pbp_profile a, b;
@@ -266,6 +439,11 @@ int main(void)
 {
     test_windows_sample();
     test_roundtrip();
+    test_parity_fields();
+    test_gui_fields();
+    test_filters();
+    test_settings();
+    test_update_feed();
     test_errors();
     test_leniency();
     test_hosts();

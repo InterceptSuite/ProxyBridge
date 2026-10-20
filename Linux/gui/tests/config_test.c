@@ -10,13 +10,21 @@ char *g_default_proxy = NULL;
 GList *g_rules_list = NULL;
 bool g_chk_logging = true;
 bool g_chk_dns = true;
+bool g_chk_log_every = false;
+bool g_chk_auto_clear = true;
+int g_zoom = 100;
+bool g_chk_updates = true;
+
+// the log view lives in gui_logs.c; the test only records what the config code tells it
+static size_t g_filters_seen;
+void gui_logs_set_filters(const struct pbp_filter *f, size_t n) { (void)f; g_filters_seen = n; }
 
 void free_proxy_data(ProxyData *p) {
     g_free(p->name); g_free(p->host); g_free(p->username); g_free(p->password); g_free(p);
 }
 
 void free_rule_data(RuleData *r) {
-    g_free(r->process_name); g_free(r->target_hosts); g_free(r->target_ports); g_free(r->proxy_name); g_free(r);
+    g_free(r->name); g_free(r->process_name); g_free(r->target_hosts); g_free(r->target_ports); g_free(r->proxy_name); g_free(r);
 }
 
 static int failures = 0;
@@ -37,12 +45,14 @@ static void add_content(const char *proxy_name) {
     ProxyData *px = g_malloc0(sizeof(ProxyData));
     px->name = g_strdup(proxy_name); px->host = g_strdup("github.com"); px->port = 8080;
     px->username = g_strdup(""); px->password = g_strdup("s3cr|et");
+    px->send_domain = false;
     g_proxies_list = g_list_append(g_proxies_list, px);
     g_free(g_default_proxy);
     g_default_proxy = g_strdup(proxy_name);
     RuleData *r = g_malloc0(sizeof(RuleData));
     r->process_name = g_strdup("curl"); r->target_hosts = g_strdup("*.github.com"); r->target_ports = g_strdup("*");
     r->action = RULE_ACTION_PROXY; r->proxy_name = g_strdup(proxy_name); r->enabled = true;
+    r->name = g_strdup("Burp \"intercept\""); r->localhost = true;
     g_rules_list = g_list_append(g_rules_list, r);
 }
 
@@ -193,6 +203,19 @@ int main() {
     CHECK(g_chk_logging && g_chk_dns);                      // a new profile starts with both switches on
     g_chk_dns = false;
     g_chk_logging = false;
+    g_chk_log_every = true;
+    g_chk_auto_clear = false;
+    g_zoom = 140;
+    g_chk_updates = false;
+    {
+        struct pbp_filter *fl = calloc(2, sizeof *fl);
+        struct pbp_filter a = { true, (char *)"chrome*", (char *)"10.*", (char *)"443", (char *)"TCP", (char *)"Proxy" };
+        struct pbp_filter b = { false, (char *)"", (char *)"", (char *)"", (char *)"All", (char *)"All" };
+        fl[0] = pbp_filter_dup(&a);
+        fl[1] = pbp_filter_dup(&b);
+        gui_filters_replace(fl, 2);
+        CHECK(g_filters_seen == 2);
+    }
     save_config();
 
     check_storage(dir);
@@ -203,14 +226,25 @@ int main() {
     CHECK(strcmp(((ProxyData *)g_proxies_list->data)->name, "p 1|x") == 0);
     CHECK(strcmp(((ProxyData *)g_proxies_list->data)->password, "s3cr|et") == 0);
     CHECK(strcmp(((RuleData *)g_rules_list->data)->target_hosts, "*.github.com") == 0);
-    CHECK(!g_chk_dns && !g_chk_logging);                    // restored from the Work profile file itself
+    CHECK(!((ProxyData *)g_proxies_list->data)->send_domain);                       // per-proxy "DNS via proxy" survives a restart
+    CHECK(strcmp(((RuleData *)g_rules_list->data)->name, "Burp \"intercept\"") == 0 && ((RuleData *)g_rules_list->data)->localhost);
+    CHECK(!g_chk_dns && !g_chk_logging && g_chk_log_every);   // restored from the Work profile file itself
+    CHECK(!g_chk_auto_clear && g_zoom == 140 && !g_chk_updates);   // zoom and auto-clear belong to the profile, the update check to settings.json
+    {
+        size_t n = 0;
+        struct pbp_filter *fl = gui_filters(&n);
+        CHECK(n == 2 && fl && fl[0].exclude && strcmp(fl[0].process, "chrome*") == 0 && strcmp(fl[0].port, "443") == 0 &&
+              strcmp(fl[0].protocol, "TCP") == 0 && strcmp(fl[0].action, "Proxy") == 0 && !fl[1].exclude);
+        CHECK(g_filters_seen == 2);                                // the log view got the filters when the profile was loaded
+    }
     CHECK(profile_find("Home") && !profile_find("Home")->logging && profile_find("Home")->dns);   // migrated values of the old file, per profile
     CHECK(profile_find("Home") && g_list_length(profile_find("Home")->rules) == 1);
 
     CHECK(profile_activate("Home"));                        // switching profiles switches the values too
-    CHECK(!g_chk_logging && g_chk_dns);
+    CHECK(!g_chk_logging && g_chk_dns && !g_chk_log_every);
+    CHECK(g_chk_auto_clear && g_zoom == 100 && g_filters_seen == 0);   // the migrated profile has the defaults
     CHECK(profile_activate("Work"));
-    CHECK(!g_chk_logging && !g_chk_dns);
+    CHECK(!g_chk_logging && !g_chk_dns && g_chk_log_every && g_zoom == 140 && g_filters_seen == 2);
     CHECK(profile_activate("Home"));
     CHECK(profile_activate("Work"));
     CHECK(profile_delete(profile_find("Work")));

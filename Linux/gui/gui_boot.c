@@ -1,0 +1,154 @@
+#include "gui_boot.h"
+#include <fcntl.h>
+#include <glib/gstdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define UNIT_NAME "proxybridge.service"
+
+static const char *unit_dir() {
+#ifdef PB_TEST_HOOKS
+    const char *e = getenv("PROXYBRIDGE_SYSTEMD_DIR");      // tests only
+    if (e && *e) return e;
+#endif
+    return "/etc/systemd/system";
+}
+
+static const char *systemctl_cmd() {
+#ifdef PB_TEST_HOOKS
+    const char *e = getenv("PROXYBRIDGE_SYSTEMCTL");
+    if (e && *e) return e;
+#endif
+    return "systemctl";
+}
+
+static char *unit_path() { return g_strdup_printf("%s/" UNIT_NAME, unit_dir()); }
+
+// The command line program that sits next to this one (an installed pair), otherwise the default install location.
+static char *cli_path() {
+#ifdef PB_TEST_HOOKS
+    const char *e = getenv("PROXYBRIDGE_CLI");
+    if (e && *e) return g_strdup(e);
+#endif
+    char self[4096];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+    if (n > 0) {
+        self[n] = 0;
+        char *dir = g_path_get_dirname(self), *cli = g_build_filename(dir, "ProxyBridge", NULL);
+        g_free(dir);
+        if (g_file_test(cli, G_FILE_TEST_IS_EXECUTABLE)) return cli;
+        g_free(cli);
+    }
+    return g_strdup("/usr/local/bin/ProxyBridge");
+}
+
+// systemd's own quoting for one ExecStart word: backslash, double quote, % (specifier) and $ (variable) are escaped
+static void quote_word(GString *out, const char *s) {
+    g_string_append_c(out, '"');
+    for (; *s; s++) {
+        if (*s == '\\' || *s == '"') g_string_append_c(out, '\\');
+        else if (*s == '%') g_string_append_c(out, '%');
+        else if (*s == '$') g_string_append_c(out, '$');
+        g_string_append_c(out, *s);
+    }
+    g_string_append_c(out, '"');
+}
+
+char *boot_unit_text(const char *cli, const char *profile, char **error) {
+    for (const char *p = profile; *p; p++)
+        if ((unsigned char)*p < 0x20 || *p == 0x7f) {
+            if (error) *error = g_strdup("the profile name contains control characters and cannot be used in a service file");
+            return NULL;
+        }
+    for (const char *p = cli; *p; p++)
+        if ((unsigned char)*p < 0x20 || *p == 0x7f) {
+            if (error) *error = g_strdup("the program path contains control characters");
+            return NULL;
+        }
+    GString *s = g_string_new("[Unit]\nDescription=ProxyBridge\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=");
+    quote_word(s, cli);
+    g_string_append(s, " --profile ");
+    quote_word(s, profile);
+    g_string_append(s, "\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n");
+    return g_string_free(s, FALSE);
+}
+
+bool boot_is_enabled(void) {
+    char *path = unit_path();
+    bool yes = g_file_test(path, G_FILE_TEST_IS_REGULAR);
+    g_free(path);
+    return yes;
+}
+
+static bool run_systemctl(const char *a, const char *b, char **error) {
+    char *argv[] = { (char *)systemctl_cmd(), (char *)a, (char *)b, NULL };
+    char *err_out = NULL;
+    int status = 0;
+    GError *gerr = NULL;
+    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL, NULL, NULL, NULL, &err_out, &status, &gerr)) {
+        if (error) *error = g_strdup_printf("could not run %s: %s", systemctl_cmd(), gerr ? gerr->message : "unknown error");
+        if (gerr) g_error_free(gerr);
+        return false;
+    }
+    bool ok = g_spawn_check_wait_status(status, NULL);
+    if (!ok && error) {
+        g_strstrip(err_out ? err_out : (char *)"");
+        *error = g_strdup_printf("systemctl %s %s failed%s%s", a, b ? b : "", err_out && *err_out ? ": " : "", err_out ? err_out : "");
+    }
+    g_free(err_out);
+    return ok;
+}
+
+static bool write_unit(const char *profile, char **error) {
+    char *cli = cli_path();
+    char *text = boot_unit_text(cli, profile, error);
+    g_free(cli);
+    if (!text) return false;
+    char *path = unit_path(), *tmp = g_strdup_printf("%s.tmp", path);
+    bool ok = false;
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
+    if (fd >= 0) {
+        size_t n = strlen(text), off = 0;
+        while (off < n) {
+            ssize_t w = write(fd, text + off, n - off);
+            if (w <= 0) break;
+            off += (size_t)w;
+        }
+        ok = off == n && close(fd) == 0 && rename(tmp, path) == 0;
+        if (!ok) g_unlink(tmp);
+    }
+    if (!ok && error) *error = g_strdup_printf("cannot write %s: %s", path, g_strerror(errno));
+    g_free(tmp); g_free(path); g_free(text);
+    return ok;
+}
+
+bool boot_set(bool enable, const char *profile, char **error) {
+    if (error) *error = NULL;
+    if (enable) {
+        if (!write_unit(profile, error)) return false;
+        if (!run_systemctl("daemon-reload", NULL, error) || !run_systemctl("enable", UNIT_NAME, error)) {
+            char *path = unit_path();
+            g_unlink(path);                          // do not leave a unit behind that is not enabled
+            g_free(path);
+            return false;
+        }
+        return true;
+    }
+    char *path = unit_path();
+    bool existed = g_file_test(path, G_FILE_TEST_EXISTS);
+    bool ok = !existed || run_systemctl("disable", UNIT_NAME, error);
+    if (ok && existed && g_unlink(path) != 0) {
+        if (error) *error = g_strdup_printf("cannot remove %s: %s", path, g_strerror(errno));
+        ok = false;
+    }
+    if (ok && existed) run_systemctl("daemon-reload", NULL, NULL);
+    g_free(path);
+    return ok;
+}
+
+bool boot_refresh(const char *profile, char **error) {
+    if (error) *error = NULL;
+    if (!boot_is_enabled()) return true;
+    return write_unit(profile, error) && run_systemctl("daemon-reload", NULL, error);
+}

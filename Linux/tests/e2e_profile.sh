@@ -6,6 +6,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first (Linux/build.sh) or set PB_DIR"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 WORK="$(mktemp -d)"
 LOG="$WORK/proxy.log"; : > "$LOG"
@@ -23,8 +24,10 @@ mkdir -p "$WORK/cfg/profiles"
 python3 "$HERE/fake_proxies.py" "$LOG" > "$WORK/fake.out" 2>&1 & FAKE_PID=$!
 sleep 1
 
-start_pb() { # args...; leaves PB_PID set and waits for start-up
-  stdbuf -oL "$PB_DIR/ProxyBridge" "$@" > "$WORK/pb.out" 2>&1 & PB_PID=$!
+start_pb() { # args...; leaves PB_PID set and waits for start-up. Plain --profile/--verbose runs the real program; extras go through pbl
+  local prog="$PB_DIR/ProxyBridge" a
+  for a in "$@"; do case "$a" in --proxy|--rule|--dns-via-proxy|--log-every-connection) prog="$PBL";; esac; done
+  stdbuf -oL "$prog" "$@" > "$WORK/pb.out" 2>&1 & PB_PID=$!
   for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/pb.out" && return 0; kill -0 "$PB_PID" 2>/dev/null || return 1; sleep 0.25; done
   return 1
 }
@@ -67,8 +70,6 @@ stop_pb
 
 echo "== a profile saved by the GUI, by name (also with spaces)"
 cp "$WORK/win.pbprofile" "$WORK/cfg/profiles/Work Profile.pbprofile"
-out=$("$PB_DIR/ProxyBridge" --list-profiles 2>&1)
-has "--list-profiles shows the name"       "$out" "Work Profile"
 if start_pb --profile "Work Profile"; then ok "starts by profile name"; else bad "start by name"; cat "$WORK/pb.out"; fi
 out=$(curl -s -m 5 http://192.0.2.9/);        has "rules from the named profile apply" "$out" "hello-from-A dst=192.0.2.9:80"
 stop_pb
@@ -92,21 +93,53 @@ start_pb --profile "$WORK/dflt.pbprofile" --dns-via-proxy true
 has "explicit --dns-via-proxy wins"        "$(cat "$WORK/pb.out")" "DNS via Proxy: Enabled"
 stop_pb
 
+echo "== per-rule LocalhostViaProxy and per-proxy SendDomainToProxy from a profile"
+cat > "$WORK/lo.pbprofile" <<'JSON'
+{ "Version": "1.0", "LocalhostViaProxy": false,
+  "ProxyConfigs": [ { "Id": 1, "Name": "p", "Type": "socks5", "Host": "127.0.0.1", "Port": "19080", "SendDomainToProxy": false } ],
+  "ProxyRules": [
+    { "Name": "with", "ProcessName": "curl", "TargetHosts": "127.0.0.1", "TargetPorts": "18403", "Protocol": "TCP", "Action": "PROXY", "ProxyConfigId": 1, "LocalhostViaProxy": true },
+    { "Name": "without", "ProcessName": "curl", "TargetHosts": "127.0.0.1", "TargetPorts": "18404", "Protocol": "TCP", "Action": "PROXY", "ProxyConfigId": 1 } ] }
+JSON
+chmod 600 "$WORK/lo.pbprofile"
+start_pb --profile "$WORK/lo.pbprofile" || { bad "start"; cat "$WORK/pb.out"; }
+has "the proxy's dns:local option is shown" "$(cat "$WORK/pb.out")" "(dns:local)"
+has "the rule's localhost option is shown"  "$(cat "$WORK/pb.out")" "(+localhost)"
+out=$(curl -s -m 5 http://127.0.0.1:18403/);  has "LocalhostViaProxy=true: loopback goes to the proxy" "$out" "hello-from-A dst=127.0.0.1:18403"
+out=$(curl -s -m 3 http://127.0.0.1:18404/ 2>&1; echo "rc=$?"); has "no LocalhostViaProxy: loopback stays direct (nothing listens there)" "$out" "rc=7"
+stop_pb
+cat > "$WORK/legacy.pbprofile" <<'JSON'
+{ "Version": "1.0", "LocalhostViaProxy": true,
+  "ProxyConfigs": [ { "Id": 1, "Type": "socks5", "Host": "127.0.0.1", "Port": "19080" } ],
+  "ProxyRules": [ { "ProcessName": "curl", "TargetHosts": "127.0.0.1", "TargetPorts": "18405", "Protocol": "TCP", "Action": "PROXY", "ProxyConfigId": 1 } ] }
+JSON
+chmod 600 "$WORK/legacy.pbprofile"
+start_pb --profile "$WORK/legacy.pbprofile" || bad "start"
+out=$(curl -s -m 5 http://127.0.0.1:18405/);  has "an older profile's global LocalhostViaProxy becomes the rule default" "$out" "hello-from-A dst=127.0.0.1:18405"
+stop_pb
+
 echo "== bad input is rejected before anything is attached"
 expect_fail() { # name expected-text args...
   local name="$1" want="$2"; shift 2
   out=$("$PB_DIR/ProxyBridge" "$@" 2>&1); rc=$?
   if [ $rc -ne 0 ] && [[ "$out" == *"$want"* ]]; then ok "$name"; else bad "$name (rc=$rc: ${out:0:300})"; fi
 }
-expect_fail "missing file"                 "cannot open"         --profile "$WORK/nope.pbprofile"
-expect_fail "unknown profile name"         "cannot open"         --profile "no such profile"
+expect_fail "missing file"                 "ERROR"         --profile "$WORK/nope.pbprofile"
+expect_fail "unknown profile name"         "ERROR"         --profile "no such profile"
 echo '{ "ProxyRules": [ { "ProxyConfigId": 9 } ] }' > "$WORK/badref.pbprofile"
 expect_fail "rule referring to a missing proxy" "does not match any proxy" --profile "$WORK/badref.pbprofile"
 echo 'not json' > "$WORK/junk.pbprofile"
 expect_fail "malformed JSON"               "not a valid profile" --profile "$WORK/junk.pbprofile"
-echo '{ "ProxyRules": [ { "TargetHosts": "999.1.1.1" } ] }' > "$WORK/badhost.pbprofile"
+echo '{ "ProxyRules": [ { "TargetHosts": "999.1.1.1", "Action": "DIRECT" } ] }' > "$WORK/badhost.pbprofile"
 expect_fail "rule the engine rejects"      "ERROR"               --profile "$WORK/badhost.pbprofile"
 expect_fail "--profile without a value"    "Unknown option"      --profile
+echo '{ "ProxyConfigs": [ { "Id": 1, "Type": "socks5", "Host": "127.0.0.1", "Port": "19080" } ] }' > "$WORK/norules.pbprofile"
+expect_fail "a profile without rules"      "no enabled rules"    --profile "$WORK/norules.pbprofile"
+echo '{ "ProxyRules": [ { "TargetHosts": "10.0.0.1" } ] }' > "$WORK/noproxy.pbprofile"
+expect_fail "a PROXY rule without any proxy" "no proxy server"   --profile "$WORK/noproxy.pbprofile"
+echo '{ "ProxyConfigs": [ { "Id": 1, "Type": "socks5", "Host": "127.0.0.1", "Port": "19080" } ], "ProxyRules": [ { "IsEnabled": false } ] }' > "$WORK/off.pbprofile"
+expect_fail "a profile whose rules are all disabled" "no enabled rules" --profile "$WORK/off.pbprofile"
+expect_fail "no profile at all"            "No profile specified"
 
 echo "== credentials in a world-readable profile trigger a warning"
 cp "$WORK/win.pbprofile" "$WORK/open.pbprofile"; chmod 644 "$WORK/open.pbprofile"

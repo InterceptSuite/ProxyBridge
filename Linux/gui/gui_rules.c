@@ -8,6 +8,7 @@ static void refresh_rules_ui();
 
 void free_rule_data(RuleData *rule) {
     if (!rule) return;
+    g_free(rule->name);
     g_free(rule->process_name);
     g_free(rule->target_hosts);
     g_free(rule->target_ports);
@@ -38,8 +39,12 @@ void apply_rules_to_lib() {
         char err[256] = "";
         r->id = ProxyBridge_AddRule(r->process_name, r->target_hosts, r->target_ports, r->protocol, r->action,
                                     rule_proxy_id(r->action, r->proxy_name), err, sizeof(err));
-        if (r->id == 0) gui_log("Rule #%d (%s) not loaded: %s", n, r->process_name, err[0] ? err : "rejected");
-        else if (!r->enabled) ProxyBridge_DisableRule(r->id);
+        if (r->id == 0) {
+            gui_log("Rule #%d (%s) not loaded: %s", n, r->process_name, err[0] ? err : "rejected");
+            continue;
+        }
+        if (r->localhost && r->action == RULE_ACTION_PROXY) ProxyBridge_SetRuleLocalhost(r->id, true);
+        if (!r->enabled) ProxyBridge_DisableRule(r->id);
     }
 }
 
@@ -105,8 +110,8 @@ static void set_str(char **dst, const char *src) {
 }
 
 // returns the saved rule, NULL while the engine rejects it (err filled)
-static RuleData *save_rule(RuleData *rule, const char *proc, const char *hosts, const char *ports,
-                           RuleProtocol proto, RuleAction action, const char *proxy_name, char *err, size_t err_size) {
+static RuleData *save_rule(RuleData *rule, const char *name, const char *proc, const char *hosts, const char *ports,
+                           RuleProtocol proto, RuleAction action, const char *proxy_name, bool localhost, char *err, size_t err_size) {
     if (!ProxyBridge_ValidateRule(proc, hosts, ports, err, err_size)) return NULL;
     uint32_t pid = rule_proxy_id(action, proxy_name);
 
@@ -125,6 +130,10 @@ static RuleData *save_rule(RuleData *rule, const char *proc, const char *hosts, 
         rule->id = id;
         ProxyBridge_MoveRule(id, lib_index_of(rule));
     }
+    localhost = localhost && action == RULE_ACTION_PROXY;
+    ProxyBridge_SetRuleLocalhost(rule->id, localhost);
+    rule->localhost = localhost;
+    set_str(&rule->name, name);
     set_str(&rule->process_name, proc);
     set_str(&rule->target_hosts, hosts);
     set_str(&rule->target_ports, ports);
@@ -139,6 +148,7 @@ static void open_rule_dialog(RuleData *rule) {
                                                     GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                                     "Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, NULL);
     gtk_window_set_default_size(GTK_WINDOW(dialog), 500, 400);
+    gtk_widget_set_name(dialog, "dlg_rule");
     GtkWidget *grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
     gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
@@ -186,20 +196,35 @@ static void open_rule_dialog(RuleData *rule) {
     gtk_combo_box_set_active(GTK_COMBO_BOX(proto_combo), rule ? (int)rule->protocol : RULE_PROTOCOL_BOTH);
     gtk_combo_box_set_active(GTK_COMBO_BOX(action_combo), rule ? (int)rule->action : RULE_ACTION_PROXY);
 
+    GtkWidget *name_entry = gtk_entry_new();
+    gtk_entry_set_max_length(GTK_ENTRY(name_entry), 127);
+    gtk_entry_set_text(GTK_ENTRY(name_entry), rule && rule->name ? rule->name : "");
+    GtkWidget *localhost_check = gtk_check_button_new_with_label("Also proxy localhost traffic (127.0.0.0/8 and ::1)");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(localhost_check), rule && rule->localhost);
+    g_signal_connect(action_combo, "changed", G_CALLBACK(on_action_changed), localhost_check);
+
     GtkWidget *err_label = hint_label("");
-    grid_row(grid, 0, "Process Name:", proc_box);
-    gtk_grid_attach(GTK_GRID(grid), hint_label("Example: firefox; chrome; /usr/bin/wget"), 1, 1, 1, 1);
-    grid_row(grid, 2, "Target Host:", host_entry);
-    gtk_grid_attach(GTK_GRID(grid), hint_label("Example: 192.168.1.*; 10.0.0.0/8; 10.0.0.1-10.0.0.50; github.com; *.github.com; * (domains are matched via DNS answers). Long lists are fine; line breaks are for readability only, separate entries with ;"), 1, 3, 1, 1);
-    grid_row(grid, 4, "Target Port:", port_entry);
-    gtk_grid_attach(GTK_GRID(grid), hint_label("Example: 80; 443; 8000-8080; *"), 1, 5, 1, 1);
-    grid_row(grid, 6, "Protocol:", proto_combo);
-    grid_row(grid, 7, "Action:", action_combo);
-    grid_row(grid, 8, "Proxy:", proxy_combo);
-    gtk_grid_attach(GTK_GRID(grid), err_label, 0, 9, 2, 1);
+    // names let the UI test find the widgets
+    gtk_widget_set_name(name_entry, "rule_name"); gtk_widget_set_name(proc_entry, "rule_process"); gtk_widget_set_name(host_view, "rule_hosts");
+    gtk_widget_set_name(port_entry, "rule_ports"); gtk_widget_set_name(proto_combo, "rule_proto"); gtk_widget_set_name(action_combo, "rule_action");
+    gtk_widget_set_name(proxy_combo, "rule_proxy"); gtk_widget_set_name(localhost_check, "rule_localhost"); gtk_widget_set_name(err_label, "rule_error");
+    grid_row(grid, 0, "Name:", name_entry);
+    grid_row(grid, 1, "Process Name:", proc_box);
+    gtk_grid_attach(GTK_GRID(grid), hint_label("Example: firefox; chrome; /usr/bin/wget"), 1, 2, 1, 1);
+    grid_row(grid, 3, "Target Host:", host_entry);
+    gtk_grid_attach(GTK_GRID(grid), hint_label("Example: 192.168.1.*; 10.0.0.0/8; 10.0.0.1-10.0.0.50; github.com; *.github.com; * (domains are matched via DNS answers). Long lists are fine; line breaks are for readability only, separate entries with ;"), 1, 4, 1, 1);
+    grid_row(grid, 5, "Target Port:", port_entry);
+    gtk_grid_attach(GTK_GRID(grid), hint_label("Example: 80; 443; 8000-8080; *"), 1, 6, 1, 1);
+    grid_row(grid, 7, "Protocol:", proto_combo);
+    grid_row(grid, 8, "Action:", action_combo);
+    grid_row(grid, 9, "Proxy:", proxy_combo);
+    gtk_grid_attach(GTK_GRID(grid), localhost_check, 1, 10, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), hint_label("Without this, a PROXY rule leaves connections to this computer (localhost) direct. DNS to a local resolver is never proxied."), 1, 11, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), err_label, 0, 12, 2, 1);
     gtk_container_add(GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(dialog))), grid);
     gtk_widget_show_all(dialog);
     on_action_changed(GTK_COMBO_BOX(action_combo), proxy_combo);
+    on_action_changed(GTK_COMBO_BOX(action_combo), localhost_check);
 
     bool saved = false;
     while (!saved && gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
@@ -216,9 +241,10 @@ static void open_rule_dialog(RuleData *rule) {
         char *clean_hosts = list_normalize(raw_hosts);
         g_free(raw_hosts);
 
-        saved = save_rule(rule, gtk_entry_get_text(GTK_ENTRY(proc_entry)), clean_hosts,
+        saved = save_rule(rule, gtk_entry_get_text(GTK_ENTRY(name_entry)), gtk_entry_get_text(GTK_ENTRY(proc_entry)), clean_hosts,
                           gtk_entry_get_text(GTK_ENTRY(port_entry)), proto < 0 ? RULE_PROTOCOL_BOTH : (RuleProtocol)proto,
-                          action < 0 ? RULE_ACTION_PROXY : (RuleAction)action, pd ? pd->name : NULL, err, sizeof(err)) != NULL;
+                          action < 0 ? RULE_ACTION_PROXY : (RuleAction)action, pd ? pd->name : NULL,
+                          gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(localhost_check)), err, sizeof(err)) != NULL;
         g_free(clean_hosts);
         if (saved) {
             save_config();
@@ -300,9 +326,12 @@ static void import_rule_cb(const RuleData *r, int index, void *ud) {
                                    !r->process_name ? "missing processNames" : err[0] ? err : "rejected");
         return;
     }
+    if (r->localhost && r->action == RULE_ACTION_PROXY) ProxyBridge_SetRuleLocalhost(id, true);
     if (!r->enabled) ProxyBridge_DisableRule(id);
     RuleData *nd = g_malloc0(sizeof(RuleData));
     nd->id = id;
+    nd->name = g_strdup(r->name ? r->name : "");
+    nd->localhost = r->localhost && r->action == RULE_ACTION_PROXY;
     nd->process_name = g_strdup(r->process_name);
     nd->target_hosts = g_strdup(r->target_hosts);
     nd->target_ports = g_strdup(r->target_ports);
@@ -406,10 +435,10 @@ static void refresh_rules_ui() {
     gtk_grid_set_column_spacing(GTK_GRID(grid), 15);
     gtk_container_add(GTK_CONTAINER(rules_list_box), grid);
 
-    const char *heads[] = {"  ", "Enable", "Actions", "SR", "Process", "Target Hosts", "Protocol", "Action", "Proxy"};
-    for (int c = 0; c < 9; c++)
-        gtk_grid_attach(GTK_GRID(grid), header_label(heads[c], c == 4 || c == 5), c, 0, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, 1, 9, 1);
+    const char *heads[] = {"  ", "Enable", "Actions", "SR", "Name", "Process", "Target Hosts", "Protocol", "Action", "Proxy"};
+    for (int c = 0; c < 10; c++)
+        gtk_grid_attach(GTK_GRID(grid), header_label(heads[c], c == 5 || c == 6), c, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, 1, 10, 1);
 
     const char *proto_strs[] = {"TCP", "UDP", "BOTH"};
     const char *action_strs[] = {"PROXY", "DIRECT", "BLOCK"};
@@ -417,34 +446,45 @@ static void refresh_rules_ui() {
     int row = 2, sr = 1;
     for (GList *l = g_rules_list; l != NULL; l = l->next, row += 2) {
         RuleData *r = (RuleData *)l->data;
-        check_cell(grid, row, 0, r->selected, G_CALLBACK(on_rule_select_toggle), r);
-        check_cell(grid, row, 1, r->enabled, G_CALLBACK(on_rule_toggle), r);
+        char nm[48];
+        snprintf(nm, sizeof nm, "rule_select_%d", sr);
+        gtk_widget_set_name(check_cell(grid, row, 0, r->selected, G_CALLBACK(on_rule_select_toggle), r), nm);
+        snprintf(nm, sizeof nm, "rule_enable_%d", sr);
+        gtk_widget_set_name(check_cell(grid, row, 1, r->enabled, G_CALLBACK(on_rule_toggle), r), nm);
 
         // list position is the priority, first match wins
         GtkWidget *act_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-        small_button(act_box, "Edit", NULL, true, G_CALLBACK(on_rule_edit), r);
-        small_button(act_box, "Delete", NULL, true, G_CALLBACK(on_rule_delete), r);
-        small_button(act_box, "▲", "Move up (higher priority)", l->prev != NULL, G_CALLBACK(on_rule_move_up), r);
-        small_button(act_box, "▼", "Move down (lower priority)", l->next != NULL, G_CALLBACK(on_rule_move_down), r);
+        char bn[48];
+        snprintf(bn, sizeof bn, "rule_edit_%d", sr);
+        gtk_widget_set_name(small_button(act_box, "Edit", NULL, true, G_CALLBACK(on_rule_edit), r), bn);
+        snprintf(bn, sizeof bn, "rule_delete_%d", sr);
+        gtk_widget_set_name(small_button(act_box, "Delete", NULL, true, G_CALLBACK(on_rule_delete), r), bn);
+        snprintf(bn, sizeof bn, "rule_up_%d", sr);
+        gtk_widget_set_name(small_button(act_box, "▲", "Move up (higher priority)", l->prev != NULL, G_CALLBACK(on_rule_move_up), r), bn);
+        snprintf(bn, sizeof bn, "rule_down_%d", sr);
+        gtk_widget_set_name(small_button(act_box, "▼", "Move down (lower priority)", l->next != NULL, G_CALLBACK(on_rule_move_down), r), bn);
         gtk_grid_attach(GTK_GRID(grid), act_box, 2, row, 1, 1);
 
         char sr_str[16];
         snprintf(sr_str, sizeof(sr_str), "%d", sr++);
         gtk_grid_attach(GTK_GRID(grid), gtk_label_new(sr_str), 3, row, 1, 1);
-        gtk_grid_attach(GTK_GRID(grid), cell_label(r->process_name), 4, row, 1, 1);
-        gtk_grid_attach(GTK_GRID(grid), cell_label(r->target_hosts), 5, row, 1, 1);
-        gtk_grid_attach(GTK_GRID(grid), gtk_label_new(proto_strs[r->protocol <= RULE_PROTOCOL_BOTH ? r->protocol : RULE_PROTOCOL_BOTH]), 6, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), cell_label(r->name && *r->name ? r->name : "-"), 4, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), cell_label(r->process_name), 5, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), cell_label(r->target_hosts), 6, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), gtk_label_new(proto_strs[r->protocol <= RULE_PROTOCOL_BOTH ? r->protocol : RULE_PROTOCOL_BOTH]), 7, row, 1, 1);
 
         int a = r->action <= RULE_ACTION_BLOCK ? r->action : RULE_ACTION_PROXY;
         GtkWidget *l_act = gtk_label_new(action_strs[a]);
         gtk_style_context_add_class(gtk_widget_get_style_context(l_act), action_class[a]);
-        gtk_grid_attach(GTK_GRID(grid), l_act, 7, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), l_act, 8, row, 1, 1);
 
         const char *proxy_txt = "-";
         if (r->action == RULE_ACTION_PROXY)
             proxy_txt = (r->proxy_name && find_proxy_by_name(r->proxy_name)) ? r->proxy_name : "default";
-        gtk_grid_attach(GTK_GRID(grid), cell_label(proxy_txt), 8, row, 1, 1);
-        gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row + 1, 9, 1);
+        char *proxy_cell = g_strdup_printf("%s%s", proxy_txt, r->localhost ? " (+localhost)" : "");
+        gtk_grid_attach(GTK_GRID(grid), cell_label(proxy_cell), 9, row, 1, 1);
+        g_free(proxy_cell);
+        gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row + 1, 10, 1);
     }
     gtk_widget_show_all(rules_list_box);
 }
@@ -465,6 +505,7 @@ void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
         return;
     }
     rules_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_widget_set_name(rules_window, "win_rules");
     g_signal_connect(rules_window, "destroy", G_CALLBACK(on_rules_window_destroy), NULL);
     gtk_window_set_title(GTK_WINDOW(rules_window), "Process Rules");
     gtk_window_set_default_size(GTK_WINDOW(rules_window), 1000, 500);
@@ -485,6 +526,8 @@ void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
     GtkWidget *del_btn = gtk_button_new_with_label("Delete Selected");
     GtkWidget *import_btn = gtk_button_new_with_label("Import");
     GtkWidget *export_btn = gtk_button_new_with_label("Export");
+    gtk_widget_set_name(add_btn, "rules_add"); gtk_widget_set_name(btn_select_all_header, "rules_select_all"); gtk_widget_set_name(del_btn, "rules_delete_selected");
+    gtk_widget_set_name(import_btn, "rules_import"); gtk_widget_set_name(export_btn, "rules_export");
     g_signal_connect(add_btn, "clicked", G_CALLBACK(on_rule_add_clicked), NULL);
     g_signal_connect(btn_select_all_header, "clicked", G_CALLBACK(on_select_all_clicked), NULL);
     g_signal_connect(del_btn, "clicked", G_CALLBACK(on_bulk_delete_clicked), NULL);
@@ -496,6 +539,7 @@ void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
 
     GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
     rules_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_name(rules_list_box, "rules_list");
     gtk_container_add(GTK_CONTAINER(scrolled), rules_list_box);
     gtk_box_pack_start(GTK_BOX(vbox), scrolled, TRUE, TRUE, 0);
 

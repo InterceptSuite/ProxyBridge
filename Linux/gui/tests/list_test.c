@@ -23,7 +23,7 @@ int main(void) {
     norm("a b ; c", "a b;c");
     norm("\x01x\x02;y", "x;y");
     norm("\xc3\xa9xample.com;\n b.org", "\xc3\xa9xample.com;b.org");   // UTF-8 passes through
-    CHECK(list_normalize(NULL) != NULL);
+    { char *nn = list_normalize(NULL); CHECK(nn != NULL); g_free(nn); }
 
     char *f = list_format("a;b;c"); CHECK(!strcmp(f, "a;\nb;\nc")); g_free(f);
     f = list_format(""); CHECK(!strcmp(f, "")); g_free(f);

@@ -22,16 +22,19 @@ typedef uint8_t pb_u8; typedef uint16_t pb_u16; typedef uint32_t pb_u32; typedef
 #define PB_RF_HAS_V6        0x10   // IPv6 patterns present: "maybe" for IPv6 destinations
 #define PB_RF_UDP_DIRECT    0x20   // PROXY rule whose proxy cannot carry UDP: UDP goes direct
 #define PB_RF_DOMAINS       0x40   // answered through the dom_hit map filled by the DNS tap
+#define PB_RF_LOCALHOST     0x80   // PROXY rule that also proxies loopback destinations
 
 #define PB_CLASS_DECIDE     0xffffffffu   // pb_bclass.n: always take the slow path for this binary
 
 struct pb_cfg {
     pb_u32 enabled;         // at least one rule is loaded
+    pb_u32 paused;          // main switch off: nothing is redirected
     pb_u32 self_tgid;       // the process hosting the relay is never redirected
     pb_u32 log;
     pb_u32 dns_via_proxy;
     pb_u32 dns_tap;         // a domain rule exists
     pb_u32 n_exempt;        // entries in the exempt map
+    pb_u32 n_localhost;     // rules that proxy loopback traffic; 0 keeps every loopback connection out of the rule walk
     pb_u16 tcp_port, udp_port;
     pb_u64 netns;           // network namespace of the relay; other namespaces are ignored (0 = unknown)
 };

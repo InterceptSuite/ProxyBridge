@@ -28,7 +28,7 @@ static struct {
     struct pb_proxy proxies[MAX_PROXIES]; size_t nproxies;
     uint32_t next_rule_id, next_proxy_id, default_proxy;
     bool running;
-    atomic_bool dns_via_proxy, traffic_logging, has_domain_rules;
+    atomic_bool dns_via_proxy, traffic_logging, need_names, has_localhost, paused, log_every;
     pthread_t maint;
     bool maint_started, maint_stop, maint_kick;
     pthread_mutex_t maint_mu;
@@ -36,6 +36,7 @@ static struct {
     uint64_t warned[16]; size_t nwarned;
     LogCallback log_cb;
     ConnectionCallback conn_cb;
+    ConnectionCallbackEx conn_cb_ex;
 } G = { .lock = PTHREAD_RWLOCK_INITIALIZER, .maint_mu = PTHREAD_MUTEX_INITIALIZER, .maint_cv = PTHREAD_COND_INITIALIZER,
        .next_rule_id = 1, .next_proxy_id = 1, .dns_via_proxy = true };
 
@@ -81,7 +82,58 @@ static bool exe_path_of_pid(uint32_t pid, char *out, size_t n)
     return true;
 }
 
-static void emit_connection(uint32_t pid, const char *comm, int family, const uint8_t addr[16], uint16_t port, int action, uint32_t proxy_id)
+// Connection log history: bounded, so a busy host cannot grow it. Entries are replaced oldest-first within a short probe window.
+#define SEEN_SLOTS  8192
+#define SEEN_PROBES 8
+#define UDP_RELOG_MS 30000
+static struct seen_ent { uint64_t key; int64_t at; } *seen_tab;
+static pthread_mutex_t seen_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static uint64_t conn_key(const char *name, int family, const uint8_t addr[16], uint16_t port, int proto, int action, uint32_t proxy_id)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (const char *s = name; *s; s++) h = (h ^ (uint8_t)*s) * 1099511628211ULL;
+    const uint8_t extra[] = { (uint8_t)family, (uint8_t)(port >> 8), (uint8_t)port, (uint8_t)proto, (uint8_t)action, (uint8_t)proxy_id, (uint8_t)(proxy_id >> 8) };
+    for (size_t i = 0; i < sizeof extra; i++) h = (h ^ extra[i]) * 1099511628211ULL;
+    for (int i = 0; i < 16; i++) h = (h ^ addr[i]) * 1099511628211ULL;
+    return h ? h : 1;
+}
+
+// Should this connection appear in the log?
+static bool log_wanted(uint64_t key, bool udp)
+{
+    bool every = atomic_load(&G.log_every), want = true;
+    int64_t now = mono_ms();
+    pthread_mutex_lock(&seen_mu);
+    if (!seen_tab) seen_tab = calloc(SEEN_SLOTS, sizeof *seen_tab);
+    if (seen_tab) {
+        struct seen_ent *hit = NULL, *victim = NULL;
+        for (int i = 0; i < SEEN_PROBES && !hit; i++) {
+            struct seen_ent *e = &seen_tab[(key + (uint64_t)i) % SEEN_SLOTS];
+            if (e->key == key) hit = e;
+            else if (e->key == 0) { if (!victim || victim->key) victim = e; }
+            else if (!victim || (victim->key && e->at < victim->at)) victim = e;
+        }
+        if (hit) {
+            want = every && (!udp || now - hit->at >= UDP_RELOG_MS);
+            hit->at = now;                      // traffic keeps a UDP flow "alive"
+        } else if (victim) {
+            victim->key = key;
+            victim->at = now;
+        }
+    }
+    pthread_mutex_unlock(&seen_mu);
+    return want;
+}
+
+static void emit_connection(uint32_t pid, const char *comm, int family, const uint8_t addr[16], uint16_t port, int proto, int action, uint32_t proxy_id)
 {
     if (!atomic_load(&G.traffic_logging)) return;
     char path[4096], dest[INET6_ADDRSTRLEN + 280], info[400];
@@ -90,6 +142,7 @@ static void emit_connection(uint32_t pid, const char *comm, int family, const ui
         const char *base = strrchr(path, '/');
         name = base ? base + 1 : path;
     }
+    if (!log_wanted(conn_key(name, family, addr, port, proto, action, proxy_id), proto == IPPROTO_UDP)) return;
     if (family == AF_INET) {
         inet_ntop(AF_INET, addr + 12, dest, sizeof dest);
         uint32_t ip = ((uint32_t)addr[12] << 24) | ((uint32_t)addr[13] << 16) | ((uint32_t)addr[14] << 8) | addr[15];
@@ -108,6 +161,7 @@ static void emit_connection(uint32_t pid, const char *comm, int family, const ui
         snprintf(info, sizeof info, "%s", action == PB_ACT_PROXY ? "PROXY" : action == PB_ACT_BLOCK ? "BLOCK" : "DIRECT");
     pthread_mutex_lock(&cb_lock);
     if (G.conn_cb) G.conn_cb(name, pid, dest, port, info);
+    if (G.conn_cb_ex) G.conn_cb_ex(name, pid, dest, port, proto == IPPROTO_UDP ? "UDP" : "TCP", info);
     pthread_mutex_unlock(&cb_lock);
 }
 
@@ -116,12 +170,20 @@ static void on_bpf_event(const struct pb_event *e)
     char comm[17];
     memcpy(comm, e->comm, 16);
     comm[16] = 0;
-    emit_connection(e->pid, comm, e->family, e->addr, e->port, e->action, e->proxy_id);
+    emit_connection(e->pid, comm, e->family, e->addr, e->port, e->proto, e->action, e->proxy_id);
 }
 
+// The kernel already reported every flow it decided itself; the relay only reports the ones it decided.
 void pb_core_flow_event(const struct pb_orig *o, int action)
 {
-    emit_connection(o->pid, NULL, o->family, o->addr, o->port, action, o->proxy_id);
+    if (o->action != PB_ACT_DECIDE) return;
+    char hint[4096];
+    const char *comm = NULL;                       // the process may be gone already: the kernel's executable identity still names it
+    if (pb_bpf_exe_path(o->exe_dev, o->exe_ino, hint, sizeof hint)) {
+        const char *base = strrchr(hint, '/');
+        comm = base ? base + 1 : hint;
+    }
+    emit_connection(o->pid, comm, o->family, o->addr, o->port, o->proto, action, o->proxy_id);
 }
 
 static struct pb_proxy *find_proxy_locked(uint32_t id)
@@ -183,12 +245,12 @@ static void arm_cb(uint32_t ip, const char *const *names, int n, void *ctx)
 static void rearm_all_locked(void)
 {
     pb_bpf_dom_clear();
-    if (atomic_load(&G.has_domain_rules)) pb_dns_for_each(arm_cb, NULL);
+    if (atomic_load(&G.need_names)) pb_dns_for_each(arm_cb, NULL);
 }
 
 void pb_core_dns_observe(const uint8_t *msg, size_t len)
 {
-    if (!atomic_load(&G.has_domain_rules)) return;
+    if (!atomic_load(&G.need_names)) return;
     struct pb_dns_result res;
     if (pb_dns_observe(msg, len, &res) <= 0) return;
     pthread_rwlock_rdlock(&G.lock);
@@ -223,19 +285,29 @@ static void rebuild_views_locked(void)
     free(G.views);
     G.views = calloc(G.nrules ? G.nrules : 1, sizeof *G.views);
     G.nviews = G.views ? G.nrules : 0;
-    bool domains = false;
+    bool names = false, localhost = false;
     for (size_t i = 0; i < G.nviews; i++) {
         const struct pb_rule *r = &G.rules[i];
         struct pb_rule_view *v = &G.views[i];
         v->rule = r;
         v->action = r->action;
-        domains |= r->enabled && r->ndomains > 0;
-        if (r->action != RULE_ACTION_PROXY) continue;
-        const struct pb_proxy *p = proxy_for_rule_locked(r);
-        if (!p) v->action = RULE_ACTION_BLOCK;      // no usable proxy: fail closed
-        else { v->proxy_id = (uint16_t)p->id; v->udp_direct = p->type == PROXY_TYPE_HTTP; }
+        v->wants_names = r->enabled && r->ndomains > 0;
+        if (r->action == RULE_ACTION_PROXY) {
+            const struct pb_proxy *p = proxy_for_rule_locked(r);
+            if (!p) {
+                v->action = RULE_ACTION_BLOCK;      // no usable proxy: fail closed
+            } else {
+                v->proxy_id = (uint16_t)p->id;
+                v->udp_direct = p->type == PROXY_TYPE_HTTP;
+                v->localhost = r->enabled && r->localhost;
+                v->wants_names |= r->enabled && p->send_domain;
+            }
+        }
+        names |= v->wants_names;
+        localhost |= v->localhost;
     }
-    atomic_store(&G.has_domain_rules, domains);
+    atomic_store(&G.need_names, names);
+    atomic_store(&G.has_localhost, localhost);
 }
 
 static void sync_locked(void)
@@ -248,24 +320,56 @@ static void sync_locked(void)
     warn_udp_over_http_locked();
 }
 
+static bool is_loopback(const struct pb_orig *o)
+{
+    if (o->family == AF_INET) return o->addr[12] == 127;
+    static const uint8_t lo6[16] = { [15] = 1 };
+    return memcmp(o->addr, lo6, 16) == 0;
+}
+
+int pb_core_name_for(const struct pb_orig *o, char *out, size_t n)
+{
+    if (o->family != AF_INET || !atomic_load(&G.need_names)) return -1;
+    uint32_t ip = ((uint32_t)o->addr[12] << 24) | ((uint32_t)o->addr[13] << 16) | ((uint32_t)o->addr[14] << 8) | o->addr[15];
+    char names[PB_DNS_MAX_NAMES][256];
+    int k = pb_dns_lookup(ip, names, PB_DNS_MAX_NAMES);
+    if (k <= 0) return -1;
+    const char *nm = names[k - 1];                // the lookup lists the most recent query name last
+    size_t len = strlen(nm);
+    if (len == 0 || len > 253 || len >= n) return -1;
+    for (size_t i = 0; i < len; i++) {            // the name came from the network: only host name characters go into a proxy request
+        unsigned char ch = (unsigned char)nm[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.')) return -1;
+    }
+    if (nm[0] == '.' || nm[len - 1] == '.' ) return -1;
+    memcpy(out, nm, len + 1);
+    return 0;
+}
+
 void pb_core_decide(const struct pb_orig *o, struct pb_decision *out)
 {
     char path[4096];
-    exe_path_of_pid(o->pid, path, sizeof path);
+    if (!exe_path_of_pid(o->pid, path, sizeof path) && !pb_bpf_exe_path(o->exe_dev, o->exe_ino, path, sizeof path)) path[0] = 0;
     out->action = PB_ACT_DIRECT;
     out->proxy_id = 0;
 
+    if (atomic_load(&G.paused)) return;
     pthread_rwlock_rdlock(&G.lock);
-    if (!pb_implicit_direct(o->family, o->addr, o->port, o->proto, atomic_load(&G.dns_via_proxy))) {
+    bool lo = atomic_load(&G.has_localhost) && is_loopback(o) && o->port != 53 &&
+              o->port != pb_relay_tcp_port() && o->port != pb_relay_udp_port();
+    if (lo || !pb_implicit_direct(o->family, o->addr, o->port, o->proto, atomic_load(&G.dns_via_proxy))) {
         char names[PB_DNS_MAX_NAMES][256];
         const char *ptrs[PB_DNS_MAX_NAMES] = { 0 };
         int nn = 0;
-        if (o->family == AF_INET && atomic_load(&G.has_domain_rules)) {
+        if (o->family == AF_INET && atomic_load(&G.need_names)) {
             uint32_t ip = ((uint32_t)o->addr[12] << 24) | ((uint32_t)o->addr[13] << 16) | ((uint32_t)o->addr[14] << 8) | o->addr[15];
             nn = pb_dns_lookup(ip, names, PB_DNS_MAX_NAMES);
             for (int k = 0; k < nn; k++) ptrs[k] = names[k];
         }
         int idx = pb_rules_eval(G.rules, G.nrules, path, o->family, o->addr, o->port, o->proto, ptrs, nn);
+        if (idx >= 0 && lo && !(G.rules[idx].action == RULE_ACTION_PROXY && G.rules[idx].localhost)) {
+            idx = -1;                                   // loopback stays direct unless the matching rule proxies it
+        }
         if (idx >= 0) {
             const struct pb_rule *r = &G.rules[idx];
             if (r->action != RULE_ACTION_PROXY) {
@@ -316,6 +420,43 @@ static uint32_t resolve_proxy_ip(const char *host, struct host_cache *cache, siz
         }
     }
     return cache[slot].ip_be;
+}
+
+#define LOOP_CACHE 32
+static struct { uint32_t pid, proxy_id; int64_t until; bool hit; } loop_cache[LOOP_CACHE];
+static unsigned loop_next;
+static struct host_cache loop_hosts[4];
+static pthread_mutex_t loop_mu = PTHREAD_MUTEX_INITIALIZER;
+
+int pb_core_is_proxy_process(uint32_t pid, uint32_t proxy_id)
+{
+    int64_t now = mono_ms();
+    pthread_mutex_lock(&loop_mu);
+    for (int i = 0; i < LOOP_CACHE; i++)
+        if (loop_cache[i].pid == pid && loop_cache[i].proxy_id == proxy_id && loop_cache[i].until > now) {
+            int hit = loop_cache[i].hit;
+            pthread_mutex_unlock(&loop_mu);
+            return hit;
+        }
+    pthread_mutex_unlock(&loop_mu);
+
+    struct pb_proxy px;
+    bool hit = false;
+    if (pb_core_get_proxy(proxy_id, &px) == 0) {
+        pthread_mutex_lock(&loop_mu);
+        uint32_t ip = resolve_proxy_ip(px.host, loop_hosts, 4, time(NULL));
+        pthread_mutex_unlock(&loop_mu);
+        hit = ip && pb_proc_is_local_ip(ip) && pb_proc_pid_listens(pid, ip, px.port);
+    }
+    pthread_mutex_lock(&loop_mu);
+    unsigned slot = loop_next++ % LOOP_CACHE;
+    loop_cache[slot].pid = pid; loop_cache[slot].proxy_id = proxy_id; loop_cache[slot].hit = hit; loop_cache[slot].until = now + 3000;
+    pthread_mutex_unlock(&loop_mu);
+    if (hit) {
+        pb_core_log("process %u serves proxy '%s': its own connections are sent direct, not back through the proxy", pid, px.name);
+        maint_kick();                       // exempt it in the kernel too, so later connections skip the relay
+    }
+    return hit;
 }
 
 static void refresh_exempt(struct host_cache *cache, size_t ncache, uint32_t *last, size_t *nlast)
@@ -418,6 +559,7 @@ uint32_t ProxyBridge_AddProxy(const char *name, ProxyType type, const char *host
         struct pb_proxy *p = &G.proxies[G.nproxies++];
         memset(p, 0, sizeof *p);
         p->id = id = G.next_proxy_id++;
+        p->send_domain = true;
         fill_proxy(p, name, type, host, port, user, pass);
         sync_locked();
     }
@@ -435,6 +577,15 @@ bool ProxyBridge_EditProxy(uint32_t id, const char *name, ProxyType type, const 
     else set_err(err, en, "unknown proxy id %u", id);
     pthread_rwlock_unlock(&G.lock);
     if (p) maint_kick();
+    return p != NULL;
+}
+
+bool ProxyBridge_SetProxySendDomain(uint32_t id, bool send_domain)
+{
+    pthread_rwlock_wrlock(&G.lock);
+    struct pb_proxy *p = find_proxy_locked(id);
+    if (p) { p->send_domain = send_domain; sync_locked(); }
+    pthread_rwlock_unlock(&G.lock);
     return p != NULL;
 }
 
@@ -542,6 +693,7 @@ bool ProxyBridge_EditRule(uint32_t id, const char *proc, const char *hosts, cons
     } else {
         r.id = id;
         r.enabled = old->enabled;
+        r.localhost = old->localhost;
         r.protocol = protocol;
         r.action = action;
         r.proxy_id = proxy_id;
@@ -551,6 +703,15 @@ bool ProxyBridge_EditRule(uint32_t id, const char *proc, const char *hosts, cons
     }
     pthread_rwlock_unlock(&G.lock);
     return old != NULL;
+}
+
+bool ProxyBridge_SetRuleLocalhost(uint32_t id, bool on)
+{
+    pthread_rwlock_wrlock(&G.lock);
+    struct pb_rule *r = find_rule_locked(id, NULL);
+    if (r) { r->localhost = on; sync_locked(); }
+    pthread_rwlock_unlock(&G.lock);
+    return r != NULL;
 }
 
 static bool set_enabled(uint32_t id, bool on)
@@ -620,6 +781,13 @@ void ProxyBridge_SetLogCallback(LogCallback cb)
     pthread_mutex_unlock(&cb_lock);
 }
 
+void ProxyBridge_SetConnectionCallbackEx(ConnectionCallbackEx cb)
+{
+    pthread_mutex_lock(&cb_lock);
+    G.conn_cb_ex = cb;
+    pthread_mutex_unlock(&cb_lock);
+}
+
 void ProxyBridge_SetConnectionCallback(ConnectionCallback cb)
 {
     pthread_mutex_lock(&cb_lock);
@@ -633,7 +801,20 @@ void ProxyBridge_SetTrafficLoggingEnabled(bool enable)
     pb_bpf_set_flags(enable, atomic_load(&G.dns_via_proxy));
 }
 
-void ProxyBridge_ClearConnectionLogs(void) {}
+void ProxyBridge_ClearConnectionLogs(void)
+{
+    pthread_mutex_lock(&seen_mu);
+    if (seen_tab) memset(seen_tab, 0, SEEN_SLOTS * sizeof *seen_tab);
+    pthread_mutex_unlock(&seen_mu);
+}
+
+void ProxyBridge_SetLogEveryConnection(bool enable) { atomic_store(&G.log_every, enable); }
+
+void ProxyBridge_SetEnabled(bool enable)
+{
+    atomic_store(&G.paused, !enable);
+    pb_bpf_set_paused(!enable);
+}
 
 static bool proxies_missing_locked(void)
 {
@@ -676,6 +857,7 @@ bool ProxyBridge_Start(void)
     pthread_mutex_unlock(&G.maint_mu);
     G.maint_started = pthread_create(&G.maint, NULL, maint_loop, NULL) == 0;
 
+    pb_bpf_set_paused(atomic_load(&G.paused));
     pthread_rwlock_wrlock(&G.lock);
     sync_locked();
     pthread_rwlock_unlock(&G.lock);
@@ -712,6 +894,51 @@ int ProxyBridge_TestProxy(uint32_t proxy_id, const char *host, uint16_t port, ch
     struct pb_proxy p;
     if (pb_core_get_proxy(proxy_id, &p) != 0) { snprintf(buf, n, "no proxy configured"); return -1; }
     return pb_relay_test_proxy(&p, host, port, buf, n);
+}
+
+uint32_t ProxyBridge_GetFlows(ProxyBridgeFlow *out, uint32_t max)
+{
+    if (!out || !max) return 0;
+    if (max > PB_FLOWS_MAX) max = PB_FLOWS_MAX;
+    struct pb_flow_info *raw = calloc(max, sizeof *raw);
+    if (!raw) return 0;
+    int n = pb_relay_flows(raw, (int)max);
+    for (int i = 0; i < n; i++) {
+        const struct pb_flow_info *f = &raw[i];
+        ProxyBridgeFlow *o = &out[i];
+        memset(o, 0, sizeof *o);
+        o->id = f->id; o->pid = f->pid; o->proxy_id = f->proxy_id; o->age_ms = f->age_ms;
+        o->sent = f->sent; o->received = f->recv; o->port = f->port; o->is_udp = f->udp; o->is_ipv6 = f->family == AF_INET6;
+        memcpy(o->dest, f->addr, 16);
+        char path[4096];
+        if (exe_path_of_pid(f->pid, path, sizeof path)) {
+            const char *base = strrchr(path, '/');
+            snprintf(o->name, sizeof o->name, "%.*s", (int)sizeof o->name - 1, base ? base + 1 : path);
+        } else {
+            snprintf(o->name, sizeof o->name, "pid %u", f->pid);
+        }
+        if (f->family == AF_INET) {
+            uint32_t ip = ((uint32_t)f->addr[12] << 24) | ((uint32_t)f->addr[13] << 16) | ((uint32_t)f->addr[14] << 8) | f->addr[15];
+            char names[PB_DNS_MAX_NAMES][256];
+            int k = pb_dns_lookup(ip, names, PB_DNS_MAX_NAMES);
+            if (k > 0) snprintf(o->host, sizeof o->host, "%s", names[k - 1]);
+            else inet_ntop(AF_INET, f->addr + 12, o->host, sizeof o->host);
+        } else {
+            inet_ntop(AF_INET6, f->addr, o->host, sizeof o->host);
+        }
+    }
+    free(raw);
+    return (uint32_t)n;
+}
+
+int ProxyBridge_TestProxyEx(uint32_t proxy_id, const char *host, uint16_t port, ProxyTestLogCallback cb, void *user)
+{
+    struct pb_proxy p;
+    if (pb_core_get_proxy(proxy_id, &p) != 0) {
+        if (cb) cb("Result: FAILED - no proxy configured", user);
+        return -1;
+    }
+    return pb_relay_check_proxy(&p, host, port, cb, user);
 }
 
 int ProxyBridge_TestConnection(const char *host, uint16_t port, char *buf, size_t n)

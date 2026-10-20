@@ -27,7 +27,10 @@
 
 #define SCRATCH_SZ      65536
 #define HDR_MAX         8192
-#define NWORKERS        16
+#define WORKERS_MIN     8       // handshake workers: a few always, more while handshakes pile up, extras leave after a pause
+#define WORKERS_MAX     64
+#define WORKER_IDLE_S   20
+#define UPSTREAM_CAP    48      // handshakes in flight per upstream, so a dead proxy cannot take every worker
 #define MAX_DATA        8
 #define PIPE_SZ         (1 << 20)
 #define JOBQ_MAX        4096    // handshake queue; excess accepts are shed with a log
@@ -39,6 +42,8 @@
 #define UDP_BATCH       16
 #define FLOW_TTL_MS     1000
 #define DC_SIZE         1024
+#define UFLOWS_MAX      200
+#define UDP_LIVE_MS     30000
 #define SESS_BUCKETS    256
 #define DIRECT_ID       0xFFFFFFFFu
 
@@ -526,6 +531,12 @@ struct conn {
     uint32_t mask[2];
     bool     eof[2], shut[2], dead;
     int64_t  last;
+    // what GetFlows reports
+    uint64_t id, bytes[2];
+    int64_t  t0;
+    uint32_t pid;
+    uint16_t port, proxy_id;
+    uint8_t  family, addr[16];
 };
 
 static void conn_bufs_free(struct conn *c)
@@ -553,6 +564,7 @@ struct sess;
 struct job {
     struct job *next;
     int         kind;
+    unsigned    key;                // upstream the handshake talks to (0 = not known before the decision)
     int         fd;
     struct pb_orig o;
     struct sess *s;
@@ -594,8 +606,8 @@ struct dce {
     uint32_t flow_be, pid;
     struct pb_orig o;
     int action, fidx;
-    int64_t looked, last;
-    uint64_t sid;
+    int64_t looked, last, t0;
+    uint64_t sid, id, sent, recv;
 };
 
 static struct {
@@ -606,10 +618,13 @@ static struct {
     atomic_bool stopping;
     atomic_int nconn;
     atomic_uint rr;
+    atomic_ullong flow_id;
     uint16_t   tcp_port, udp_port;
 
     pthread_t  acceptor; bool acc_started;
-    pthread_t  workers[NWORKERS]; int nworkers;
+    int        nworkers, nidle;
+    int        busy[256];                // handshakes in flight per upstream key
+    pthread_cond_t wdone;
     struct dthread data[MAX_DATA];
     int        ndata;
     pthread_t  udpth; bool udp_started;
@@ -627,6 +642,8 @@ static struct {
     int          nsess;
     struct sess *sgrave;
     struct dce  *dc;
+    pthread_mutex_t fmu;                  // guards uflows, the UDP side of GetFlows (published by the UDP thread once a second)
+    struct pb_flow_info uflows[UFLOWS_MAX]; int nuflows;
     uint8_t     *rxbuf;
     int64_t      drop_count, drop_logged;
     uint64_t     next_sid;
@@ -634,12 +651,27 @@ static struct {
     struct iovec    *mmiov;
     struct sockaddr_in *mmname;
     char         (*mmctl)[CMSG_SPACE(sizeof(struct in_pktinfo))];
-} R = { .life = PTHREAD_MUTEX_INITIALIZER, .jmu = PTHREAD_MUTEX_INITIALIZER, .jcv = PTHREAD_COND_INITIALIZER,
-        .dmu = PTHREAD_MUTEX_INITIALIZER, .lfd = -1, .ufd = -1, .stopfd = -1, .tmfd = -1, .uep = -1, .uwake = -1 };
+} R = { .life = PTHREAD_MUTEX_INITIALIZER, .jmu = PTHREAD_MUTEX_INITIALIZER, .jcv = PTHREAD_COND_INITIALIZER, .wdone = PTHREAD_COND_INITIALIZER,
+        .dmu = PTHREAD_MUTEX_INITIALIZER, .fmu = PTHREAD_MUTEX_INITIALIZER, .lfd = -1, .ufd = -1, .stopfd = -1, .tmfd = -1, .uep = -1, .uwake = -1 };
 
 static void proxy_desc(const struct pb_proxy *p, char *out, size_t n)
 {
     snprintf(out, n, "%s %s:%u", p->type == PROXY_TYPE_SOCKS5 ? "SOCKS5" : "HTTP", p->host, p->port);
+}
+
+static void *worker_main(void *arg);
+
+// Caller holds R.jmu.
+static void worker_spawn_locked(void)
+{
+    pthread_attr_t at;
+    pthread_t th;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 512 * 1024);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    R.nworkers++;
+    if (pthread_create(&th, &at, worker_main, NULL) != 0) R.nworkers--;
+    pthread_attr_destroy(&at);
 }
 
 static int job_push(int kind, int fd, const struct pb_orig *o, struct sess *s)
@@ -648,6 +680,8 @@ static int job_push(int kind, int fd, const struct pb_orig *o, struct sess *s)
     if (!j) return -1;
     j->kind = kind; j->fd = fd; j->s = s;
     if (o) j->o = *o;
+    if (kind == J_TCP && o && o->action == PB_ACT_PROXY) j->key = 1 + o->proxy_id % 255u;
+    else if (kind != J_TCP && s) j->key = 1 + s->proxy.id % 255u;
     pthread_mutex_lock(&R.jmu);
     if (R.jcount >= JOBQ_MAX || atomic_load(&R.stopping)) {
         pthread_mutex_unlock(&R.jmu);
@@ -657,17 +691,22 @@ static int job_push(int kind, int fd, const struct pb_orig *o, struct sess *s)
     if (R.jtail) R.jtail->next = j; else R.jhead = j;
     R.jtail = j;
     R.jcount++;
+    if (R.jcount > R.nidle && R.nworkers < WORKERS_MAX && R.busy[j->key] < UPSTREAM_CAP) worker_spawn_locked();
     pthread_cond_signal(&R.jcv);
     pthread_mutex_unlock(&R.jmu);
     return 0;
 }
 
-static void conn_handoff(int cfd, int ufd, const uint8_t *left, size_t leftn, bool dns)
+static void conn_handoff(int cfd, int ufd, const uint8_t *left, size_t leftn, bool dns, const struct pb_orig *o, uint32_t proxy_id)
 {
     struct conn *c = calloc(1, sizeof *c);
     if (!c) { close(cfd); close(ufd); atomic_fetch_sub(&R.nconn, 1); return; }
     c->fd[0] = cfd; c->fd[1] = ufd;
     c->dns = dns;
+    c->id = atomic_fetch_add(&R.flow_id, 1) + 1;
+    c->t0 = now_ms();
+    c->pid = o->pid; c->port = o->port; c->proxy_id = (uint16_t)proxy_id; c->family = o->family;
+    memcpy(c->addr, o->addr, 16);
     if (leftn) {
         uint8_t *m = malloc(leftn);
         if (!m) { close(cfd); close(ufd); free(c); atomic_fetch_sub(&R.nconn, 1); return; }
@@ -712,6 +751,7 @@ static void tcp_job_run(struct job *j)
         pb_core_decide(o, &d);
         action = d.action; pid = d.proxy_id;
     }
+    if (action == PB_ACT_PROXY && pb_core_is_proxy_process(o->pid, pid)) action = PB_ACT_DIRECT;     // a local proxy must not loop through itself
     if (action == PB_ACT_DIRECT) {
         pb_core_flow_event(o, PB_ACT_DIRECT);
         struct sockaddr_storage ss;
@@ -734,14 +774,17 @@ static void tcp_job_run(struct job *j)
             } else {
                 struct io x = { .fd = up, .dl = dl, .stopfd = R.stopfd };
                 int rc;
+                char hn[256];
+                bool named = px.send_domain && pb_core_name_for(o, hn, sizeof hn) == 0;
                 if (px.type == PROXY_TYPE_SOCKS5) {
                     struct s5dst d;
                     s5dst_from_orig(&d, o);
+                    if (named) { d.atyp = 3; snprintf(d.host, sizeof d.host, "%s", hn); }
                     rc = socks5_request(&x, &px, 1, &d, NULL);
                 } else {
                     char ip[INET6_ADDRSTRLEN];
                     fmt_ip(o->family, o->addr, ip, sizeof ip);
-                    rc = http_connect(&x, &px, ip, o->port, left, &leftn);
+                    rc = http_connect(&x, &px, named ? hn : ip, o->port, left, &leftn);
                 }
                 if (rc) {
                     snprintf(err, sizeof err, "proxy %s -> %s: %s", desc, dst, x.err);
@@ -762,7 +805,7 @@ static void tcp_job_run(struct job *j)
         atomic_fetch_sub(&R.nconn, 1);
         return;
     }
-    conn_handoff(cfd, up, left, leftn, o->port == 53);
+    conn_handoff(cfd, up, left, leftn, o->port == 53, o, action == PB_ACT_PROXY ? pid : 0);
 }
 
 static void udp_job_run(struct sess *s)
@@ -820,18 +863,37 @@ out:
 static void *worker_main(void *arg)
 {
     (void)arg;
-    for (;;) {
-        pthread_mutex_lock(&R.jmu);
-        while (!R.jhead && !atomic_load(&R.stopping)) pthread_cond_wait(&R.jcv, &R.jmu);
-        if (atomic_load(&R.stopping)) { pthread_mutex_unlock(&R.jmu); return NULL; }
-        struct job *j = R.jhead;
-        R.jhead = j->next;
-        if (!R.jhead) R.jtail = NULL;
-        R.jcount--;
-        pthread_mutex_unlock(&R.jmu);
-        if (j->kind == J_TCP) tcp_job_run(j); else udp_job_run(j->s);
-        free(j);
+    pthread_mutex_lock(&R.jmu);
+    while (!atomic_load(&R.stopping)) {
+        struct job *prev = NULL, *j;
+        for (j = R.jhead; j; prev = j, j = j->next)
+            if (R.busy[j->key] < UPSTREAM_CAP) break;
+        if (j) {
+            if (prev) prev->next = j->next; else R.jhead = j->next;
+            if (R.jtail == j) R.jtail = prev;
+            R.jcount--;
+            unsigned key = j->key;
+            R.busy[key]++;
+            pthread_mutex_unlock(&R.jmu);
+            if (j->kind == J_TCP) tcp_job_run(j); else udp_job_run(j->s);
+            free(j);
+            pthread_mutex_lock(&R.jmu);
+            R.busy[key]--;
+            pthread_cond_signal(&R.jcv);            // a job held back by this upstream's cap may be able to run now
+            continue;
+        }
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += WORKER_IDLE_S;
+        R.nidle++;
+        int rc = pthread_cond_timedwait(&R.jcv, &R.jmu, &ts);
+        R.nidle--;
+        if (rc == ETIMEDOUT && !R.jhead && R.nworkers > WORKERS_MIN) break;
     }
+    R.nworkers--;
+    pthread_cond_broadcast(&R.wdone);
+    pthread_mutex_unlock(&R.jmu);
+    return NULL;
 }
 
 static void *acceptor_main(void *arg)
@@ -918,6 +980,7 @@ static int pump_splice(struct dthread *t, struct conn *c, int d)
         if (errno != EAGAIN && errno != EINTR) { pipe_discard(t->pfd[0]); return -1; }
         w = 0;
     }
+    c->bytes[d] += (uint64_t)n;
     if (w < n && spill_from_pipe(c, d, t->pfd[0], (size_t)(n - w)) != 0) return -1;
     return 1;
 }
@@ -929,6 +992,7 @@ static int dns_pump_up(struct conn *c, uint8_t *scratch)
     ssize_t n = recv(c->fd[1], scratch, SCRATCH_SZ, 0);
     if (n < 0 && errno != EAGAIN && errno != EINTR) return -1;
     if (n > 0) {
+        c->bytes[1] += (uint64_t)n;
         if (c->dhave + (size_t)n > c->dcap) {
             size_t nc = c->dhave + (size_t)n;
             uint8_t *nb = realloc(c->dbuf, nc);
@@ -998,6 +1062,7 @@ static int conn_pump(struct dthread *t, struct conn *c)
                     ssize_t n = recv(c->fd[d], scratch, SCRATCH_SZ, 0);
                     if (n > 0) {
                         progress = true;
+                        c->bytes[d] += (uint64_t)n;
                         ssize_t w = send(c->fd[o], scratch, (size_t)n, MSG_NOSIGNAL);
                         if (w < 0) {
                             if (errno != EAGAIN && errno != EINTR) return -1;
@@ -1058,8 +1123,10 @@ static void conn_close(struct dthread *t, struct conn *c)
     close(c->fd[1]);
     c->dead = true;
     conn_bufs_free(c);
+    pthread_mutex_lock(&t->mu);                 // GetFlows walks this list from another thread
     if (c->prev) c->prev->next = c->next; else t->conns = c->next;
     if (c->next) c->next->prev = c->prev;
+    pthread_mutex_unlock(&t->mu);
     c->next = t->grave;
     c->prev = NULL;
     t->grave = c;
@@ -1082,9 +1149,11 @@ static void dthread_adopt(struct dthread *t)
     pthread_mutex_unlock(&t->mu);
     while (c) {
         struct conn *n = c->next;
+        pthread_mutex_lock(&t->mu);
         c->next = t->conns; c->prev = NULL;
         if (t->conns) t->conns->prev = c;
         t->conns = c;
+        pthread_mutex_unlock(&t->mu);
         c->last = now_ms();
         if (c->len[1] || c->dhave) conn_service(t, c);
         else if (conn_update(t, c) != 0) conn_close(t, c);
@@ -1208,8 +1277,16 @@ static struct sess *sess_new(const struct sockaddr_in *cli, uint32_t id, uint32_
     return s;
 }
 
+static struct dce *dce_slot(const struct sockaddr_in *cli, uint32_t flow_be)
+{
+    uint32_t hv = (cli->sin_addr.s_addr * 2654435761u) ^ (cli->sin_port * 40503u) ^ (flow_be * 2246822519u);
+    return &R.dc[hv % DC_SIZE];
+}
+
 static void udp_reply(const struct sockaddr_in *cli, uint32_t flow_be, const uint8_t *data, size_t n)
 {
+    struct dce *de = dce_slot(cli, flow_be);
+    if (de->used && de->cli.sin_addr.s_addr == cli->sin_addr.s_addr && de->cli.sin_port == cli->sin_port && de->flow_be == flow_be) de->recv += n;
     struct iovec iov = { (void *)data, n };
     union { char b[CMSG_SPACE(sizeof(struct in_pktinfo))]; struct cmsghdr a; } cb;
     memset(&cb, 0, sizeof cb);
@@ -1263,8 +1340,7 @@ static size_t socks5_header(uint8_t *h, const struct pb_orig *o)
 
 static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uint8_t *pl, size_t n, int64_t now)
 {
-    uint32_t hv = (cli->sin_addr.s_addr * 2654435761u) ^ (cli->sin_port * 40503u) ^ (flow_be * 2246822519u);
-    struct dce *e = &R.dc[hv % DC_SIZE];
+    struct dce *e = dce_slot(cli, flow_be);
     bool same = e->used && e->cli.sin_addr.s_addr == cli->sin_addr.s_addr && e->cli.sin_port == cli->sin_port && e->flow_be == flow_be;
     if (!same || now - e->looked >= FLOW_TTL_MS) {
         struct pb_orig o;
@@ -1286,6 +1362,7 @@ static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uin
                     act = PB_ACT_BLOCK;
                 } else {
                     pid = px.id;
+                    if (pb_core_is_proxy_process(o.pid, pid)) act = PB_ACT_DIRECT;
                 }
             } else if (act != PB_ACT_DIRECT) {
                 act = PB_ACT_BLOCK;
@@ -1294,6 +1371,8 @@ static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uin
             e->action = act;
             e->pid = pid;
             e->sid = 0;
+            e->t0 = now; e->sent = e->recv = 0;
+            e->id = atomic_fetch_add(&R.flow_id, 1) + 1;
         }
         e->used = true;
         e->cli = *cli;
@@ -1302,6 +1381,7 @@ static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uin
         e->looked = now;
     }
     e->last = now;
+    e->sent += n;
     if (e->action == PB_ACT_BLOCK) return;
 
     const struct pb_orig *o = &e->o;
@@ -1500,6 +1580,24 @@ static void udp_ctl_event(struct sess *s)
     sess_destroy(s);
 }
 
+// The UDP thread owns the flow table; GetFlows reads this copy, refreshed once a second.
+static void udp_publish_flows(void)
+{
+    int64_t now = now_ms();
+    pthread_mutex_lock(&R.fmu);
+    int n = 0;
+    for (int i = 0; i < DC_SIZE && n < UFLOWS_MAX; i++) {
+        const struct dce *e = &R.dc[i];
+        if (!e->used || e->action != PB_ACT_PROXY || now - e->last > UDP_LIVE_MS) continue;
+        struct pb_flow_info *f = &R.uflows[n++];
+        f->id = e->id; f->pid = e->o.pid; f->proxy_id = (uint16_t)e->pid; f->port = e->o.port;
+        f->family = e->o.family; f->udp = 1; memcpy(f->addr, e->o.addr, 16);
+        f->age_ms = (uint32_t)(now - e->t0); f->sent = e->sent; f->recv = e->recv;
+    }
+    R.nuflows = n;
+    pthread_mutex_unlock(&R.fmu);
+}
+
 static void udp_sweep(void)
 {
     int64_t now = now_ms(), lim = (int64_t)R.cfg.udp_idle_timeout_s * 1000;
@@ -1522,7 +1620,7 @@ static void *udp_main(void *arg)
             if (p == &TAG_STOP) return NULL;
             if (p == &TAG_UDP) udp_recv_client();
             else if (p == &TAG_WAKE) { eventfd_t v; eventfd_read(R.uwake, &v); udp_setup_done(); }
-            else if (p == &TAG_TIMER) { uint64_t v; if (read(R.tmfd, &v, sizeof v) > 0) udp_sweep(); }
+            else if (p == &TAG_TIMER) { uint64_t v; if (read(R.tmfd, &v, sizeof v) > 0) { udp_sweep(); udp_publish_flows(); } }
             else {
                 struct ref *r = p;
                 struct sess *s = r->s;
@@ -1538,16 +1636,20 @@ static void *udp_main(void *arg)
 static void teardown(void)
 {
     atomic_store(&R.stopping, true);
+    pthread_mutex_lock(&R.fmu);
+    R.nuflows = 0;
+    pthread_mutex_unlock(&R.fmu);
     if (R.stopfd >= 0) eventfd_write(R.stopfd, 1);
     pthread_mutex_lock(&R.jmu);
     pthread_cond_broadcast(&R.jcv);
     pthread_mutex_unlock(&R.jmu);
     if (R.acc_started) pthread_join(R.acceptor, NULL);
-    for (int i = 0; i < R.nworkers; i++) pthread_join(R.workers[i], NULL);
+    pthread_mutex_lock(&R.jmu);
+    while (R.nworkers > 0) pthread_cond_wait(&R.wdone, &R.jmu);
+    pthread_mutex_unlock(&R.jmu);
     for (int i = 0; i < R.ndata; i++) if (R.data[i].started) pthread_join(R.data[i].th, NULL);
     if (R.udp_started) pthread_join(R.udpth, NULL);
     R.acc_started = R.udp_started = false;
-    R.nworkers = 0;
 
     while (R.jhead) {
         struct job *j = R.jhead;
@@ -1681,10 +1783,11 @@ int pb_relay_start(const struct pb_relay_cfg *cfg)
         ok = pthread_create(&R.data[i].th, &at, data_main, &R.data[i]) == 0;
         R.data[i].started = ok;
     }
-    for (int i = 0; i < NWORKERS && ok; i++) {
-        ok = pthread_create(&R.workers[i], &at, worker_main, NULL) == 0;
-        if (ok) R.nworkers++;
-    }
+    pthread_mutex_lock(&R.jmu);
+    memset(R.busy, 0, sizeof R.busy);
+    for (int i = 0; i < WORKERS_MIN; i++) worker_spawn_locked();
+    ok = R.nworkers == WORKERS_MIN;
+    pthread_mutex_unlock(&R.jmu);
     if (ok) { ok = pthread_create(&R.udpth, &at, udp_main, NULL) == 0; R.udp_started = ok; }
     if (ok) { ok = pthread_create(&R.acceptor, &at, acceptor_main, NULL) == 0; R.acc_started = ok; }
     pthread_attr_destroy(&at);
@@ -1761,4 +1864,196 @@ int pb_relay_test_proxy(const struct pb_proxy *proxy, const char *host, uint16_t
     if (!resp[0]) { snprintf(buf, buflen, "No response through proxy: %s", x.err); return -1; }
     snprintf(buf, buflen, "%s", resp);
     return 0;
+}
+
+// ---- detailed proxy check -----------------------------------------------------------------------------------------------------
+
+static void chk(pb_check_cb cb, void *user, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+static void chk(pb_check_cb cb, void *user, const char *fmt, ...)
+{
+    if (!cb) return;
+    char line[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    cb(line, user);
+}
+
+static void s5dst_from_host(struct s5dst *d, const char *host, uint16_t port)
+{
+    memset(d, 0, sizeof *d);
+    d->port = port;
+    struct in_addr a4; struct in6_addr a6;
+    if (inet_pton(AF_INET, host, &a4) == 1) { d->atyp = 1; memcpy(d->addr, &a4, 4); }
+    else if (inet_pton(AF_INET6, host, &a6) == 1) { d->atyp = 4; memcpy(d->addr, &a6, 16); }
+    else { d->atyp = 3; snprintf(d->host, sizeof d->host, "%s", host); }
+}
+
+// Connects to the proxy and opens a tunnel to host:port. Returns the socket or -1 with the reason in err; *ms is the setup time.
+static int check_open_tunnel(const struct pb_proxy *proxy, const char *host, uint16_t port, uint8_t *left, size_t *leftn,
+                             char *err, size_t errn, int *stage, int64_t *ms)
+{
+    int64_t t0 = now_ms(), dl = t0 + 10000;
+    char cerr[200];
+    *stage = 1;
+    int fd = connect_host(proxy->host, proxy->port, dl, -1, cerr, sizeof cerr);
+    if (fd < 0) { snprintf(err, errn, "%s", cerr); return -1; }
+    *stage = 2;
+    struct io x = { .fd = fd, .dl = dl, .stopfd = -1 };
+    int rc;
+    *leftn = 0;
+    if (proxy->type == PROXY_TYPE_SOCKS5) {
+        struct s5dst d;
+        s5dst_from_host(&d, host, port);
+        rc = socks5_request(&x, proxy, 1, &d, NULL);
+    } else {
+        rc = http_connect(&x, proxy, host, port, left, leftn);
+    }
+    if (rc) { snprintf(err, errn, "%s", x.err); close(fd); return -1; }
+    *ms = now_ms() - t0;
+    return fd;
+}
+
+int pb_relay_check_proxy(const struct pb_proxy *proxy, const char *host, uint16_t port, pb_check_cb cb, void *user)
+{
+    char desc[300], err[256] = "";
+    proxy_desc(proxy, desc, sizeof desc);
+    chk(cb, user, "Proxy: %s (%s)%s", proxy->name, desc, proxy->user[0] ? ", with credentials" : ", no credentials");
+    chk(cb, user, "Target: %s:%u", host, port);
+
+    chk(cb, user, "[1/5] Connecting to the proxy ...");
+    int64_t t0 = now_ms();
+    char cerr[200];
+    int probe = connect_host(proxy->host, proxy->port, t0 + 10000, -1, cerr, sizeof cerr);
+    if (probe < 0) {
+        chk(cb, user, "      FAILED: %s", cerr);
+        chk(cb, user, "Result: FAILED - the proxy cannot be reached");
+        return -1;
+    }
+    struct sockaddr_storage ss;
+    socklen_t sl = sizeof ss;
+    char peer[INET6_ADDRSTRLEN] = "?";
+    if (getpeername(probe, (struct sockaddr *)&ss, &sl) == 0)
+        inet_ntop(ss.ss_family, ss.ss_family == AF_INET ? (void *)&((struct sockaddr_in *)&ss)->sin_addr : (void *)&((struct sockaddr_in6 *)&ss)->sin6_addr, peer, sizeof peer);
+    close(probe);
+    chk(cb, user, "      OK: connected to %s in %lld ms", peer, (long long)(now_ms() - t0));
+
+    chk(cb, user, "[2/5] Opening a tunnel to the target ...");
+    uint8_t left[HDR_MAX];
+    size_t leftn = 0;
+    int stage = 0;
+    int64_t ms = 0;
+    int fd = check_open_tunnel(proxy, host, port, left, &leftn, err, sizeof err, &stage, &ms);
+    if (fd < 0) {
+        chk(cb, user, "      FAILED: %s", err);
+        chk(cb, user, "Result: FAILED - the proxy refused the tunnel or the login");
+        return -2;
+    }
+    chk(cb, user, "      OK: %s tunnel established in %lld ms%s", proxy->type == PROXY_TYPE_SOCKS5 ? "SOCKS5" : "HTTP CONNECT", (long long)ms,
+        proxy->user[0] ? " (login accepted)" : "");
+
+    chk(cb, user, "[3/5] Loading a page through the tunnel ...");
+    if (port != 80) {
+        chk(cb, user, "      skipped: only port 80 is probed with a plain HTTP request");
+    } else {
+        struct io x = { .fd = fd, .dl = now_ms() + 8000, .stopfd = -1 };
+        char req[600];
+        int n = snprintf(req, sizeof req, "HEAD / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: ProxyBridge-check\r\n\r\n", host);
+        char resp[1024];
+        size_t got = leftn < sizeof resp - 1 ? leftn : sizeof resp - 1;
+        memcpy(resp, left, got);
+        int64_t t1 = now_ms();
+        if (io_send(&x, req, (size_t)n) == 0) {
+            while (!memchr(resp, '\n', got) && got < sizeof resp - 1) {
+                ssize_t r = io_recv(&x, resp + got, sizeof resp - 1 - got);
+                if (r < 0) break;
+                got += (size_t)r;
+            }
+        }
+        resp[got] = 0;
+        char *nl = strpbrk(resp, "\r\n");
+        if (nl) *nl = 0;
+        if (resp[0]) chk(cb, user, "      OK: %.120s (first byte after %lld ms)", resp, (long long)(now_ms() - t1));
+        else chk(cb, user, "      WARNING: no HTTP answer through the tunnel (%s)", x.err[0] ? x.err : "empty reply");
+    }
+    close(fd);
+
+    chk(cb, user, "[4/5] Measuring tunnel set-up time (3 tunnels) ...");
+    int64_t lo = INT64_MAX, hi = 0, sum = 0;
+    int okn = 0;
+    for (int i = 0; i < 3; i++) {
+        int fd2 = check_open_tunnel(proxy, host, port, left, &leftn, err, sizeof err, &stage, &ms);
+        if (fd2 < 0) continue;
+        close(fd2);
+        okn++; sum += ms;
+        if (ms < lo) lo = ms;
+        if (ms > hi) hi = ms;
+    }
+    if (okn == 3) chk(cb, user, "      OK: min/avg/max = %lld/%lld/%lld ms", (long long)lo, (long long)(sum / 3), (long long)hi);
+    else if (okn > 0) chk(cb, user, "      WARNING: only %d of 3 tunnels opened (min/avg/max = %lld/%lld/%lld ms)", okn, (long long)lo, (long long)(sum / okn), (long long)hi);
+    else chk(cb, user, "      WARNING: none of the repeat tunnels opened: %s", err);
+
+    chk(cb, user, "[5/5] UDP support ...");
+    if (proxy->type != PROXY_TYPE_SOCKS5) {
+        chk(cb, user, "      HTTP proxies cannot carry UDP: rules that send UDP here go direct");
+    } else {
+        int64_t dl = now_ms() + 8000;
+        int cfd = connect_host(proxy->host, proxy->port, dl, -1, cerr, sizeof cerr);
+        if (cfd < 0) {
+            chk(cb, user, "      WARNING: %s", cerr);
+        } else {
+            struct io x = { .fd = cfd, .dl = dl, .stopfd = -1 };
+            struct s5dst d;
+            struct s5bnd b;
+            memset(&d, 0, sizeof d);
+            d.atyp = 1;
+            if (socks5_request(&x, proxy, 3, &d, &b) == 0) {
+                char a[INET6_ADDRSTRLEN] = "?";
+                if (b.atyp == 1) inet_ntop(AF_INET, b.addr, a, sizeof a);
+                else if (b.atyp == 4) inet_ntop(AF_INET6, b.addr, a, sizeof a);
+                else snprintf(a, sizeof a, "(host name)");
+                chk(cb, user, "      OK: UDP ASSOCIATE accepted, the proxy relays UDP at %s:%u", a, b.port);
+            } else {
+                chk(cb, user, "      WARNING: UDP ASSOCIATE refused: %s (UDP rules for this proxy will not work)", x.err);
+            }
+            close(cfd);
+        }
+    }
+    chk(cb, user, "Result: PASSED");
+    return 0;
+}
+
+// ---- live flows ---------------------------------------------------------------------------------------------------------------
+
+static int flow_newest_first(const void *a, const void *b)
+{
+    const struct pb_flow_info *x = a, *y = b;
+    return x->age_ms < y->age_ms ? -1 : x->age_ms > y->age_ms;
+}
+
+int pb_relay_flows(struct pb_flow_info *out, int max)
+{
+    int n = 0;
+    if (!out || max <= 0 || !R.running || atomic_load(&R.stopping)) return 0;
+    int64_t now = now_ms();
+    for (int i = 0; i < R.ndata && n < max; i++) {
+        struct dthread *t = &R.data[i];
+        pthread_mutex_lock(&t->mu);
+        for (struct conn *c = t->conns; c && n < max; c = c->next) {
+            if (!c->proxy_id) continue;                   // direct flows are not the engine's business
+            struct pb_flow_info *f = &out[n++];
+            f->id = c->id; f->pid = c->pid; f->proxy_id = c->proxy_id; f->port = c->port; f->family = c->family; f->udp = 0;
+            memcpy(f->addr, c->addr, 16);
+            f->age_ms = (uint32_t)(now - c->t0);
+            f->sent = __atomic_load_n(&c->bytes[0], __ATOMIC_RELAXED);
+            f->recv = __atomic_load_n(&c->bytes[1], __ATOMIC_RELAXED);
+        }
+        pthread_mutex_unlock(&t->mu);
+    }
+    pthread_mutex_lock(&R.fmu);
+    for (int i = 0; i < R.nuflows && n < max; i++) out[n++] = R.uflows[i];
+    pthread_mutex_unlock(&R.fmu);
+    qsort(out, (size_t)n, sizeof *out, flow_newest_first);
+    return n;
 }

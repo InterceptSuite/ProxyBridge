@@ -1,10 +1,12 @@
 #!/bin/bash
 # End-to-end test of domain-name rules (DNS tap). Needs root, dig, curl, python3.
+# Proxies get the resolved host name (the default "DNS via proxy"), so the fake proxy reports names, not addresses.
 #   sudo Linux/tests/e2e_domains.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"   # directory holding the built ProxyBridge + libproxybridge.so (run ../build.sh first)
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first: (cd Linux && ./build.sh), or set PB_DIR to a directory containing ProxyBridge and libproxybridge.so"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 WORK="$(mktemp -d)"; PLOG="$WORK/proxy.log"; DLOG="$WORK/dns.log"; : > "$PLOG"; : > "$DLOG"
 PASS=0; FAIL=0; DNSIP=10.77.0.2
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
@@ -19,7 +21,7 @@ python3 "$HERE/fake_proxies.py" "$PLOG" > /dev/null 2>&1 & FAKE_PID=$!
 python3 "$HERE/fake_dns.py" $DNSIP "$DLOG" > /dev/null 2>&1 & DNS_PID=$!
 sleep 1
 
-stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 2 \
+stdbuf -oL "$PBL" --verbose 2 \
   --proxy a=socks5://127.0.0.1:19080 --proxy b=socks5://bob:pw@127.0.0.1:19081 --proxy h=socks5://localhost:19080 \
   --rule "*:blocked.example.test:*:TCP:BLOCK" \
   --rule "*:*.example.test:*:TCP:PROXY=a" \
@@ -38,14 +40,14 @@ ip2=$(dig @$DNSIP +tcp tcp.example.test +short +time=3 +tries=1 | head -1); has 
 nx=$(dig @$DNSIP nope.example.test +time=3 +tries=1 | grep -c NXDOMAIN); [ "$nx" -ge 1 ] && ok "NXDOMAIN is passed through" || bad "NXDOMAIN lost"
 
 echo "== domain rules: resolve with one process, connect with another"
-out=$(curl -s -m 5 http://192.0.2.77/);       has "*.example.test -> proxy a (UDP DNS learned)" "$out" "hello-from-A dst=192.0.2.77:80"
-out=$(curl -s -m 5 http://192.0.2.80/);       has "*.example.test -> proxy a (TCP DNS learned)" "$out" "hello-from-A dst=192.0.2.80:80"
+out=$(curl -s -m 5 http://192.0.2.77/);       has "*.example.test -> proxy a (UDP DNS learned)" "$out" "hello-from-A dst=app.example.test:80"
+out=$(curl -s -m 5 http://192.0.2.80/);       has "*.example.test -> proxy a (TCP DNS learned)" "$out" "hello-from-A dst=tcp.example.test:80"
 resolve blocked.example.test >/dev/null
 out=$(curl -s -m 5 http://192.0.2.78/ 2>&1; echo "rc=$?"); has "exact-name BLOCK rule beats the wildcard rule" "$out" "rc=7"
 resolve www.corp.test >/dev/null
-out=$(curl -s -m 5 http://192.0.2.79/);       has "CNAME chain: rule on the canonical name -> proxy b" "$out" "hello-from-B dst=192.0.2.79:80"
+out=$(curl -s -m 5 http://192.0.2.79/);       has "CNAME chain: rule on the canonical name -> proxy b" "$out" "hello-from-B dst=www.corp.test:80"
 resolve svc.byname.test >/dev/null
-out=$(curl -s -m 5 http://192.0.2.81/);       has "domain rule + proxy configured by hostname (localhost)" "$out" "hello-from-A dst=192.0.2.81:80"
+out=$(curl -s -m 5 http://192.0.2.81/);       has "domain rule + proxy configured by hostname (localhost)" "$out" "hello-from-A dst=svc.byname.test:80"
 
 echo "== things that must NOT match"
 resolve plain.other.test >/dev/null

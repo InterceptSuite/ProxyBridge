@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include "ProxyBridge.h"
+#include "pb_profile.h"
 
 typedef struct {
     uint32_t id;            // library id, 0 = not registered
@@ -19,16 +20,19 @@ typedef struct {
     uint16_t port;
     char *username;
     char *password;
+    bool send_domain;       // DNS via proxy: the proxy resolves host names (default on, like Windows and macOS)
 } ProxyData;
 
 typedef struct {
     uint32_t id;
+    char *name;             // label, may be empty
     char *process_name;
     char *target_hosts;
     char *target_ports;
     RuleProtocol protocol;
     RuleAction action;
     char *proxy_name;       // NULL or "" = default proxy
+    bool localhost;         // PROXY rule that also proxies loopback traffic
     bool enabled;
     bool selected;
 } RuleData;
@@ -39,7 +43,11 @@ typedef struct {
     GList *proxies;
     char *default_proxy;
     GList *rules;
-    bool logging, dns;      // traffic logging and DNS via proxy, stored in the profile like the Windows app does
+    bool logging, dns, log_every;   // traffic logging, DNS via proxy and "log every connection", stored in the profile like the Windows app does
+    bool auto_clear;                // wipe a log once it passes 500 lines
+    int zoom;                       // font zoom in percent, 60-300
+    struct pbp_filter *filters;     // connection-log filters (malloc'd strings, freed with the profile)
+    size_t nfilters;
     char *saved;            // what is on disk, to skip rewriting unchanged profiles
 } Profile;
 
@@ -63,6 +71,10 @@ extern char *g_default_proxy;
 extern GList *g_rules_list;
 extern bool g_chk_logging;
 extern bool g_chk_dns;
+extern bool g_chk_log_every;
+extern bool g_chk_auto_clear;
+extern int g_zoom;
+extern bool g_chk_updates;   // check for a new version when the program starts (settings.json, not per profile)
 
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...);
 GtkWidget *combo_new(const char *first, ...) G_GNUC_NULL_TERMINATED;
@@ -78,7 +90,18 @@ char *extract_sub_json_str(const char *json, const char *key);
 int rules_from_json(const char *json, RuleImportCb cb, void *ud);
 char *rules_to_json(GList *rules, bool only_selected);
 
-void gui_sync_switches();   // pushes the active profile's logging/DNS switches to the engine and the menu
+// Filters of the active profile. The edit functions take ownership of the array and refresh the log view.
+struct pbp_filter *gui_filters(size_t *n);
+void gui_filters_replace(struct pbp_filter *filters, size_t n);
+struct pbp_filter pbp_filter_dup(const struct pbp_filter *f);
+void pbp_filter_clear(struct pbp_filter *f);
+void gui_logs_set_filters(const struct pbp_filter *f, size_t n);
+void on_log_filters_clicked(GtkWidget *widget, gpointer data);
+void gui_set_zoom(int percent);   // clamps to 60-300, applies and saves
+const char *gui_zoom_css();
+void gui_check_updates_on_startup();
+void gui_sync_switches();
+void gui_refresh_flows();   // refreshes the Live Connections tab from the engine   // pushes the active profile's logging/DNS switches to the engine and the menu
 void save_config();
 void load_config();
 void config_free_all();
@@ -104,7 +127,7 @@ void refresh_rules_window();
 
 void gui_log(const char *format, ...);
 void lib_log_callback(const char *message);
-void lib_connection_callback(const char *process_name, uint32_t pid, const char *dest_ip, uint16_t dest_port, const char *proxy_info);
+void lib_connection_callback_ex(const char *process_name, uint32_t pid, const char *dest_ip, uint16_t dest_port, const char *protocol, const char *proxy_info);
 void gui_logs_init();
 void gui_logs_stop_timers();
 void gui_logs_free();

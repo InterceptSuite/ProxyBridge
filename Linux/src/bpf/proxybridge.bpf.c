@@ -92,6 +92,16 @@ static __always_inline int rule_match(const struct pb_brule *r, __u32 ri, __u8 f
     return (host_res == M_MAYBE || port_res == M_MAYBE) ? M_MAYBE : M_YES;
 }
 
+static __always_inline int is_loopback(const struct pb_orig *o)
+{
+    const __u8 *a = o->addr;
+    if (o->family == AF_INET) return a[12] == 127;
+    int loopback = a[15] == 1;
+    #pragma unroll
+    for (int i = 0; i < 15; i++) if (a[i]) loopback = 0;
+    return loopback;
+}
+
 static __always_inline int implicit_direct(const struct pb_orig *o)
 {
     const __u8 *a = o->addr;
@@ -111,10 +121,12 @@ static __always_inline int implicit_direct(const struct pb_orig *o)
 // Sets o->proxy_id for ACT_PROXY.
 static __always_inline int decide(struct pb_orig *o)
 {
-    if (!cfg.enabled || o->pid == cfg.self_tgid) return ACT_DIRECT;
+    if (!cfg.enabled || cfg.paused || o->pid == cfg.self_tgid) return ACT_DIRECT;
     if (cfg.n_exempt && bpf_map_lookup_elem(&exempt, &o->pid)) return ACT_DIRECT;
     int tap = o->port == 53 && cfg.dns_tap;
-    if (!tap && implicit_direct(o)) return ACT_DIRECT;
+    // Loopback joins the rule walk only when some rule asks for it; the resolver stub (port 53) and the relay itself never do.
+    int lo = cfg.n_localhost && is_loopback(o) && o->port != 53 && o->port != cfg.tcp_port && o->port != cfg.udp_port;
+    if (!tap && !lo && implicit_direct(o)) return ACT_DIRECT;
 
     struct mm_struct *mm = bpf_get_current_task_btf()->mm;
     if (!mm) return ACT_DIRECT;
@@ -146,6 +158,7 @@ static __always_inline int decide(struct pb_orig *o)
         int m = rule_match(r, ri, o->family, ip4, o->port);
         if (m == M_NO) continue;
         if (m == M_MAYBE) return ACT_DECIDE;
+        if (lo && !(r->action == ACT_PROXY && (r->flags & PB_RF_LOCALHOST))) return ACT_DIRECT;
         if (r->action != ACT_PROXY) return r->action;
         if (o->proto == IPPROTO_UDP && (r->flags & PB_RF_UDP_DIRECT)) return ACT_DIRECT;
         o->proxy_id = r->proxy_id;

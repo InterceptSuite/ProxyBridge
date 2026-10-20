@@ -1,0 +1,176 @@
+name: SonarQube
+
+# SonarQube Cloud keeps one result per project, and the C analyzer needs the compiler and headers of the platform the
+# code is built for (MSVC and the Windows SDK, or gcc and the Linux headers). So every platform is its own project,
+# analysed on its own runner, and each has its own quality gate:
+#
+#   Windows  InterceptSuite_ProxyBridge_Windows   MSVC, recorded by the Build Wrapper     Windows/sonar-project.properties
+#   Linux    InterceptSuite_ProxyBridge_Linux     gcc/clang, recorded by the Build Wrapper Linux/sonar-project.properties
+#   macOS    InterceptSuite_ProxyBridge_macOS     Swift is read from the sources, no build  MacOS/sonar-project.properties
+#
+# Needs the SONAR_TOKEN secret and the three projects created in SonarQube Cloud (import this repository as a monorepo).
+# In every project, Administration > Analysis Method must be "With GitHub Actions" (automatic analysis rejects CI scans).
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    types: [ opened, synchronize, reopened ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonarqube-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Analyze (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    # Pull requests from forks do not get repository secrets: skip them instead of failing.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0   # shallow clones lower the relevancy of the analysis
+
+      - name: Cache SonarQube packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~\.sonar\cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      # same download, with the same checksum, as the Build Windows and CodeQL workflows
+      - name: Download WinDivert
+        run: |
+          $url = "https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip"
+          $expectedHash = "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15"
+          Invoke-WebRequest -Uri $url -OutFile "WinDivert.zip" -UseBasicParsing
+          $actualHash = (Get-FileHash "WinDivert.zip" -Algorithm SHA256).Hash
+          if ($actualHash -ne $expectedHash) {
+            Write-Error "WinDivert.zip SHA256 mismatch! Expected: $expectedHash  Got: $actualHash"
+            exit 1
+          }
+          Expand-Archive -Path "WinDivert.zip" -DestinationPath "C:\"
+        shell: pwsh
+
+      - name: Install Build Wrapper
+        id: build-wrapper
+        uses: SonarSource/sonarqube-scan-action/install-build-wrapper@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+
+      # The wrapper records every compiler call of the compile-only build of the engine, service, CLI and GUI.
+      - name: Build Windows code under the Build Wrapper
+        env:
+          BUILD_WRAPPER: ${{ steps.build-wrapper.outputs.build-wrapper-binary }}
+        run: |
+          & $env:BUILD_WRAPPER --out-dir bw-output pwsh -NoProfile -File .github\scripts\sonar-compile-windows.ps1
+          if ($LASTEXITCODE -ne 0) { throw "build under the Build Wrapper failed" }
+        shell: pwsh
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: Windows
+          args: >
+            -Dsonar.cfamily.compile-commands=${{ github.workspace }}/bw-output/compile_commands.json
+
+  linux:
+    name: Analyze (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Cache SonarQube packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      # same packages as the Build Linux and CodeQL workflows
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            gcc \
+            make \
+            clang \
+            curl \
+            linux-tools-common \
+            linux-tools-generic \
+            libbpf-dev \
+            libelf-dev \
+            zlib1g-dev \
+            libgtk-3-dev \
+            pkg-config
+        shell: bash
+
+      - name: Locate bpftool
+        run: |
+          shopt -s nullglob
+          candidates=(/usr/lib/linux-tools/*/bpftool)
+          [ ${#candidates[@]} -gt 0 ] || { echo "bpftool binary not found"; ls /usr/lib/linux-tools 2>&1 || true; exit 1; }
+          echo "BPFTOOL=${candidates[0]}" >> "$GITHUB_ENV"
+        shell: bash
+
+      - name: Install Build Wrapper
+        id: build-wrapper
+        uses: SonarSource/sonarqube-scan-action/install-build-wrapper@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+
+      # The wrapper records every compiler call of the Linux build (library, CLI and GTK GUI). LTO and the binary
+      # audit are off (they only matter for the shipped binaries); the system libbpf is used.
+      - name: Build Linux code under the Build Wrapper
+        env:
+          BUILD_WRAPPER: ${{ steps.build-wrapper.outputs.build-wrapper-binary }}
+        run: |
+          chmod +x Linux/build.sh
+          "$BUILD_WRAPPER" --out-dir bw-output bash -c 'cd Linux && LTO=0 AUDIT=0 STATIC_LIBBPF=0 ./build.sh'
+        shell: bash
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: Linux
+          args: >
+            -Dsonar.cfamily.compile-commands=${{ github.workspace }}/bw-output/compile_commands.json
+
+  macos:
+    # Swift is analysed from the sources and needs no build, so an ordinary Linux runner is enough (macOS runners cost
+    # far more). The job is named after the platform it covers.
+    name: Analyze (macOS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Cache SonarQube packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: MacOS

@@ -3,6 +3,7 @@
 #endif
 #include "pb_profile.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -339,8 +340,13 @@ void pbp_free(struct pbp_profile *p)
         free(p->proxies[i].name); free(p->proxies[i].host); free(p->proxies[i].user); free(p->proxies[i].pass);
     }
     for (size_t i = 0; i < p->nrules; i++) {
-        free(p->rules[i].process); free(p->rules[i].hosts); free(p->rules[i].ports);
+        free(p->rules[i].name); free(p->rules[i].process); free(p->rules[i].hosts); free(p->rules[i].ports);
     }
+    for (size_t i = 0; i < p->nfilters; i++) {
+        free(p->filters[i].process); free(p->filters[i].ip); free(p->filters[i].port);
+        free(p->filters[i].protocol); free(p->filters[i].action);
+    }
+    free(p->filters);
     free(p->proxies);
     free(p->rules);
     free(p->name);
@@ -409,13 +415,14 @@ static int read_proxy(struct pbp_profile *p, const struct jv *o, size_t idx, cha
         free(x->name);
         x->name = strdup(fallback);
     }
+    x->send_domain = jbool(o, "SendDomainToProxy", true);
     x->user = dup_or(jtext(o, "Username"), "");
     x->pass = dup_or(jtext(o, "Password"), "");
     if (!x->name || !x->user || !x->pass) { snprintf(err, errlen, "out of memory"); return -1; }
     return 0;
 }
 
-static int read_rule(struct pbp_profile *p, const struct jv *o, size_t idx, char *err, size_t errlen)
+static int read_rule(struct pbp_profile *p, const struct jv *o, size_t idx, bool default_localhost, char *err, size_t errlen)
 {
     struct pbp_rule *r = &p->rules[p->nrules];
     memset(r, 0, sizeof *r);
@@ -425,9 +432,10 @@ static int read_rule(struct pbp_profile *p, const struct jv *o, size_t idx, char
     r->hosts = pbp_merge_hosts(hosts, domains);
     free(hosts);
     free(domains);
+    r->name = dup_or(jtext(o, "Name"), "");
     r->process = dup_or(jtext(o, "ProcessName"), "*");
     r->ports = dup_or(jtext(o, "TargetPorts"), "*");
-    if (!r->hosts || !r->process || !r->ports) { snprintf(err, errlen, "out of memory"); return -1; }
+    if (!r->name || !r->hosts || !r->process || !r->ports) { snprintf(err, errlen, "out of memory"); return -1; }
 
     char *proto = jtext(o, "Protocol"), *act = jtext(o, "Action");
     int rc = 0;
@@ -446,6 +454,7 @@ static int read_rule(struct pbp_profile *p, const struct jv *o, size_t idx, char
     if (rc) return rc;
 
     r->enabled = jbool(o, "IsEnabled", true);
+    r->localhost = r->action == 0 && jbool(o, "LocalhostViaProxy", default_localhost);
     long pid = jnum(o, "ProxyConfigId", 0);
     if (pid < 0 || (pid > 0 && !pbp_find_proxy(p, (uint32_t)pid))) {
         snprintf(err, errlen, "ProxyRules[%zu]: ProxyConfigId %ld does not match any proxy", idx, pid);
@@ -495,6 +504,10 @@ int pbp_parse(const char *json, size_t len, struct pbp_profile *out, char *err, 
         out->name = jtext(&root, "Name");
         out->logging = jbool(&root, "IsTrafficLoggingEnabled", true);
         out->dns_via_proxy = jbool(&root, "DnsViaProxy", true);
+        out->log_every = jbool(&root, "LogEveryConnection", false);
+        out->auto_clear = jbool(&root, "AutoClearConnectionLogs", true);
+        long zoom = jnum(&root, "FontZoom", 100);
+        out->font_zoom = (zoom >= PBP_ZOOM_MIN && zoom <= PBP_ZOOM_MAX) ? (int)zoom : 100;
         long dp = jnum(&root, "DefaultProxyId", 0);
         out->default_proxy_id = dp > 0 ? (uint32_t)dp : 0;
         if (cfgs && cfgs->nk) out->proxies = calloc(cfgs->nk, sizeof *out->proxies);
@@ -504,12 +517,34 @@ int pbp_parse(const char *json, size_t len, struct pbp_profile *out, char *err, 
             rc = -1;
         }
     }
+    bool default_localhost = jbool(&root, "LocalhostViaProxy", false);     // profiles from before the setting became per rule
     for (size_t i = 0; rc == 0 && cfgs && i < cfgs->nk; i++)
         rc = cfgs->kid[i].t == J_OBJ ? read_proxy(out, &cfgs->kid[i], i, err, errlen)
                                      : (snprintf(err, errlen, "ProxyConfigs[%zu] is not an object", i), -1);
     for (size_t i = 0; rc == 0 && rules && i < rules->nk; i++)
-        rc = rules->kid[i].t == J_OBJ ? read_rule(out, &rules->kid[i], i, err, errlen)
+        rc = rules->kid[i].t == J_OBJ ? read_rule(out, &rules->kid[i], i, default_localhost, err, errlen)
                                       : (snprintf(err, errlen, "ProxyRules[%zu] is not an object", i), -1);
+    const struct jv *flts = jget(&root, "LogFilters");
+    if (rc == 0 && flts && flts->t != J_ARR) { snprintf(err, errlen, "LogFilters must be an array"); rc = -1; }
+    if (rc == 0 && flts && flts->nk > PBP_MAX_FILTERS) { snprintf(err, errlen, "too many log filters (max %d)", PBP_MAX_FILTERS); rc = -1; }
+    if (rc == 0 && flts && flts->nk) {
+        out->filters = calloc(flts->nk, sizeof *out->filters);
+        if (!out->filters) { snprintf(err, errlen, "out of memory"); rc = -1; }
+    }
+    for (size_t i = 0; rc == 0 && flts && i < flts->nk; i++) {
+        const struct jv *o = &flts->kid[i];
+        if (o->t != J_OBJ) { snprintf(err, errlen, "LogFilters[%zu] is not an object", i); rc = -1; break; }
+        struct pbp_filter *x = &out->filters[out->nfilters++];
+        char *mode = jtext(o, "Mode"), *proto = jtext(o, "Protocol"), *act = jtext(o, "Action");
+        x->exclude = mode && !strcasecmp(mode, "Exclude");
+        x->process = dup_or(jtext(o, "ProcessName"), "");
+        x->ip = dup_or(jtext(o, "Ip"), "");
+        x->port = dup_or(jtext(o, "Port"), "");
+        x->protocol = strdup(proto && !strcasecmp(proto, "TCP") ? "TCP" : proto && !strcasecmp(proto, "UDP") ? "UDP" : "All");
+        x->action = strdup(act && !strcasecmp(act, "Direct") ? "Direct" : act && !strcasecmp(act, "Proxy") ? "Proxy" : act && !strcasecmp(act, "Blocked") ? "Blocked" : "All");
+        free(mode); free(proto); free(act);
+        if (!x->process || !x->ip || !x->port || !x->protocol || !x->action) { snprintf(err, errlen, "out of memory"); rc = -1; }
+    }
     if (rc == 0 && out->default_proxy_id && !pbp_find_proxy(out, out->default_proxy_id)) {
         snprintf(err, errlen, "DefaultProxyId %u does not match any proxy", out->default_proxy_id);
         rc = -1;
@@ -585,9 +620,11 @@ char *pbp_serialize(const struct pbp_profile *p)
     struct sb b = {0};
     sb_puts(&b, "{\n  \"Version\": \"1.0\",\n");
     sb_kv(&b, "  ", "Name", p->name ? p->name : "", ",\n");
-    sb_puts(&b, "  \"LocalhostViaProxy\": false,\n");
     sb_puts(&b, p->logging ? "  \"IsTrafficLoggingEnabled\": true,\n" : "  \"IsTrafficLoggingEnabled\": false,\n");
     sb_puts(&b, p->dns_via_proxy ? "  \"DnsViaProxy\": true,\n" : "  \"DnsViaProxy\": false,\n");
+    sb_puts(&b, p->log_every ? "  \"LogEveryConnection\": true,\n" : "  \"LogEveryConnection\": false,\n");
+    sb_puts(&b, p->auto_clear ? "  \"AutoClearConnectionLogs\": true,\n" : "  \"AutoClearConnectionLogs\": false,\n");
+    sb_fmt(&b, "  \"FontZoom\": %d,\n", p->font_zoom >= PBP_ZOOM_MIN && p->font_zoom <= PBP_ZOOM_MAX ? p->font_zoom : 100);
     sb_fmt(&b, "  \"DefaultProxyId\": %u,\n", p->default_proxy_id);
 
     sb_puts(&b, "  \"ProxyConfigs\": [");
@@ -603,7 +640,7 @@ char *pbp_serialize(const struct pbp_profile *p)
         sb_kv(&b, "      ", "Port", port, ",\n");
         sb_kv(&b, "      ", "Username", x->user, ",\n");
         sb_kv(&b, "      ", "Password", x->pass, ",\n");
-        sb_puts(&b, "      \"SendDomainToProxy\": false\n    }");
+        sb_puts(&b, x->send_domain ? "      \"SendDomainToProxy\": true\n    }" : "      \"SendDomainToProxy\": false\n    }");
     }
     sb_puts(&b, p->nproxies ? "\n  ],\n" : "],\n");
 
@@ -613,7 +650,7 @@ char *pbp_serialize(const struct pbp_profile *p)
         char *ips, *doms;
         pbp_split_hosts(r->hosts, &ips, &doms);
         sb_puts(&b, i ? ",\n    {\n" : "\n    {\n");
-        sb_kv(&b, "      ", "Name", "", ",\n");
+        sb_kv(&b, "      ", "Name", r->name ? r->name : "", ",\n");
         sb_kv(&b, "      ", "ProcessName", r->process, ",\n");
         sb_kv(&b, "      ", "TargetHosts", ips && *ips ? ips : "*", ",\n");
         sb_kv(&b, "      ", "TargetPorts", r->ports, ",\n");
@@ -621,11 +658,25 @@ char *pbp_serialize(const struct pbp_profile *p)
         sb_kv(&b, "      ", "Protocol", r->protocol == 1 ? "UDP" : r->protocol == 2 ? "BOTH" : "TCP", ",\n");
         sb_kv(&b, "      ", "Action", r->action == 1 ? "DIRECT" : r->action == 2 ? "BLOCK" : "PROXY", ",\n");
         sb_puts(&b, r->enabled ? "      \"IsEnabled\": true,\n" : "      \"IsEnabled\": false,\n");
-        sb_fmt(&b, "      \"ProxyConfigId\": %u\n    }", r->proxy_id);
+        sb_fmt(&b, "      \"ProxyConfigId\": %u,\n", r->proxy_id);
+        sb_puts(&b, r->localhost ? "      \"LocalhostViaProxy\": true\n    }" : "      \"LocalhostViaProxy\": false\n    }");
         free(ips);
         free(doms);
     }
-    sb_puts(&b, p->nrules ? "\n  ]\n}\n" : "]\n}\n");
+    sb_puts(&b, p->nrules ? "\n  ],\n" : "],\n");
+
+    sb_puts(&b, "  \"LogFilters\": [");
+    for (size_t i = 0; i < p->nfilters; i++) {
+        const struct pbp_filter *x = &p->filters[i];
+        sb_puts(&b, i ? ",\n    {\n" : "\n    {\n");
+        sb_kv(&b, "      ", "Mode", x->exclude ? "Exclude" : "Include", ",\n");
+        sb_kv(&b, "      ", "ProcessName", x->process ? x->process : "", ",\n");
+        sb_kv(&b, "      ", "Ip", x->ip ? x->ip : "", ",\n");
+        sb_kv(&b, "      ", "Port", x->port ? x->port : "", ",\n");
+        sb_kv(&b, "      ", "Protocol", x->protocol ? x->protocol : "All", ",\n");
+        sb_kv(&b, "      ", "Action", x->action ? x->action : "All", "\n    }");
+    }
+    sb_puts(&b, p->nfilters ? "\n  ]\n}\n" : "]\n}\n");
     if (b.oom) { free(b.p); return NULL; }
     return b.p;
 }
@@ -703,7 +754,7 @@ int pbp_save_file(const char *path, const struct pbp_profile *p, char *err, size
     return rc;
 }
 
-int pbp_settings_load(const char *path, char **active)
+int pbp_settings_load(const char *path, char **active, bool *check_updates)
 {
     char err[200];
     FILE *f = fopen(path, "r");
@@ -719,21 +770,118 @@ int pbp_settings_load(const char *path, char **active)
     if (rc == 0 && root.t == J_OBJ) {
         char *a = jtext(&root, "ActiveProfileName");
         if (a && *a) { free(*active); *active = a; } else free(a);
+        if (check_updates) *check_updates = jbool(&root, "CheckForUpdatesOnStartup", true);
     } else rc = -1;
     jfree(&root);
     free(buf);
     return rc;
 }
 
-int pbp_settings_save(const char *path, const char *active, char *err, size_t errlen)
+int pbp_settings_save(const char *path, const char *active, bool check_updates, char *err, size_t errlen)
 {
     struct sb b = {0};
     sb_puts(&b, "{\n");
-    sb_kv(&b, "  ", "ActiveProfileName", active ? active : "", "\n}\n");
+    sb_kv(&b, "  ", "ActiveProfileName", active ? active : "", ",\n");
+    sb_puts(&b, check_updates ? "  \"CheckForUpdatesOnStartup\": true\n}\n" : "  \"CheckForUpdatesOnStartup\": false\n}\n");
     if (b.oom) { free(b.p); snprintf(err, errlen, "out of memory"); return -1; }
     int rc = pbp_write_file(path, b.p, err, errlen);
     free(b.p);
     return rc;
+}
+
+// ---- update feed ----
+
+int pbp_update_parse(const char *json, size_t len, char **version, char **download, char **notes)
+{
+    char err[100];
+    char *copy = malloc(len + 1);
+    if (!copy) return -1;
+    memcpy(copy, json, len);
+    copy[len] = 0;
+    struct jp j = { copy, copy + len, 0, err, sizeof err };
+    struct jv root = {0};
+    int rc = parse_value(&j, &root, 0) == 0 && root.t == J_OBJ ? 0 : -1;
+    const struct jv *lin = rc == 0 ? jget(&root, "linux") : NULL;
+    *version = *download = *notes = NULL;
+    if (lin && lin->t == J_OBJ) {
+        *version = jtext(lin, "version");
+        *download = jtext(lin, "download");
+        *notes = jtext(lin, "release_notes");
+    }
+    if (!*version || !**version) {
+        free(*version); free(*download); free(*notes);
+        *version = *download = *notes = NULL;
+        rc = -1;
+    }
+    jfree(&root);
+    free(copy);
+    return rc;
+}
+
+static void version_parts(const char *s, long out[3])
+{
+    out[0] = out[1] = out[2] = 0;
+    while (*s && (*s < '0' || *s > '9')) s++;
+    for (int i = 0; i < 3 && *s; i++) {
+        long n = 0;
+        while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); if (n > 1000000) n = 1000000; s++; }
+        out[i] = n;
+        if (*s == '.') s++; else break;
+    }
+}
+
+bool pbp_version_newer(const char *candidate, const char *current)
+{
+    long a[3], b[3];
+    version_parts(candidate ? candidate : "", a);
+    version_parts(current ? current : "", b);
+    for (int i = 0; i < 3; i++)
+        if (a[i] != b[i]) return a[i] > b[i];
+    return false;
+}
+
+// ---- log filters ----
+
+static bool ci_glob(const char *p, const char *s)
+{
+    while (*p) {
+        if (*p == '*') {
+            while (*p == '*') p++;
+            if (!*p) return true;
+            for (; *s; s++) if (ci_glob(p, s)) return true;
+            return false;
+        }
+        if (!*s || (*p != '?' && tolower((unsigned char)*p) != tolower((unsigned char)*s))) return false;
+        p++; s++;
+    }
+    return !*s;
+}
+
+static bool pat_ok(const char *pat, const char *actual)
+{
+    if (!pat || !*pat || !strcasecmp(pat, "All")) return true;
+    return ci_glob(pat, actual ? actual : "");
+}
+
+static bool filter_hits(const struct pbp_filter *f, const char *proc, const char *ip, const char *port, const char *proto, const char *action)
+{
+    return pat_ok(f->process, proc) && pat_ok(f->ip, ip) && pat_ok(f->port, port) &&
+           (!f->protocol[0] || !strcasecmp(f->protocol, "All") || !strcasecmp(f->protocol, proto ? proto : "")) &&
+           (!f->action[0] || !strcasecmp(f->action, "All") || !strcasecmp(f->action, action ? action : ""));
+}
+
+bool pbp_filters_pass(const struct pbp_filter *f, size_t n, const char *proc, const char *ip, const char *port, const char *proto, const char *action)
+{
+    if (!n) return true;
+    for (size_t i = 0; i < n; i++)
+        if (f[i].exclude && filter_hits(&f[i], proc, ip, port, proto, action)) return false;
+    bool has_include = false;
+    for (size_t i = 0; i < n; i++)
+        if (!f[i].exclude) {
+            has_include = true;
+            if (filter_hits(&f[i], proc, ip, port, proto, action)) return true;
+        }
+    return !has_include;
 }
 
 // ---- profile names and files ----

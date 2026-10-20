@@ -2,13 +2,14 @@
 //
 //   { "Version": "1.0", "Name": "...", "IsTrafficLoggingEnabled": true,
 //     "ProxyConfigs": [ { "Id": 1, "Name": "work", "Type": "SOCKS5", "Host": "...", "Port": "1080",
-//                         "Username": "", "Password": "", "SendDomainToProxy": false } ],
-//     "ProxyRules":   [ { "ProcessName": "...", "TargetHosts": "...", "TargetPorts": "...", "TargetDomains": "...",
+//                         "Username": "", "Password": "", "SendDomainToProxy": true } ],
+//     "ProxyRules":   [ { "Name": "...", "ProcessName": "...", "TargetHosts": "...", "TargetPorts": "...", "TargetDomains": "...",
 //                         "Protocol": "TCP|UDP|BOTH", "Action": "PROXY|DIRECT|BLOCK", "IsEnabled": true,
-//                         "ProxyConfigId": 1 } ] }
+//                         "ProxyConfigId": 1, "LocalhostViaProxy": false } ] }
 //
 // Linux keeps domain names in the host list; they are split into TargetDomains on export and merged back on import.
-// Fields this program does not use (LocalhostViaProxy, LogFilters, ...) are ignored on import.
+// Fields this program does not use (LogFilters, ...) are ignored on import. A top-level LocalhostViaProxy from older profiles
+// becomes the default for rules that do not carry their own.
 #ifndef PB_PROFILE_H
 #define PB_PROFILE_H
 
@@ -20,6 +21,9 @@
 #define PBP_MAX_PROXIES 256
 #define PBP_MAX_RULES   4096
 #define PBP_EXT         ".pbprofile"
+#define PBP_MAX_FILTERS 64
+#define PBP_ZOOM_MIN    60
+#define PBP_ZOOM_MAX    300
 
 struct pbp_proxy {
     uint32_t id;        // stable within the file; rules refer to it
@@ -28,20 +32,35 @@ struct pbp_proxy {
     char *host;
     uint16_t port;
     char *user, *pass;
+    bool  send_domain;   // SendDomainToProxy: the proxy resolves host names (default true)
 };
 
 struct pbp_rule {
+    char *name;                      // label shown in the rule list; may be empty
     char *process, *hosts, *ports;   // hosts holds IPs and domain names together
     int   protocol;                  // 0 TCP, 1 UDP, 2 BOTH (RuleProtocol)
     int   action;                    // 0 PROXY, 1 DIRECT, 2 BLOCK (RuleAction)
     bool  enabled;
+    bool  localhost;                 // LocalhostViaProxy: a PROXY rule that also proxies 127.0.0.0/8 and ::1
     uint32_t proxy_id;               // 0 = default proxy
+};
+
+// A connection-log filter (GUI). Patterns are case-insensitive globs; "" and "*" and "All" match anything.
+struct pbp_filter {
+    bool  exclude;                   // Mode: "Exclude" hides matches, "Include" shows only matches
+    char *process, *ip, *port;
+    char *protocol;                  // "All", "TCP" or "UDP"
+    char *action;                    // "All", "Direct", "Proxy" or "Blocked"
 };
 
 struct pbp_profile {
     char *name;
     bool  logging;                   // IsTrafficLoggingEnabled
     bool  dns_via_proxy;             // DnsViaProxy (Linux extension)
+    bool  log_every;                 // LogEveryConnection: the connection log is not de-duplicated
+    bool  auto_clear;                // AutoClearConnectionLogs: a log is wiped once it passes 500 lines (default true)
+    int   font_zoom;                 // FontZoom in percent, 60-300 (default 100)
+    struct pbp_filter *filters; size_t nfilters;     // LogFilters
     uint32_t default_proxy_id;       // DefaultProxyId (Linux extension); 0 = first proxy
     struct pbp_proxy *proxies; size_t nproxies;
     struct pbp_rule  *rules;   size_t nrules;
@@ -58,9 +77,15 @@ int   pbp_write_file(const char *path, const char *data, char *err, size_t errle
 // Atomic (temporary file + rename), mode 0600 because the file holds proxy credentials.
 int   pbp_save_file(const char *path, const struct pbp_profile *p, char *err, size_t errlen);
 
-// settings.json next to the profiles holds only the name of the active profile; everything else lives in the profile files.
-int   pbp_settings_load(const char *path, char **active);                       // -1 if missing or unreadable
-int   pbp_settings_save(const char *path, const char *active, char *err, size_t errlen);
+// settings.json next to the profiles holds the name of the active profile and the update check switch (both are not per profile);
+// everything else lives in the profile files.
+int   pbp_settings_load(const char *path, char **active, bool *check_updates);   // -1 if missing or unreadable
+int   pbp_settings_save(const char *path, const char *active, bool check_updates, char *err, size_t errlen);
+
+// Does a connection pass the filters? Excludes run first (any match hides); then, if there are Include filters, one must match.
+// protocol: "TCP"/"UDP"; action: "Direct"/"Proxy"/"Blocked".
+bool  pbp_filters_pass(const struct pbp_filter *f, size_t n, const char *process, const char *ip, const char *port,
+                       const char *protocol, const char *action);
 
 // Profile name <-> file name inside a profiles directory (percent-encoding, so any name is safe).
 char *pbp_filename_for(const char *name);                          // malloc'd, includes the extension
@@ -73,6 +98,11 @@ char *pbp_resolve(const char *dir, const char *name_or_path);
 // Splits a host list into IP-like and domain tokens (either output may be empty); the caller frees both.
 void  pbp_split_hosts(const char *hosts, char **ips, char **domains);
 char *pbp_merge_hosts(const char *ips, const char *domains);
+
+// The update feed: {"linux": {"version": "...", "download": "...", "release_notes": "..."}, ...}. 0 if there is a linux version.
+int   pbp_update_parse(const char *json, size_t len, char **version, char **download, char **notes);
+// Is `candidate` a higher version than `current`? Numeric parts only (4.0.0-Beta equals 4.0.0).
+bool  pbp_version_newer(const char *candidate, const char *current);
 
 struct pbp_proxy *pbp_find_proxy(const struct pbp_profile *p, uint32_t id);
 

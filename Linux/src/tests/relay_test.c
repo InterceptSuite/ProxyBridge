@@ -42,6 +42,7 @@ static bool g_px_used[16];
 static uint32_t g_default_px = 1;
 static struct pb_decision g_decision = { PB_ACT_DIRECT, 0 };
 static atomic_int g_ev, g_ev_proxy, g_ev_direct, g_ev_block, g_decide_calls;
+static atomic_int g_loop_pid;             // tests: non-zero = every flow counts as made by the proxy process itself
 static char g_log[64][512];
 static int g_log_n;
 
@@ -121,6 +122,18 @@ static uint32_t fnv(const uint8_t *p, size_t n)
     while (n--) { h ^= *p++; h *= 16777619u; }
     return h;
 }
+int pb_core_is_proxy_process(uint32_t pid, uint32_t proxy_id)
+{
+    (void)pid; (void)proxy_id;
+    return atomic_load(&g_loop_pid) != 0;
+}
+
+int pb_core_name_for(const struct pb_orig *o, char *out, size_t n)
+{
+    (void)o; (void)out; (void)n;
+    return -1;
+}
+
 void pb_core_dns_observe(const uint8_t *m, size_t len)
 {
     int64_t t0 = mono_ms();
@@ -253,7 +266,7 @@ struct srvcfg { bool auth; char user[64], pass[64]; bool leftover; bool silent; 
 struct srv { int lfd; uint16_t port; void (*h)(int, const struct srvcfg *); struct srvcfg cfg; };
 struct hctx { int fd; struct srv *s; };
 
-static atomic_int g_assoc_count, g_s5_udp_dgrams;
+static atomic_int g_assoc_count, g_s5_udp_dgrams, g_socks_conns;
 
 static int rd_full(int fd, void *b, size_t n)
 {
@@ -353,6 +366,7 @@ static void socks_udp_assoc(int tfd)
 
 static void socks_handler(int fd, const struct srvcfg *c)
 {
+    atomic_fetch_add(&g_socks_conns, 1);
     if (c->silent) { char b[16]; while (recv(fd, b, sizeof b, 0) > 0) {} return; }
     uint8_t h[2], m[256];
     if (rd_full(fd, h, 2) || h[0] != 5 || rd_full(fd, m, h[1])) return;
@@ -1290,6 +1304,112 @@ static void test_udp(void)
     close(c);
 }
 
+
+static int flows_of(struct pb_flow_info *out, int max, int udp)
+{
+    int n = pb_relay_flows(out, max), k = 0;
+    for (int i = 0; i < n; i++) if (out[i].udp == udp) out[k++] = out[i];
+    return k;
+}
+
+static bool wait_flow_count(int want, int udp, int ms)
+{
+    struct pb_flow_info f[64];
+    for (int t = 0; t < ms; t += 50) {
+        if (flows_of(f, 64, udp) == want) return true;
+        usleep(50000);
+    }
+    return false;
+}
+
+static void test_flows(void)
+{
+    struct pb_flow_info f[64];
+    CHECK(flows_of(f, 64, 0) == 0, "no flows listed before any connection");
+
+    int fds[3];
+    for (int i = 0; i < 3; i++) {
+        uint16_t src = new_src();
+        set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_PROXY, 1);
+        fds[i] = relay_connect(src);
+        usleep(30000);
+    }
+    CHECK(wait_flow_count(3, 0, 3000), "three proxied TCP connections are listed");
+    int n = flows_of(f, 64, 0);
+    bool fields = n == 3;
+    for (int i = 0; i < n; i++) fields &= f[i].proxy_id == 1 && f[i].port == g_echo->port && f[i].family == AF_INET && f[i].id != 0;
+    CHECK(fields, "each flow has its proxy, destination port and id");
+    CHECK(n == 3 && f[0].age_ms <= f[1].age_ms && f[1].age_ms <= f[2].age_ms, "newest first");
+    CHECK(n == 3 && f[0].id != f[1].id && f[1].id != f[2].id, "ids are unique");
+
+    char buf[4096];
+    memset(buf, 'a', sizeof buf);
+    bool ok = fds[0] >= 0 && send(fds[0], buf, sizeof buf, MSG_NOSIGNAL) == (ssize_t)sizeof buf && rd_full(fds[0], buf, sizeof buf) == 0;
+    CHECK(ok, "data goes through the first connection");
+    usleep(100000);
+    n = flows_of(f, 64, 0);
+    uint64_t best_sent = 0, best_recv = 0;
+    for (int i = 0; i < n; i++) { if (f[i].sent > best_sent) best_sent = f[i].sent; if (f[i].recv > best_recv) best_recv = f[i].recv; }
+    CHECK(best_sent >= sizeof buf && best_recv >= sizeof buf, "byte counters follow the traffic (sent %llu, received %llu)",
+          (unsigned long long)best_sent, (unsigned long long)best_recv);
+
+    uint16_t src = new_src();
+    set_tcp(src, "127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0);
+    int direct = relay_connect(src);
+    usleep(100000);
+    CHECK(flows_of(f, 64, 0) == 3, "a direct connection is not a proxied flow");
+    if (direct >= 0) close(direct);
+
+    close(fds[1]);
+    CHECK(wait_flow_count(2, 0, 3000), "a closed connection leaves the list");
+    close(fds[0]); close(fds[2]);
+    CHECK(wait_flow_count(0, 0, 3000), "all closed: the list is empty");
+
+    // UDP flows are published once a second; earlier tests left flows behind, so start from a clean relay
+    pb_relay_stop();
+    CHECK(relay_up(300, 60, 0, 5) == 0, "relay restarted for the UDP part");
+    int c = udp_client();
+    set_flow("127.1.6.1", "127.0.0.1", g_uecho1, PB_ACT_PROXY, 1);
+    CHECK(udp_echo_ok(c, "127.1.6.1", "flow-one") && udp_echo_ok(c, "127.1.6.1", "flow-two"), "UDP traffic through the proxy");
+    CHECK(wait_flow_count(1, 1, 3000), "the UDP flow is listed");
+    n = flows_of(f, 64, 1);
+    CHECK(n == 1 && f[0].sent >= 16 && f[0].recv >= 16 && f[0].proxy_id == 1 && f[0].port == g_uecho1,
+          "UDP counters and destination (sent %llu, received %llu)", n ? (unsigned long long)f[0].sent : 0ULL, n ? (unsigned long long)f[0].recv : 0ULL);
+    set_flow("127.1.6.2", "127.0.0.1", g_uecho2, PB_ACT_DIRECT, 0);
+    int c2 = udp_client();
+    CHECK(udp_echo_ok(c2, "127.1.6.2", "direct"), "a direct UDP flow to the other echo server");
+    sleep(2);
+    n = flows_of(f, 64, 1);
+    bool direct_listed = false;
+    for (int i = 0; i < n; i++) direct_listed |= f[i].port == g_uecho2;
+    CHECK(!direct_listed, "direct UDP is never listed (%d UDP flows listed)", n);
+    close(c2);
+    close(c);
+
+    CHECK(pb_relay_flows(f, 0) == 0 && pb_relay_flows(NULL, 5) == 0, "degenerate arguments");
+}
+
+
+static void test_proxy_process_loop(void)
+{
+    // the process that serves the proxy must never be sent through it: the relay connects such flows directly
+    int before = g_socks_conns;
+    atomic_store(&g_loop_pid, 1);
+    CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_PROXY, 1, 20000, false) == 20000, "TCP of the proxy's own process still works");
+    CHECK(g_socks_conns == before, "...without touching the proxy (%d new proxy connections)", (int)g_socks_conns - before);
+    set_decision((struct pb_decision){ PB_ACT_PROXY, 1 });
+    CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_DECIDE, 0, 5000, false) == 5000 && g_socks_conns == before,
+          "also when the relay itself decided to use the proxy");
+    int a0 = g_assoc_count;
+    int c = udp_client();
+    set_flow("127.1.7.1", "127.0.0.1", g_uecho1, PB_ACT_PROXY, 1);
+    CHECK(udp_echo_ok(c, "127.1.7.1", "own-process") && g_assoc_count == a0, "UDP of the proxy's own process goes direct, no association (%d)", (int)g_assoc_count - a0);
+    close(c);
+    atomic_store(&g_loop_pid, 0);
+    CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_PROXY, 1, 20000, false) == 20000 && g_socks_conns > before,
+          "any other process still goes through the proxy");
+}
+
 static void test_udp_idle(void)
 {
     pb_relay_stop();
@@ -1780,6 +1900,8 @@ int main(void)
     RUN(test_tcp_bad_proxy);
     RUN(test_tcp_halfclose);
     RUN(test_udp);
+    RUN(test_flows);
+    RUN(test_proxy_process_loop);
     RUN(test_proxy_helper);
     RUN(test_udp_odd);
     RUN(test_hostname);
