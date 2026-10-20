@@ -10,6 +10,13 @@
 
 static int pass, fail;
 static int events;
+static char ex_seen[4096];
+static void on_conn_ex(const char *p, uint32_t pid, const char *ip, uint16_t port, const char *proto, const char *info)
+{
+    (void)p; (void)pid;
+    size_t n = strlen(ex_seen);
+    if (n < sizeof ex_seen - 160) snprintf(ex_seen + n, sizeof ex_seen - n, "%s %s:%u via %s\n", proto, ip, port, info);
+}
 static void on_conn(const char *p, uint32_t pid, const char *ip, uint16_t port, const char *info) { (void)p; (void)pid; (void)ip; (void)port; (void)info; events++; }
 static void on_log(const char *m) { if (getenv("PB_VERBOSE")) fprintf(stderr, "[log] %s\n", m); }
 
@@ -33,7 +40,7 @@ static void check(const char *what, int cond) { printf("  %s  %s\n", cond ? "PAS
 int main(void)
 {
     char err[256] = "";
-    ProxyBridge_SetLogCallback(on_log); ProxyBridge_SetConnectionCallback(on_conn); ProxyBridge_SetTrafficLoggingEnabled(true);
+    ProxyBridge_SetLogCallback(on_log); ProxyBridge_SetConnectionCallback(on_conn); ProxyBridge_SetConnectionCallbackEx(on_conn_ex); ProxyBridge_SetTrafficLoggingEnabled(true);
 
     printf("== validation\n");
     check("invalid host rejected with a reason", !ProxyBridge_ValidateRule("curl", "999.1.1.1", "80", err, sizeof err) && err[0]);
@@ -153,6 +160,7 @@ int main(void)
             for (uint32_t k = 0; k < n; k++) if (!fl[k].is_udp && strncmp(fl[k].name, "python3", 7) == 0) left++;
         }
         check("closed connections leave the list", left == 0);
+        check("the extended connection callback names the protocol", strstr(ex_seen, "TCP 192.0.2.30:8888 via ") != NULL && strstr(ex_seen, "UDP 192.0.2.32:5300 via ") != NULL);
         ProxyBridge_DeleteRule(fr1);
         ProxyBridge_DeleteRule(fr2);
         unlink("/tmp/pb_api_live_hold.py");

@@ -49,7 +49,7 @@ connects 198.51.100.50 80 6; connects 198.51.100.51 80 4; connects 198.51.100.52
 [ "$(lines '198.51.100.51:80 via BLOCK')" = 1 ] && ok "4 blocked connections: one line" || bad "blocked: $(lines '198.51.100.51:80 via')"
 [ "$(lines '198.51.100.52:80 via DIRECT')" = 1 ] && ok "4 direct connections: one line" || bad "direct: $(lines '198.51.100.52:80 via')"
 connects 198.51.100.61 80 5; sleep 1.5
-[ "$(lines '198.51.100.61:80 via')" = 1 ] && ok "decided by the relay (long host list): one line" || bad "slow path: $(grep '198.51.100.61' "$WORK/pb.out")"
+[ "$(lines '198.51.100.61:80 via SOCKS5')" = 1 ] && ok "decided by the relay (long host list), process already gone: one proxied line" || bad "slow path: $(grep '198.51.100.61' "$WORK/pb.out")"
 udp_sends 198.51.100.80 5300 8; sleep 1
 [ "$(lines '198.51.100.80:5300 via')" = 1 ] && ok "a UDP flow of 8 datagrams: one line" || bad "udp: $(lines '198.51.100.80:5300 via')"
 stop_pb
@@ -61,7 +61,7 @@ connects 198.51.100.50 80 6; connects 198.51.100.51 80 4; connects 198.51.100.52
 [ "$(lines '198.51.100.51:80 via BLOCK')" = 4 ] && ok "every blocked connection is listed" || bad "blocked: $(lines '198.51.100.51:80 via')"
 [ "$(lines '198.51.100.52:80 via DIRECT')" = 4 ] && ok "every direct connection is listed" || bad "direct: $(lines '198.51.100.52:80 via')"
 connects 198.51.100.61 80 5; sleep 2
-[ "$(lines '198.51.100.61:80 via')" = 5 ] && ok "decided by the relay: every connection, once" || bad "slow path: $(lines '198.51.100.61:80 via')"
+[ "$(lines '198.51.100.61:80 via SOCKS5')" = 5 ] && ok "decided by the relay: every connection, once" || bad "slow path: $(lines '198.51.100.61:80 via')"
 udp_sends 198.51.100.80 5300 8; sleep 1
 [ "$(lines '198.51.100.80:5300 via')" = 1 ] && ok "a busy UDP flow is still one line" || bad "udp: $(lines '198.51.100.80:5300 via')"
 if [ "${PB_SLOW:-0}" = 1 ]; then

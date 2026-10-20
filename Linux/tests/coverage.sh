@@ -32,6 +32,7 @@ unit_tests() {
         ( cd "$ROOT/gui" &&
           gcc $cf -I../src -I../profile -I. tests/config_test.c gui_config.c ../profile/pb_profile.c -o "$UNIT/config_test" $gtk && "$UNIT/config_test" &&
           gcc $cf -I../src -I. tests/json_test.c gui_json.c -o "$UNIT/json_test" $gtk && "$UNIT/json_test" &&
+          gcc $cf -I. $(pkg-config --cflags glib-2.0) -DPB_TEST_HOOKS tests/boot_test.c gui_boot.c -o "$UNIT/boot_test" $(pkg-config --libs glib-2.0) && "$UNIT/boot_test" &&
           gcc $cf -I. tests/events_test.c gui_events.c -o "$UNIT/events_test" -pthread && "$UNIT/events_test" ) 2>&1 | grep -E "FAIL|passed" || true
     fi
 }
@@ -52,7 +53,7 @@ for t in e2e e2e_rules e2e_domains e2e_security e2e_profile e2e_parity e2e_fault
     echo "== $t"
     timeout 900 bash "$HERE/$t.sh" 2>&1 | grep -E "FAIL|passed=|RESULT" || true
 done
-echo "== churn"; timeout 900 bash "$HERE/churn.sh" 1500 2>&1 | grep -E "PASS|FAIL" || true
+echo "== churn"; timeout 900 bash "$HERE/churn.sh" 1500 2>&1 | grep -E "PASS|FAIL" || echo "FAIL churn produced no result (timed out?)"
 if [ -x "$OUT/ProxyBridgeGUI" ] && command -v broadwayd > /dev/null; then
     echo "== gui_headless"; timeout 300 bash "$HERE/gui_headless.sh" "$OUT/ProxyBridgeGUI" "$OUT" 2>&1 | grep -E "FAIL|passed=" || true
 fi

@@ -89,6 +89,7 @@ sudo ProxyBridgeGUI
 The GTK3-based GUI provides:
 - Proxy configuration (SOCKS5/HTTP with authentication)
 - Visual rule management with process selection
+- Font zoom, auto-clear logs, connection-log filters, *Start at Boot* and an update check on startup (see [Appearance, logs and start-up](#appearance-logs-and-start-up))
 - Real-time connection monitoring, a **Live Connections** tab (every proxied TCP connection and UDP flow with its process, destination, proxy, age and bytes), and *Log Every Connection* / *Enable ProxyBridge* switches in the Proxy menu
 - Profiles: create, switch, duplicate, rename, delete, **import and export** `.pbprofile` files (the Windows/macOS format, see [Profiles](#profiles))
 - Import/Export rules (JSON format compatible with Windows/macOS)
@@ -350,6 +351,14 @@ Cost: DNS from covered processes takes one extra loopback hop (about +90 µs per
 - **Enable ProxyBridge** (Proxy menu, `ProxyBridge_SetEnabled()`): the main switch. Off pauses every rule for *new* connections; connections already relayed keep running.
 - **Testing a proxy.** The Test button in the proxy settings and `--test-proxy host[:port]` run the same five steps: reach the proxy, open a tunnel and log in, load a page (port 80), time three more tunnels, and probe UDP ASSOCIATE. Only the first two decide success; a page, latency or UDP problem is a warning. The exit code is 0 only when every configured proxy works.
 
+## Appearance, logs and start-up
+
+- **Font zoom** (View menu, `Ctrl` + `+` / `-` / `0`): 60-300 % in steps of 10, saved in the profile (`FontZoom`).
+- **Auto-clear Logs** (Proxy menu, on by default, saved in the profile as `AutoClearConnectionLogs`): a log is wiped once it grows past 500 lines. Switched off, each log keeps its recent history (1000 lines for activity, 2000 for connections).
+- **Log Filters...** (Proxy menu): rules for what the connection log shows, saved in the profile as `LogFilters`. A filter has a mode (*Include* or *Exclude*) and optional patterns for process, IP address, port, protocol (*All*/*TCP*/*UDP*) and action (*All*/*Direct*/*Proxy*/*Blocked*); patterns are case-insensitive globs (`*`, `?`), empty or `All` matches anything. Excludes run first (any match hides a line); if there are Include filters, a line must match one of them. Filters apply to new connections as they happen; the traffic itself is not affected.
+- **Start at Boot** (Proxy menu): writes `/etc/systemd/system/proxybridge.service`, which runs the command line program next to the GUI (or `/usr/local/bin/ProxyBridge`) with the **active profile**, and enables it; unchecking disables the service and removes the file. The unit follows the active profile when you switch or rename it. Needs systemd and root (the GUI already runs as root); a failure is reported and the box stays unchecked.
+- **Check for Updates on Startup** (About menu, on by default, stored in `settings.json`): asks the update feed in the background when the GUI starts. It stays quiet unless a newer version exists, then offers *Open in Browser*, *Close* or *Don't Check at Startup*. Only an `https` page is ever opened.
+
 ## Compared with the Windows app (4.3.0)
 
 | Feature | Linux |
@@ -364,7 +373,10 @@ Cost: DNS from covered processes takes one extra loopback hop (about +90 µs per
 | Detailed proxy check (reach, login, page, latency, UDP) | yes (GUI Test button, `--test-proxy`) |
 | Live connections | yes (GUI tab, `ProxyBridge_GetFlows`) |
 | Log Every Connection, main on/off switch | yes |
-| Hide/Show log filters (`LogFilters`), auto-clear logs, font zoom, language, close to tray, start with the OS, update check on start-up | not implemented (a `LogFilters` list in an imported profile is ignored) |
+| Connection-log filters (`LogFilters`), auto-clear logs (`AutoClearConnectionLogs`), font zoom (`FontZoom`) | yes, per profile |
+| Start with the OS | yes, as a systemd service that runs `ProxyBridge --profile <active profile>` (Proxy menu, *Start at Boot*) |
+| Update check on start-up | yes (*Check for Updates on Startup*, on by default, quiet unless a newer version exists) |
+| Language selection, close to tray | not implemented |
 
 ## Multiple proxies
 

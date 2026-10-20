@@ -808,6 +808,375 @@ static void logs_scenario(void) {
     ProxyBridge_DeleteRule(rule);
 }
 
+
+// ================================================================================================================================
+// Font zoom, auto-clear, log filters, start at boot, update check on start-up
+// ================================================================================================================================
+static int buffer_lines(const char *view_name)
+{
+    GtkWidget *v = find_named(view_name);
+    return v ? gtk_text_buffer_get_line_count(gtk_text_view_get_buffer(GTK_TEXT_VIEW(v))) - 1 : -1;
+}
+
+static void fire_logs(int n)
+{
+    for (int i = 0; i < n; i++) gui_log("filler line %d", i);
+    pump(900);
+}
+
+static void zoom_scenario(void)
+{
+    STEP("font zoom");
+    struct pbp_profile disk;
+    CHECK(g_zoom == 100);
+    activate("Zoom In"); activate("Zoom In");
+    CHECK(g_zoom == 120 && strstr(gui_zoom_css(), "120%") != NULL);
+    CHECK(load_disk("Default", &disk) && disk.font_zoom == 120);
+    pbp_free(&disk);
+    activate("Zoom Out");
+    CHECK(g_zoom == 110 && strstr(gui_zoom_css(), "110%") != NULL);
+    activate("Reset Zoom");
+    CHECK(g_zoom == 100 && strstr(gui_zoom_css(), "100%") != NULL);
+
+    gui_set_zoom(1000); CHECK(g_zoom == 300);
+    activate("Zoom In"); CHECK(g_zoom == 300);                 // clamped at both ends
+    gui_set_zoom(5); CHECK(g_zoom == 60);
+    activate("Zoom Out"); CHECK(g_zoom == 60);
+    gui_set_zoom(-40); CHECK(g_zoom == 60);
+
+    // the zoom belongs to the profile
+    gui_set_zoom(130);
+    CHECK(profile_create("Zoomed", false) != NULL);
+    CHECK(profile_activate("Zoomed"));
+    gui_sync_switches();
+    CHECK(g_zoom == 100 && strstr(gui_zoom_css(), "100%") != NULL);
+    gui_set_zoom(180);
+    CHECK(profile_activate("Default"));
+    gui_sync_switches();
+    CHECK(g_zoom == 130 && strstr(gui_zoom_css(), "130%") != NULL);
+    CHECK(profile_activate("Zoomed"));
+    gui_sync_switches();
+    CHECK(g_zoom == 180);
+    CHECK(profile_activate("Default"));
+    gui_sync_switches();
+    gui_set_zoom(100);
+    save_config();
+}
+
+static void autoclear_scenario(void)
+{
+    STEP("auto-clear logs");
+    GtkWidget *item = menu_item("Auto-clear Logs");
+    CHECK(item && gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(item)) && g_chk_auto_clear);
+    click("log_clear");
+    fire_logs(600);                                           // past 500 lines the log is wiped
+    int n = buffer_lines("log_view");
+    CHECK(n >= 0 && n < 500);
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), FALSE);
+    CHECK(!g_chk_auto_clear);
+    struct pbp_profile disk;
+    CHECK(load_disk("Default", &disk) && !disk.auto_clear);
+    pbp_free(&disk);
+    click("log_clear");
+    fire_logs(700);                                           // switched off: the log keeps its history
+    n = buffer_lines("log_view");
+    CHECK(n >= 700);
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+    CHECK(g_chk_auto_clear && load_disk("Default", &disk) && disk.auto_clear);
+    pbp_free(&disk);
+    click("log_clear");
+}
+
+typedef struct { const char *mode, *proc, *ip, *port, *proto, *action; } FltForm;
+
+static void fill_flt(GtkWidget *d, gpointer arg)
+{
+    FltForm *f = arg;
+    set_combo(d, "flt_mode", !strcmp(f->mode, "Exclude") ? 1 : 0);
+    set_text(d, "flt_process", f->proc); set_text(d, "flt_ip", f->ip); set_text(d, "flt_port", f->port);
+    set_combo(d, "flt_proto", !strcmp(f->proto, "TCP") ? 1 : !strcmp(f->proto, "UDP") ? 2 : 0);
+    set_combo(d, "flt_action", !strcmp(f->action, "Direct") ? 1 : !strcmp(f->action, "Proxy") ? 2 : !strcmp(f->action, "Blocked") ? 3 : 0);
+}
+
+static FltForm *ff(const char *mode, const char *proc, const char *ip, const char *port, const char *proto, const char *action)
+{
+    FltForm *f = g_malloc0(sizeof *f);
+    f->mode = mode; f->proc = proc; f->ip = ip; f->port = port; f->proto = proto; f->action = action;
+    return f;
+}
+
+static char *flt_error;
+static void see_flt_error(GtkWidget *d, gpointer arg) { (void)arg; g_free(flt_error); flt_error = get_text(d, "flt_error"); }
+static void submit_bad_flt(GtkWidget *d, gpointer arg)
+{
+    fill_flt(d, arg);
+    arm("dlg_filter", see_flt_error, NULL, GTK_RESPONSE_CANCEL);
+}
+
+static void filters_add_exclude(GtkWidget *dlg, gpointer arg)
+{
+    (void)arg;
+    CHECK(model_rows("filter_tree") == 0);
+    arm("dlg_filter", fill_flt, ff("Exclude", "python3*", "", "", "All", "All"), GTK_RESPONSE_ACCEPT);
+    click("flt_add");
+    CHECK(model_rows("filter_tree") == 1);
+    size_t n = 0;
+    struct pbp_filter *fl = gui_filters(&n);
+    CHECK(n == 1 && fl[0].exclude && !strcmp(fl[0].process, "python3*") && !strcmp(fl[0].protocol, "All"));
+    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
+}
+
+static void filters_manage(GtkWidget *dlg, gpointer arg)
+{
+    (void)arg;
+    size_t n = 0;
+    CHECK(model_rows("filter_tree") == 1);                    // the filter added earlier is listed
+
+    g_free(flt_error); flt_error = NULL;
+    arm("dlg_filter", submit_bad_flt, ff("Include", "x", "", "80x", "All", "All"), GTK_RESPONSE_ACCEPT);
+    click("flt_add");
+    CHECK_HAS(flt_error, "Port must be digits");
+    CHECK(model_rows("filter_tree") == 1);
+
+    arm("dlg_filter", fill_flt, ff("Include", "ignored", "", "", "All", "All"), GTK_RESPONSE_CANCEL);       // cancel changes nothing
+    click("flt_add");
+    CHECK(model_rows("filter_tree") == 1);
+
+    unselect_all("filter_tree");
+    arm_msg(GTK_RESPONSE_OK); click("flt_edit");   CHECK_HAS(last_msg, "Select a filter first");
+    arm_msg(GTK_RESPONSE_OK); click("flt_delete"); CHECK_HAS(last_msg, "Select a filter first");
+
+    select_row("filter_tree", 0);
+    arm("dlg_filter", fill_flt, ff("Include", "curl", "192.0.2.4*", "80", "TCP", "Proxy"), GTK_RESPONSE_ACCEPT);
+    click("flt_edit");
+    struct pbp_filter *fl = gui_filters(&n);
+    CHECK(n == 1 && !fl[0].exclude && !strcmp(fl[0].process, "curl") && !strcmp(fl[0].ip, "192.0.2.4*") && !strcmp(fl[0].port, "80") &&
+          !strcmp(fl[0].protocol, "TCP") && !strcmp(fl[0].action, "Proxy"));
+    struct pbp_profile disk;
+    CHECK(load_disk("Default", &disk) && disk.nfilters == 1 && !disk.filters[0].exclude && !strcmp(disk.filters[0].ip, "192.0.2.4*"));
+    pbp_free(&disk);
+
+    arm("dlg_filter", fill_flt, ff("Exclude", "*", "", "53", "UDP", "Blocked"), GTK_RESPONSE_ACCEPT);
+    click("flt_add");
+    CHECK(model_rows("filter_tree") == 2);
+    select_row("filter_tree", 0);
+    click("flt_delete");
+    fl = gui_filters(&n);
+    CHECK(n == 1 && fl[0].exclude && !strcmp(fl[0].port, "53"));
+    select_row("filter_tree", 0);
+    click("flt_delete");
+    gui_filters(&n);
+    CHECK(n == 0 && model_rows("filter_tree") == 0);
+    CHECK(load_disk("Default", &disk) && disk.nfilters == 0);
+    pbp_free(&disk);
+    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
+}
+
+static void filters_delete_all(GtkWidget *dlg, gpointer arg)
+{
+    (void)arg;
+    while (model_rows("filter_tree") > 0) { select_row("filter_tree", 0); click("flt_delete"); }
+    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
+}
+
+static void filters_scenario(void)
+{
+    STEP("log filters");
+    ProxyData *p = proxy_named("p1x");
+    char err[200];
+    uint32_t rule = p ? ProxyBridge_AddRule("python3*", "192.0.2.40-192.0.2.60", "80", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, p->id, err, sizeof err) : 0;
+    CHECK(rule != 0);
+    GtkWidget *log_item = menu_item("Enable Traffic Logging");
+    if (log_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_item), TRUE);
+    click("conn_clear");
+
+    // an Exclude filter hides new connections of that process
+    arm("dlg_filters", filters_add_exclude, NULL, 0);
+    activate("Log Filters...");
+    connect_once("192.0.2.43");
+    pump(900);
+    char *conns = buffer_of("conn_view");
+    CHECK(strstr(conns, "192.0.2.43") == NULL);
+    g_free(conns);
+
+    // the dialog edits, validates and deletes
+    arm("dlg_filters", filters_manage, NULL, 0);
+    activate("Log Filters...");
+
+    // Include filters show only what matches
+    arm("dlg_filters", filters_delete_all, NULL, 0);
+    activate("Log Filters...");
+    connect_once("192.0.2.44");
+    pump(900);
+    conns = buffer_of("conn_view");
+    CHECK_HAS(conns, "192.0.2.44:80");                          // with the filter gone the connection shows again
+    g_free(conns);
+    click("conn_clear");
+
+    size_t n = 0;
+    struct pbp_filter inc = { false, strdup(""), strdup("192.0.2.45"), strdup(""), strdup("All"), strdup("All") };
+    struct pbp_filter *fl = calloc(1, sizeof *fl);
+    fl[0] = pbp_filter_dup(&inc);
+    pbp_filter_clear(&inc);
+    gui_filters_replace(fl, 1);
+    connect_once("192.0.2.45");
+    connect_once("192.0.2.46");
+    pump(900);
+    conns = buffer_of("conn_view");
+    CHECK(strstr(conns, "192.0.2.45:80") != NULL && strstr(conns, "192.0.2.46") == NULL);
+    g_free(conns);
+    gui_filters_replace(NULL, 0);
+    gui_filters(&n);
+    CHECK(n == 0);
+
+    // the filters follow the profile
+    fl = calloc(1, sizeof *fl);
+    struct pbp_filter ex = { true, strdup("python3*"), strdup(""), strdup(""), strdup("All"), strdup("All") };
+    fl[0] = pbp_filter_dup(&ex);
+    pbp_filter_clear(&ex);
+    gui_filters_replace(fl, 1);
+    CHECK(profile_activate("Zoomed"));
+    gui_filters(&n);
+    CHECK(n == 0);
+    CHECK(profile_activate("Default"));
+    gui_filters(&n);
+    CHECK(n == 1);
+    gui_filters_replace(NULL, 0);
+    save_config();
+    ProxyBridge_DeleteRule(rule);
+    click("conn_clear");
+}
+
+static void make_fake_systemctl(const char *path, const char *log)
+{
+    char *script = g_strdup_printf("#!/bin/sh\necho \"$@\" >> %s\n[ \"$FAKE_FAIL\" = \"$1\" ] && { echo \"boom: $1\" >&2; exit 1; }\nexit 0\n", log);
+    g_file_set_contents(path, script, -1, NULL);
+    chmod(path, 0755);
+    g_free(script);
+}
+
+static void switch_to(GtkWidget *dlg, gpointer arg)
+{
+    select_by_first_column("profile_tree", arg);
+    click("pf_switch");
+    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
+}
+
+static void boot_scenario(void)
+{
+    STEP("start at boot");
+    char *units = tmp_path("units"), *fake = tmp_path("systemctl"), *calls = tmp_path("systemctl.log");
+    g_mkdir_with_parents(units, 0755);
+    make_fake_systemctl(fake, calls);
+    setenv("PROXYBRIDGE_SYSTEMD_DIR", units, 1);
+    setenv("PROXYBRIDGE_SYSTEMCTL", fake, 1);
+    setenv("PROXYBRIDGE_CLI", "/usr/local/bin/ProxyBridge", 1);
+    char *unit = g_build_filename(units, "proxybridge.service", NULL);
+
+    GtkWidget *item = menu_item("Start at Boot (systemd service)");
+    CHECK(item != NULL && !gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(item)));
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+    char *text = NULL;
+    CHECK(g_file_get_contents(unit, &text, NULL, NULL));
+    CHECK_HAS(text, "ExecStart=\"/usr/local/bin/ProxyBridge\" --profile \"Default\"");
+    g_free(text);
+    char *log = NULL;
+    g_file_get_contents(calls, &log, NULL, NULL);
+    CHECK_HAS(log, "enable proxybridge.service");
+    g_free(log);
+
+    // another active profile is what the service runs after the next boot
+    arm("dlg_profiles", switch_to, (gpointer)"Zoomed", 0);
+    activate("Profiles...");
+    CHECK_STR(g_active_profile, "Zoomed");
+    CHECK(g_file_get_contents(unit, &text, NULL, NULL));
+    CHECK_HAS(text, "--profile \"Zoomed\"");
+    g_free(text);
+    arm("dlg_profiles", switch_to, (gpointer)"Default", 0);
+    activate("Profiles...");
+    CHECK(g_file_get_contents(unit, &text, NULL, NULL));
+    CHECK_HAS(text, "--profile \"Default\"");
+    g_free(text);
+
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), FALSE);
+    CHECK(!g_file_test(unit, G_FILE_TEST_EXISTS));
+
+    // a failing systemctl: say so and leave the box unchecked
+    setenv("FAKE_FAIL", "enable", 1);
+    arm_msg(GTK_RESPONSE_OK);
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+    CHECK_HAS(last_msg, "Could not enable starting at boot");
+    CHECK(!gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(item)) && !g_file_test(unit, G_FILE_TEST_EXISTS));
+    unsetenv("FAKE_FAIL");
+    unsetenv("PROXYBRIDGE_SYSTEMD_DIR"); unsetenv("PROXYBRIDGE_SYSTEMCTL"); unsetenv("PROXYBRIDGE_CLI");
+    g_free(units); g_free(fake); g_free(calls); g_free(unit);
+}
+
+static bool any_message_dialog(void) { return visible_dialog("msg") != NULL; }
+
+static void startup_update_scenario(void)
+{
+    STEP("update check on start-up");
+    GtkWidget *item = menu_item("Check for Updates on Startup");
+    CHECK(item && gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(item)) && g_chk_updates);
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), FALSE);
+    CHECK(!g_chk_updates);
+    char *settings = tmp_path("settings.json"), *text = NULL;
+    CHECK(g_file_get_contents(settings, &text, NULL, NULL));
+    CHECK_HAS(text, "\"CheckForUpdatesOnStartup\": false");
+    g_free(text);
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+    CHECK(g_chk_updates && g_file_get_contents(settings, &text, NULL, NULL));
+    CHECK_HAS(text, "\"CheckForUpdatesOnStartup\": true");
+    g_free(text); g_free(settings);
+
+    // a start-up check says nothing unless there is a newer version
+    const char *quiet[][2] = {
+        { "su_same.json", "{\"linux\": {\"version\": \"" PROXYBRIDGE_VERSION "\"}}" },
+        { "su_older.json", "{\"linux\": {\"version\": \"1.0.0\"}}" },
+        { "su_broken.json", "not json at all" },
+        { "su_nolinux.json", "{\"windows\": {}}" },
+    };
+    for (size_t i = 0; i < sizeof quiet / sizeof *quiet; i++) {
+        char *path = tmp_path(quiet[i][0]);
+        g_file_set_contents(path, quiet[i][1], -1, NULL);
+        char *url = g_strdup_printf("file://%s", path);
+        setenv("PB_UPDATE_FEED", url, 1);
+        gui_check_updates_on_startup();
+        pump(1500);
+        CHECK(!any_message_dialog());
+        g_free(path); g_free(url);
+    }
+    setenv("PB_UPDATE_FEED", "file:///nonexistent/feed.json", 1);
+    gui_check_updates_on_startup();
+    pump(1500);
+    CHECK(!any_message_dialog());
+
+    // news: the user is asked, and can turn the start-up check off for good
+    char *path = tmp_path("su_newer.json");
+    g_file_set_contents(path, "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"https://example.test/d\", \"release_notes\": \"https://example.test/n\"}}", -1, NULL);
+    char *url = g_strdup_printf("file://%s", path);
+    setenv("PB_UPDATE_FEED", url, 1);
+    g_free(last_msg); last_msg = NULL;
+    arm_msg(GTK_RESPONSE_CANCEL);
+    gui_check_updates_on_startup();
+    for (int i = 0; i < 60 && !last_msg; i++) pump(100);
+    CHECK_HAS(last_msg, "Version 9.9.9 is available");
+    CHECK(g_chk_updates);                                      // Close leaves the setting alone
+    g_free(last_msg); last_msg = NULL;
+    arm_msg(GTK_RESPONSE_REJECT);                              // "Don't Check at Startup"
+    gui_check_updates_on_startup();
+    for (int i = 0; i < 60 && !last_msg; i++) pump(100);
+    CHECK_HAS(last_msg, "Version 9.9.9 is available");
+    pump(300);
+    CHECK(!g_chk_updates);
+    GtkWidget *it2 = menu_item("Check for Updates on Startup");
+    CHECK(it2 && !gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(it2)));
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(it2), TRUE);
+    g_free(path); g_free(url);
+    unsetenv("PB_UPDATE_FEED");
+}
+
 // ================================================================================================================================
 static void ui_main(void) {
     pump(300);
@@ -836,6 +1205,15 @@ static void ui_main(void) {
 
     printf("== logs\n");
     logs_scenario();
+
+    printf("== zoom, auto-clear, filters, boot, start-up update check\n");
+    zoom_scenario();
+    autoclear_scenario();
+    filters_scenario();
+    boot_scenario();
+    startup_update_scenario();
+    CHECK(profile_delete(profile_find("Zoomed")));            // the scenarios made it; the end state below expects only Default
+    save_config();
 
     printf("== menus and engine\n");
     GtkWidget *start = menu_item("Start Engine"), *stop = menu_item("Stop Engine");

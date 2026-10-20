@@ -17,7 +17,7 @@ G="$ROOT/gui"
 SRC=$(ls "$G"/*.c | grep -v "/main.c$")
 gcc -O1 -g -w -D_GNU_SOURCE ${EXTRA_CFLAGS:-} -I"$ROOT/src" -I"$ROOT/profile" -I"$G" $(pkg-config --cflags gtk+-3.0) \
     -DPB_TEST_HOOKS -Dmain=pb_gui_main -c "$G/main.c" -o "$BUILD/gui_main.o" || exit 1
-gcc -O1 -g -w -D_GNU_SOURCE ${EXTRA_CFLAGS:-} -I"$ROOT/src" -I"$ROOT/profile" -I"$G" $(pkg-config --cflags gtk+-3.0) \
+gcc -O1 -g -w -D_GNU_SOURCE -DPB_TEST_HOOKS ${EXTRA_CFLAGS:-} -I"$ROOT/src" -I"$ROOT/profile" -I"$G" $(pkg-config --cflags gtk+-3.0) \
     -o "$BUILD/ui_test" "$G/tests/ui_test.c" "$BUILD/gui_main.o" $SRC "$ROOT/profile/pb_profile.c" \
     -L"$LIBDIR" -Wl,-rpath,"$LIBDIR" -lproxybridge -lpthread $(pkg-config --libs gtk+-3.0) ${EXTRA_LDFLAGS:-} || exit 1
 
