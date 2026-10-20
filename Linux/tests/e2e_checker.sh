@@ -1,5 +1,5 @@
 #!/bin/bash
-# `ProxyBridge --test-proxy host[:port]`: the multi-step proxy check, against working and broken proxies. Needs python3 (no root).
+# The library's multi-step (what the GUI's Test connection runs, via tests/check_probe.c) proxy check, against working and broken proxies. Needs python3 (no root).
 #   Linux/tests/e2e_checker.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
@@ -11,16 +11,39 @@ bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 cleanup() { kill $F1 $F2 2>/dev/null; wait 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 export LD_LIBRARY_PATH="$PB_DIR"
+gcc -Wall -Wextra -O1 -I"$ROOT/src" -o "$WORK/check_probe" "$HERE/check_probe.c" -L"$PB_DIR" -lproxybridge || exit 1
 python3 "$HERE/fake_proxies.py" "$WORK/proxy.log" > /dev/null 2>&1 & F1=$!
 python3 "$HERE/fault_proxies.py" "$WORK/fault.log" > /dev/null 2>&1 & F2=$!
 sleep 1.5
+
+# turns "--proxy name=type://[user:pw@]host:port ... --test-proxy host[:port]" into check_probe arguments
+probe_args() {
+  local out=() tgt="" th tp
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --proxy) local spec="$2" nm="p" ty u="-" pw="-" hp; shift 2
+        [[ "$spec" == *=* ]] && { nm="${spec%%=*}"; spec="${spec#*=}"; }
+        ty="${spec%%://*}"; spec="${spec#*://}"
+        [[ "$spec" == *@* ]] && { u="${spec%%:*}"; pw="${spec#*:}"; pw="${pw%%@*}"; spec="${spec#*@}"; }
+        out+=("$nm" "$ty" "${spec%:*}" "${spec##*:}" "$u" "$pw");;
+      --test-proxy) tgt="$2"; shift 2;;
+      *) shift;;
+    esac
+  done
+  if [[ "$tgt" == \[*\]* ]]; then th="${tgt%%]*}"; th="${th#[}"; tp="${tgt##*]}"; tp="${tp#:}"
+  elif [[ "$tgt" == *:* ]]; then th="${tgt%%:*}"; tp="${tgt#*:}"
+  else th="$tgt"; tp=""; fi
+  [ -z "$tp" ] && [[ "$tgt" != *:* || "$tgt" == \[*\] ]] && tp=80
+  printf '%s\n' "${out[@]}" "$th" "$tp"
+}
 
 # check <name> <expected exit> <needle>... -- <ProxyBridge args>
 check() {
   local name="$1" want_rc="$2"; shift 2
   local needles=()
   while [ "$1" != "--" ]; do needles+=("$1"); shift; done; shift
-  local out; out=$(timeout 60 "$PB_DIR/ProxyBridge" "$@" 2>&1); local rc=$?
+  local out; local pa; mapfile -t pa < <(probe_args "$@")
+  out=$(timeout 60 "$WORK/check_probe" "${pa[@]}" 2>&1); local rc=$?
   if [ "$rc" != "$want_rc" ]; then bad "$name (exit $rc, wanted $want_rc: ${out:0:300})"; return; fi
   for n in "${needles[@]}"; do
     if [[ "$out" != *"$n"* ]]; then bad "$name (output lacks '$n': ${out:0:400})"; return; fi
@@ -58,8 +81,5 @@ echo "== bad arguments"
 check "empty host" 2 "Invalid target" -- --proxy a=socks5://127.0.0.1:19080 --test-proxy :80
 check "port out of range" 2 "Invalid target" -- --proxy a=socks5://127.0.0.1:19080 --test-proxy example.test:99999
 check "port that is not a number" 2 "Invalid target" -- --proxy a=socks5://127.0.0.1:19080 --test-proxy example.test:http
-echo '{ "ProxyConfigs": [ { "Id": 1, "Name": "p1", "Type": "socks5", "Host": "127.0.0.1", "Port": "19080" } ] }' > "$WORK/p.pbprofile"; chmod 600 "$WORK/p.pbprofile"
-check "profile proxies are checked too (again, file present)" 0 "Proxy: p1" "Result: PASSED" -- --profile "$WORK/p.pbprofile" --test-proxy example.test:80
-
 echo; echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" = 0 ]

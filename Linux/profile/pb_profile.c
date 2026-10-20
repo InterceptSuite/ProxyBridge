@@ -789,6 +789,57 @@ int pbp_settings_save(const char *path, const char *active, bool check_updates, 
     return rc;
 }
 
+// ---- update feed ----
+
+int pbp_update_parse(const char *json, size_t len, char **version, char **download, char **notes)
+{
+    char err[100];
+    char *copy = malloc(len + 1);
+    if (!copy) return -1;
+    memcpy(copy, json, len);
+    copy[len] = 0;
+    struct jp j = { copy, copy + len, 0, err, sizeof err };
+    struct jv root = {0};
+    int rc = parse_value(&j, &root, 0) == 0 && root.t == J_OBJ ? 0 : -1;
+    const struct jv *lin = rc == 0 ? jget(&root, "linux") : NULL;
+    *version = *download = *notes = NULL;
+    if (lin && lin->t == J_OBJ) {
+        *version = jtext(lin, "version");
+        *download = jtext(lin, "download");
+        *notes = jtext(lin, "release_notes");
+    }
+    if (!*version || !**version) {
+        free(*version); free(*download); free(*notes);
+        *version = *download = *notes = NULL;
+        rc = -1;
+    }
+    jfree(&root);
+    free(copy);
+    return rc;
+}
+
+static void version_parts(const char *s, long out[3])
+{
+    out[0] = out[1] = out[2] = 0;
+    while (*s && (*s < '0' || *s > '9')) s++;
+    for (int i = 0; i < 3 && *s; i++) {
+        long n = 0;
+        while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); if (n > 1000000) n = 1000000; s++; }
+        out[i] = n;
+        if (*s == '.') s++; else break;
+    }
+}
+
+bool pbp_version_newer(const char *candidate, const char *current)
+{
+    long a[3], b[3];
+    version_parts(candidate ? candidate : "", a);
+    version_parts(current ? current : "", b);
+    for (int i = 0; i < 3; i++)
+        if (a[i] != b[i]) return a[i] > b[i];
+    return false;
+}
+
 // ---- log filters ----
 
 static bool ci_glob(const char *p, const char *s)

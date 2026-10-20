@@ -6,6 +6,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first (Linux/build.sh) or set PB_DIR"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 WORK="$(mktemp -d)"; FLOG="$WORK/fault.log"; : > "$FLOG"
 PASS=0; FAIL=0; DST=203.0.113.10
@@ -20,7 +21,7 @@ python3 "$HERE/fake_proxies.py" "$WORK/proxy.log" > /dev/null 2>&1 & FAKE2=$!
 sleep 1
 
 start_pb() {
-  stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 1 "$@" > "$WORK/pb.out" 2>&1 & PB_PID=$!
+  stdbuf -oL "$PBL" --verbose 1 "$@" > "$WORK/pb.out" 2>&1 & PB_PID=$!
   for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/pb.out" && return 0; kill -0 "$PB_PID" 2>/dev/null || return 1; sleep 0.25; done; return 1
 }
 stop_pb() { kill -INT "$PB_PID" 2>/dev/null; wait "$PB_PID" 2>/dev/null; PB_PID=""; }

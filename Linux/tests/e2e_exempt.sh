@@ -6,6 +6,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first (Linux/build.sh) or set PB_DIR"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 WORK="$(mktemp -d)"; PASS=0; FAIL=0; PB=""; FWD=""; WWW=""
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
@@ -19,7 +20,7 @@ mkdir -p "$WORK/www"; echo "origin-ok" > "$WORK/www/index.html"
 python3 -m http.server 18399 --bind "$MYIP" --directory "$WORK/www" > /dev/null 2>&1 & WWW=$!
 sleep 1
 start_pb() { # proxy spec
-  stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 1 --proxy "fwd=$1" --rule "*:$MYIP:18399:TCP:PROXY=fwd" > "$WORK/pb.out" 2>&1 & PB=$!
+  stdbuf -oL "$PBL" --verbose 1 --proxy "fwd=$1" --rule "*:$MYIP:18399:TCP:PROXY=fwd" > "$WORK/pb.out" 2>&1 & PB=$!
   for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/pb.out" && return 0; sleep 0.25; done; return 1
 }
 stop_pb() { kill -INT $PB 2>/dev/null; wait $PB 2>/dev/null; PB=""; }

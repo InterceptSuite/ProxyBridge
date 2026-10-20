@@ -99,6 +99,11 @@ char *pbp_resolve(const char *dir, const char *name_or_path);
 void  pbp_split_hosts(const char *hosts, char **ips, char **domains);
 char *pbp_merge_hosts(const char *ips, const char *domains);
 
+// The update feed: {"linux": {"version": "...", "download": "...", "release_notes": "..."}, ...}. 0 if there is a linux version.
+int   pbp_update_parse(const char *json, size_t len, char **version, char **download, char **notes);
+// Is `candidate` a higher version than `current`? Numeric parts only (4.0.0-Beta equals 4.0.0).
+bool  pbp_version_newer(const char *candidate, const char *current);
+
 struct pbp_proxy *pbp_find_proxy(const struct pbp_profile *p, uint32_t id);
 
 #endif

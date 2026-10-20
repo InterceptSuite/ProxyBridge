@@ -12,6 +12,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first: (cd Linux && ./build.sh), or set PB_DIR"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 NODE="${NODE:-node}"; NEXUS_JS="${NEXUS_JS:-}"
 command -v "$NODE" >/dev/null 2>&1 && [ -f "$NEXUS_JS" ] || { echo "SKIP: set NODE and NEXUS_JS (see header)"; exit 0; }
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
@@ -61,7 +62,7 @@ print(h.hexdigest())
 PY
 sha_for() { python3 -c "$EXPECT_PY" "$1"; }
 
-stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 2 \
+stdbuf -oL "$PBL" --verbose 2 \
   --proxy n1=socks5://127.0.0.1:1080 --proxy n2=socks5://nx:secret@127.0.0.1:1081 \
   --rule "curl:10.77.1.3:*:TCP:DIRECT" \
   --rule "curl:10.77.1.4:*:TCP:BLOCK" \

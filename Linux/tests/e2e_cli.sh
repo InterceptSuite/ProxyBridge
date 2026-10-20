@@ -1,6 +1,6 @@
 #!/bin/bash
-# Command line: every way to get the arguments wrong, and the ways to get them right, without ever starting the engine.
-# Works as any user (valid specs are checked through --test-proxy, which needs no root).   Linux/tests/e2e_cli.sh
+# Command line (the same options as the Windows CLI: --profile, --verbose, --version, -?/-h/--help, --update): every way to get
+# them wrong and right, without ever starting the engine. Works as any user.   Linux/tests/e2e_cli.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"
@@ -20,99 +20,75 @@ t() {
   if [ "$needle" != "-" ] && [[ "$out" != *"$needle"* ]]; then bad "$name (output lacks '$needle': ${out:0:240})"; return; fi
   ok "$name"
 }
-# a proxy spec that parses is reported by --test-proxy ("Proxy: ..."); one that does not is an error before that
-parses() { t "$1" 1 "Proxy:" -- --proxy "$2" --test-proxy 127.0.0.1:9; }
-rejects() { t "$1" 1 "$3" -- --proxy "$2" --test-proxy 127.0.0.1:9; }
 
-echo "== help, version, small commands"
-t "--help" 0 "--proxy" -- --help
-t "-h" 0 "--rule" -- -h
-t "help documents the new options" 0 "--test-proxy" -- --help
-t "help documents profiles" 0 "--profile" -- --help
-t "--cleanup is a harmless no-op" 0 "Nothing to clean up" -- --cleanup
-t "--list-profiles without a profiles directory" 1 "No profiles directory" -- --list-profiles
-mkdir -p "$WORK/cfg/profiles"
-t "--list-profiles with an empty directory" 0 "No profiles" -- --list-profiles
-echo '{}' > "$WORK/cfg/profiles/A b.pbprofile"; echo '{}' > "$WORK/cfg/profiles/plain.pbprofile"; echo x > "$WORK/cfg/profiles/ignored.txt"
-out=$("$PB_DIR/ProxyBridge" --list-profiles 2>&1)
-[[ "$out" == *"A b"* && "$out" == *"plain"* && "$out" != *"ignored"* ]] && ok "--list-profiles lists exactly the .pbprofile files" || bad "list: $out"
+secure() { chmod 600 "$1"; }
+echo "== help and version"
+t "--help" 0 "--profile" -- --help
+t "-h" 0 "--verbose" -- -h
+t "-?" 0 "--update" -- '-?'
+t "help documents verbosity levels" 0 "Silent" -- --help
+t "help documents the version option" 0 "--version" -- --help
+t "--version" 0 "ProxyBridge CLI V" -- --version
+out=$("$PB_DIR/ProxyBridge" --help 2>&1)
+for gone in --proxy --rule --dns-via-proxy --log-every-connection --test-proxy --list-profiles --cleanup; do
+  [[ "$out" != *"$gone"* ]] && ok "help no longer lists $gone" || bad "help still lists $gone"
+  t "$gone is rejected" 1 "Unknown option '$gone'" -- "$gone"
+done
 
 echo "== unknown and incomplete options"
 t "unknown option" 1 "Unknown option '--bogus'" -- --bogus
 t "stray argument" 1 "Unknown option 'stray'" -- stray
-t "--proxy without a value" 1 "Unknown option '--proxy'" -- --proxy
-t "--rule without a value" 1 "Unknown option '--rule'" -- --rule
 t "--profile without a value" 1 "Unknown option '--profile'" -- --profile
-t "--test-proxy without a value" 1 "Unknown option '--test-proxy'" -- --test-proxy
 t "--verbose without a value" 1 "Unknown option '--verbose'" -- --verbose
 t "--verbose out of range" 1 "Verbose level must be 0-3" -- --verbose 9
 t "--verbose negative" 1 "Verbose level must be 0-3" -- --verbose -1
-t "--dns-via-proxy with a bad value" 1 "Invalid value for --dns-via-proxy" -- --dns-via-proxy maybe
-t "--log-every-connection with a bad value" 1 "Invalid value for --log-every-connection" -- --log-every-connection 2
+t "--verbose not a number" 1 "Verbose level must be 0-3" -- --verbose x
+t "no profile" 1 "No profile specified" -- --verbose 1
 
-echo "== proxy specs that are accepted"
-parses "socks5" "socks5://127.0.0.1:1"
-parses "http" "http://127.0.0.1:1"
-parses "uppercase scheme" "SOCKS5://127.0.0.1:1"
-parses "named" "work=socks5://127.0.0.1:1"
-parses "user and password" "socks5://bob:pw@127.0.0.1:1"
-parses "password with a colon and an at sign" "socks5://bob:p:w@x@127.0.0.1:1"
-parses "legacy host:port:user:pass" "socks5://127.0.0.1:1:bob:pw"
-parses "IPv6 proxy address" "socks5://[::1]:1"
-parses "host name" "socks5://localhost:1"
-parses "dns=local" "socks5://127.0.0.1:1?dns=local"
-parses "dns=proxy" "socks5://127.0.0.1:1?dns=proxy"
-parses "port 65535" "socks5://127.0.0.1:65535"
-t "credentials are reported as present, never shown" 1 "with credentials" -- --proxy "a=socks5://bob:topsecret@127.0.0.1:1" --test-proxy 127.0.0.1:9
-out=$("$PB_DIR/ProxyBridge" --proxy "a=socks5://bob:topsecret@127.0.0.1:1" --test-proxy 127.0.0.1:9 2>&1)
-[[ "$out" != *topsecret* ]] && ok "the password never appears in the output" || bad "password printed"
-
-echo "== proxy specs that are refused"
-rejects "no scheme" "127.0.0.1:1080" "Expected [name=]type://host:port"
-rejects "unknown scheme" "ftp://127.0.0.1:1" "Invalid proxy type"
-rejects "missing port" "socks5://127.0.0.1" "missing port"
-rejects "port zero" "socks5://127.0.0.1:0" "Invalid proxy port"
-rejects "port too large" "socks5://127.0.0.1:65536" "Invalid proxy port"
-rejects "port not a number" "socks5://127.0.0.1:abc" "Invalid proxy port"
-rejects "empty host" "socks5://:1080" "host is empty"
-rejects "IPv6 without closing bracket" "socks5://[::1:1080" "Invalid IPv6 proxy host"
-rejects "unknown option after ?" "socks5://127.0.0.1:1?dns=maybe" "Unknown proxy option"
-t "too many proxies" 1 "Maximum 64 proxies" -- $(for i in $(seq 65); do printf -- '--proxy socks5://127.0.0.1:%d ' $((1000 + i)); done)
-
-echo "== rule specs that are refused"
-r() { t "$1" 1 "$3" -- --rule "$2"; }
-r "no colons at all" "curl" "Invalid rule format"
-r "too few fields" "curl:*:*:TCP" "Invalid rule format"
-r "bad protocol" "curl:*:*:ICMP:PROXY" "Invalid protocol"
-r "bad action" "curl:*:*:TCP:ALLOW" "Invalid action"
-r "empty protocol" "::::PROXY" "Invalid protocol"
-r "proxy on DIRECT" "curl:*:*:TCP:DIRECT=a" "only valid with PROXY"
-r "+localhost on BLOCK" "curl:*:*:TCP:BLOCK+localhost" "only valid with PROXY"
-r "+localhost on DIRECT" "curl:*:*:TCP:DIRECT+localhost" "only valid with PROXY"
-t "too many rules" 1 "Maximum 1024 rules" -- $(for i in $(seq 1025); do printf -- '--rule curl:*:*:TCP:DIRECT '; done)
-
-echo "== rule specs that parse (--test-proxy stops before the engine)"
-for spec in "curl:*:*:TCP:PROXY" "curl:10.0.0.0/8:80;443:UDP:DIRECT" "curl;wget:*:*:BOTH:BLOCK" "*:*.github.com:443:TCP:PROXY=a" \
-            "curl:2001:db8::1:80:TCP:PROXY" "curl:[::1]:80:TCP:PROXY" "curl:*:*:tcp:proxy" "curl:*:*:TCP:PROXY=a+localhost" "curl:*:*:TCP:PROXY+LOCALHOST"; do
-  out=$("$PB_DIR/ProxyBridge" --proxy a=socks5://127.0.0.1:1 --rule "$spec" --test-proxy 127.0.0.1:9 2>&1)
-  [[ "$out" == *"Proxy:"* && "$out" != *"Invalid"* ]] && ok "rule accepted: $spec" || bad "rule '$spec': ${out:0:200}"
-done
-
-echo "== target of --test-proxy"
-for tg in "example.test" "example.test:80" "198.51.100.1:8080" "[2001:db8::1]:443" "[2001:db8::1]"; do
-  out=$("$PB_DIR/ProxyBridge" --proxy a=socks5://127.0.0.1:1 --test-proxy "$tg" 2>&1)
-  [[ "$out" == *"Target:"* ]] && ok "target accepted: $tg" || bad "target '$tg': ${out:0:200}"
-done
-for tg in ":80" "host:0" "host:70000" "host:x" "[::1" "" ; do
-  out=$("$PB_DIR/ProxyBridge" --proxy a=socks5://127.0.0.1:1 --test-proxy "$tg" 2>&1); rc=$?
-  [ $rc = 2 ] && ok "target refused: '$tg'" || bad "target '$tg' (exit $rc: ${out:0:160})"
-done
-
+echo "== profile loading and validation"
+t "missing file" 1 "ERROR" -- --profile "$WORK/nope.pbprofile"
+t "unknown profile name" 1 "ERROR" -- --profile "No Such Profile"
+echo 'this is not json' > "$WORK/junk.pbprofile"
+t "not JSON" 1 "ERROR" -- --profile "$WORK/junk.pbprofile"
+echo '{ "ProxyRules": [ { "TargetHosts": "999.1.1.1", "Action": "DIRECT" } ] }' > "$WORK/badhost.pbprofile"
+t "invalid host in a rule" 1 "ERROR" -- --profile "$WORK/badhost.pbprofile"
+echo '{ "ProxyConfigs": [ { "Id": 1, "Type": "socks5", "Host": "127.0.0.1", "Port": "1" } ] }' > "$WORK/norules.pbprofile"
+t "profile with no rules" 1 "no enabled rules" -- --profile "$WORK/norules.pbprofile"
+echo '{ "ProxyConfigs": [ { "Id": 1, "Type": "socks5", "Host": "127.0.0.1", "Port": "1" } ], "ProxyRules": [ { "IsEnabled": false } ] }' > "$WORK/off.pbprofile"
+t "all rules disabled" 1 "no enabled rules" -- --profile "$WORK/off.pbprofile"
+echo '{ "ProxyRules": [ { "TargetHosts": "10.0.0.1" } ] }' > "$WORK/noproxy.pbprofile"
+t "PROXY rule but no proxy" 1 "no proxy server" -- --profile "$WORK/noproxy.pbprofile"
+mkdir -p "$WORK/cfg/profiles"
+echo '{ "ProxyRules": [ { "TargetHosts": "10.0.0.1", "Action": "DIRECT" } ] }' > "$WORK/cfg/profiles/Named.pbprofile"; secure "$WORK/cfg/profiles/Named.pbprofile"
 if [ "$(id -u)" != 0 ]; then
-  echo "== not root"
-  t "the engine needs root" 1 "requires root privileges" -- --proxy socks5://127.0.0.1:1
-  t "...even with rules" 1 "requires root privileges" -- --proxy socks5://127.0.0.1:1 --rule "curl:*:*:TCP:PROXY"
+  echo "== not root (a valid profile reaches the privilege check)"
+  t "by path" 1 "requires root privileges" -- --profile "$WORK/cfg/profiles/Named.pbprofile"
+  t "by GUI profile name" 1 "requires root privileges" -- --profile Named
+  t "with --verbose" 1 "requires root privileges" -- --verbose 3 --profile Named
+  echo '{ "ProxyConfigs": [ { "Id": 1, "Type": "socks5", "Host": "h", "Port": "1", "Username": "u", "Password": "secretpw" } ], "ProxyRules": [ { "Action": "PROXY", "ProxyConfigId": 1 } ] }' > "$WORK/open.pbprofile"; chmod 644 "$WORK/open.pbprofile"
+  t "readable credentials are warned about" 1 "WARNING" -- --profile "$WORK/open.pbprofile"
+  out=$("$PB_DIR/ProxyBridge" --profile "$WORK/open.pbprofile" 2>&1)
+  [[ "$out" != *secretpw* ]] && ok "the password never appears in the output" || bad "password printed"
 fi
+
+echo "== --update (feed overridden through PROXYBRIDGE_UPDATE_FEED)"
+feed() { echo "$2" > "$WORK/$1.json"; }
+upd() { local name="$1" want="$2" needle="$3" file="$4"; local out rc; out=$(PROXYBRIDGE_UPDATE_FEED="$file" timeout 30 "$PB_DIR/ProxyBridge" --update 2>&1); rc=$?
+        [ "$rc" = "$want" ] && [[ "$out" == *"$needle"* ]] && ok "$name" || bad "$name (exit $rc: ${out:0:240})"; }
+feed new '{"linux":{"version":"99.0.0","download":"https://example.test/pb.tar.gz","release_notes":"https://example.test/n"}}'
+feed same "{\"linux\":{\"version\":\"$(sed -n 's/.*PROXYBRIDGE_VERSION "\(.*\)"/\1/p' "$ROOT/src/ProxyBridge.h")\",\"download\":\"https://example.test/a\"}}"
+feed old '{"linux":{"version":"0.0.1","download":"https://example.test/a"}}'
+feed junk 'not json'
+feed http '{"linux":{"version":"99.0.0","download":"http://example.test/a"}}'
+upd "a newer version is reported" 0 "99.0.0" "file://$WORK/new.json"
+upd "the download link is shown" 0 "https://example.test/pb.tar.gz" "file://$WORK/new.json"
+upd "an older feed means up to date" 0 "latest version" "file://$WORK/old.json"
+upd "the same version means up to date" 0 "latest version" "file://$WORK/same.json"
+upd "a broken feed is an error" 1 "ERROR" "file://$WORK/junk.json"
+upd "a missing feed is an error" 1 "ERROR" "file://$WORK/absent.json"
+out=$(PROXYBRIDGE_UPDATE_FEED="file://$WORK/http.json" "$PB_DIR/ProxyBridge" --update 2>&1)
+[[ "$out" != *"http://example.test"* ]] && ok "a non-https download link is never shown" || bad "http link shown"
+[ "$(id -u)" != 0 ] && { out=$(PROXYBRIDGE_UPDATE_FEED="file://$WORK/new.json" "$PB_DIR/ProxyBridge" --update 2>&1); [[ "$out" != *"root"* ]] && ok "--update needs no root" || bad "--update asked for root"; }
 
 echo; echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" = 0 ]

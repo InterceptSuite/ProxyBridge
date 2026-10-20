@@ -5,6 +5,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first (Linux/build.sh) or set PB_DIR"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 WORK="$(mktemp -d)"; : > "$WORK/fault.log"; : > "$WORK/proxy.log"
 PASS=0; FAIL=0
@@ -31,7 +32,7 @@ want() { # name, output, expected substring
 nowant() { if [[ "$2" != *"$3"* ]]; then ok "$1"; else bad "$1 (got: ${2:0:300})"; fi; }
 logged() { grep -q "$2" "$WORK/pb.out" && ok "$1" || bad "$1 (log lacks '$2')"; }
 
-stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 1 \
+stdbuf -oL "$PBL" --verbose 1 \
   --proxy a=socks5://127.0.0.1:19080 --proxy c=http://127.0.0.1:19082 \
   --proxy u0=socks5://127.0.0.1:19120 --proxy u1=socks5://127.0.0.1:19121 --proxy u2=socks5://127.0.0.1:19122 --proxy u3=socks5://127.0.0.1:19123 \
   --proxy u4=socks5://127.0.0.1:19124 --proxy u5=socks5://127.0.0.1:19125 --proxy u6=socks5://127.0.0.1:19126 --proxy u7=socks5://127.0.0.1:19127 \

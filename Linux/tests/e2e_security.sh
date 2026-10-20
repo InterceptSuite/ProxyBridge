@@ -4,6 +4,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first: (cd Linux && ./build.sh), or set PB_DIR"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 BPFTOOL="${BPFTOOL:-bpftool}"; command -v "$BPFTOOL" >/dev/null || { echo "bpftool not found (set BPFTOOL)"; exit 1; }
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 export LD_LIBRARY_PATH="$PB_DIR"
@@ -15,7 +16,7 @@ trap cleanup EXIT
 
 python3 "$HERE/fake_proxies.py" "$PLOG" >/dev/null 2>&1 & FAKE=$!
 sleep 1
-stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 1 --proxy a=socks5://127.0.0.1:19080 --rule "curl:192.0.2.1:*:TCP:PROXY=a" > "$WORK/pb.out" 2>&1 & PB=$!
+stdbuf -oL "$PBL" --verbose 1 --proxy a=socks5://127.0.0.1:19080 --rule "curl:192.0.2.1:*:TCP:PROXY=a" > "$WORK/pb.out" 2>&1 & PB=$!
 for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/pb.out" && break; sleep 0.25; done
 RELAY=$(sed -n 's/.*relay tcp:\([0-9]*\) udp.*/\1/p' "$WORK/pb.out" | head -1)
 [ -n "$RELAY" ] || { echo "ProxyBridge did not start"; cat "$WORK/pb.out"; exit 1; }

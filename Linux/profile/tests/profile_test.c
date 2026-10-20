@@ -199,6 +199,27 @@ static void test_settings(void)
     CHECK(system(cmd) == 0);
 }
 
+static void test_update_feed(void)
+{
+    char *v, *d, *n;
+    const char *feed = "{ \"windows\": { \"version\": \"4.3.0\" }, \"linux\": { \"version\": \"4.1.0\", \"download\": \"https://x/d\", \"release_notes\": \"https://x/n\" } }";
+    CHECK(pbp_update_parse(feed, strlen(feed), &v, &d, &n) == 0 && !strcmp(v, "4.1.0") && !strcmp(d, "https://x/d") && !strcmp(n, "https://x/n"));
+    free(v); free(d); free(n);
+    const char *bare = "{ \"linux\": { \"version\": \"9\" } }";
+    CHECK(pbp_update_parse(bare, strlen(bare), &v, &d, &n) == 0 && !strcmp(v, "9") && d == NULL && n == NULL);
+    free(v);
+    const char *bad[] = { "", "not json", "[]", "{}", "{ \"linux\": 5 }", "{ \"linux\": {} }", "{ \"linux\": { \"version\": \"\" } }", "{ \"windows\": { \"version\": \"1\" } }" };
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++)
+        CHECK(pbp_update_parse(bad[i], strlen(bad[i]), &v, &d, &n) == -1 && !v && !d && !n);
+
+    CHECK(pbp_version_newer("4.0.1", "4.0.0") && pbp_version_newer("4.1.0", "4.0.9") && pbp_version_newer("5.0.0", "4.9.9"));
+    CHECK(!pbp_version_newer("4.0.0", "4.0.0") && !pbp_version_newer("3.2.0", "4.0.0"));
+    CHECK(!pbp_version_newer("4.0.0", "4.0.0-Beta") && !pbp_version_newer("4.0.0-Beta", "4.0.0"));      // a suffix is ignored
+    CHECK(pbp_version_newer("v4.0.1", "4.0.0-Beta") && pbp_version_newer("10.0.0", "9.0.0") && pbp_version_newer("4.0", "3.9.9"));
+    CHECK(!pbp_version_newer("", "1.0.0") && !pbp_version_newer("junk", "0.0.0") && !pbp_version_newer(NULL, "1.0.0"));
+    CHECK(pbp_version_newer("1.0.0", "") && pbp_version_newer("99999999999999999999.0.0", "1.0.0"));
+}
+
 static void test_roundtrip(void)
 {
     struct pbp_profile a, b;
@@ -422,6 +443,7 @@ int main(void)
     test_gui_fields();
     test_filters();
     test_settings();
+    test_update_feed();
     test_errors();
     test_leniency();
     test_hosts();

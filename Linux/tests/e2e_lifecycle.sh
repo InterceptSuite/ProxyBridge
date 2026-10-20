@@ -6,6 +6,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"
 BPFTOOL="${BPFTOOL:-bpftool}"
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first (Linux/build.sh) or set PB_DIR"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 WORK="$(mktemp -d)"; PASS=0; FAIL=0; PB=""; PB2=""; HOLD_T=""; HOLD_U=""; FAKE=""
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
@@ -19,7 +20,7 @@ progs() { "$BPFTOOL" prog show 2>/dev/null | grep -c "pb_connect4"; }
 RULE="python3*:192.0.2.0/24:80:TCP:PROXY=a"
 start() { # outfile args... ; sets PB
   local out="$1"; shift
-  stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 1 --proxy a=socks5://127.0.0.1:19080 --rule "$RULE" "$@" > "$out" 2>&1 & PB=$!
+  stdbuf -oL "$PBL" --verbose 1 --proxy a=socks5://127.0.0.1:19080 --rule "$RULE" "$@" > "$out" 2>&1 & PB=$!
   for _ in $(seq 40); do grep -q "ProxyBridge started" "$out" && return 0; kill -0 $PB 2>/dev/null || return 1; sleep 0.25; done; return 1
 }
 get() { python3 - "$1" <<'PY'
@@ -71,7 +72,7 @@ done
 echo "== two instances at once"
 start "$WORK/a.out" || bad "first instance"
 PA=$PB
-stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 1 --proxy a=socks5://127.0.0.1:19080 --rule "python3*:192.0.2.0/24:81:TCP:PROXY=a" > "$WORK/b.out" 2>&1 & PB2=$!
+stdbuf -oL "$PBL" --verbose 1 --proxy a=socks5://127.0.0.1:19080 --rule "python3*:192.0.2.0/24:81:TCP:PROXY=a" > "$WORK/b.out" 2>&1 & PB2=$!
 for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/b.out" && break; sleep 0.25; done
 grep -q "ProxyBridge started" "$WORK/b.out" && ok "a second instance starts next to the first" || bad "second instance: $(tail -3 "$WORK/b.out")"
 [ "$(get 192.0.2.7)" = DATA ] && ok "the first instance's rule still works" || bad "first instance broken by the second"

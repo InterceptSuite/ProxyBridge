@@ -6,6 +6,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"   # directory holding the built ProxyBridge + libproxybridge.so (run ../build.sh first)
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first: (cd Linux && ./build.sh), or set PB_DIR to a directory containing ProxyBridge and libproxybridge.so"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 WORK="$(mktemp -d)"
 LOG="$WORK/proxy.log"; : > "$LOG"
 PASS=0; FAIL=0
@@ -29,7 +30,7 @@ sleep 1
 
 cp "$(command -v curl)" "$WORK/newcurl"            # a binary that did not exist when ProxyBridge started
 
-stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 3 \
+stdbuf -oL "$PBL" --verbose 3 \
   --proxy a=socks5://127.0.0.1:19080 --proxy b=socks5://bob:pw@127.0.0.1:19081 --proxy c=http://127.0.0.1:19082 \
   --rule "curl:$MYIP/32:18399:TCP:DIRECT" \
   --rule "curl:192.0.2.0/24:*:TCP:PROXY=a" \

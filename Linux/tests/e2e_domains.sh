@@ -6,6 +6,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"   # directory holding the built ProxyBridge + libproxybridge.so (run ../build.sh first)
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first: (cd Linux && ./build.sh), or set PB_DIR to a directory containing ProxyBridge and libproxybridge.so"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 WORK="$(mktemp -d)"; PLOG="$WORK/proxy.log"; DLOG="$WORK/dns.log"; : > "$PLOG"; : > "$DLOG"
 PASS=0; FAIL=0; DNSIP=10.77.0.2
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
@@ -20,7 +21,7 @@ python3 "$HERE/fake_proxies.py" "$PLOG" > /dev/null 2>&1 & FAKE_PID=$!
 python3 "$HERE/fake_dns.py" $DNSIP "$DLOG" > /dev/null 2>&1 & DNS_PID=$!
 sleep 1
 
-stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 2 \
+stdbuf -oL "$PBL" --verbose 2 \
   --proxy a=socks5://127.0.0.1:19080 --proxy b=socks5://bob:pw@127.0.0.1:19081 --proxy h=socks5://localhost:19080 \
   --rule "*:blocked.example.test:*:TCP:BLOCK" \
   --rule "*:*.example.test:*:TCP:PROXY=a" \

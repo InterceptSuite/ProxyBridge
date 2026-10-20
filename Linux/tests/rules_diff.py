@@ -131,8 +131,8 @@ def connect(proto, ip, port):
 def run_seed(seed):
     rng = random.Random(seed)
     rules = [Rule(rng) for _ in range(rng.choice([8, 12, 16, 24]))]
-    env = dict(os.environ, LD_LIBRARY_PATH=PB_DIR)
-    args = ["stdbuf", "-oL", os.path.join(PB_DIR, "ProxyBridge"), "--verbose", "2", "--proxy", PROXY]
+    env = dict(os.environ, LD_LIBRARY_PATH=PB_DIR, PB_DIR=PB_DIR)
+    args = ["stdbuf", "-oL", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pbl"), "--verbose", "2", "--proxy", PROXY]
     for r in rules:
         args += ["--rule", r.cli()]
     out = open("/tmp/rules_diff.%d.out" % os.getpid(), "w+")

@@ -5,6 +5,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"   # directory holding the built ProxyBridge + libproxybridge.so (run ../build.sh first)
 [ -x "$PB_DIR/ProxyBridge" ] && [ -f "$PB_DIR/libproxybridge.so" ] || { echo "Build first: (cd Linux && ./build.sh), or set PB_DIR to a directory containing ProxyBridge and libproxybridge.so"; exit 1; }
+HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; export PB_DIR   # starts the real program from compact --proxy/--rule arguments (see pbl.py)
 WORK="$(mktemp -d)"; PASS=0; FAIL=0; ORIGIN=10.77.0.5
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
@@ -43,7 +44,7 @@ python3 -m http.server 18500 --bind $ORIGIN --directory "$WORK" >/dev/null 2>&1 
 sleep 1
 SUM=$(sha256sum "$WORK/big.bin" | cut -d' ' -f1)
 
-stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 1 --proxy ossh=socks5://127.0.0.1:19090 \
+stdbuf -oL "$PBL" --verbose 1 --proxy ossh=socks5://127.0.0.1:19090 \
    --rule "curl:$ORIGIN:18500:TCP:PROXY=ossh" > "$WORK/pb.out" 2>&1 & PB=$!
 for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/pb.out" && break; sleep 0.25; done
 
@@ -68,7 +69,7 @@ socketserver.ThreadingTCPServer(("10.77.0.5", 18501), H).serve_forever()
 PY
 UP=$!; sleep 1
 kill -INT $PB; wait $PB 2>/dev/null
-stdbuf -oL "$PB_DIR/ProxyBridge" --proxy ossh=socks5://127.0.0.1:19090 --rule "curl:$ORIGIN:18500-18501:TCP:PROXY=ossh" > "$WORK/pb.out" 2>&1 & PB=$!
+stdbuf -oL "$PBL" --proxy ossh=socks5://127.0.0.1:19090 --rule "curl:$ORIGIN:18500-18501:TCP:PROXY=ossh" > "$WORK/pb.out" 2>&1 & PB=$!
 for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/pb.out" && break; sleep 0.25; done
 GOT=$(curl -s -m 60 --data-binary @"$WORK/big.bin" http://$ORIGIN:18501/ )
 [ "$GOT" = "$SUM" ] && ok "40 MB upload through OpenSSH SOCKS5: origin received identical bytes" || bad "upload checksum mismatch (got ${GOT:0:20})"
