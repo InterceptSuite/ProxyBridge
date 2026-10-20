@@ -112,6 +112,10 @@ typedef struct CONNECTION_INFO {
     UINT32 rev_bucket;                 // reverse bucket this entry is currently linked in
     BOOL   in_rev;                     // TRUE while linked in the reverse table
     UINT8  fin_flags;                  // TCP: 1 = app sent FIN, 2 = relay sent FIN (entry dropped when both seen)
+    DWORD  pid;                        // owning process (shown in the live connections view)
+    UINT32 rule_id;                    // rule that matched (live connections view)
+    volatile LONG64 up_bytes;          // UDP: payload bytes app -> proxy
+    volatile LONG64 down_bytes;        // UDP: payload bytes proxy -> app
 } CONNECTION_INFO;
 
 typedef struct {
@@ -121,6 +125,8 @@ typedef struct {
     UINT32 proxy_config_id;
     BOOL   is_ipv6;
     UINT8  orig_dest_ip6[16];
+    DWORD  pid;
+    UINT32 rule_id;
 } CONNECTION_CONFIG;
 
 typedef struct {
@@ -214,6 +220,7 @@ extern UINT16 g_local_relay_port;
 // Set by match_rule*_inner on the calling thread: the "localhost via proxy" flag of the rule that
 // produced the last verdict (FALSE when nothing matched). Read right after check_process_rule*().
 extern __declspec(thread) BOOL g_tl_rule_localhost;
+extern __declspec(thread) UINT32 g_tl_rule_id;   // same for the id of the rule that produced the verdict (0 = none)
 extern LogCallback g_log_callback;
 extern ConnectionCallback g_connection_callback;
 extern char  *g_pidtbl_buf;
@@ -341,10 +348,11 @@ UINT32 rev_hash_v4(UINT32 dest_ip, UINT16 dest_port);
 UINT32 rev_hash_v6(const UINT8 dest_ip6[16], UINT16 dest_port);
 void rev_insert(CONNECTION_INFO *c);
 void rev_unlink(CONNECTION_INFO *c);
-void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id);
-void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id);
+void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id, DWORD pid, UINT32 rule_id);
+void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id, DWORD pid, UINT32 rule_id);
 BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id);
-BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port);
+// acct_down: payload bytes to add to the winning flow's "received" counter (0 = none)
+BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port, UINT32 acct_down);
 // UDP flow validation for the app->relay redirect. A UDP "connection" is keyed by source port
 // only, so it must be re-checked on every datagram: (a) if the destination changed (a socket
 // that moves to another server, e.g. a voice call migrating) the entry is retargeted, and
@@ -372,6 +380,13 @@ void connection_fin(UINT16 src_port, BOOL is_ipv6, UINT8 bit);
 BOOL is_connection_tracked(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port);
 BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id);
+// Same lookups, plus the owning pid (optional) and an optional byte count added to the flow's "sent" counter under the
+// same lock (the UDP relay uses it so counting costs no extra lookup).
+BOOL get_connection_full_x(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id, DWORD *pid, UINT32 *rule_id, UINT32 acct_up);
+BOOL get_connection_full_v6_x(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id, DWORD *pid, UINT32 *rule_id, UINT32 acct_up);
+// Live proxied UDP flows (active in the last UDP_FLOW_LIVE_MS), newest table order; raw fields only.
+#define UDP_FLOW_LIVE_MS 30000
+UINT32 udp_flows_snapshot(PB_FLOW *out, UINT32 max);
 UINT32 get_connection_proxy_id(UINT16 src_port, BOOL is_udp);
 void remove_connection(UINT16 src_port, BOOL is_udp, BOOL is_ipv6);
 void cleanup_stale_connections(void);
@@ -390,7 +405,10 @@ DWORD WINAPI one_way_relay(LPVOID arg);
 DWORD WINAPI transfer_handler(LPVOID arg);
 BOOL relay_pool_start(void);                       // IOCP relay pool (pb_relay.c)
 void relay_pool_stop(void);
-BOOL relay_start(SOCKET client, SOCKET proxy);
+// What the live connections view shows about a relayed TCP connection (copied into the relay record).
+typedef struct { DWORD pid; UINT32 proxy_id; UINT32 rule_id; UINT16 port; BOOL v6; UINT8 dest[16]; } FLOW_META;
+BOOL relay_start(SOCKET client, SOCKET proxy, const FLOW_META *meta);
+UINT32 relay_flows_snapshot(PB_FLOW *out, UINT32 max);   // live proxied TCP connections, newest first; raw fields only
 extern volatile LONG g_active_relays;
 extern volatile LONG g_handler_threads;   // per-connection handshake threads still running (Stop waits for them)
 

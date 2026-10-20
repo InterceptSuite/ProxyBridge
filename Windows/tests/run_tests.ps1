@@ -88,6 +88,7 @@ $tests = @(
     @{ n='test_engine';          src=@('tests\test_engine.c') + $core;                      cl=$clCore;  link=$lnCore; ui=$false },
     @{ n='test_rules_match';     src=@('tests\test_rules_match.c') + $core;                 cl=$clCore;  link=$lnCore; ui=$false },
     @{ n='test_conntrack';       src=@('tests\test_conntrack.c') + $core;                   cl=$clCore;  link=$lnCore; ui=$false },
+    @{ n='test_flows';           src=@('tests\test_flows.c') + $core;                       cl=$clCore;  link=$lnCore; ui=$false },
     @{ n='test_dns';             src=@('tests\test_dns.c') + $core;                         cl=$clCore;  link=$lnCore; ui=$false },
     @{ n='test_proxy_protocols'; src=@('tests\test_proxy_protocols.c') + $core;             cl=$clCore;  link=$lnCore; ui=$false },
     @{ n='test_cli';             src=@('tests\test_cli.c');                                 cl="$clPlain /D_WINSOCK_DEPRECATED_NO_WARNINGS /D_WIN32_WINNT=0x0601"; link='winhttp.lib shell32.lib advapi32.lib'; ui=$false },
@@ -183,7 +184,17 @@ if ($runStatic) {
 
     # 3. the pipe names and protocol version agree between the app and the service (one header, but make sure it is sane)
     $proto = Read-Text 'src\service\pb_proto.h'
-    Check ([int][regex]::Match($proto, 'PB_PROTO_VERSION\s+(\d+)').Groups[1].Value -ge 4) 'service protocol version is at least 4'
+    Check ([int][regex]::Match($proto, 'PB_PROTO_VERSION\s+(\d+)').Groups[1].Value -ge 5) 'service protocol version is at least 5'
+
+    # 3b. the string enum and the EN/ZH table in loc.h list the same names in the same order (a shifted table shows the
+    #     wrong text everywhere after the mistake)
+    $loc = Read-Text 'gui\loc\loc.h'
+    $enumBody = [regex]::Match($loc, 'enum\s*\{(.*?)\bS_COUNT\b', 'Singleline').Groups[1].Value
+    $enumNames = [regex]::Matches($enumBody, '\bS_[A-Z0-9_]+\b') | ForEach-Object { $_.Value }
+    $tableNames = [regex]::Matches($loc, '/\*\s*(S_[A-Z0-9_]+)\s*\*/\s*\{') | ForEach-Object { $_.Groups[1].Value }
+    Check ($enumNames.Count -gt 100 -and $enumNames.Count -eq $tableNames.Count) 'loc.h: the string enum and the translation table have the same number of entries'
+    $badAt = -1; for ($i = 0; $i -lt [Math]::Min($enumNames.Count, $tableNames.Count); $i++) { if ($enumNames[$i] -ne $tableNames[$i]) { $badAt = $i; break } }
+    Check ($badAt -lt 0) ("loc.h: the translation table is in the same order as the enum" + $(if ($badAt -ge 0) { " (first difference: enum " + $enumNames[$badAt] + " vs table " + $tableNames[$badAt] + ")" } else { "" }))
 
     # 4. wiring: every test source is run by this script, and the workflow runs this script
     $self = [IO.File]::ReadAllText($PSCommandPath)

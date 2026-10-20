@@ -316,7 +316,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                             // HTTP proxy can't relay UDP - drop
                             continue;
                         }
-                        add_connection_v6(sp, TRUE, (const UINT8*)ipv6_header->SrcAddr, (const UINT8*)ipv6_header->DstAddr, dp, pcid6u);
+                        add_connection_v6(sp, TRUE, (const UINT8*)ipv6_header->SrcAddr, (const UINT8*)ipv6_header->DstAddr, dp, pcid6u, pid6u, g_tl_rule_id);
 
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
                         static const UINT8 _lb6up[16]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
@@ -531,7 +531,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 }
                 else if (action6 == RULE_ACTION_PROXY)
                 {
-                    add_connection_v6(sp, FALSE, (const UINT8*)ipv6_header->SrcAddr, (const UINT8*)ipv6_header->DstAddr, dp, proxy_config_id6);
+                    add_connection_v6(sp, FALSE, (const UINT8*)ipv6_header->SrcAddr, (const UINT8*)ipv6_header->DstAddr, dp, proxy_config_id6, pid6, g_tl_rule_id);
                     port_set_decided(sp);
                     tcp_header->DstPort = htons(g_local_relay_port);
 
@@ -721,7 +721,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
 
                     if (action == RULE_ACTION_PROXY)
                     {
-                        add_connection(src_port, TRUE, src_ip, dest_ip, dest_port, proxy_config_id);
+                        add_connection(src_port, TRUE, src_ip, dest_ip, dest_port, proxy_config_id, pid, g_tl_rule_id);
 
                         // redirect to UDP relay server at 127.0.0.1:34011
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
@@ -983,7 +983,7 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 }
                 else if (action == RULE_ACTION_PROXY)
             {
-                add_connection(src_port, FALSE, src_ip, orig_dest_ip, orig_dest_port, proxy_config_id);
+                add_connection(src_port, FALSE, src_ip, orig_dest_ip, orig_dest_port, proxy_config_id, pid, g_tl_rule_id);
                 // Mark this port as decided (not direct) so subsequent packets from
                 // the same source port skip the rule check.  The is_connection_tracked
                 // branch above handles the actual per-packet redirect.
@@ -1041,6 +1041,56 @@ DWORD WINAPI packet_processor(LPVOID arg)
 // until they end. TRUE (the default) applies the rules again.
 // "Log every connection": FALSE (default) shows a connection once per (process, destination, port, action);
 // TRUE logs every new TCP connection and every new UDP flow.
+// Copies at most `cap`-1 bytes of a UTF-8 string, never cutting a multi-byte character in half.
+static void copy_utf8(char *dst, size_t cap, const char *src)
+{
+    size_t n = strnlen(src, cap - 1);
+    if (src[n] != '\0')                                           // cut: step back to the start of the character
+        while (n > 0 && ((unsigned char)src[n] & 0xC0) == 0x80) n--;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+PROXYBRIDGE_API UINT32 ProxyBridge_GetFlows(PB_FLOW *out, UINT32 max)
+{
+    if (out == NULL || max == 0) return 0;
+    if (max > PB_FLOWS_MAX) max = PB_FLOWS_MAX;
+    UINT32 n = relay_flows_snapshot(out, max);
+    if (n < max) n += udp_flows_snapshot(out + n, max - n);
+
+    // Names and hosts are looked up here, after every engine lock was released. Process names come from a small
+    // cache (10 s): resolving one means opening the process (or, for a protected / already exited one, walking the
+    // whole process list), which is pointless to repeat every second for a connection that lives for minutes.
+    static struct { DWORD pid; ULONGLONG tick; char name[40]; } cache[64];
+    static volatile LONG cache_busy = 0;
+    ULONGLONG now = GetTickCount64();
+    BOOL have_cache = InterlockedCompareExchange(&cache_busy, 1, 0) == 0;      // a second caller simply skips the cache
+    for (UINT32 i = 0; i < n; i++)
+    {
+        PB_FLOW *f = &out[i];
+        int slot = (int)(f->pid % 64);
+        if (have_cache && cache[slot].pid == f->pid && cache[slot].tick != 0 && now - cache[slot].tick < 10000)
+            copy_utf8(f->name, sizeof(f->name), cache[slot].name);
+        else
+        {
+            char full[MAX_PROCESS_NAME], nm[40];
+            nm[0] = '\0';
+            if (f->pid != 0 && get_process_name_from_pid(f->pid, full, sizeof(full)))
+                copy_utf8(nm, sizeof(nm), extract_filename(full));
+            copy_utf8(f->name, sizeof(f->name), nm);
+            if (have_cache) { cache[slot].pid = f->pid; cache[slot].tick = now; memcpy(cache[slot].name, nm, sizeof(nm)); }
+        }
+
+        char dom[256]; dom[0] = '\0';
+        BOOL have = f->is_ipv6 ? dns_cache_lookup_v6(f->dest, dom, sizeof(dom)) : dns_cache_lookup(*(UINT32 *)f->dest, dom, sizeof(dom));
+        if (have && dom[0] != '\0' && strlen(dom) < sizeof(f->host)) { strcpy_s(f->host, sizeof(f->host), dom); continue; }
+        if (f->is_ipv6) { struct in6_addr a6; memcpy(&a6, f->dest, 16); if (!inet_ntop(AF_INET6, &a6, f->host, sizeof(f->host))) f->host[0] = '\0'; }
+        else format_ip_address(*(UINT32 *)f->dest, f->host, sizeof(f->host));
+    }
+    if (have_cache) InterlockedExchange(&cache_busy, 0);
+    return n;
+}
+
 PROXYBRIDGE_API void ProxyBridge_SetLogEveryConnection(BOOL enable)
 {
     g_log_every_connection = enable ? TRUE : FALSE;

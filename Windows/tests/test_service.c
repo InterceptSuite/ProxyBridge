@@ -35,6 +35,21 @@ static void   SLogAll(BOOL v)  { g_logAllArg = v; }
 static void   SClear(void)     { g_cleared++; }
 static BOOL   SStart(void)     { g_started++; return TRUE; }
 static BOOL   SStop(void)      { g_stopped++; return FALSE; }
+static UINT32 g_flowsAsked = 0, g_flowsHave = 0;
+static UINT32 SGetFlows(PBFlow* out, UINT32 max)
+{
+    g_flowsAsked = max;
+    UINT32 n = g_flowsHave < max ? g_flowsHave : max;
+    for (UINT32 i = 0; i < n; i++)
+    {
+        ZeroMemory(&out[i], sizeof out[i]);
+        out[i].id = 0x100000002ull + i; out[i].pid = 4000 + i; out[i].proxy_config_id = 7; out[i].rule_id = 40 + i; out[i].age_ms = i ? 0xFFFFFFFFu : 1500;
+        out[i].sent = 0x500000001ull; out[i].received = 99; out[i].port = 443; out[i].is_udp = (UINT8)(i & 1); out[i].is_ipv6 = (UINT8)((i >> 1) & 1);
+        strcpy_s(out[i].name, sizeof out[i].name, "chrome.exe"); strcpy_s(out[i].host, sizeof out[i].host, "example.com");
+    }
+    if (n) memset(out[n - 1].name, 'x', sizeof out[n - 1].name);       /* an unterminated name must not run past the field */
+    return n;
+}
 
 /* ---- request helpers ---- */
 static BYTE  rq[PB_MSG_MAX], rs[PB_MSG_MAX];
@@ -49,11 +64,11 @@ int main(void)
     g_api.AddRule = SAddRule; g_api.EditRule = SEditRule; g_api.EnableRule = SEnable; g_api.DisableRule = SDisable; g_api.DeleteRule = SDelete;
     g_api.MoveRuleToPosition = SMove; g_api.GetRulePosition = SGetPos;
     g_api.SetTrafficLoggingEnabled = STraffic; g_api.SetEnabled = SEnabled; g_api.SetLogEveryConnection = SLogAll; g_api.ClearConnectionLogs = SClear;
-    g_api.Start = SStart; g_api.Stop = SStop; g_api.TestProxyConfigEx = NULL;
+    g_api.Start = SStart; g_api.Stop = SStop; g_api.TestProxyConfigEx = NULL; g_api.GetFlows = SGetFlows;
     UINT32 ret;
 
     /* ================= request handler ================= */
-    begin(PBOP_HELLO);                                   CHECK(run(&ret) && ret == PB_PROTO_VERSION && PB_PROTO_VERSION >= 4);
+    begin(PBOP_HELLO);                                   CHECK(run(&ret) && ret == PB_PROTO_VERSION && PB_PROTO_VERSION >= 5);
     begin(PBOP_ADD_PROXY); PbW_U32(&W, 1); PbW_Str(&W, "127.0.0.1"); PbW_U32(&W, 1080); PbW_Str(&W, "alice"); PbW_Str(&W, "pw"); PbW_U32(&W, 1);
     CHECK(run(&ret) && ret == 41 && P.type == 1 && !strcmp(P.ip, "127.0.0.1") && P.port == 1080 && !strcmp(P.user, "alice") && !strcmp(P.pass, "pw") && P.sd);
     begin(PBOP_ADD_PROXY); PbW_U32(&W, 0); PbW_Str(&W, "10.0.0.1"); PbW_U32(&W, 8080); PbW_Str(&W, NULL); PbW_Str(&W, NULL); PbW_U32(&W, 0);
@@ -96,6 +111,30 @@ int main(void)
     begin(PBOP_START);                           CHECK(run(&ret) && ret == 1 && g_started == 1);
     begin(PBOP_STOP);                            CHECK(run(&ret) && ret == 0 && g_stopped == 1);
 
+    /* live connections */
+    g_flowsHave = 3;
+    begin(PBOP_GET_FLOWS); PbW_U32(&W, 10);
+    { PbW resp; PbW_Init(&resp, rs, sizeof rs); CHECK(Dispatch(rq, W.len, &resp) && resp.ok);
+      PbR r; PbR_Init(&r, rs, resp.len);
+      CHECK(PbR_U32(&r) == 3 && g_flowsAsked == 10);
+      for (int i = 0; i < 3; i++)
+      {
+          UINT32 lo = PbR_U32(&r), hi = PbR_U32(&r); UINT32 pid = PbR_U32(&r), flags = PbR_U32(&r), port = PbR_U32(&r), cfg = PbR_U32(&r), rid = PbR_U32(&r), age = PbR_U32(&r);
+          UINT32 sl = PbR_U32(&r), sh = PbR_U32(&r), rl = PbR_U32(&r), rh = PbR_U32(&r);
+          char name[64], host[64]; PbR_Str(&r, name, sizeof name, NULL); PbR_Str(&r, host, sizeof host, NULL);
+          CHECK(r.ok && lo == 2u + i && hi == 1 && pid == 4000u + i && port == 443 && cfg == 7 && rid == 40u + i && sl == 1 && sh == 5 && rl == 99 && rh == 0);
+          CHECK(flags == (UINT32)(((i & 1) ? 1 : 0) | (((i >> 1) & 1) ? 2 : 0)) && age == (i ? 0xFFFFFFFFu : 1500u) && !strcmp(host, "example.com"));
+          if (i == 2) CHECK(strlen(name) == 39);                                           /* the unterminated name was cut at the field size */
+          else        CHECK(!strcmp(name, "chrome.exe"));
+      }
+      CHECK(r.pos == r.len); }                                                               /* nothing left over */
+    begin(PBOP_GET_FLOWS); PbW_U32(&W, 0xFFFFFFFFu); CHECK(run(&ret) && ret == 3 && g_flowsAsked == PB_FLOWS_MAX_GUI);   /* a huge request is capped */
+    g_flowsHave = 0; begin(PBOP_GET_FLOWS); PbW_U32(&W, 5); CHECK(run(&ret) && ret == 0);
+    g_flowsHave = 1000; begin(PBOP_GET_FLOWS); PbW_U32(&W, 400);                              /* the biggest possible answer still fits one message */
+    { PbW resp; PbW_Init(&resp, rs, sizeof rs); CHECK(Dispatch(rq, W.len, &resp) && resp.ok && resp.len <= PB_MSG_MAX); PbR r; PbR_Init(&r, rs, resp.len); CHECK(PbR_U32(&r) == 400); }
+    begin(PBOP_GET_FLOWS); CHECK(!run(&ret));                                                 /* missing argument */
+    g_flowsHave = 0;
+
     /* unknown operations and garbage are rejected without touching the engine */
     begin(0);        CHECK(!run(&ret));
     begin(9999);     CHECK(!run(&ret));
@@ -105,7 +144,7 @@ int main(void)
       {
           int n = rand() % 120; BYTE tmp[160];
           for (int i = 0; i < n; i++) tmp[i] = (BYTE)(rand() % 4 ? rand() % 40 : rand());
-          if (n >= 4 && it % 2) { UINT32 op = 1 + rand() % (PBOP_SET_LOG_ALL + 1); memcpy(tmp, &op, 4); }
+          if (n >= 4 && it % 2) { UINT32 op = 1 + rand() % (PBOP_GET_FLOWS + 1); memcpy(tmp, &op, 4); }
           void* base; BYTE* g = pb_guarded(tmp, (size_t)n, &base);
           PbW resp; PbW_Init(&resp, rs, sizeof rs); Dispatch(g, (DWORD)n, &resp);
           pb_guard_release(base);

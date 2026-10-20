@@ -39,10 +39,11 @@ static DWORD retry_tcp_pid(DWORD pid, BOOL ipv6, UINT32 src_ip, const UINT8 *src
 }
 
 __declspec(thread) BOOL g_tl_rule_localhost = FALSE;
+__declspec(thread) UINT32 g_tl_rule_id = 0;
 
 RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port, const UINT8 dest_ip6[16], UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id)
 {
-    g_tl_rule_localhost = FALSE;
+    g_tl_rule_localhost = FALSE; g_tl_rule_id = 0;
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
 
@@ -618,7 +619,7 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
                     match_port_list(rule->target_ports, dest_port))
                 {
                     // Matched! Return this rule's action
-                    g_tl_rule_localhost = rule->localhost_via_proxy;
+                    g_tl_rule_localhost = rule->localhost_via_proxy; g_tl_rule_id = rule->rule_id;
                     if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
                     return rule->action;
                 }
@@ -644,7 +645,7 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
                     match_port_list(rule->target_ports, dest_port))
             {
                 // All filters matched! Return this rule's action
-                g_tl_rule_localhost = rule->localhost_via_proxy;
+                g_tl_rule_localhost = rule->localhost_via_proxy; g_tl_rule_id = rule->rule_id;
                     if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
                 return rule->action;
             }
@@ -656,13 +657,13 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
     // No specific rule matched, use wildcard if available
     if (wildcard_rule != NULL)
     {
-        g_tl_rule_localhost = wildcard_rule->localhost_via_proxy;
+        g_tl_rule_localhost = wildcard_rule->localhost_via_proxy; g_tl_rule_id = wildcard_rule->rule_id;
         if (out_proxy_config_id != NULL) *out_proxy_config_id = wildcard_rule->proxy_config_id;
         return wildcard_rule->action;
     }
 
     // No rule matched at all
-    g_tl_rule_localhost = FALSE;
+    g_tl_rule_localhost = FALSE; g_tl_rule_id = 0;
     if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
     return RULE_ACTION_DIRECT;
 }
@@ -673,7 +674,7 @@ RuleAction match_rule(const char *process_name, UINT32 dest_ip, UINT16 dest_port
 {
     if (!g_proxy_enabled)                      // paused: no rule applies
     {
-        g_tl_rule_localhost = FALSE;
+        g_tl_rule_localhost = FALSE; g_tl_rule_id = 0;
         if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
         return RULE_ACTION_DIRECT;
     }
@@ -726,7 +727,7 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
                 if (rule_host_match_v6(rule, dest_ip6, dst_domain) &&
                     match_port_list(rule->target_ports, dest_port))
                 {
-                    g_tl_rule_localhost = rule->localhost_via_proxy;
+                    g_tl_rule_localhost = rule->localhost_via_proxy; g_tl_rule_id = rule->rule_id;
                     if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
                     return rule->action;
                 }
@@ -745,7 +746,7 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
             if (rule_host_match_v6(rule, dest_ip6, dst_domain) &&
                     match_port_list(rule->target_ports, dest_port))
             {
-                g_tl_rule_localhost = rule->localhost_via_proxy;
+                g_tl_rule_localhost = rule->localhost_via_proxy; g_tl_rule_id = rule->rule_id;
                     if (out_proxy_config_id != NULL) *out_proxy_config_id = rule->proxy_config_id;
                 return rule->action;
             }
@@ -756,12 +757,12 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
 
     if (wildcard_rule != NULL)
     {
-        g_tl_rule_localhost = wildcard_rule->localhost_via_proxy;
+        g_tl_rule_localhost = wildcard_rule->localhost_via_proxy; g_tl_rule_id = wildcard_rule->rule_id;
         if (out_proxy_config_id != NULL) *out_proxy_config_id = wildcard_rule->proxy_config_id;
         return wildcard_rule->action;
     }
 
-    g_tl_rule_localhost = FALSE;
+    g_tl_rule_localhost = FALSE; g_tl_rule_id = 0;
     if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
     return RULE_ACTION_DIRECT;
 }
@@ -770,7 +771,7 @@ RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UIN
 {
     if (!g_proxy_enabled)                      // paused: no rule applies
     {
-        g_tl_rule_localhost = FALSE;
+        g_tl_rule_localhost = FALSE; g_tl_rule_id = 0;
         if (out_proxy_config_id != NULL) *out_proxy_config_id = 0;
         return RULE_ACTION_DIRECT;
     }
@@ -782,7 +783,7 @@ RuleAction match_rule_v6(const char *process_name, const UINT8 dest_ip6[16], UIN
 
 RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UINT16 dest_port, BOOL is_udp, DWORD *out_pid, UINT32 *out_proxy_config_id)
 {
-    g_tl_rule_localhost = FALSE;
+    g_tl_rule_localhost = FALSE; g_tl_rule_id = 0;
     DWORD pid;
     char process_name[MAX_PROCESS_NAME];
 

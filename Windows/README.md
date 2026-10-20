@@ -55,7 +55,7 @@ Launch `ProxyBridge.exe` with Administrator privileges for an intuitive graphica
 #### Proxy Settings
 
 <p align="center">
-  <img src="../img/proxy-setting.png" alt="Proxy Settings" width="600"/>
+  <img src="../img/Windows/Proxy-Server.png" alt="Proxy Settings" width="600"/>
 </p>
 
 1. Click **Proxy** tab in the main window
@@ -91,11 +91,7 @@ ProxyBridge supports multiple proxy server configurations simultaneously. Each p
 #### Process Rules
 
 <p align="center">
-  <img src="../img/proxy-rule.png" alt="Add Process Rule" width="600"/>
-</p>
-
-<p align="center">
-  <img src="../img/proxy-rule2.png" alt="Process Rules List" width="600"/>
+  <img src="../img/Windows/Proxy-Rules.png" alt="Process Rules List" width="600"/>
 </p>
 
 1. Click **Proxy** tab in the main window
@@ -210,10 +206,19 @@ ProxyBridge allows you to export selected rules to a `.pbprofile` JSON file and 
 #### Activity Monitoring
 
 <p align="center">
-  <img src="../img/ProxyBridge.png" alt="Active Connections" width="600"/>
+  <img src="../img/Windows/Connections.png" alt="Active Connections" width="600"/>
+</p>
+
+<p align="center">
+  <img src="../img/Windows/Live%20Connection.png" alt="Live Connections" width="600"/>
 </p>
 
 - View real-time connection activity in the **Connections** tab
+- See what is relayed right now in the **Live Connections** tab: one row per proxied TCP connection or UDP flow with the
+  application, target, time, proxy and bytes sent / received. A finished connection turns grey and stays in the list
+  (with its final byte counts) until you press **Clear closed**; the list keeps up to 1200 rows and replaces the oldest finished
+  one when full. Direct and blocked traffic is not listed (ProxyBridge only sees the first packet of those). The tab polls once
+  a second, and only while it is open.
 - Monitor all TCP and UDP connections system-wide
 - See routing status per connection: **PROXY**, **DIRECT**, or **BLOCK**
 - Search and filter by process name, IP, port, or routing status

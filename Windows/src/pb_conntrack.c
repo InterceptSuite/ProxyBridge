@@ -36,7 +36,7 @@ void rev_unlink(CONNECTION_INFO *c)
     c->rev_next = NULL;
 }
 
-void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id)
+void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip, UINT16 dest_port, UINT32 proxy_config_id, DWORD pid, UINT32 rule_id)
 {
     AcquireSRWLockExclusive(&lock);
 
@@ -49,6 +49,8 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
         if (existing->src_port == src_port && existing->is_udp == is_udp && !existing->is_ipv6) {
             rev_unlink(existing);   // dest may change (port reuse) - re-key the reverse index
             existing->is_ipv6 = FALSE;
+            existing->pid = pid;
+            existing->rule_id = rule_id;
             existing->src_ip = src_ip;
             existing->orig_dest_ip = dest_ip;
             existing->orig_dest_port = dest_port;
@@ -71,6 +73,8 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
 
     conn->src_port = src_port;
     conn->is_udp = is_udp;
+    conn->pid = pid;
+    conn->rule_id = rule_id;
     conn->src_ip = src_ip;
     conn->orig_dest_ip = dest_ip;
     conn->orig_dest_port = dest_port;
@@ -85,7 +89,7 @@ void add_connection(UINT16 src_port, BOOL is_udp, UINT32 src_ip, UINT32 dest_ip,
     ReleaseSRWLockExclusive(&lock);
 }
 
-void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id)
+void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], const UINT8 dest_ip6[16], UINT16 dest_port, UINT32 proxy_config_id, DWORD pid, UINT32 rule_id)
 {
     AcquireSRWLockExclusive(&lock);
 
@@ -96,6 +100,8 @@ void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], co
         if (existing->src_port == src_port && existing->is_udp == is_udp && existing->is_ipv6) {
             rev_unlink(existing);   // dest may change (port reuse) - re-key the reverse index
             existing->is_ipv6 = TRUE;
+            existing->pid = pid;
+            existing->rule_id = rule_id;
             memcpy(existing->src_ip6, src_ip6, 16);
             memcpy(existing->orig_dest_ip6, dest_ip6, 16);
             existing->orig_dest_port = dest_port;
@@ -118,6 +124,8 @@ void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], co
 
     conn->src_port = src_port;
     conn->is_udp = is_udp;
+    conn->pid = pid;
+    conn->rule_id = rule_id;
     conn->src_ip = 0;
     conn->orig_dest_ip = 0;
     conn->is_ipv6 = TRUE;
@@ -135,6 +143,11 @@ void add_connection_v6(UINT16 src_port, BOOL is_udp, const UINT8 src_ip6[16], co
 
 BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id)
 {
+    return get_connection_full_v6_x(src_port, is_udp, dest_ip6, dest_port, proxy_config_id, NULL, NULL, 0);
+}
+
+BOOL get_connection_full_v6_x(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UINT16 *dest_port, UINT32 *proxy_config_id, DWORD *pid, UINT32 *rule_id, UINT32 acct_up)
+{
     BOOL found = FALSE;
     AcquireSRWLockShared(&lock);
     int hash = src_port % CONNECTION_HASH_SIZE;
@@ -144,6 +157,9 @@ BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UI
             memcpy(dest_ip6, conn->orig_dest_ip6, 16);
             *dest_port = conn->orig_dest_port;
             if (proxy_config_id != NULL) *proxy_config_id = conn->proxy_config_id;
+            if (pid != NULL) *pid = conn->pid;
+            if (rule_id != NULL) *rule_id = conn->rule_id;
+            if (acct_up) InterlockedExchangeAdd64(&conn->up_bytes, (LONG64)acct_up);
             InterlockedExchange64((LONGLONG volatile*)&conn->last_activity, (LONGLONG)GetTickCount64());
             found = TRUE;
             break;
@@ -155,10 +171,11 @@ BOOL get_connection_full_v6(UINT16 src_port, BOOL is_udp, UINT8 dest_ip6[16], UI
 }
 
 // Reverse lookup for IPv6 UDP relay responses: find src addr+port by orig dest ip6+port
-BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port)
+BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UINT8 src_ip6[16], UINT16 *src_port, UINT32 acct_down)
 {
     BOOL found = FALSE;
     ULONGLONG best = 0;
+    CONNECTION_INFO *winner = NULL;
     AcquireSRWLockShared(&lock);
     // O(1): only the reverse bucket for this (dest ip6, dest port).
     for (CONNECTION_INFO *conn = connection_rev_table[rev_hash_v6(orig_dest_ip6, orig_dest_port)];
@@ -170,9 +187,11 @@ BOOL find_v6_udp_sender(const UINT8 orig_dest_ip6[16], UINT16 orig_dest_port, UI
                 *src_port = conn->src_port;
                 best = conn->last_activity;
                 found = TRUE;
+                winner = conn;
             }
         }
     }
+    if (winner != NULL && acct_down) InterlockedExchangeAdd64(&winner->down_bytes, (LONG64)acct_down);
     ReleaseSRWLockShared(&lock);
     return found;
 }
@@ -303,6 +322,11 @@ BOOL get_connection(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_
 
 BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id)
 {
+    return get_connection_full_x(src_port, is_udp, dest_ip, dest_port, proxy_config_id, NULL, NULL, 0);
+}
+
+BOOL get_connection_full_x(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *dest_port, UINT32 *proxy_config_id, DWORD *pid, UINT32 *rule_id, UINT32 acct_up)
+{
     BOOL found = FALSE;
 
     AcquireSRWLockShared(&lock);
@@ -317,6 +341,9 @@ BOOL get_connection_full(UINT16 src_port, BOOL is_udp, UINT32 *dest_ip, UINT16 *
             *dest_ip = conn->orig_dest_ip;
             *dest_port = conn->orig_dest_port;
             if (proxy_config_id != NULL) *proxy_config_id = conn->proxy_config_id;
+            if (pid != NULL) *pid = conn->pid;
+            if (rule_id != NULL) *rule_id = conn->rule_id;
+            if (acct_up) InterlockedExchangeAdd64(&conn->up_bytes, (LONG64)acct_up);
             InterlockedExchange64((LONGLONG volatile*)&conn->last_activity, (LONGLONG)GetTickCount64());
             found = TRUE;
             break;
@@ -391,6 +418,41 @@ void connection_fin(UINT16 src_port, BOOL is_ipv6, UINT8 bit)
         }
     }
     ReleaseSRWLockExclusive(&lock);
+}
+
+// Live proxied UDP flows for the live connections view. A UDP flow has no close event, so "live" means traffic in the
+// last UDP_FLOW_LIVE_MS; the view marks it closed when it stops being listed. One pass over the table under the shared
+// lock (4096 buckets), only when a client polls.
+UINT32 udp_flows_snapshot(PB_FLOW *out, UINT32 max)
+{
+    UINT32 n = 0;
+    ULONGLONG now = GetTickCount64();
+    AcquireSRWLockShared(&lock);
+    for (int i = 0; i < CONNECTION_HASH_SIZE && n < max; i++)
+    {
+        for (CONNECTION_INFO *c = connection_hash_table[i]; c != NULL && n < max; c = c->next)
+        {
+            if (!c->is_udp || !c->is_tracked) continue;
+            ULONGLONG last = c->last_activity;
+            if (last <= now && now - last > UDP_FLOW_LIVE_MS) continue;
+            PB_FLOW *f = &out[n++];
+            ZeroMemory(f, sizeof(*f));
+            f->id = ((UINT64)1 << 63) | ((UINT64)c->src_port << 1) | (c->is_ipv6 ? 1u : 0u);
+            f->pid = c->pid;
+            f->proxy_config_id = c->proxy_config_id;
+            f->rule_id = c->rule_id;
+            f->age_ms = 0xFFFFFFFFu;
+            f->sent = (UINT64)c->up_bytes;
+            f->received = (UINT64)c->down_bytes;
+            f->port = c->orig_dest_port;
+            f->is_udp = 1;
+            f->is_ipv6 = c->is_ipv6 ? 1 : 0;
+            if (c->is_ipv6) memcpy(f->dest, c->orig_dest_ip6, 16);
+            else memcpy(f->dest, &c->orig_dest_ip, 4);
+        }
+    }
+    ReleaseSRWLockShared(&lock);
+    return n;
 }
 
 void cleanup_stale_connections(void)
