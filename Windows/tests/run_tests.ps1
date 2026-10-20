@@ -64,6 +64,12 @@ if (-not $vcvars -and -not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
 if (Test-Path $Out) { [IO.Directory]::Delete($Out, $true) }
 New-Item -ItemType Directory -Path $Out | Out-Null
 
+# The engine tests link the WinDivert import library, so Windows needs WinDivert.dll to start them (the driver itself
+# is never loaded). Put it next to the test programs: a machine without ProxyBridge installed (a CI runner) has no
+# other copy on its PATH, and the tests would stop with 0xC0000135 (DLL not found).
+$wdDll = Join-Path $WinDivertPath "$Arch\WinDivert.dll"
+if (Test-Path $wdDll) { Copy-Item $wdDll $Out } else { Write-Host "WARNING: $wdDll not found; the engine tests need it to start" -ForegroundColor Yellow }
+
 $core = 'ProxyBridge.c','pb_util.c','pb_process.c','pb_rules.c','pb_proxy.c','pb_dns.c','pb_socks5.c','pb_http.c','pb_conntrack.c','pb_relay.c','pb_sockmap.c' | ForEach-Object { "src\$_" }
 $warn = '/W3 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996'
 $wdInc = "/I`"$WinDivertPath\include`""
