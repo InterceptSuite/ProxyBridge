@@ -16,8 +16,9 @@ ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 MADE_GROUP=0
 cleanup() {
-  kill $GUI_PID 2>/dev/null; wait $GUI_PID 2>/dev/null; kill $DPID $FAKE $BW 2>/dev/null; wait 2>/dev/null
+  # system state first: nothing below may keep this from running (a stuck child must not leave the user in the group)
   gpasswd -d nobody proxybridge >/dev/null 2>&1; [ $MADE_GROUP = 1 ] && groupdel proxybridge 2>/dev/null
+  kill $GUI_PID $DPID $FAKE $BW 2>/dev/null; sleep 0.5; kill -KILL $GUI_PID $DPID $FAKE $BW 2>/dev/null
   rm -rf "$WORK" /run/proxybridge
 }
 GUI_PID=; DPID=; FAKE=; BW=
