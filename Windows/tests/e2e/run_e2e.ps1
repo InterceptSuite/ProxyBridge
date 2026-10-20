@@ -254,16 +254,18 @@ try {
     Check 'CIDR 203.0.113.0/24 does not match and stays direct' ($r.Exit -eq 0 -and (Count $logOpen '[CONNECT]') -eq $b) "exit $($r.Exit)"
 
     Write-Host "`n=== UDP through the proxy (SOCKS5 UDP ASSOCIATE)" -ForegroundColor Cyan
-    $b = Count $logOpen '[UDP]'
+    # nslookup prints "Server / Address" for the resolver even when the query failed, and on a runner its "Name:" label
+    # can come out as "(null)": only an address listed after the queried name is an answer
+    $dnsAnswer = '(?s)example\.com\s+Address(es)?:\s*[0-9a-fA-F:.]+'
+    $b = Count $logOpen '1.1.1.1:53'          # Nexus logs the first datagram to each new destination
     $o = ''
     for ($i = 0; $i -lt 2; $i++) {
         $o = (& $udpClient 'example.com' '1.1.1.1' 2>&1 | Out-String)
-        if ($o -match 'Name:\s+example\.com' -and $o -notmatch 'timed out') { break }
+        if ($o -match $dnsAnswer) { break }
         Start-Sleep -Seconds 2
     }
-    # nslookup prints "Server / Address" for the resolver even when the query timed out: only an answer section counts
-    Check 'UDP: a DNS answer comes back' ($o -match 'Name:\s+example\.com' -and $o -notmatch 'timed out') ($o.Trim() -replace '\s+', ' ')
-    Check 'UDP: the proxy relayed the datagrams' ((Count $logOpen '[UDP]') -gt $b) 'no [UDP] line in the Nexus log'
+    Check 'UDP: a DNS answer comes back' ($o -match $dnsAnswer) ($o.Trim() -replace '\s+', ' ')
+    Check 'UDP: the proxy relayed the datagrams' ((Count $logOpen '1.1.1.1:53') -gt $b) 'Nexus never saw a datagram for 1.1.1.1:53'
 
     Write-Host "`n=== IPv4-only proxy recipe (IPv6 blocked for the program, rest proxied)" -ForegroundColor Cyan
     $b = Count $logOpen '[CONNECT]'
