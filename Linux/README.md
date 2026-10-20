@@ -452,6 +452,9 @@ sudo systemctl disable --now proxybridge.service 2>/dev/null
 sudo rm -f /etc/systemd/system/proxybridge.service
 sudo systemctl daemon-reload
 
+# Remove the launcher entry and icon
+sudo rm -f /usr/share/applications/proxybridge.desktop /usr/share/icons/hicolor/*/apps/proxybridge.png
+
 # Remove binaries
 sudo rm -f /usr/local/bin/ProxyBridge
 sudo rm -f /usr/local/bin/ProxyBridgeGUI

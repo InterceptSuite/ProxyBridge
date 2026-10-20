@@ -123,6 +123,16 @@ install_files() {
         echo "Installing ProxyBridgeGUI to /usr/local/bin..."
         install -o root -g root -m 0755 "$SCRIPT_DIR/ProxyBridgeGUI" /usr/local/bin/ProxyBridgeGUI
     fi
+
+    if [ -f "$SCRIPT_DIR/ProxyBridgeGUI" ] && [ -f "$SCRIPT_DIR/proxybridge.desktop" ]; then
+        echo "Installing the launcher entry and icon..."
+        install -d -m 0755 /usr/share/applications /usr/share/icons/hicolor/128x128/apps /usr/share/icons/hicolor/256x256/apps
+        install -o root -g root -m 0644 "$SCRIPT_DIR/proxybridge.desktop" /usr/share/applications/proxybridge.desktop
+        install -o root -g root -m 0644 "$SCRIPT_DIR/proxybridge-128.png" /usr/share/icons/hicolor/128x128/apps/proxybridge.png
+        install -o root -g root -m 0644 "$SCRIPT_DIR/proxybridge-256.png" /usr/share/icons/hicolor/256x256/apps/proxybridge.png
+        command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+        command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications 2>/dev/null || true
+    fi
     
     echo "Files installed"
 }
@@ -193,6 +203,8 @@ uninstall() {
         echo "  boot service removed"
     fi
     rm -f /usr/local/bin/ProxyBridge /usr/local/bin/ProxyBridgeGUI
+    rm -f /usr/share/applications/proxybridge.desktop /usr/share/icons/hicolor/128x128/apps/proxybridge.png /usr/share/icons/hicolor/256x256/apps/proxybridge.png
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
     rm -f /usr/local/lib/libproxybridge.so /usr/local/lib64/libproxybridge.so /usr/lib/libproxybridge.so /usr/lib64/libproxybridge.so
     rm -f /etc/ld.so.conf.d/proxybridge.conf
     ldconfig 2>/dev/null || true

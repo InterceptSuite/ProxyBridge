@@ -224,6 +224,16 @@ install_files() {
         cp "$TEMP_DIR/ProxyBridgeGUI" /usr/local/bin/
         chmod 755 /usr/local/bin/ProxyBridgeGUI
     fi
+    if [ -f "$TEMP_DIR/ProxyBridgeGUI" ] && [ -f "$TEMP_DIR/proxybridge.desktop" ]; then
+        echo "Installing the launcher entry and icon..."
+        install -d -m 0755 /usr/share/applications /usr/share/icons/hicolor/128x128/apps /usr/share/icons/hicolor/256x256/apps
+        install -o root -g root -m 0644 "$TEMP_DIR/proxybridge.desktop" /usr/share/applications/proxybridge.desktop
+        install -o root -g root -m 0644 "$TEMP_DIR/proxybridge-128.png" /usr/share/icons/hicolor/128x128/apps/proxybridge.png
+        install -o root -g root -m 0644 "$TEMP_DIR/proxybridge-256.png" /usr/share/icons/hicolor/256x256/apps/proxybridge.png
+        command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+        command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications 2>/dev/null || true
+    fi
+
 
     echo "Files installed"
 }

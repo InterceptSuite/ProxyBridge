@@ -96,6 +96,10 @@ cp "$BUILD_DIR/lib/libproxybridge.so" "$OUTPUT_DIR/"
 cp "$BUILD_DIR/cli/ProxyBridge" "$OUTPUT_DIR/"
 [ "$GUI_BUILT" = 1 ] && cp "$BUILD_DIR/gui/ProxyBridgeGUI" "$OUTPUT_DIR/"
 install -m 755 "$SCRIPT_DIR/setup.sh" "$OUTPUT_DIR/setup.sh"
+if [ "$GUI_BUILT" = 1 ]; then      # launcher entry and icon: the desktop shows the logo and name for the running window
+    install -m 644 "$SCRIPT_DIR/gui/proxybridge.desktop" "$OUTPUT_DIR/proxybridge.desktop"
+    install -m 644 "$SCRIPT_DIR/gui/icons/proxybridge-128.png" "$SCRIPT_DIR/gui/icons/proxybridge-256.png" "$OUTPUT_DIR/"
+fi
 echo ""
 
 if [ "${AUDIT:-1}" = 1 ]; then
