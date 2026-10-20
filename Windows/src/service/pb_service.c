@@ -173,6 +173,28 @@ static BOOL Dispatch(const BYTE *req, DWORD reqLen, PbW *resp)
     case PBOP_CLEAR_CONN_LOGS:  g_api.ClearConnectionLogs(); break;
     case PBOP_SET_LOG_ALL:      { UINT32 v = PbR_U32(&r); if (!r.ok) return FALSE; g_api.SetLogEveryConnection(v != 0); break; }
     case PBOP_SET_ENABLED:      { UINT32 v = PbR_U32(&r); if (!r.ok) return FALSE; g_api.SetEnabled(v != 0); break; }
+    case PBOP_GET_FLOWS: {
+        UINT32 max = PbR_U32(&r);
+        if (!r.ok) return FALSE;
+        if (max > PB_FLOWS_MAX_GUI) max = PB_FLOWS_MAX_GUI;
+        static PBFlow flows[PB_FLOWS_MAX_GUI];
+        UINT32 n = (g_api.GetFlows != NULL && max > 0) ? g_api.GetFlows(flows, max) : 0;
+        if (n > max) n = max;
+        if (n > (resp->cap - resp->len - 4) / PB_FLOW_ROW_MAX) n = (resp->cap - resp->len - 4) / PB_FLOW_ROW_MAX;   // always fits
+        PbW_U32(resp, n);
+        for (UINT32 i = 0; i < n; i++)
+        {
+            PBFlow *f = &flows[i];
+            f->name[sizeof(f->name) - 1] = '\0'; f->host[sizeof(f->host) - 1] = '\0';     // never trust a terminator
+            PbW_U32(resp, (UINT32)f->id); PbW_U32(resp, (UINT32)(f->id >> 32));
+            PbW_U32(resp, f->pid); PbW_U32(resp, (f->is_udp ? 1u : 0u) | (f->is_ipv6 ? 2u : 0u));
+            PbW_U32(resp, f->port); PbW_U32(resp, f->proxy_config_id); PbW_U32(resp, f->rule_id); PbW_U32(resp, f->age_ms);
+            PbW_U32(resp, (UINT32)f->sent); PbW_U32(resp, (UINT32)(f->sent >> 32));
+            PbW_U32(resp, (UINT32)f->received); PbW_U32(resp, (UINT32)(f->received >> 32));
+            PbW_Str(resp, f->name); PbW_Str(resp, f->host);
+        }
+        return resp->ok;
+    }
     case PBOP_START: ret = g_api.Start(); break;
     case PBOP_STOP:  ret = g_api.Stop();  break;
     default: return FALSE;

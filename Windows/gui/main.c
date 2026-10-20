@@ -18,6 +18,8 @@
 #include <tlhelp32.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#define COBJMACROS
+#include <shobjidl.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <stdio.h>
@@ -33,6 +35,8 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "uxtheme.lib")
 
@@ -162,6 +166,7 @@ static const wchar_t* ProtoName(int i)  { return i == 1 ? L"UDP" : i == 2 ? L"BO
 
 // log panel + connection filters (split out)
 #include "ui/logview.h"
+#include "ui/flows.h"
 
 // forward decls
 static void SaveActive(void);
@@ -431,6 +436,9 @@ static void RelocalizeUI(HWND hwnd)
     TCITEMW ti; ti.mask = TCIF_TEXT;
     ti.pszText = (LPWSTR)T(S_TAB_CONN); TabCtrl_SetItem(g_hTab, 0, &ti);
     ti.pszText = (LPWSTR)T(S_TAB_ACT);  TabCtrl_SetItem(g_hTab, 1, &ti);
+    ti.pszText = (LPWSTR)T(S_TAB_FLOWS); TabCtrl_SetItem(g_hTab, 2, &ti);
+    FlowsSetColumns();
+    SetWindowTextW(g_hFlowsClear, T(S_FL_CLEAR));
     // The tab strip, the Clear buttons and the search cue banners all carry localized
     // text too - refresh them here so a language switch updates them without a restart.
     SetWindowTextW(g_hConnClear, T(S_BTN_CLEARLOGS));
@@ -498,6 +506,8 @@ static void ApplyZoom(HWND hwnd)
     SendMessageW(g_hTab,        WM_SETFONT, (WPARAM)g_hUi,   TRUE);
     SendMessageW(g_hConnLog,    WM_SETFONT, (WPARAM)g_hMono, TRUE);
     SendMessageW(g_hActLog,     WM_SETFONT, (WPARAM)g_hMono, TRUE);
+    SendMessageW(g_hFlows,      WM_SETFONT, (WPARAM)g_hUi,   TRUE);
+    SendMessageW(g_hFlowsClear, WM_SETFONT, (WPARAM)g_hUi,   TRUE);
     SendMessageW(g_hConnSearch, WM_SETFONT, (WPARAM)g_hUi,   TRUE);
     SendMessageW(g_hActSearch,  WM_SETFONT, (WPARAM)g_hUi,   TRUE);
     SendMessageW(g_hConnClear,  WM_SETFONT, (WPARAM)g_hUi,   TRUE);
@@ -560,11 +570,16 @@ static void LayoutMain(HWND hwnd)
     MoveWindow(g_hActClear,   4 + searchW + gap, top - 1, clearW, barH - 2, TRUE);
     MoveWindow(g_hConnLog, 2, logTop, rc.right - 4, logH, TRUE);
     MoveWindow(g_hActLog,  2, logTop, rc.right - 4, logH, TRUE);
+    MoveWindow(g_hFlowsClear, 4, top - 1, clearW, barH - 2, TRUE);
+    MoveWindow(g_hFlows, 2, logTop, rc.right - 4, logH, TRUE);
 }
 static void SelectTab(int idx)
 {
     int c = (idx == 0) ? SW_SHOW : SW_HIDE;
     int a = (idx == 1) ? SW_SHOW : SW_HIDE;
+    int f = (idx == 2) ? SW_SHOW : SW_HIDE;
+    ShowWindow(g_hFlows, f); ShowWindow(g_hFlowsClear, f);
+    FlowsActivate(g_hMain, idx == 2);
     ShowWindow(g_hConnLog, c); ShowWindow(g_hConnSearch, c); ShowWindow(g_hConnClear, c);
     ShowWindow(g_hActLog,  a); ShowWindow(g_hActSearch,  a); ShowWindow(g_hActClear,  a);
 }
@@ -672,6 +687,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         TCITEMW ti; ti.mask = TCIF_TEXT;
         ti.pszText = (LPWSTR)T(S_TAB_CONN); TabCtrl_InsertItem(g_hTab, 0, &ti);
         ti.pszText = (LPWSTR)T(S_TAB_ACT);  TabCtrl_InsertItem(g_hTab, 1, &ti);
+        ti.pszText = (LPWSTR)T(S_TAB_FLOWS); TabCtrl_InsertItem(g_hTab, 2, &ti);
+        FlowsCreate(hwnd);
+        SendMessageW(g_hFlows, WM_SETFONT, (WPARAM)g_hUi, TRUE);
+    SendMessageW(g_hFlowsClear, WM_SETFONT, (WPARAM)g_hUi, TRUE);
 
         DWORD es = WS_CHILD | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER;
         g_hConnLog = CreateWindowExW(0, L"EDIT", NULL, es | WS_VISIBLE, 0, 0, 0, 0, hwnd, NULL, g_hInst, NULL);
@@ -855,10 +874,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_NOTIFY:
     {
         LPNMHDR nh = (LPNMHDR)lp;
+        if (nh->hwndFrom == g_hFlows) return FlowsNotify(lp);
         if (nh->hwndFrom == g_hTab && nh->code == TCN_SELCHANGE) SelectTab(TabCtrl_GetCurSel(g_hTab));
         return 0;
     }
     case WM_TIMER:
+        if (wp == TIMER_FLOWS) { if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) FlowsPollAsync(); return 0; }   // only while the Live Connections tab is open
         if (wp == TIMER_LOG)
         {
             int processed = LogStoreFlush(&g_connStore) + LogStoreFlush(&g_actStore);
@@ -882,6 +903,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     }
+    case WM_APP_FLOWS: FlowsOnResult((UINT32)wp); return 0;
     case WM_APP_TRAY:
         if (LOWORD(lp) == WM_LBUTTONDBLCLK) ShowMainWindow(hwnd);
         else if (LOWORD(lp) == WM_RBUTTONUP)
@@ -909,6 +931,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         switch (id)
         {
+        case IDC_FLOWS_CLEAR:    FlowsClearClosed(); return 0;
         case IDM_PROXY_SETTINGS: DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_SERVERS), hwnd, ServersDlgProc); return 0;
         case IDM_PROXY_RULES:    DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_RULES),   hwnd, RulesDlgProc);   return 0;
         case IDM_PROXY_ENABLE:
@@ -1009,7 +1032,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case IDM_HELP_DOCS:
-            ShellExecuteW(hwnd, L"open", L"https://interceptsuite.com/docs/proxybridge/", NULL, NULL, SW_SHOWNORMAL);
+            ShellExecuteW(hwnd, L"open", L"https://proxybridge.interceptsuite.com/docs/", NULL, NULL, SW_SHOWNORMAL);
             return 0;
         case IDM_HELP_UPDATE:
             UpdStartCheck(hwnd, TRUE);   // manual: also reports "up to date" / errors

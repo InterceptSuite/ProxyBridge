@@ -67,20 +67,29 @@ static DWORD WINAPI PbIpcReader(LPVOID arg)
     return 0;
 }
 
+// Sends one request and reads the whole response into rsp. FALSE on any failure (the pipe is dropped).
+static BOOL PbIpcExchange(const BYTE *req, DWORD len, BYTE *rsp, DWORD cap, DWORD *got)
+{
+    BOOL ok = FALSE;
+    *got = 0;
+    EnterCriticalSection(&g_ipcLock);
+    if (g_ipcCtl != INVALID_HANDLE_VALUE)
+    {
+        DWORD n = 0;
+        if (WriteFile(g_ipcCtl, req, len, &n, NULL) && ReadFile(g_ipcCtl, rsp, cap, &n, NULL) && n >= 4) { *got = n; ok = TRUE; }
+        else { CloseHandle(g_ipcCtl); g_ipcCtl = INVALID_HANDLE_VALUE; }   // service gone
+    }
+    LeaveCriticalSection(&g_ipcLock);
+    return ok;
+}
+
 // Sends one request, returns the response's leading u32 (0 on any failure).
 static UINT32 PbIpcCall(const BYTE *req, DWORD len)
 {
     UINT32 ret = 0;
     BYTE rsp[64];
-    EnterCriticalSection(&g_ipcLock);
-    if (g_ipcCtl != INVALID_HANDLE_VALUE)
-    {
-        DWORD n = 0;
-        if (WriteFile(g_ipcCtl, req, len, &n, NULL) && ReadFile(g_ipcCtl, rsp, sizeof(rsp), &n, NULL) && n >= 4)
-            memcpy(&ret, rsp, 4);
-        else { CloseHandle(g_ipcCtl); g_ipcCtl = INVALID_HANDLE_VALUE; }   // service gone
-    }
-    LeaveCriticalSection(&g_ipcLock);
+    DWORD n = 0;
+    if (PbIpcExchange(req, len, rsp, sizeof(rsp), &n)) memcpy(&ret, rsp, 4);
     return ret;
 }
 
@@ -129,6 +138,35 @@ static UINT32 IpcGetRulePos(UINT32 id) { PBIPC_BEGIN(PBOP_GET_RULE_POS); PbW_U32
 static void IpcSetTrafficLog(BOOL v)  { PBIPC_BEGIN(PBOP_SET_TRAFFIC_LOG); PbW_U32(&_w, v != 0); PbIpcCall(_b, _w.len); }
 static void IpcClearConnLogs(void)    { PBIPC_BEGIN(PBOP_CLEAR_CONN_LOGS); PbIpcCall(_b, _w.len); }
 static void IpcSetLogAll(BOOL v)      { PBIPC_BEGIN(PBOP_SET_LOG_ALL);     PbW_U32(&_w, v != 0); PbIpcCall(_b, _w.len); }
+// Live connections: asks the service for up to max flows. Every field is bounds-checked; a malformed reply yields 0.
+static UINT32 IpcGetFlows(PBFlow *out, UINT32 max)
+{
+    if (out == NULL || max == 0) return 0;
+    if (max > PB_FLOWS_MAX_GUI) max = PB_FLOWS_MAX_GUI;
+    BYTE req[16]; PbW w; PbW_Init(&w, req, sizeof(req)); PbW_U32(&w, PBOP_GET_FLOWS); PbW_U32(&w, max);
+    static BYTE rsp[PB_MSG_MAX];                     // one poller at a time (g_ipcLock is taken inside the exchange)
+    DWORD got = 0;
+    if (!PbIpcExchange(req, w.len, rsp, sizeof(rsp), &got)) return 0;
+    PbR r; PbR_Init(&r, rsp, got);
+    UINT32 n = PbR_U32(&r);
+    if (!r.ok || n > max) return 0;
+    UINT32 i = 0;
+    for (; i < n; i++)
+    {
+        PBFlow *f = &out[i];
+        ZeroMemory(f, sizeof(*f));
+        UINT32 lo = PbR_U32(&r), hi = PbR_U32(&r);  f->id = ((UINT64)hi << 32) | lo;
+        f->pid = PbR_U32(&r);
+        UINT32 flags = PbR_U32(&r);  f->is_udp = (flags & 1) != 0; f->is_ipv6 = (flags & 2) != 0;
+        UINT32 port = PbR_U32(&r);   f->port = (UINT16)port;
+        f->proxy_config_id = PbR_U32(&r); f->rule_id = PbR_U32(&r); f->age_ms = PbR_U32(&r);
+        lo = PbR_U32(&r); hi = PbR_U32(&r);  f->sent = ((UINT64)hi << 32) | lo;
+        lo = PbR_U32(&r); hi = PbR_U32(&r);  f->received = ((UINT64)hi << 32) | lo;
+        PbR_Str(&r, f->name, sizeof(f->name), NULL); PbR_Str(&r, f->host, sizeof(f->host), NULL);
+        if (!r.ok || port > 65535) break;
+    }
+    return i == n ? n : 0;
+}
 static void IpcSetEnabled(BOOL v)     { PBIPC_BEGIN(PBOP_SET_ENABLED);     PbW_U32(&_w, v != 0); PbIpcCall(_b, _w.len); }
 static void IpcSetLogCallback(PBLogCallback cb)               { g_ipcLogCb = cb; }
 static void IpcSetConnectionCallback(PBConnectionCallback cb) { g_ipcConnCb = cb; }
@@ -248,6 +286,7 @@ static int PB_LoadService(PBApi* api)
     api->SetConnectionCallback = IpcSetConnectionCallback;
     api->SetTrafficLoggingEnabled = IpcSetTrafficLog;   api->SetEnabled = IpcSetEnabled;   api->SetLogEveryConnection = IpcSetLogAll;
     api->ClearConnectionLogs = IpcClearConnLogs;   api->Start = IpcStart; api->Stop = IpcStop;
+    api->GetFlows = IpcGetFlows;
     return PB_IPC_OK;
 }
 

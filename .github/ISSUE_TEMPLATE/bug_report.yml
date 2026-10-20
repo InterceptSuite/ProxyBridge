@@ -6,7 +6,19 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to fill out this bug report!
+        Thanks for taking the time to report a bug.
+
+        ## Please read this first
+
+        ProxyBridge changes where an application's traffic goes. When something does not work, the cause can be a bug in ProxyBridge, but it can just as well be **your rules, your proxy server, another program on your PC (VPN, firewall, antivirus), your network, or the way the application itself behaves**.
+
+        **We are not God.** We cannot see your PC, your rules, your proxy or your network, and we will not guess. If you do not tell us your setup, nobody can tell which of the above is the cause, so nobody will try.
+
+        **A report that only says "it does not work" or "I get error X", without the details asked for below (your rules, your proxy server, your setup and the steps to reproduce), cannot be verified or reproduced. It will not be investigated, fixed or replied to, and it may be closed without a response.** Do not expect us to spy on your setup or to work out your configuration for you. The more precise you are, the faster it gets fixed.
+
+        Before you submit, check the [documentation](https://proxybridge.interceptsuite.com/docs/) and the troubleshooting section for your platform. Most problems are answered there.
+
+        > **Remove passwords, tokens, private hostnames and anything else you do not want public** from everything you paste.
 
   - type: dropdown
     id: platform
@@ -24,8 +36,8 @@ body:
     id: version
     attributes:
       label: ProxyBridge Version
-      description: What version of ProxyBridge are you running?
-      placeholder: e.g., 1.0.0
+      description: What version of ProxyBridge are you running? (Windows and macOS - Help > About.  Linux - the version of the package or build)
+      placeholder: e.g., 4.3.0
     validations:
       required: true
 
@@ -42,14 +54,17 @@ body:
     id: documentation
     attributes:
       label: Documentation
-      description: Have you read the documentation for your platform?
+      description: |
+        Documentation for every platform: https://proxybridge.interceptsuite.com/docs/
+
+        - Windows: [quick start](https://proxybridge.interceptsuite.com/docs/configuration-windows/) and [troubleshooting](https://proxybridge.interceptsuite.com/docs/windows-troubleshooting/)
+        - macOS: [configuration](https://proxybridge.interceptsuite.com/docs/configuration-macos/)
+        - Linux: [configuration](https://proxybridge.interceptsuite.com/docs/configuration-linux/)
       options:
-        - label: I have read the [Windows documentation](https://github.com/InterceptSuite/ProxyBridge/blob/master/Windows/README.md)
-          required: false
-        - label: I have read the [macOS documentation](https://github.com/InterceptSuite/ProxyBridge/blob/master/MacOS/README.md)
-          required: false
-        - label: I have read the [Linux documentation](https://github.com/InterceptSuite/ProxyBridge/blob/master/Linux/README.md)
-          required: false
+        - label: I have read the [ProxyBridge documentation](https://proxybridge.interceptsuite.com/docs/) for my platform, including the troubleshooting information
+          required: true
+        - label: I have searched the existing issues and did not find this problem reported
+          required: true
 
   - type: checkboxes
     id: code-review
@@ -65,26 +80,110 @@ body:
     attributes:
       label: Describe the Bug
       description: |
-        Please provide a clear and detailed description of the bug.
+        What is wrong, in your own words. Include the exact error message if there is one, and screenshots where they help.
 
-        **If applicable, please include:**
-        - Screenshots or error messages
-        - Steps to reproduce the issue
-        - Expected behavior vs actual behavior
+        Say what you **expected** and what **actually happened**.
       placeholder: |
-        Steps to reproduce:
-        1. Go to '...'
-        2. Click on '...'
-        3. See error
-
         Expected behavior: ...
         Actual behavior: ...
     validations:
       required: true
 
   - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: |
+        Exact steps, starting from a fresh start of ProxyBridge, that someone else can follow to see the same problem.
+        Include the application you are routing (name, version, how you start it) and what you do in it.
+      placeholder: |
+        1. Add the proxy server '...'
+        2. Create the rule '...'
+        3. Start the application '...' and do '...'
+        4. See the problem '...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: rules
+    attributes:
+      label: Your Rules
+      description: |
+        Every rule that is involved, with ALL fields. If you use more than one rule, list them in the order they appear.
+        Applications, Target Hosts (IPs and domains), Target Ports, Protocol (TCP / UDP / Both), Action, which proxy, and whether localhost proxying is on.
+
+        Not sure which rules matter? Paste all of them.
+      placeholder: |
+        Rule 1:
+          Applications: chrome.exe
+          Target Hosts: *
+          Target Ports: *
+          Protocol: TCP
+          Action: Proxy -> "Burp"
+          Also proxy localhost traffic: off
+    validations:
+      required: true
+
+  - type: textarea
+    id: proxy
+    attributes:
+      label: Your Proxy Server
+      description: |
+        Type (SOCKS5 or HTTP), whether it runs on the same PC or another one, address and port (hide private addresses if you must, but say if it is local or remote), whether authentication is used,
+        and which software it is (Burp Suite, mitmproxy, your own, ...), with its version. For UDP problems say whether the proxy supports UDP ASSOCIATE.
+        Windows: tell us what the **Proxy Test** reports for it.
+      placeholder: |
+        Type: SOCKS5
+        Location: same PC, 127.0.0.1:1080
+        Authentication: none
+        Software: mitmproxy 10.x in SOCKS5 mode
+        Proxy Test result: all four tests passed
+    validations:
+      required: true
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: Your Setup
+      description: |
+        Anything else about your environment that could matter: VPN client, firewall, antivirus or other security software, other proxy or traffic tools running (Proxifier, Clash, a system proxy), DNS over HTTPS in the browser, a corporate network, virtual machines, Windows account type, and so on.
+        If there is none, write "none". Do not leave this empty.
+      placeholder: |
+        VPN: none
+        Security software: Windows Defender only
+        Other tools: none
+        Network: home Wi-Fi
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and Screenshots
+      description: |
+        What ProxyBridge shows while the problem happens:
+        - Windows: the lines from the **Connections** tab and the **Activity Log** tab for the application, and the Proxy Test output
+        - macOS and Linux: the relevant lines from the app's log, or the command line output when you run it from a terminal
+        - Screenshots of the rules and proxy settings help.
+
+        Use code blocks (```) for logs.
+      placeholder: Paste logs here
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: understanding
+    attributes:
+      label: Before you submit
+      options:
+        - label: I have filled in my rules, proxy server and setup above, and removed any passwords or private data. I understand that a report without these details cannot be verified and may be closed without a reply.
+          required: true
+
+  - type: textarea
     id: additional-context
     attributes:
       label: Additional Context
-      description: Add any other context about the problem here (logs, configuration files, etc.)
-      placeholder: Paste any relevant logs or additional information here
+      description: Anything else that may help (a `.pbprofile` export without passwords, packet captures, when it started, what changed before it started)
+      placeholder: Add any other information here
+    validations:
+      required: false

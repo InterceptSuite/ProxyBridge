@@ -16,7 +16,7 @@
 #define PB_MAX_FILTER  64
 #define PB_NAME_MAX    64
 #define PB_HOSTS_MAX   8192   // Target Hosts: one ";"-separated list of IPs and domain names (8191 characters + NUL)
-#define PB_APPS_MAX    1024   // Applications field: holds a "; "-separated list of many exes
+#define PB_APPS_MAX    8192   // Applications field: a "; "-separated list of many programs (8191 characters + NUL)
 
 typedef struct {
     UINT32  storedId;              // Id as written in the profile

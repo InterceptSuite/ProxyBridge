@@ -122,6 +122,24 @@ BEGIN
     DEFPUSHBUTTON   "Close",     IDCANCEL,    572, 298, 60, 16
 END
 
+// Running programs picker (adds program NAMES to a rule; PIDs are shown for reference only)
+IDD_PROCPICK DIALOGEX 0, 0, 420, 276
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Add running process"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    EDITTEXT        IDC_PP_SEARCH,      8,   8, 332, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Refresh",          IDC_PP_REFRESH, 346,  7,  66, 16
+    CONTROL         "", IDC_PP_LIST, "SysListView32",
+                    LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
+                    8, 28, 404, 188
+    AUTOCHECKBOX    "Use full executable path when available", IDC_PP_FULLPATH, 8, 222, 300, 10
+    LTEXT           "",                 IDC_PP_NOTE,     8, 234, 404, 20
+    LTEXT           "",                 IDC_PP_STATUS,   8, 258, 270, 10
+    DEFPUSHBUTTON   "Add",              IDOK,          284, 256, 60, 16
+    PUSHBUTTON      "Cancel",           IDCANCEL,      352, 256, 60, 16
+END
+
 // Proxification Rule (edit) sub-dialog
 IDD_RULE DIALOGEX 0, 0, 480, 314
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
@@ -133,7 +151,8 @@ BEGIN
     AUTOCHECKBOX    "Enabled",         IDC_RE_ENABLED,  410,  10, 62, 10
 
     LTEXT           "Applications:",   IDC_RE_L_APPS,     8,  32, 80, 10
-    EDITTEXT        IDC_RE_APPS,       92,  30, 316, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    EDITTEXT        IDC_RE_APPS,       92,  30, 250, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Running...",      IDC_RE_RUNNING,  346,  29, 62, 14
     PUSHBUTTON      "Browse...",       IDC_RE_BROWSE,   412,  29, 60, 14
     LTEXT           "",                IDC_RE_EX_APPS,   92,  46, 380, 9
 

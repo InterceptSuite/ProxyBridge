@@ -607,15 +607,284 @@ static LRESULT CALLBACK RuleListProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PT
     return DefSubclassProc(h, m, w, l);
 }
 
-// Append one application name to a "; "-separated list, respecting the existing separator.
-static void AppendApp(wchar_t* out, int cap, const wchar_t* name)
+// ---- Applications list: adding programs from Browse / Running ----
+// Rules match programs by NAME (or by full path), never by PID: everything added here is a file name or a path.
+typedef struct { wchar_t** v; int n; } AppList;
+
+static void AppListAdd(AppList* l, const wchar_t* s)
 {
-    if (!name || !name[0]) return;
-    size_t n = wcslen(out);
-    if (n == 0) { lstrcpynW(out, name, cap); return; }
-    const wchar_t* sep = (out[n - 1] == L';') ? L" " : L"; ";
-    _snwprintf_s(out + n, (size_t)cap - n, _TRUNCATE, L"%s%s", sep, name);
+    for (int i = 0; i < l->n; i++) if (!_wcsicmp(l->v[i], s)) return;          // no duplicates
+    wchar_t* c = _wcsdup(s);
+    wchar_t** nv = c ? (wchar_t**)realloc(l->v, ((size_t)l->n + 1) * sizeof(wchar_t*)) : NULL;
+    if (!nv) { free(c); return; }
+    l->v = nv; l->v[l->n++] = c;
 }
+static void AppListFree(AppList* l) { for (int i = 0; i < l->n; i++) free(l->v[i]); free(l->v); l->v = NULL; l->n = 0; }
+
+// Does the ';' / ',' separated list already contain `name` (case-insensitive; blanks and surrounding quotes ignored)?
+static BOOL AppListContains(const wchar_t* list, const wchar_t* name)
+{
+    size_t nl = wcslen(name);
+    const wchar_t* p = list;
+    while (*p)
+    {
+        while (*p == L';' || *p == L',' || *p == L' ' || *p == L'\t') p++;
+        const wchar_t* s = p; while (*p && *p != L';' && *p != L',') p++;
+        const wchar_t* e = p; while (e > s && (e[-1] == L' ' || e[-1] == L'\t')) e--;
+        if (e - s >= 2 && *s == L'"' && e[-1] == L'"') { s++; e--; }
+        if ((size_t)(e - s) == nl && _wcsnicmp(s, name, nl) == 0) return TRUE;
+    }
+    return FALSE;
+}
+
+// Appends names to the Applications box ("a.exe; b.exe"). A name already in the list is skipped, and a name that is
+// empty, contains a list separator (';' ',' or a quote), or would not fit in PB_APPS_MAX is skipped as a whole - never
+// cut in the middle. Returns how many were added; *skipped counts the ones that could not be (list full / unusable name).
+static int AppendApps(HWND dlg, const wchar_t* const* names, int n, int* skipped, int* duplicates)
+{
+    int added = 0, bad = 0, dup = 0;
+    HWND e = GetDlgItem(dlg, IDC_RE_APPS);
+    wchar_t out[PB_APPS_MAX];
+    GetWindowTextW(e, out, PB_APPS_MAX);
+    if (out[0] == L'*' && out[1] == 0) out[0] = 0;                              // "any program" gives way to the first real entry
+    for (int i = 0; i < n; i++)
+    {
+        const wchar_t* nm = names[i];
+        size_t len = out[0] ? wcslen(out) : 0, nl = nm ? wcslen(nm) : 0;
+        if (!nm || nl == 0 || wcspbrk(nm, L";,\"")) { bad++; continue; }
+        if (AppListContains(out, nm)) { dup++; continue; }
+        const wchar_t* sep = len == 0 ? L"" : (out[len - 1] == L';') ? L" " : L"; ";
+        if (len + wcslen(sep) + nl >= PB_APPS_MAX) { bad++; continue; }
+        _snwprintf_s(out + len, PB_APPS_MAX - len, _TRUNCATE, L"%s%s", sep, nm);
+        added++;
+    }
+    if (added) SetWindowTextW(e, out);
+    if (skipped) *skipped = bad;
+    if (duplicates) *duplicates = dup;
+    return added;
+}
+
+// AppendApps + the "list is full" message (kept apart so tests can call AppendApps without a message box)
+static void ApplyApps(HWND dlg, const AppList* l)
+{
+    int bad = 0;
+    AppendApps(dlg, (const wchar_t* const*)l->v, l->n, &bad, NULL);
+    if (bad > 0)
+    {
+        wchar_t m[256]; _snwprintf_s(m, ARRAYSIZE(m), _TRUNCATE, T(S_PP_FULL), PB_APPS_MAX - 1, bad);
+        MessageBoxW(dlg, m, APP_TITLE, MB_OK | MB_ICONWARNING);
+    }
+}
+
+// Browse: the modern Windows file dialog. Unlike the old GetOpenFileName multi-select it accepts files from DIFFERENT
+// folders (for example the results of a search), and has no fixed buffer to overflow. Adds the file NAMES.
+static BOOL BrowseExecutables(HWND owner, AppList* out)
+{
+    BOOL got = FALSE;
+    HRESULT co = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    IFileOpenDialog* fd = NULL;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, &IID_IFileOpenDialog, (void**)&fd)))
+    {
+        DWORD opt = 0; IFileOpenDialog_GetOptions(fd, &opt);
+        IFileOpenDialog_SetOptions(fd, opt | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST);
+        COMDLG_FILTERSPEC spec[2] = { { L"Executables", L"*.exe" }, { L"All Files", L"*.*" } };
+        IFileOpenDialog_SetFileTypes(fd, 2, spec);
+        IFileOpenDialog_SetFileTypeIndex(fd, 1);
+        IFileOpenDialog_SetTitle(fd, L"Select Process Executable(s)");
+        if (SUCCEEDED(IFileOpenDialog_Show(fd, owner)))
+        {
+            IShellItemArray* arr = NULL;
+            if (SUCCEEDED(IFileOpenDialog_GetResults(fd, &arr)))
+            {
+                DWORD cnt = 0; IShellItemArray_GetCount(arr, &cnt);
+                for (DWORD i = 0; i < cnt; i++)
+                {
+                    IShellItem* it = NULL;
+                    if (FAILED(IShellItemArray_GetItemAt(arr, i, &it))) continue;
+                    PWSTR path = NULL;
+                    if (SUCCEEDED(IShellItem_GetDisplayName(it, SIGDN_FILESYSPATH, &path)) && path)
+                    {
+                        const wchar_t* base = path;
+                        for (const wchar_t* q = path; *q; q++) if (*q == L'\\' || *q == L'/') base = q + 1;
+                        if (*base) { AppListAdd(out, base); got = TRUE; }
+                        CoTaskMemFree(path);
+                    }
+                    IShellItem_Release(it);
+                }
+                IShellItemArray_Release(arr);
+            }
+        }
+        IFileOpenDialog_Release(fd);
+    }
+    if (SUCCEEDED(co)) CoUninitialize();
+    return got;
+}
+
+// ---- Running-programs picker ----
+// One row per running PROGRAM (same executable path; or same name when the path cannot be read). The PID shown is
+// the lowest one of that program and is for reference only - nothing here ever writes a PID into a rule.
+typedef struct { wchar_t name[260]; wchar_t path[MAX_PATH]; DWORD pid; int instances; } PPRow;
+
+static int PPCompare(const void* a, const void* b)
+{
+    const PPRow* x = (const PPRow*)a; const PPRow* y = (const PPRow*)b;
+    int c = _wcsicmp(x->name, y->name);
+    return c ? c : _wcsicmp(x->path, y->path);
+}
+
+static int PPEnumerateReal(PPRow** out)
+{
+    *out = NULL;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    int cap = 256, n = 0;
+    PPRow* rows = (PPRow*)calloc((size_t)cap, sizeof(PPRow));
+    if (!rows) { CloseHandle(snap); return 0; }
+    PROCESSENTRY32W pe; pe.dwSize = sizeof(pe);
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe))
+    {
+        if (pe.th32ProcessID == 0 || pe.th32ProcessID == 4) continue;           // Idle and System are not programs
+        wchar_t path[MAX_PATH]; path[0] = 0;
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+        if (h) { DWORD len = MAX_PATH; if (!QueryFullProcessImageNameW(h, 0, path, &len)) path[0] = 0; CloseHandle(h); }
+        int found = -1;
+        for (int i = 0; i < n && found < 0; i++)
+            if (path[0] ? (rows[i].path[0] && !_wcsicmp(rows[i].path, path)) : (!rows[i].path[0] && !_wcsicmp(rows[i].name, pe.szExeFile))) found = i;
+        if (found >= 0) { rows[found].instances++; if (pe.th32ProcessID < rows[found].pid) rows[found].pid = pe.th32ProcessID; continue; }
+        if (n == cap)
+        {
+            PPRow* g = (PPRow*)realloc(rows, (size_t)cap * 2 * sizeof(PPRow));
+            if (!g) break;
+            rows = g; cap *= 2;
+        }
+        PPRow* r = &rows[n++]; ZeroMemory(r, sizeof(*r));
+        lstrcpynW(r->name, pe.szExeFile, 260); lstrcpynW(r->path, path, MAX_PATH); r->pid = pe.th32ProcessID; r->instances = 1;
+    }
+    CloseHandle(snap);
+    qsort(rows, (size_t)n, sizeof(PPRow), PPCompare);
+    *out = rows;
+    return n;
+}
+static int (*g_ppEnumerate)(PPRow**) = PPEnumerateReal;       // replaced by a fake list in the tests
+
+typedef struct { AppList* result; PPRow* rows; int n; int* shown; int shownN; } PPState;
+
+static void PPRefill(HWND dlg, PPState* st)
+{
+    HWND lv = GetDlgItem(dlg, IDC_PP_LIST);
+    wchar_t q[256]; GetDlgItemTextW(dlg, IDC_PP_SEARCH, q, ARRAYSIZE(q));
+    wchar_t words[8][64]; int nw = 0;                           // every word must appear in the name or the path
+    for (const wchar_t* p = q; *p && nw < 8; )
+    {
+        while (*p && *p <= L' ') p++;
+        if (!*p) break;
+        int k = 0; while (*p && *p > L' ') { if (k < 63) words[nw][k++] = *p; p++; }
+        words[nw++][k] = 0;
+    }
+    SendMessageW(lv, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(lv);
+    st->shownN = 0;
+    for (int i = 0; i < st->n; i++)
+    {
+        const PPRow* r = &st->rows[i];
+        BOOL ok = TRUE;
+        for (int w = 0; w < nw && ok; w++) ok = ContainsCI(r->name, words[w]) || ContainsCI(r->path, words[w]);
+        if (!ok) continue;
+        int row = st->shownN++;
+        st->shown[row] = i;
+        LVITEMW it; ZeroMemory(&it, sizeof(it)); it.mask = LVIF_TEXT; it.iItem = row; it.pszText = (LPWSTR)r->name;
+        ListView_InsertItem(lv, &it);
+        wchar_t pid[48];
+        if (r->instances > 1) _snwprintf_s(pid, ARRAYSIZE(pid), _TRUNCATE, L"%lu  (+%d)", r->pid, r->instances - 1);
+        else                  _snwprintf_s(pid, ARRAYSIZE(pid), _TRUNCATE, L"%lu", r->pid);
+        ListView_SetItemText(lv, row, 1, pid);
+        ListView_SetItemText(lv, row, 2, r->path[0] ? (LPWSTR)r->path : (LPWSTR)L"\x2014");
+    }
+    SendMessageW(lv, WM_SETREDRAW, TRUE, 0);
+    EnableWindow(GetDlgItem(dlg, IDOK), ListView_GetSelectedCount(lv) > 0);
+    wchar_t status[200]; _snwprintf_s(status, ARRAYSIZE(status), _TRUNCATE, T(S_PP_STATUS), st->n);
+    SetDlgItemTextW(dlg, IDC_PP_STATUS, status);
+}
+
+static void PPReload(HWND dlg, PPState* st)
+{
+    free(st->rows); free(st->shown);
+    st->rows = NULL; st->shown = NULL; st->n = 0; st->shownN = 0;
+    st->n = g_ppEnumerate(&st->rows);
+    if (st->n < 0 || !st->rows) st->n = 0;
+    st->shown = (int*)calloc((size_t)(st->n > 0 ? st->n : 1), sizeof(int));
+    if (!st->shown) { free(st->rows); st->rows = NULL; st->n = 0; st->shown = (int*)calloc(1, sizeof(int)); }
+    PPRefill(dlg, st);
+}
+
+// Only ever a name, or a path when "full path" is ticked and the path is usable in the list ("," ";" and quotes are not).
+static const wchar_t* PPChoose(const PPRow* r, BOOL fullPath)
+{
+    if (fullPath && r->path[0] && !wcspbrk(r->path, L";,\"")) return r->path;
+    return r->name;
+}
+
+INT_PTR CALLBACK ProcPickDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    PPState* st = (PPState*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+    switch (msg)
+    {
+    case WM_INITDIALOG:
+    {
+        st = (PPState*)calloc(1, sizeof(PPState));
+        st->result = (AppList*)lp;
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)st);
+        SetWindowTextW(dlg, T(S_DLG_PROCPICK));
+        SetDlgItemTextW(dlg, IDC_PP_REFRESH,  T(S_PP_REFRESH));
+        SetDlgItemTextW(dlg, IDC_PP_FULLPATH, T(S_PP_FULLPATH));
+        SetDlgItemTextW(dlg, IDC_PP_NOTE,     T(S_PP_NOTE));
+        SetDlgItemTextW(dlg, IDOK,            T(S_BTN_ADD));
+        SetDlgItemTextW(dlg, IDCANCEL,        T(S_BTN_CANCEL));
+        SendDlgItemMessageW(dlg, IDC_PP_SEARCH, EM_LIMITTEXT, 255, 0);
+        SendDlgItemMessageW(dlg, IDC_PP_SEARCH, EM_SETCUEBANNER, TRUE, (LPARAM)T(S_PP_SEARCH));
+        InitDarkMode(dlg);
+        HWND lv = GetDlgItem(dlg, IDC_PP_LIST);
+        DarkListView(lv, 0);
+        struct { int s; int w; } cols[] = { {S_PP_COL_NAME, 150}, {S_PP_COL_PID, 80}, {S_PP_COL_PATH, 380} };
+        LVCOLUMNW c; c.mask = LVCF_TEXT | LVCF_WIDTH;
+        for (int i = 0; i < 3; i++) { c.pszText = (LPWSTR)T(cols[i].s); c.cx = cols[i].w; ListView_InsertColumn(lv, i, &c); }
+        PPReload(dlg, st);
+        return TRUE;
+    }
+    PB_DARK_CTLCOLORS;
+    case WM_NOTIFY:
+    {
+        LPNMHDR nh = (LPNMHDR)lp;
+        if (nh->idFrom == IDC_PP_LIST && nh->code == LVN_ITEMCHANGED)
+            EnableWindow(GetDlgItem(dlg, IDOK), ListView_GetSelectedCount(GetDlgItem(dlg, IDC_PP_LIST)) > 0);
+        else if (nh->idFrom == IDC_PP_LIST && nh->code == NM_DBLCLK && ListView_GetSelectedCount(GetDlgItem(dlg, IDC_PP_LIST)) > 0)
+            PostMessageW(dlg, WM_COMMAND, IDOK, 0);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wp))
+        {
+        case IDC_PP_SEARCH:  if (HIWORD(wp) == EN_CHANGE && st) PPRefill(dlg, st); return TRUE;
+        case IDC_PP_REFRESH: if (st) PPReload(dlg, st); return TRUE;
+        case IDOK:
+        {
+            HWND lv = GetDlgItem(dlg, IDC_PP_LIST);
+            BOOL full = IsDlgButtonChecked(dlg, IDC_PP_FULLPATH) == BST_CHECKED;
+            for (int row = ListView_GetNextItem(lv, -1, LVNI_SELECTED); row >= 0 && st; row = ListView_GetNextItem(lv, row, LVNI_SELECTED))
+                if (row < st->shownN) AppListAdd(st->result, PPChoose(&st->rows[st->shown[row]], full));
+            EndDialog(dlg, (st && st->result->n > 0) ? 1 : 0);
+            return TRUE;
+        }
+        case IDCANCEL: EndDialog(dlg, 0); return TRUE;
+        }
+        return FALSE;
+    case WM_DESTROY:
+        if (st) { free(st->rows); free(st->shown); free(st); SetWindowLongPtrW(dlg, GWLP_USERDATA, 0); }
+        return FALSE;
+    }
+    return FALSE;
+}
+
 
 // Edit sub-dialog. lParam is a PBRule* seeded with current values; on OK it is written back
 // (name/proc/hosts/ports/domains/proto/action/cfgStoredId/enabled) and the dialog returns 1.
@@ -647,6 +916,7 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_RE_L_PROTO,  T(S_L_PROTO));
         SetDlgItemTextW(dlg, IDC_RE_L_ACTION, T(S_L_ACTION));
         SetDlgItemTextW(dlg, IDC_RE_BROWSE,   T(S_BTN_BROWSE));
+        SetDlgItemTextW(dlg, IDC_RE_RUNNING,  T(S_BTN_RUNNING));
         SetDlgItemTextW(dlg, IDC_RE_EX_APPS,    T(S_EX_APPS));
         SetDlgItemTextW(dlg, IDC_RE_EX_HOSTS,   T(S_EX_HOSTS));
         SetDlgItemTextW(dlg, IDC_RE_EX_PORTS,   T(S_EX_PORTS));
@@ -728,41 +998,16 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             return TRUE;
         case IDC_RE_BROWSE:
         {
-            // Pick one or more .exe files and append each file name to the list.
-            // Multi-select needs a buffer big enough for the folder + every file name.
-            static wchar_t files[8192];
-            files[0] = 0;
-            OPENFILENAMEW ofn; ZeroMemory(&ofn, sizeof(ofn));
-            ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = dlg;
-            ofn.lpstrFilter = L"Executables\0*.exe\0All Files\0*.*\0";
-            ofn.lpstrFile = files; ofn.nMaxFile = ARRAYSIZE(files);
-            ofn.lpstrTitle = L"Select Process Executable(s)";
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST |
-                        OFN_ALLOWMULTISELECT | OFN_EXPLORER;
-            if (GetOpenFileNameW(&ofn))
-            {
-                wchar_t out[PB_APPS_MAX];
-                GetDlgItemTextW(dlg, IDC_RE_APPS, out, PB_APPS_MAX);
-                if (!out[0] || (out[0] == L'*' && out[1] == 0)) out[0] = 0;   // replace empty/"*"
-
-                // OFN_EXPLORER multi-select layout:
-                //   single: "C:\dir\app.exe\0\0"          (one full path)
-                //   multi:  "C:\dir\0a.exe\0b.exe\0...\0\0" (folder, then bare names)
-                const wchar_t* dir = files;
-                const wchar_t* p = files + wcslen(files) + 1;
-                if (*p == 0)
-                {
-                    const wchar_t* base = dir;                 // single: strip to file name
-                    for (const wchar_t* q = dir; *q; q++) if (*q == L'\\' || *q == L'/') base = q + 1;
-                    AppendApp(out, ARRAYSIZE(out), base);
-                }
-                else
-                {
-                    for (; *p; p += wcslen(p) + 1)             // multi: each p is a bare file name
-                        AppendApp(out, ARRAYSIZE(out), p);
-                }
-                SetDlgItemTextW(dlg, IDC_RE_APPS, out);
-            }
+            AppList l = { 0 };                                 // file names only; files from different folders are fine
+            if (BrowseExecutables(dlg, &l)) ApplyApps(dlg, &l);
+            AppListFree(&l);
+            return TRUE;
+        }
+        case IDC_RE_RUNNING:
+        {
+            AppList l = { 0 };                                 // program names (never PIDs) from the running programs
+            if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_PROCPICK), dlg, ProcPickDlgProc, (LPARAM)&l) == 1) ApplyApps(dlg, &l);
+            AppListFree(&l);
             return TRUE;
         }
         case IDOK:

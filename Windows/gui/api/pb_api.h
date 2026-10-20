@@ -13,6 +13,22 @@ typedef enum { PB_PROXY_HTTP = 0, PB_PROXY_SOCKS5 = 1 } PBProxyType;
 typedef enum { PB_ACTION_PROXY = 0, PB_ACTION_DIRECT = 1, PB_ACTION_BLOCK = 2 } PBRuleAction;
 typedef enum { PB_PROTO_TCP = 0, PB_PROTO_UDP = 1, PB_PROTO_BOTH = 2 } PBRuleProtocol;
 
+// one live connection (must match PB_FLOW in ../../src/ProxyBridge.h)
+typedef struct {
+    UINT64 id;
+    UINT32 pid;
+    UINT32 proxy_config_id;
+    UINT32 rule_id;          // 0 = not known
+    UINT32 age_ms;           // 0xFFFFFFFF = not known
+    UINT64 sent, received;   // payload bytes application -> proxy, proxy -> application
+    UINT16 port;
+    UINT8  is_udp, is_ipv6;
+    UINT8  dest[16];
+    char   name[40];         // process image name (UTF-8)
+    char   host[64];         // destination: domain if known, else address (UTF-8)
+} PBFlow;
+#define PB_FLOWS_MAX_GUI 400
+
 // callbacks (native thread - never touch UI directly from these)
 typedef void (*PBLogCallback)(const char* message);
 typedef void (*PBConnectionCallback)(const char* process_name, DWORD pid,
@@ -39,6 +55,7 @@ typedef void   (*PFN_SetTrafficLoggingEnabled)(BOOL);
 typedef void   (*PFN_SetEnabled)(BOOL);
 typedef void   (*PFN_SetLogEveryConnection)(BOOL);
 typedef void   (*PFN_ClearConnectionLogs)(void);
+typedef UINT32 (*PFN_GetFlows)(PBFlow*, UINT32);
 typedef BOOL   (*PFN_Start)(void);
 typedef BOOL   (*PFN_Stop)(void);
 
@@ -63,6 +80,7 @@ typedef struct {
     PFN_SetEnabled                SetEnabled;
     PFN_SetLogEveryConnection     SetLogEveryConnection;
     PFN_ClearConnectionLogs       ClearConnectionLogs;
+    PFN_GetFlows                  GetFlows;
     PFN_Start                     Start;
     PFN_Stop                      Stop;
 } PBApi;
@@ -109,6 +127,7 @@ static BOOL PB_LoadDirect(PBApi* api)
     PB_BIND(SetEnabled,               "SetEnabled");
     PB_BIND(SetLogEveryConnection,    "SetLogEveryConnection");
     PB_BIND(ClearConnectionLogs,      "ClearConnectionLogs");
+    PB_BIND(GetFlows,                 "GetFlows");
     PB_BIND(Start,                    "Start");
     PB_BIND(Stop,                     "Stop");
     #undef PB_BIND

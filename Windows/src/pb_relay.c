@@ -166,9 +166,9 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                 UINT32 dest_ip;
                 UINT16 dest_port;
 
-                if (get_connection(from_port, TRUE, &dest_ip, &dest_port))
+                UINT32 proxy_config_id = 0;
+                if (get_connection_full_x(from_port, TRUE, &dest_ip, &dest_port, &proxy_config_id, NULL, NULL, (UINT32)recv_len))
                 {
-                    UINT32 proxy_config_id = get_connection_proxy_id(from_port, TRUE);
                     PROXY_CONFIG *cfg = find_proxy_config(proxy_config_id);
 
                     if (cfg == NULL || cfg->type != PROXY_TYPE_SOCKS5)
@@ -300,7 +300,10 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                     // Keep winner's session alive (update outside loop so comparisons above
                     // use the original, unmodified timestamps for all candidates).
                     if (winner_conn != NULL)
+                    {
                         InterlockedExchange64((LONGLONG volatile*)&winner_conn->last_activity, (LONGLONG)GetTickCount64());
+                        InterlockedExchangeAdd64(&winner_conn->down_bytes, (LONG64)(recv_len - 10));
+                    }
                     ReleaseSRWLockShared(&lock);
 
                     if (found)
@@ -329,7 +332,7 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
 
                     UINT8 target_ip6[16];
                     UINT16 target_port = 0;
-                    if (find_v6_udp_sender(src_ip6, src_port, target_ip6, &target_port) && udp_relay_socket6 != INVALID_SOCKET)
+                    if (find_v6_udp_sender(src_ip6, src_port, target_ip6, &target_port, (UINT32)(recv_len - 22)) && udp_relay_socket6 != INVALID_SOCKET)
                     {
                         struct sockaddr_in6 t6;
                         memset(&t6, 0, sizeof(t6));
@@ -357,7 +360,7 @@ DWORD WINAPI udp_relay_server(LPVOID arg)
                 UINT16 dest_port = 0;
                 UINT32 proxy_config_id = 0;
 
-                if (get_connection_full_v6(from_port, TRUE, dest_ip6, &dest_port, &proxy_config_id))
+                if (get_connection_full_v6_x(from_port, TRUE, dest_ip6, &dest_port, &proxy_config_id, NULL, NULL, (UINT32)recv_len))
                 {
                     PROXY_CONFIG *cfg = find_proxy_config(proxy_config_id);
                     if (cfg != NULL && cfg->type == PROXY_TYPE_SOCKS5)
@@ -515,7 +518,7 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                     conn_config->is_ipv6 = FALSE;
 
                     UINT16 client_port = ntohs(client_addr.sin_port);
-                    if (get_connection_full(client_port, FALSE, &conn_config->orig_dest_ip, &conn_config->orig_dest_port, &conn_config->proxy_config_id) &&
+                    if (get_connection_full_x(client_port, FALSE, &conn_config->orig_dest_ip, &conn_config->orig_dest_port, &conn_config->proxy_config_id, &conn_config->pid, &conn_config->rule_id, 0) &&
                         relay_peer_ok_v4(client_addr.sin_addr.s_addr, conn_config->orig_dest_ip))
                     {
                         InterlockedIncrement(&g_handler_threads);
@@ -544,7 +547,7 @@ DWORD WINAPI local_proxy_server(LPVOID arg)
                     conn_config->is_ipv6 = TRUE;
 
                     UINT16 client_port = ntohs(client_addr6.sin6_port);
-                    if (get_connection_full_v6(client_port, FALSE, conn_config->orig_dest_ip6, &conn_config->orig_dest_port, &conn_config->proxy_config_id) &&
+                    if (get_connection_full_v6_x(client_port, FALSE, conn_config->orig_dest_ip6, &conn_config->orig_dest_port, &conn_config->proxy_config_id, &conn_config->pid, &conn_config->rule_id, 0) &&
                         relay_peer_ok_v6(&client_addr6.sin6_addr, conn_config->orig_dest_ip6))
                     {
                         InterlockedIncrement(&g_handler_threads);
@@ -600,6 +603,10 @@ static DWORD WINAPI connection_handler_impl(LPVOID arg)
     BOOL is_ipv6 = config->is_ipv6;
     UINT8 dest_ip6[16];
     if (is_ipv6) memcpy(dest_ip6, config->orig_dest_ip6, 16);
+    FLOW_META meta;
+    ZeroMemory(&meta, sizeof(meta));
+    meta.pid = config->pid; meta.proxy_id = proxy_config_id; meta.rule_id = config->rule_id; meta.port = dest_port; meta.v6 = is_ipv6;
+    if (is_ipv6) memcpy(meta.dest, dest_ip6, 16); else memcpy(meta.dest, &dest_ip, 4);
     SOCKET socks_sock;
     struct sockaddr_in socks_addr;
 
@@ -711,7 +718,7 @@ static DWORD WINAPI connection_handler_impl(LPVOID arg)
     WSAIoctl(client_sock, SIO_KEEPALIVE_VALS, &keepalive_settings, sizeof(keepalive_settings), NULL, 0, &bytes_returned, NULL, NULL);
 
     // Preferred path: hand both sockets to the IOCP pool (no per-connection threads).
-    if (relay_start(client_sock, socks_sock))
+    if (relay_start(client_sock, socks_sock, &meta))
         return 0;
 
     TRANSFER_CONFIG *transfer_config = (TRANSFER_CONFIG *)malloc(sizeof(TRANSFER_CONFIG));
@@ -874,6 +881,7 @@ typedef struct {
     char       *buf;         // NULL while waiting
     DWORD       len, off;
     int         state;
+    volatile LONG64 bytes;   // payload bytes this direction has delivered (read by the live connections view)
 } RELAY_DIR;
 struct RELAY_CONN {
     SOCKET        s[2];
@@ -881,9 +889,13 @@ struct RELAY_CONN {
     volatile LONG refs;      // directions still alive
     volatile LONG closing;
     RELAY_CONN   *prev, *next;
+    UINT64        id;        // live connections view
+    ULONGLONG     start;
+    FLOW_META     meta;
 };
 
 volatile LONG g_active_relays = 0;
+static volatile LONG64   g_flow_seq = 0;
 static HANDLE            g_iocp = NULL;
 static HANDLE            g_relay_workers[16];
 static int               g_relay_nworkers = 0;
@@ -1003,6 +1015,7 @@ static DWORD WINAPI relay_worker(LPVOID arg)
             break;
         default:                                       // RS_SEND
             if (n == 0) { relay_dir_end(d); continue; }
+            InterlockedExchangeAdd64(&d->bytes, (LONG64)n);
             d->off += n;
             if (d->off < d->len) posted = relay_post_send(d);
             else if (d->len < RELAY_BUF_SIZE / 4) posted = relay_post_wait(d);   // lightly used: drop the buffer
@@ -1054,7 +1067,7 @@ void relay_pool_stop(void)
 
 // Takes over both (already handshaken) sockets. Returns FALSE if the pool is unavailable; the
 // caller then falls back to the blocking relay and still owns the sockets.
-BOOL relay_start(SOCKET client, SOCKET proxy)
+BOOL relay_start(SOCKET client, SOCKET proxy, const FLOW_META *meta)
 {
     if (g_iocp == NULL || !running) return FALSE;
 
@@ -1068,6 +1081,9 @@ BOOL relay_start(SOCKET client, SOCKET proxy)
     }
     rc->s[0] = client; rc->s[1] = proxy;
     rc->refs = 2;
+    rc->id = (UINT64)InterlockedIncrement64(&g_flow_seq);
+    rc->start = GetTickCount64();
+    if (meta != NULL) rc->meta = *meta;
     rc->dir[0].rc = rc; rc->dir[0].src = client; rc->dir[0].dst = proxy;    // upload
     rc->dir[1].rc = rc; rc->dir[1].src = proxy;  rc->dir[1].dst = client;   // download
 
@@ -1082,4 +1098,33 @@ BOOL relay_start(SOCKET client, SOCKET proxy)
     if (!relay_post_wait(&rc->dir[0])) relay_dir_end(&rc->dir[0]);
     if (!relay_post_wait(&rc->dir[1])) relay_dir_end(&rc->dir[1]);
     return TRUE;
+}
+
+// Live proxied TCP connections for the live connections view: raw fields copied under the relay list lock (a few
+// hundred nanoseconds per entry), newest first. Names and hosts are resolved by the caller after the lock is released.
+UINT32 relay_flows_snapshot(PB_FLOW *out, UINT32 max)
+{
+    UINT32 n = 0;
+    if (!g_relay_lock_ready || out == NULL) return 0;
+    ULONGLONG now = GetTickCount64();
+    EnterCriticalSection(&g_relay_lock);
+    for (RELAY_CONN *rc = g_relay_head; rc != NULL && n < max; rc = rc->next)
+    {
+        if (rc->closing) continue;                       // being torn down
+        PB_FLOW *f = &out[n++];
+        ZeroMemory(f, sizeof(*f));
+        f->id = rc->id;
+        f->pid = rc->meta.pid;
+        f->proxy_config_id = rc->meta.proxy_id;
+        f->rule_id = rc->meta.rule_id;
+        ULONGLONG age = now - rc->start;
+        f->age_ms = age > 0xFFFFFFFEull ? 0xFFFFFFFEu : (UINT32)age;
+        f->sent = (UINT64)rc->dir[0].bytes;              // client -> proxy
+        f->received = (UINT64)rc->dir[1].bytes;          // proxy -> client
+        f->port = rc->meta.port;
+        f->is_ipv6 = rc->meta.v6 ? 1 : 0;
+        memcpy(f->dest, rc->meta.dest, 16);
+    }
+    LeaveCriticalSection(&g_relay_lock);
+    return n;
 }

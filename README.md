@@ -172,33 +172,33 @@ winget install InterceptSuite.ProxyBridge
 #### GUI
 
 <p align="center">
-  <img src="img/ProxyBridge.png" alt="ProxyBridge Windows Main Interface" width="800"/>
+  <img src="img/Windows/Connections.png" alt="ProxyBridge Windows Main Interface" width="800"/>
   <br/>
   <em>ProxyBridge GUI - Main Interface</em>
 </p>
 
 <p align="center">
-  <img src="img/proxy-setting.png" alt="Proxy Settings" width="800"/>
+  <img src="img/Windows/Proxy-Server.png" alt="Proxy Settings" width="800"/>
   <br/>
   <em>Proxy Settings Configuration</em>
 </p>
 
 <p align="center">
-  <img src="img/proxy-rule.png" alt="Proxy Rules" width="800"/>
+  <img src="img/Windows/Proxy-Rules.png" alt="Proxy Rules" width="800"/>
   <br/>
   <em>Proxy Rules Management</em>
 </p>
 
 <p align="center">
-  <img src="img/Proxy-Tester.png" alt="Proxy Tester" width="800"/>
+  <img src="img/Windows/Live%20Connection.png" alt="Live Connections" width="800"/>
   <br/>
-  <em>Proxy Tester</em>
+  <em>Live Connections - proxied connections and UDP flows right now</em>
 </p>
 
 #### CLI
 
 <p align="center">
-  <img src="img/ProxyBridge_CLI.png" alt="ProxyBridge CLI" width="800"/>
+  <img src="img/Windows/Proxy-CLI.png" alt="ProxyBridge CLI" width="800"/>
   <br/>
   <em>ProxyBridge CLI Interface</em>
 </p>

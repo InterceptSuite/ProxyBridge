@@ -55,7 +55,7 @@ Launch `ProxyBridge.exe` with Administrator privileges for an intuitive graphica
 #### Proxy Settings
 
 <p align="center">
-  <img src="../img/proxy-setting.png" alt="Proxy Settings" width="600"/>
+  <img src="../img/Windows/Proxy-Server.png" alt="Proxy Settings" width="600"/>
 </p>
 
 1. Click **Proxy** tab in the main window
@@ -91,11 +91,7 @@ ProxyBridge supports multiple proxy server configurations simultaneously. Each p
 #### Process Rules
 
 <p align="center">
-  <img src="../img/proxy-rule.png" alt="Add Process Rule" width="600"/>
-</p>
-
-<p align="center">
-  <img src="../img/proxy-rule2.png" alt="Process Rules List" width="600"/>
+  <img src="../img/Windows/Proxy-Rules.png" alt="Process Rules List" width="600"/>
 </p>
 
 1. Click **Proxy** tab in the main window
@@ -113,6 +109,7 @@ ProxyBridge supports multiple proxy server configurations simultaneously. Each p
    - Wildcard IP range: `192.168.*.*`
    - Multiple IPs: `127.0.0.1; 192.168.1.1`
    - IP range: `10.10.1.1-10.10.255.255`
+   - IPv4 CIDR: `10.0.0.0/8`, `192.168.1.128/25`
    - IPv6 exact: `::1`, `2001:db8::1`
    - IPv6 CIDR: `2001:db8::/32`, `fe80::/10`
    - IPv6 range: `2001:db8::1-2001:db8::ff`
@@ -210,10 +207,19 @@ ProxyBridge allows you to export selected rules to a `.pbprofile` JSON file and 
 #### Activity Monitoring
 
 <p align="center">
-  <img src="../img/ProxyBridge.png" alt="Active Connections" width="600"/>
+  <img src="../img/Windows/Connections.png" alt="Active Connections" width="600"/>
+</p>
+
+<p align="center">
+  <img src="../img/Windows/Live%20Connection.png" alt="Live Connections" width="600"/>
 </p>
 
 - View real-time connection activity in the **Connections** tab
+- See what is relayed right now in the **Live Connections** tab: one row per proxied TCP connection or UDP flow with the
+  application, target, time, proxy and bytes sent / received. A finished connection turns grey and stays in the list
+  (with its final byte counts) until you press **Clear closed**; the list keeps up to 1200 rows and replaces the oldest finished
+  one when full. Direct and blocked traffic is not listed (ProxyBridge only sees the first packet of those). The tab polls once
+  a second, and only while it is open.
 - Monitor all TCP and UDP connections system-wide
 - See routing status per connection: **PROXY**, **DIRECT**, or **BLOCK**
 - Search and filter by process name, IP, port, or routing status
@@ -246,13 +252,13 @@ saved per profile. It only changes what is listed: rules are applied to the same
 
 #### Profile Format
 
-The CLI reads `.pbprofile` files exported directly from the GUI (**File → Export Profile**). These are JSON files containing proxy server configurations and routing rules. See the [Profile JSON Format](#exporting-and-importing-rules) section above for the schema.
+The CLI reads `.pbprofile` files exported directly from the GUI (**Profile → Export Profile**). These are JSON files containing proxy server configurations and routing rules. See the [Profile JSON Format](#exporting-and-importing-rules) section above for the schema.
 
 **Key profile fields read by the CLI:**
 
 | Field | Description |
 |---|---|
-| `ProxyConfigs[]` | Array of proxy servers (SOCKS5 or HTTP, up to 16) |
+| `ProxyConfigs[]` | Array of proxy servers (SOCKS5 or HTTP, up to 32) |
 | `ProxyRules[]` | Array of routing rules (up to 256) |
 | `ProxyRules[].LocalhostViaProxy` | Per rule: also proxy `127.x.x.x` / `::1` traffic that matches this rule (default `false`) |
 | `IsTrafficLoggingEnabled` | Enable/disable connection logging |
@@ -294,7 +300,7 @@ ProxyBridge_CLI.exe --help
 
 Options:
   --profile <path>     Path to .pbprofile file exported from the GUI
-                       Export from GUI: File > Export Profile
+                       Export from GUI: Profile > Export Profile
 
   --verbose <0-3>      Logging verbosity
                          0 - Silent (default)
@@ -386,7 +392,7 @@ Commands:
   - Many UDP applications use HTTP/3 and DTLS protocols - ensure your proxy handles these
   - **Testing**: Try [Nexus Proxy](https://github.com/InterceptSuite/nexus-proxy) to test ProxyBridge UDP/HTTP3/DTLS support
 
-- **Multiple Proxy Configurations**: Up to 16 proxy server configurations can be active simultaneously. Rules can each be assigned to a specific proxy config. If the assigned config is not found, ProxyBridge falls back to the first available config. This allows routing different apps through different proxies without any application-side configuration.
+- **Multiple Proxy Configurations**: Up to 32 proxy server configurations can be active simultaneously. Rules can each be assigned to a specific proxy config. If the assigned config is not found, ProxyBridge falls back to the first available config. This allows routing different apps through different proxies without any application-side configuration.
 
 ## How It Works
 

@@ -72,12 +72,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "compile failed in Windows\gui" }
           Pop-Location
 
-      # fail instead of silently losing coverage when C code appears outside the folders compiled above
+      # fail instead of silently losing coverage when C code appears outside the folders compiled above.
+      # Windows\tests holds the test programs (built by tests\run_tests.ps1 in the Windows build workflow). They are not
+      # shipped, and they compile the real sources from src, cli and gui, which are analysed above.
       - name: Check every Windows C file is covered
         shell: pwsh
         run: |
           $stray = Get-ChildItem Windows -Filter *.c -File -Recurse |
-            Where-Object { $_.FullName -notmatch '\\Windows\\(src|cli|gui)\\' }
+            Where-Object { $_.FullName -notmatch '\\Windows\\(src|cli|gui|tests)\\' }
           if ($stray) {
             $stray | ForEach-Object { Write-Host "not covered by CodeQL: $($_.FullName)" }
             throw "C files outside Windows\src, cli and gui are not compiled by this workflow, add them to the Build step"
