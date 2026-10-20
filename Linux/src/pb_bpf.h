@@ -32,6 +32,7 @@ void pb_bpf_detach(void);
 void pb_bpf_stop(void);
 
 void pb_bpf_set_flags(bool log, bool dns_via_proxy);
+void pb_bpf_set_paused(bool paused);
 // Recompiles the rule set and rescans /proc for running executables. -1 if it does not fit.
 int  pb_bpf_sync(const struct pb_rule_view *v, size_t n);
 // Installs the class of the executable the kernel reported in `o` (slow-path learning); no-op for known binaries.

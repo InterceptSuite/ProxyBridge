@@ -59,6 +59,7 @@ static void profile_sync_active() {
     p->default_proxy = g_default_proxy;
     p->logging = g_chk_logging;
     p->dns = g_chk_dns;
+    p->log_every = g_chk_log_every;
 }
 
 static void load_globals_from(Profile *p) {
@@ -67,6 +68,7 @@ static void load_globals_from(Profile *p) {
     g_default_proxy = p->default_proxy;
     g_chk_logging = p->logging;
     g_chk_dns = p->dns;
+    g_chk_log_every = p->log_every;
 }
 
 void config_free_all() {
@@ -124,6 +126,7 @@ Profile *profile_create(const char *name, bool copy_active) {
         p->default_proxy = g_strdup(src->default_proxy);
         p->logging = src->logging;
         p->dns = src->dns;
+        p->log_every = src->log_every;
     }
     return p;
 }
@@ -182,6 +185,7 @@ static void profile_to_pbp(const Profile *prof, struct pbp_profile *out) {
     out->name = prof->name;
     out->logging = prof->logging;
     out->dns_via_proxy = prof->dns;
+    out->log_every = prof->log_every;
     out->nproxies = g_list_length(prof->proxies);
     out->nrules = g_list_length(prof->rules);
     out->proxies = g_new0(struct pbp_proxy, out->nproxies + 1);
@@ -257,6 +261,7 @@ static void fill_profile_from_pbp(Profile *p, const struct pbp_profile *src) {
     p->default_proxy = d ? g_strdup(d->name) : NULL;
     p->logging = src->logging;
     p->dns = src->dns_via_proxy;
+    p->log_every = src->log_every;
 }
 
 bool profile_export(const Profile *prof, const char *path, char *err, size_t errlen) {

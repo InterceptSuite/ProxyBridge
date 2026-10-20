@@ -237,6 +237,13 @@ void pb_bpf_stop(void)
     pthread_mutex_unlock(&G.lock);
 }
 
+void pb_bpf_set_paused(bool paused)
+{
+    pthread_mutex_lock(&G.lock);
+    if (G.skel) G.skel->bss->cfg.paused = paused;
+    pthread_mutex_unlock(&G.lock);
+}
+
 void pb_bpf_set_flags(bool log, bool dns_via_proxy)
 {
     pthread_mutex_lock(&G.lock);

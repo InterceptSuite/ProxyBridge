@@ -148,6 +148,7 @@ static void open_rule_dialog(RuleData *rule) {
                                                     GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                                     "Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, NULL);
     gtk_window_set_default_size(GTK_WINDOW(dialog), 500, 400);
+    gtk_widget_set_name(dialog, "dlg_rule");
     GtkWidget *grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
     gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
@@ -203,6 +204,10 @@ static void open_rule_dialog(RuleData *rule) {
     g_signal_connect(action_combo, "changed", G_CALLBACK(on_action_changed), localhost_check);
 
     GtkWidget *err_label = hint_label("");
+    // names let the UI test find the widgets
+    gtk_widget_set_name(name_entry, "rule_name"); gtk_widget_set_name(proc_entry, "rule_process"); gtk_widget_set_name(host_view, "rule_hosts");
+    gtk_widget_set_name(port_entry, "rule_ports"); gtk_widget_set_name(proto_combo, "rule_proto"); gtk_widget_set_name(action_combo, "rule_action");
+    gtk_widget_set_name(proxy_combo, "rule_proxy"); gtk_widget_set_name(localhost_check, "rule_localhost"); gtk_widget_set_name(err_label, "rule_error");
     grid_row(grid, 0, "Name:", name_entry);
     grid_row(grid, 1, "Process Name:", proc_box);
     gtk_grid_attach(GTK_GRID(grid), hint_label("Example: firefox; chrome; /usr/bin/wget"), 1, 2, 1, 1);
@@ -441,15 +446,23 @@ static void refresh_rules_ui() {
     int row = 2, sr = 1;
     for (GList *l = g_rules_list; l != NULL; l = l->next, row += 2) {
         RuleData *r = (RuleData *)l->data;
-        check_cell(grid, row, 0, r->selected, G_CALLBACK(on_rule_select_toggle), r);
-        check_cell(grid, row, 1, r->enabled, G_CALLBACK(on_rule_toggle), r);
+        char nm[48];
+        snprintf(nm, sizeof nm, "rule_select_%d", sr);
+        gtk_widget_set_name(check_cell(grid, row, 0, r->selected, G_CALLBACK(on_rule_select_toggle), r), nm);
+        snprintf(nm, sizeof nm, "rule_enable_%d", sr);
+        gtk_widget_set_name(check_cell(grid, row, 1, r->enabled, G_CALLBACK(on_rule_toggle), r), nm);
 
         // list position is the priority, first match wins
         GtkWidget *act_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-        small_button(act_box, "Edit", NULL, true, G_CALLBACK(on_rule_edit), r);
-        small_button(act_box, "Delete", NULL, true, G_CALLBACK(on_rule_delete), r);
-        small_button(act_box, "▲", "Move up (higher priority)", l->prev != NULL, G_CALLBACK(on_rule_move_up), r);
-        small_button(act_box, "▼", "Move down (lower priority)", l->next != NULL, G_CALLBACK(on_rule_move_down), r);
+        char bn[48];
+        snprintf(bn, sizeof bn, "rule_edit_%d", sr);
+        gtk_widget_set_name(small_button(act_box, "Edit", NULL, true, G_CALLBACK(on_rule_edit), r), bn);
+        snprintf(bn, sizeof bn, "rule_delete_%d", sr);
+        gtk_widget_set_name(small_button(act_box, "Delete", NULL, true, G_CALLBACK(on_rule_delete), r), bn);
+        snprintf(bn, sizeof bn, "rule_up_%d", sr);
+        gtk_widget_set_name(small_button(act_box, "▲", "Move up (higher priority)", l->prev != NULL, G_CALLBACK(on_rule_move_up), r), bn);
+        snprintf(bn, sizeof bn, "rule_down_%d", sr);
+        gtk_widget_set_name(small_button(act_box, "▼", "Move down (lower priority)", l->next != NULL, G_CALLBACK(on_rule_move_down), r), bn);
         gtk_grid_attach(GTK_GRID(grid), act_box, 2, row, 1, 1);
 
         char sr_str[16];
@@ -492,6 +505,7 @@ void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
         return;
     }
     rules_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_widget_set_name(rules_window, "win_rules");
     g_signal_connect(rules_window, "destroy", G_CALLBACK(on_rules_window_destroy), NULL);
     gtk_window_set_title(GTK_WINDOW(rules_window), "Process Rules");
     gtk_window_set_default_size(GTK_WINDOW(rules_window), 1000, 500);
@@ -512,6 +526,8 @@ void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
     GtkWidget *del_btn = gtk_button_new_with_label("Delete Selected");
     GtkWidget *import_btn = gtk_button_new_with_label("Import");
     GtkWidget *export_btn = gtk_button_new_with_label("Export");
+    gtk_widget_set_name(add_btn, "rules_add"); gtk_widget_set_name(btn_select_all_header, "rules_select_all"); gtk_widget_set_name(del_btn, "rules_delete_selected");
+    gtk_widget_set_name(import_btn, "rules_import"); gtk_widget_set_name(export_btn, "rules_export");
     g_signal_connect(add_btn, "clicked", G_CALLBACK(on_rule_add_clicked), NULL);
     g_signal_connect(btn_select_all_header, "clicked", G_CALLBACK(on_select_all_clicked), NULL);
     g_signal_connect(del_btn, "clicked", G_CALLBACK(on_bulk_delete_clicked), NULL);
@@ -523,6 +539,7 @@ void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
 
     GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
     rules_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_name(rules_list_box, "rules_list");
     gtk_container_add(GTK_CONTAINER(scrolled), rules_list_box);
     gtk_box_pack_start(GTK_BOX(vbox), scrolled, TRUE, TRUE, 0);
 

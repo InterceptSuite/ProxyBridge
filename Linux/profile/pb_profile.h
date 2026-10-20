@@ -46,6 +46,7 @@ struct pbp_profile {
     char *name;
     bool  logging;                   // IsTrafficLoggingEnabled
     bool  dns_via_proxy;             // DnsViaProxy (Linux extension)
+    bool  log_every;                 // LogEveryConnection: the connection log is not de-duplicated
     uint32_t default_proxy_id;       // DefaultProxyId (Linux extension); 0 = first proxy
     struct pbp_proxy *proxies; size_t nproxies;
     struct pbp_rule  *rules;   size_t nrules;

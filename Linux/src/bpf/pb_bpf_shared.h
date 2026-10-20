@@ -28,6 +28,7 @@ typedef uint8_t pb_u8; typedef uint16_t pb_u16; typedef uint32_t pb_u32; typedef
 
 struct pb_cfg {
     pb_u32 enabled;         // at least one rule is loaded
+    pb_u32 paused;          // main switch off: nothing is redirected
     pb_u32 self_tgid;       // the process hosting the relay is never redirected
     pb_u32 log;
     pb_u32 dns_via_proxy;

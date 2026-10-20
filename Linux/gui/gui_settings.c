@@ -22,8 +22,10 @@ typedef struct {
     uint16_t port;
     GtkTextBuffer *buffer;
     GtkWidget *btn;
-    char result[4096];
+    int result;
 } TestJob;
+
+typedef struct { GtkTextBuffer *buffer; char *line; } TestLine;
 
 void free_proxy_data(ProxyData *p) {
     if (!p) return;
@@ -83,12 +85,24 @@ static bool port_text_valid(const char *text, int *port_out) {
     return true;
 }
 
+// the first line replaces the "Testing..." placeholder, later lines are appended
+static gboolean on_test_line(gpointer user_data) {
+    TestLine *tl = (TestLine *)user_data;
+    char *text = g_utf8_make_valid(tl->line, -1);
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(tl->buffer, &end);
+    gtk_text_buffer_insert(tl->buffer, &end, text, -1);
+    gtk_text_buffer_insert(tl->buffer, &end, "\n", 1);
+    g_free(text);
+    g_object_unref(tl->buffer);
+    g_free(tl->line);
+    g_free(tl);
+    return FALSE;
+}
+
 static gboolean on_test_done(gpointer user_data) {
     TestJob *job = (TestJob *)user_data;
-    char *text = g_utf8_make_valid(job->result, -1);
-    gtk_text_buffer_set_text(job->buffer, text, -1);
     gtk_widget_set_sensitive(job->btn, TRUE);
-    g_free(text);
     g_object_unref(job->buffer);
     g_object_unref(job->btn);
     g_free(job->host);
@@ -96,10 +110,17 @@ static gboolean on_test_done(gpointer user_data) {
     return FALSE;
 }
 
+static void test_progress(const char *line, void *user) {
+    TestJob *job = (TestJob *)user;
+    TestLine *tl = g_malloc0(sizeof *tl);
+    tl->buffer = g_object_ref(job->buffer);
+    tl->line = g_strdup(line);
+    g_idle_add(on_test_line, tl);
+}
+
 static gpointer run_test_thread(gpointer user_data) {
     TestJob *job = (TestJob *)user_data;
-    ProxyBridge_TestProxy(job->proxy_id, job->host, job->port, job->result, sizeof(job->result));
-    job->result[sizeof(job->result) - 1] = '\0';
+    job->result = ProxyBridge_TestProxyEx(job->proxy_id, job->host, job->port, test_progress, job);
     g_idle_add(on_test_done, job);
     return NULL;
 }
@@ -127,7 +148,7 @@ static void on_start_test_clicked(GtkWidget *widget, gpointer data) {
     int t_port = (int)parse_long(gtk_entry_get_text(GTK_ENTRY(info->test_port)));
     if (t_port <= 0 || t_port > 65535) t_port = 80;
 
-    gtk_text_buffer_set_text(info->output_buffer, "Testing connection... Please wait...", -1);
+    gtk_text_buffer_set_text(info->output_buffer, "", -1);
     gtk_widget_set_sensitive(info->test_btn, FALSE);
 
     TestJob *job = g_malloc0(sizeof(TestJob));
@@ -193,6 +214,7 @@ static ProxyData *proxy_edit_dialog(GtkWindow *parent, ProxyData *existing) {
                                          GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                          "Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, NULL);
     gtk_window_set_default_size(GTK_WINDOW(dialog), 420, -1);
+    gtk_widget_set_name(dialog, "dlg_proxy");
     GtkWidget *grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid), 5);
     gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
@@ -217,6 +239,9 @@ static ProxyData *proxy_edit_dialog(GtkWindow *parent, ProxyData *existing) {
     gtk_grid_attach(GTK_GRID(grid), dns_check, 1, 6, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), hint_label("On: connections to a name the application resolved are sent to the proxy by name. Off: the IP address is sent. UDP always uses the IP."), 1, 7, 1, 1);
     GtkWidget *err_label = hint_label("");
+    gtk_widget_set_name(name_entry, "px_name"); gtk_widget_set_name(type_combo, "px_type"); gtk_widget_set_name(ip_entry, "px_host");
+    gtk_widget_set_name(port_entry, "px_port"); gtk_widget_set_name(user_entry, "px_user"); gtk_widget_set_name(pass_entry, "px_pass");
+    gtk_widget_set_name(dns_check, "px_dns"); gtk_widget_set_name(err_label, "px_error");
     gtk_grid_attach(GTK_GRID(grid), err_label, 0, 8, 2, 1);
 
     gtk_combo_box_set_active(GTK_COMBO_BOX(type_combo), 1);
@@ -371,6 +396,7 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
                                          GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                          "Close", GTK_RESPONSE_CLOSE, NULL);
     gtk_window_set_default_size(GTK_WINDOW(info.dialog), 650, 560);
+    gtk_widget_set_name(info.dialog, "dlg_proxies");
 
     GtkWidget *grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid), 5);
@@ -388,6 +414,7 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
         gtk_tree_view_column_set_expand(c, i == 2);
         gtk_tree_view_append_column(GTK_TREE_VIEW(info.tree), c);
     }
+    gtk_widget_set_name(info.tree, "proxy_tree");
     g_signal_connect(info.tree, "row-activated", G_CALLBACK(on_proxy_row_activated), &info);
     GtkWidget *tree_scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_widget_set_size_request(tree_scroll, -1, 180);
@@ -399,8 +426,10 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
     GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     const char *labels[] = {"Add", "Edit", "Delete", "Set Default"};
     void (*cbs[])(GtkWidget *, gpointer) = {on_proxy_add, on_proxy_edit, on_proxy_delete, on_proxy_set_default};
+    const char *bnames[] = {"px_add", "px_edit", "px_delete", "px_default"};
     for (int i = 0; i < 4; i++) {
         GtkWidget *b = gtk_button_new_with_label(labels[i]);
+        gtk_widget_set_name(b, bnames[i]);
         g_signal_connect(b, "clicked", G_CALLBACK(cbs[i]), &info);
         gtk_box_pack_start(GTK_BOX(btn_box), b, FALSE, FALSE, 0);
     }
@@ -423,13 +452,16 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
     gtk_widget_set_size_request(info.test_port, 80, -1);
     gtk_grid_attach(GTK_GRID(grid), info.test_port, 3, 4, 1, 1);
 
+    gtk_widget_set_name(info.test_host, "px_test_host"); gtk_widget_set_name(info.test_port, "px_test_port");
     info.test_btn = gtk_button_new_with_label("Start Test");
+    gtk_widget_set_name(info.test_btn, "px_test");
     g_signal_connect(info.test_btn, "clicked", G_CALLBACK(on_start_test_clicked), &info);
     gtk_grid_attach(GTK_GRID(grid), info.test_btn, 0, 5, 4, 1);
 
     GtkWidget *out_scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_widget_set_size_request(out_scroll, -1, 150);
     GtkWidget *out_view = gtk_text_view_new();
+    gtk_widget_set_name(out_view, "px_test_output");
     gtk_text_view_set_editable(GTK_TEXT_VIEW(out_view), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(out_view), TRUE);
     info.output_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(out_view));
@@ -495,9 +527,11 @@ static char *selected_profile_name(ProfilesInfo *pi) {
 static char *ask_profile_name(GtkWindow *parent, const char *title, const char *initial) {
     GtkWidget *d = gtk_dialog_new_with_buttons(title, parent, GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                                "Cancel", GTK_RESPONSE_CANCEL, "OK", GTK_RESPONSE_ACCEPT, NULL);
+    gtk_widget_set_name(d, "dlg_profile_name");
     GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(d));
     gtk_container_set_border_width(GTK_CONTAINER(box), 10);
     GtkWidget *entry = gtk_entry_new();
+    gtk_widget_set_name(entry, "profile_name_entry");
     gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
     gtk_entry_set_text(GTK_ENTRY(entry), initial);
     gtk_box_pack_start(GTK_BOX(box), gtk_label_new("Profile name:"), FALSE, FALSE, 0);
@@ -646,6 +680,7 @@ void on_profiles_clicked(GtkWidget *widget, gpointer data) {
     pi.dialog = gtk_dialog_new_with_buttons("Profiles", GTK_WINDOW(window), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                             "Close", GTK_RESPONSE_CLOSE, NULL);
     gtk_window_set_default_size(GTK_WINDOW(pi.dialog), 560, 360);
+    gtk_widget_set_name(pi.dialog, "dlg_profiles");
     GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(pi.dialog));
     gtk_container_set_border_width(GTK_CONTAINER(box), 10);
 
@@ -658,6 +693,7 @@ void on_profiles_clicked(GtkWidget *widget, gpointer data) {
         gtk_tree_view_column_set_expand(c, i == 0);
         gtk_tree_view_append_column(GTK_TREE_VIEW(pi.tree), c);
     }
+    gtk_widget_set_name(pi.tree, "profile_tree");
     g_signal_connect(pi.tree, "row-activated", G_CALLBACK(on_profile_row_activated), &pi);
     GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_container_add(GTK_CONTAINER(scroll), pi.tree);
@@ -667,8 +703,10 @@ void on_profiles_clicked(GtkWidget *widget, gpointer data) {
     const char *labels[] = {"Switch", "New", "Duplicate", "Rename", "Delete", "Import...", "Export..."};
     void (*cbs[])(GtkWidget *, gpointer) = {on_profile_switch, on_profile_new, on_profile_duplicate, on_profile_rename, on_profile_delete,
                                             on_profile_import, on_profile_export};
+    const char *bnames[] = {"pf_switch", "pf_new", "pf_duplicate", "pf_rename", "pf_delete", "pf_import", "pf_export"};
     for (int i = 0; i < 7; i++) {
         GtkWidget *b = gtk_button_new_with_label(labels[i]);
+        gtk_widget_set_name(b, bnames[i]);
         g_signal_connect(b, "clicked", G_CALLBACK(cbs[i]), &pi);
         gtk_box_pack_start(GTK_BOX(btns), b, FALSE, FALSE, 0);
     }

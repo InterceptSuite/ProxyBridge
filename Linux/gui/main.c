@@ -11,13 +11,27 @@ guint status_context_id;
 GList *g_rules_list = NULL;
 bool g_chk_logging = true;
 bool g_chk_dns = true;
-static GtkWidget *log_item, *dns_item;
+bool g_chk_log_every = false;
+static GtkWidget *log_item, *dns_item, *every_item, *enable_item;
 
 static void on_log_traffic_toggled(GtkCheckMenuItem *item, gpointer data) {
     bool active = gtk_check_menu_item_get_active(item);
     ProxyBridge_SetTrafficLoggingEnabled(active);
     g_chk_logging = active;
     save_config();
+}
+
+static void on_log_every_toggled(GtkCheckMenuItem *item, gpointer data) {
+    bool active = gtk_check_menu_item_get_active(item);
+    ProxyBridge_SetLogEveryConnection(active);
+    g_chk_log_every = active;
+    save_config();
+}
+
+// main switch: pauses the rules for new connections; it is not part of a profile
+static void on_enable_toggled(GtkCheckMenuItem *item, gpointer data) {
+    ProxyBridge_SetEnabled(gtk_check_menu_item_get_active(item));
+    gui_log("ProxyBridge %s", gtk_check_menu_item_get_active(item) ? "enabled" : "paused: new connections are not redirected");
 }
 
 static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
@@ -31,6 +45,8 @@ static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
 void gui_sync_switches() {
     ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
     ProxyBridge_SetDnsViaProxy(g_chk_dns);
+    ProxyBridge_SetLogEveryConnection(g_chk_log_every);
+    if (every_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(every_item), g_chk_log_every);
     if (log_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_item), g_chk_logging);
     if (dns_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_item), g_chk_dns);
 }
@@ -197,6 +213,7 @@ static void on_check_update(GtkWidget *widget, gpointer data) {
 static void on_about(GtkWidget *widget, gpointer data) {
     GtkWidget *dialog = gtk_dialog_new_with_buttons("About ProxyBridge", GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT | GTK_DIALOG_MODAL, "OK", GTK_RESPONSE_OK, NULL);
     gtk_window_set_default_size(GTK_WINDOW(dialog), 400, 300);
+    gtk_widget_set_name(dialog, "dlg_about");
     GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
     gtk_container_set_border_width(GTK_CONTAINER(content_area), 20);
     char *markup = g_strdup_printf(
@@ -377,6 +394,63 @@ static GtkTextBuffer *add_text_tab(GtkWidget *notebook, const char *title, const
     return buffer;
 }
 
+// set only by the UI test: it drives the finished window instead of the user and returns when it is done
+void (*pb_gui_ready_hook)(void) = NULL;
+
+// ---- Live Connections tab ----
+static GtkListStore *flows_store;
+static GtkWidget *flows_tree, *flows_page;
+
+static char *human_bytes(uint64_t b) {
+    if (b < 1024) return g_strdup_printf("%llu B", (unsigned long long)b);
+    if (b < 1024 * 1024) return g_strdup_printf("%.1f KB", b / 1024.0);
+    if (b < 1024ULL * 1024 * 1024) return g_strdup_printf("%.1f MB", b / (1024.0 * 1024));
+    return g_strdup_printf("%.2f GB", b / (1024.0 * 1024 * 1024));
+}
+
+void gui_refresh_flows() {
+    if (!flows_store) return;
+    static ProxyBridgeFlow flows[PB_FLOWS_MAX];
+    uint32_t n = ProxyBridge_GetFlows(flows, PB_FLOWS_MAX);
+    gtk_list_store_clear(flows_store);
+    for (uint32_t i = 0; i < n; i++) {
+        const ProxyBridgeFlow *f = &flows[i];
+        const char *proxy = "?";
+        for (GList *l = g_proxies_list; l != NULL; l = l->next)
+            if (((ProxyData *)l->data)->id == f->proxy_id) proxy = ((ProxyData *)l->data)->name;
+        char *dest = f->is_ipv6 ? g_strdup_printf("[%s]:%u", f->host, f->port) : g_strdup_printf("%s:%u", f->host, f->port);
+        char *age = g_strdup_printf("%u s", f->age_ms / 1000);
+        char *sent = human_bytes(f->sent), *recv = human_bytes(f->received);
+        GtkTreeIter it;
+        gtk_list_store_append(flows_store, &it);
+        gtk_list_store_set(flows_store, &it, 0, f->name, 1, (guint)f->pid, 2, dest, 3, f->is_udp ? "UDP" : "TCP", 4, proxy, 5, age, 6, sent, 7, recv, -1);
+        g_free(dest); g_free(age); g_free(sent); g_free(recv);
+    }
+}
+
+static gboolean flows_tick(gpointer data) {
+    if (flows_page && gtk_widget_get_mapped(flows_page)) gui_refresh_flows();
+    return G_SOURCE_CONTINUE;
+}
+
+static GtkWidget *add_flows_tab(GtkWidget *notebook) {
+    flows_store = gtk_list_store_new(8, G_TYPE_STRING, G_TYPE_UINT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    flows_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(flows_store));
+    gtk_widget_set_name(flows_tree, "flows_tree");
+    g_object_unref(flows_store);
+    const char *titles[] = {"Process", "PID", "Destination", "Proto", "Proxy", "Age", "Sent", "Received"};
+    for (int i = 0; i < 8; i++) {
+        GtkTreeViewColumn *c = gtk_tree_view_column_new_with_attributes(titles[i], gtk_cell_renderer_text_new(), "text", i, NULL);
+        gtk_tree_view_column_set_resizable(c, TRUE);
+        gtk_tree_view_column_set_expand(c, i == 2);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(flows_tree), c);
+    }
+    flows_page = gtk_scrolled_window_new(NULL, NULL);
+    gtk_container_add(GTK_CONTAINER(flows_page), flows_tree);
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), flows_page, gtk_label_new("Live Connections"));
+    return flows_page;
+}
+
 int main(int argc, char *argv[]) {
     if (getuid() != 0) {
         gtk_init(&argc, &argv);
@@ -408,6 +482,8 @@ int main(int argc, char *argv[]) {
     add_separator(proxy_menu);
     log_item = add_check_item(proxy_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
     dns_item = add_check_item(proxy_menu, "DNS via Proxy", g_chk_dns, G_CALLBACK(on_dns_proxy_toggled));
+    every_item = add_check_item(proxy_menu, "Log Every Connection", g_chk_log_every, G_CALLBACK(on_log_every_toggled));
+    enable_item = add_check_item(proxy_menu, "Enable ProxyBridge", true, G_CALLBACK(on_enable_toggled));
     add_separator(proxy_menu);
     start_item = add_menu_item(proxy_menu, "Start Engine", G_CALLBACK(on_start_engine));
     stop_item = add_menu_item(proxy_menu, "Stop Engine", G_CALLBACK(on_stop_engine));
@@ -421,6 +497,8 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(vbox), notebook, TRUE, TRUE, 0);
     conn_buffer = add_text_tab(notebook, "Connections", "Search connections...", G_CALLBACK(on_search_conn_changed), G_CALLBACK(on_clear_conn_clicked), G_CALLBACK(on_pause_conn_toggled));
     log_buffer = add_text_tab(notebook, "Activity Logs", "Search logs...", G_CALLBACK(on_search_log_changed), G_CALLBACK(on_clear_log_clicked), NULL);
+    add_flows_tab(notebook);
+    g_timeout_add_seconds(1, flows_tick, NULL);
 
     GtkWidget *status_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     status_bar = gtk_statusbar_new();
@@ -436,6 +514,7 @@ int main(int argc, char *argv[]) {
     ProxyBridge_SetConnectionCallback(lib_connection_callback);
     ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
     ProxyBridge_SetDnsViaProxy(g_chk_dns);
+    ProxyBridge_SetLogEveryConnection(g_chk_log_every);
     apply_proxies_to_lib();
     apply_rules_to_lib();
 
@@ -446,7 +525,8 @@ int main(int argc, char *argv[]) {
     update_status_info();
     status_source = g_timeout_add_seconds(1, status_tick, NULL);
     engine_request(true);
-    gtk_main();
+    if (pb_gui_ready_hook) pb_gui_ready_hook();
+    else gtk_main();
 
     shutdown_engine();
     gui_logs_free();

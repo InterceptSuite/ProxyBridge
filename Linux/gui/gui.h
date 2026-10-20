@@ -42,7 +42,7 @@ typedef struct {
     GList *proxies;
     char *default_proxy;
     GList *rules;
-    bool logging, dns;      // traffic logging and DNS via proxy, stored in the profile like the Windows app does
+    bool logging, dns, log_every;   // traffic logging, DNS via proxy and "log every connection", stored in the profile like the Windows app does
     char *saved;            // what is on disk, to skip rewriting unchanged profiles
 } Profile;
 
@@ -66,6 +66,7 @@ extern char *g_default_proxy;
 extern GList *g_rules_list;
 extern bool g_chk_logging;
 extern bool g_chk_dns;
+extern bool g_chk_log_every;
 
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...);
 GtkWidget *combo_new(const char *first, ...) G_GNUC_NULL_TERMINATED;
@@ -81,7 +82,8 @@ char *extract_sub_json_str(const char *json, const char *key);
 int rules_from_json(const char *json, RuleImportCb cb, void *ud);
 char *rules_to_json(GList *rules, bool only_selected);
 
-void gui_sync_switches();   // pushes the active profile's logging/DNS switches to the engine and the menu
+void gui_sync_switches();
+void gui_refresh_flows();   // refreshes the Live Connections tab from the engine   // pushes the active profile's logging/DNS switches to the engine and the menu
 void save_config();
 void load_config();
 void config_free_all();

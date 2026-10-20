@@ -123,6 +123,13 @@ static void show_help(const char* prog)
 
     printf("  --dns-via-proxy <bool> Route DNS queries through the proxy (true/false/1/0, default true)\n\n");
 
+    printf("  --log-every-connection <bool>  Show every new connection in the connection log (--verbose 2/3) instead of one\n");
+    printf("                         line per application, destination and action (default false; a profile can set it)\n\n");
+
+    printf("  --test-proxy <host[:port]>  Check every configured proxy against that target (reach it, open a tunnel and log in,\n");
+    printf("                         load a page, time tunnels, probe UDP), print the steps and exit 0 only if all work.\n");
+    printf("                         Needs no root. Example: --proxy socks5://127.0.0.1:1080 --test-proxy example.com:80\n\n");
+
     printf("  --verbose <level>      0 none (default), 1 logs, 2 connections, 3 both\n\n");
 
     printf("  --cleanup              No-op, kept for compatibility: the eBPF programs detach automatically\n\n");
@@ -358,7 +365,7 @@ static const char* profile_default_ref = NULL;
 static char profile_default_name[64];
 
 /* Appends the proxies and rules of a .pbprofile (a path, or the name of a profile saved by the GUI). */
-static bool load_profile(const char* arg, ProxyEntry* proxies, int* num_proxies, ProxyRule* rules, int* num_rules, bool* dns)
+static bool load_profile(const char* arg, ProxyEntry* proxies, int* num_proxies, ProxyRule* rules, int* num_rules, bool* dns, bool* log_every)
 {
     char* path = pbp_resolve(pbp_config_dir(), arg);
     char err[256];
@@ -436,6 +443,7 @@ static bool load_profile(const char* arg, ProxyEntry* proxies, int* num_proxies,
         }
     }
     *dns = prof.dns_via_proxy;
+    *log_every = prof.log_every;
     pbp_free(&prof);
     return ok;
 }
@@ -468,6 +476,60 @@ static int list_profiles(void)
     return 0;
 }
 
+static void check_line(const char* line, void* user)
+{
+    (void)user;
+    printf("%s\n", line);
+    fflush(stdout);
+}
+
+/* --test-proxy host[:port]: runs the multi-step check against every configured proxy; no root needed. */
+static int run_proxy_checks(ProxyEntry* proxies, int num_proxies, const char* target)
+{
+    char host[256];
+    unsigned long port = 80;
+    snprintf(host, sizeof(host), "%s", target);
+    char* colon = strrchr(host, ':');
+    if (host[0] == '[')
+    {
+        char* close = strchr(host, ']');
+        if (!close) { fprintf(stderr, "ERROR: Invalid target '%s'\n", target); return 2; }
+        *close = '\0';
+        memmove(host, host + 1, strlen(host));
+        colon = (close[1] == ':') ? close + 1 : NULL;
+        if (colon) { char* e = NULL; port = strtoul(colon + 1, &e, 10); if (!colon[1] || *e) port = 0; }
+    }
+    else if (colon && strchr(host, ':') == colon)
+    {
+        char* e = NULL;
+        port = strtoul(colon + 1, &e, 10);
+        if (!colon[1] || *e) port = 0;
+        *colon = '\0';
+    }
+    if (!host[0] || port < 1 || port > 65535)
+    {
+        fprintf(stderr, "ERROR: Invalid target '%s'. Expected host[:port]\n", target);
+        return 2;
+    }
+    int failed = 0;
+    char err[256];
+    for (int i = 0; i < num_proxies; i++)
+    {
+        ProxyEntry* p = &proxies[i];
+        p->id = ProxyBridge_AddProxy(p->name, p->type, p->host, p->port, p->username, p->password, err, sizeof(err));
+        if (!p->id)
+        {
+            fprintf(stderr, "ERROR: Proxy %d (%s:%u): %s\n", i + 1, p->host, p->port, err);
+            return 2;
+        }
+        if (i)
+            printf("\n");
+        if (ProxyBridge_TestProxyEx(p->id, host, (uint16_t)port, check_line, NULL) != 0)
+            failed++;
+    }
+    return failed ? 1 : 0;
+}
+
 static bool is_root(void)
 {
     return getuid() == 0;
@@ -481,6 +543,8 @@ int main(int argc, char *argv[])
     int num_rules = 0;
     bool dns_via_proxy = true;
     bool dns_explicit = false;
+    bool log_every = false, log_every_explicit = false;
+    const char* test_target = NULL;
 
     for (int i = 1; i < argc; i++)
     {
@@ -518,11 +582,13 @@ int main(int argc, char *argv[])
         }
         else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc)
         {
-            bool dns = dns_via_proxy;
-            if (!load_profile(argv[++i], proxies, &num_proxies, rules, &num_rules, &dns))
+            bool dns = dns_via_proxy, every = log_every;
+            if (!load_profile(argv[++i], proxies, &num_proxies, rules, &num_rules, &dns, &every))
                 return 1;
             if (!dns_explicit)
                 dns_via_proxy = dns;
+            if (!log_every_explicit)
+                log_every = every;
         }
         else if (strcmp(argv[i], "--rule") == 0 && i + 1 < argc)
         {
@@ -549,6 +615,24 @@ int main(int argc, char *argv[])
                 return 1;
             }
         }
+        else if (strcmp(argv[i], "--log-every-connection") == 0 && i + 1 < argc)
+        {
+            char* value = argv[++i];
+            log_every_explicit = true;
+            if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0)
+                log_every = true;
+            else if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0)
+                log_every = false;
+            else
+            {
+                fprintf(stderr, "ERROR: Invalid value for --log-every-connection. Use: true, false, 1, or 0\n");
+                return 1;
+            }
+        }
+        else if (strcmp(argv[i], "--test-proxy") == 0 && i + 1 < argc)
+        {
+            test_target = argv[++i];
+        }
         else if (strcmp(argv[i], "--verbose") == 0 && i + 1 < argc)
         {
             verbose_level = atoi(argv[++i]);
@@ -573,6 +657,9 @@ int main(int argc, char *argv[])
         num_proxies = 1;
     }
 
+    if (test_target)
+        return run_proxy_checks(proxies, num_proxies, test_target);
+
     show_banner();
 
     if (!is_root())
@@ -594,6 +681,7 @@ int main(int argc, char *argv[])
 
     ProxyBridge_SetTrafficLoggingEnabled(verbose_level > 0);
     ProxyBridge_SetDnsViaProxy(dns_via_proxy);
+    ProxyBridge_SetLogEveryConnection(log_every);
 
     char err[256];
     printf("Proxies: %d\n", num_proxies);

@@ -121,7 +121,7 @@ static __always_inline int implicit_direct(const struct pb_orig *o)
 // Sets o->proxy_id for ACT_PROXY.
 static __always_inline int decide(struct pb_orig *o)
 {
-    if (!cfg.enabled || o->pid == cfg.self_tgid) return ACT_DIRECT;
+    if (!cfg.enabled || cfg.paused || o->pid == cfg.self_tgid) return ACT_DIRECT;
     if (cfg.n_exempt && bpf_map_lookup_elem(&exempt, &o->pid)) return ACT_DIRECT;
     int tap = o->port == 53 && cfg.dns_tap;
     // Loopback joins the rule walk only when some rule asks for it; the resolver stub (port 53) and the relay itself never do.

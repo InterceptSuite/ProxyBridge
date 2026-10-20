@@ -80,12 +80,42 @@ PB_API bool ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, uin
 
 /* ---- Runtime --------------------------------------------------------------------------------------------------------- */
 PB_API void ProxyBridge_SetDnsViaProxy(bool enable);
+/* Main switch (default true). False pauses every rule for new connections; existing connections are not touched. */
+PB_API void ProxyBridge_SetEnabled(bool enable);
+/* Connection log: by default a connection is reported once per (application, destination, port, protocol, action); true reports
+ * every new TCP connection and every new UDP flow (a UDP flow again after 30 s of silence). ClearConnectionLogs forgets the history. */
+PB_API void ProxyBridge_SetLogEveryConnection(bool enable);
 PB_API void ProxyBridge_SetLogCallback(LogCallback callback);
 PB_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
 PB_API void ProxyBridge_SetTrafficLoggingEnabled(bool enable);
 PB_API void ProxyBridge_ClearConnectionLogs(void);
 PB_API bool ProxyBridge_Start(void);   /* needs root (CAP_BPF/CAP_SYS_ADMIN) and a BTF kernel >= 5.11; returns false and logs why on failure */
 PB_API bool ProxyBridge_Stop(void);    /* keeps rules and proxies; Start() may be called again */
+/* Live connections: the TCP connections and UDP flows ProxyBridge is relaying through a proxy right now (direct and blocked traffic
+ * is not part of it). Newest first, at most PB_FLOWS_MAX; cheap enough to poll about once a second. UDP flows are refreshed once
+ * a second and stay listed for 30 s after their last datagram. Returns the number of entries written. */
+#define PB_FLOWS_MAX 400
+typedef struct {
+    uint64_t id;             /* stable for the life of the flow */
+    uint32_t pid;
+    uint32_t proxy_id;
+    uint32_t age_ms;         /* time since the flow started */
+    uint64_t sent;           /* payload bytes application -> proxy */
+    uint64_t received;       /* payload bytes proxy -> application */
+    uint16_t port;           /* destination port */
+    uint8_t  is_udp;
+    uint8_t  is_ipv6;
+    uint8_t  dest[16];       /* destination address (IPv4 as ::ffff:a.b.c.d) */
+    char     name[40];       /* process name */
+    char     host[64];       /* destination: the DNS name the application resolved if known, otherwise the address */
+} ProxyBridgeFlow;
+PB_API uint32_t ProxyBridge_GetFlows(ProxyBridgeFlow* out, uint32_t max);
+
+/* Multi-step check (reach the proxy, open a tunnel and log in, load a page, measure tunnel set-up, probe UDP). Streams human readable
+ * lines to the callback (called on the calling thread). Returns 0 when the proxy works, -1 when it cannot be reached, -2 when it
+ * refuses the tunnel or the login. Works without ProxyBridge_Start(). */
+typedef void (*ProxyTestLogCallback)(const char* line, void* user);
+PB_API int  ProxyBridge_TestProxyEx(uint32_t proxy_id, const char* target_host, uint16_t target_port, ProxyTestLogCallback callback, void* user);
 PB_API int  ProxyBridge_TestConnection(const char* target_host, uint16_t target_port, char* result_buffer, size_t buffer_size);
 PB_API int  ProxyBridge_TestProxy(uint32_t proxy_id, const char* target_host, uint16_t target_port, char* result_buffer, size_t buffer_size);
 

@@ -7,12 +7,17 @@
 #   OUTPUT_DIR=/some/dir ./build.sh
 #   WERROR=1 ./build.sh              warnings are errors (CI)     LTO=0 ./build.sh   no link-time optimisation
 #   AUDIT=0 ./build.sh               skip the binary audit      STATIC_LIBBPF=0 ./build.sh   use the system libbpf
+#   PB_BUILD_DIR=/dir ./build.sh     keep the intermediate files there (used by tests/coverage.sh)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/output}"
-BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/proxybridge-build.XXXXXX")"
-trap 'rm -rf "$BUILD_DIR"' EXIT
+if [ -n "${PB_BUILD_DIR:-}" ]; then      # keep the intermediate files (coverage builds need the .gcno files)
+    BUILD_DIR="$PB_BUILD_DIR"; mkdir -p "$BUILD_DIR"
+else
+    BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/proxybridge-build.XXXXXX")"
+    trap 'rm -rf "$BUILD_DIR"' EXIT
+fi
 JOBS="$(nproc 2>/dev/null || echo 2)"
 export WERROR LTO OPT
 

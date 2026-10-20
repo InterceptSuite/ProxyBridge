@@ -498,6 +498,7 @@ int pbp_parse(const char *json, size_t len, struct pbp_profile *out, char *err, 
         out->name = jtext(&root, "Name");
         out->logging = jbool(&root, "IsTrafficLoggingEnabled", true);
         out->dns_via_proxy = jbool(&root, "DnsViaProxy", true);
+        out->log_every = jbool(&root, "LogEveryConnection", false);
         long dp = jnum(&root, "DefaultProxyId", 0);
         out->default_proxy_id = dp > 0 ? (uint32_t)dp : 0;
         if (cfgs && cfgs->nk) out->proxies = calloc(cfgs->nk, sizeof *out->proxies);
@@ -591,6 +592,7 @@ char *pbp_serialize(const struct pbp_profile *p)
     sb_kv(&b, "  ", "Name", p->name ? p->name : "", ",\n");
     sb_puts(&b, p->logging ? "  \"IsTrafficLoggingEnabled\": true,\n" : "  \"IsTrafficLoggingEnabled\": false,\n");
     sb_puts(&b, p->dns_via_proxy ? "  \"DnsViaProxy\": true,\n" : "  \"DnsViaProxy\": false,\n");
+    sb_puts(&b, p->log_every ? "  \"LogEveryConnection\": true,\n" : "  \"LogEveryConnection\": false,\n");
     sb_fmt(&b, "  \"DefaultProxyId\": %u,\n", p->default_proxy_id);
 
     sb_puts(&b, "  \"ProxyConfigs\": [");
