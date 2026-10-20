@@ -50,9 +50,9 @@ export PB_DIR="$OUT"
 for t in e2e e2e_rules e2e_domains e2e_security e2e_profile e2e_parity e2e_faults e2e_udp e2e_rules_diff e2e_logging e2e_checker e2e_cli e2e_exempt e2e_lifecycle api_live e2e_openssh; do
     [ -f "$HERE/$t.sh" ] || continue
     echo "== $t"
-    timeout 900 bash "$HERE/$t.sh" 2>&1 | grep -E "FAIL|passed=" || true
+    timeout 900 bash "$HERE/$t.sh" 2>&1 | grep -E "FAIL|passed=|RESULT" || true
 done
-echo "== churn"; timeout 300 bash "$HERE/churn.sh" 1500 2>&1 | grep -E "PASS|FAIL" || true
+echo "== churn"; timeout 900 bash "$HERE/churn.sh" 1500 2>&1 | grep -E "PASS|FAIL" || true
 if [ -x "$OUT/ProxyBridgeGUI" ] && command -v broadwayd > /dev/null; then
     echo "== gui_headless"; timeout 300 bash "$HERE/gui_headless.sh" "$OUT/ProxyBridgeGUI" "$OUT" 2>&1 | grep -E "FAIL|passed=" || true
 fi
