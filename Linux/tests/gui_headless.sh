@@ -11,13 +11,14 @@ PASS=0; FAIL=0; DNSIP=10.77.0.4
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 has() { [[ "$2" == *"$3"* ]] && ok "$1" || bad "$1 (got: ${2:0:160})"; }
-cleanup() { kill $GUI_PID $FAKE $DNSP $BW $WWW 2>/dev/null; wait 2>/dev/null; ip addr del $DNSIP/32 dev lo 2>/dev/null; rm -rf "$WORK"; }
+cleanup() { kill $GUI_PID 2>/dev/null; wait $GUI_PID 2>/dev/null; kill $FAKE $DNSP $BW $WWW 2>/dev/null; wait 2>/dev/null;   # the client first: the display daemon aborts when its client vanishes
+    ip addr del $DNSIP/32 dev lo 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 ip addr add $DNSIP/32 dev lo 2>/dev/null
 python3 "$HERE/fake_proxies.py" "$PLOG" >/dev/null 2>&1 & FAKE=$!
 python3 "$HERE/fake_dns.py" $DNSIP "$DLOG" >/dev/null 2>&1 & DNSP=$!
-broadwayd :9 >/dev/null 2>&1 & BW=$!
+( ulimit -c 0; exec broadwayd :9 ) >/dev/null 2>&1 & BW=$!   # no core dump (see gui_ui.sh)
 sleep 1.5
 
 # Seeded in the format of the previous GUI versions, so the first start also exercises the migration to .pbprofile files.

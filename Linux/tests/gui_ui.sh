@@ -22,7 +22,7 @@ gcc -O1 -g -w -D_GNU_SOURCE -DPB_TEST_HOOKS ${EXTRA_CFLAGS:-} -I"$ROOT/src" -I"$
     -L"$LIBDIR" -Wl,-rpath,"$LIBDIR" -lproxybridge -lpthread $(pkg-config --libs gtk+-3.0) ${EXTRA_LDFLAGS:-} || exit 1
 
 python3 "$HERE/fake_proxies.py" "$WORK/proxy.log" > /dev/null 2>&1 & FAKE=$!
-broadwayd :8 > /dev/null 2>&1 & BW=$!
+( ulimit -c 0; exec broadwayd :8 ) > /dev/null 2>&1 & BW=$!   # no core dump: apport would pop up a crash report when the daemon aborts on a client that vanished
 sleep 1.5
 mkdir -p "$WORK/cfg"
 GDK_BACKEND=broadway BROADWAY_DISPLAY=:8 PROXYBRIDGE_CONFIG_DIR="$WORK/cfg" LD_LIBRARY_PATH="$LIBDIR" \

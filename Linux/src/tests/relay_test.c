@@ -1033,6 +1033,57 @@ static void test_throughput(void)
     }
 }
 
+// A server that streams data until the connection breaks, and one that resets every connection at once.
+static void burst_handler(int fd, const struct srvcfg *c)
+{
+    (void)c;
+    char buf[16384];
+    memset(buf, 'b', sizeof buf);
+    for (int i = 0; i < 400; i++)
+        if (send(fd, buf, sizeof buf, MSG_NOSIGNAL) < 0) break;
+}
+static void reset_handler(int fd, const struct srvcfg *c)
+{
+    (void)c;
+    struct linger lg = { 1, 0 };
+    setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof lg);      // close() sends RST
+}
+
+// splice() into a connection the peer already reset raises SIGPIPE, which would end the process that hosts the relay
+// (GitHub issue 268). Every such write must just fail and close that one connection; other connections keep working.
+static void test_sigpipe(void)
+{
+    struct srv *burst = srv_start(burst_handler, NULL), *rst = srv_start(reset_handler, NULL);
+    CHECK(burst && rst, "SIGPIPE: helper servers started");
+    if (!burst || !rst) return;
+    for (int i = 0; i < 20; i++) {                 // server -> client: the client resets while data is still being forwarded
+        uint16_t src = new_src();
+        set_tcp(src, "127.0.0.1", burst->port, PB_ACT_DIRECT, 0);
+        int fd = relay_connect(src);
+        if (fd < 0) continue;
+        char b[64];
+        recv(fd, b, sizeof b, 0);
+        struct linger lg = { 1, 0 };
+        setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof lg);
+        close(fd);
+    }
+    msleep(300);
+    CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0, 50000, false) == 50000, "SIGPIPE: relay still serves traffic after clients reset mid-transfer");
+    for (int i = 0; i < 20; i++) {                 // client -> server: the server resets, the client keeps sending
+        uint16_t src = new_src();
+        set_tcp(src, "127.0.0.1", rst->port, PB_ACT_DIRECT, 0);
+        int fd = relay_connect(src);
+        if (fd < 0) continue;
+        char buf[65536];
+        memset(buf, 'c', sizeof buf);
+        for (int k = 0; k < 8; k++) if (send(fd, buf, sizeof buf, MSG_NOSIGNAL) < 0) break;
+        close(fd);
+    }
+    msleep(300);
+    CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0, 50000, false) == 50000, "SIGPIPE: relay still serves traffic after servers reset mid-transfer");
+    CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_PROXY, 1, 50000, false) == 50000, "SIGPIPE: proxied traffic also unaffected");
+}
+
 static void test_tcp_halfclose(void)
 {
     CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_PROXY, 1, 300000, true) == 300000, "half-close via SOCKS5: all echoed then EOF");
@@ -1915,6 +1966,7 @@ int main(void)
     RUN(test_tcp_identity);
     RUN(test_tcp_bad_proxy);
     RUN(test_tcp_halfclose);
+    RUN(test_sigpipe);
     RUN(test_udp);
     RUN(test_flows);
     RUN(test_proxy_process_loop);

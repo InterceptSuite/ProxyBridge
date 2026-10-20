@@ -11,6 +11,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -236,9 +237,12 @@ static void res_unref(struct resreq *r)                       // res_mu held
     if (--r->refs == 0) { pthread_cond_destroy(&r->cv); free(r); }
 }
 
+static bool block_sigpipe(void);
+
 static void *res_thread(void *arg)
 {
     struct resreq *r = arg;
+    block_sigpipe();
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET;
@@ -668,6 +672,18 @@ static void proxy_desc(const struct pb_proxy *p, char *out, size_t n)
 
 static void *worker_main(void *arg);
 
+// splice() has no MSG_NOSIGNAL: writing into a connection the peer already reset raises SIGPIPE, whose default action ends
+// the whole process (the CLI or GUI that hosts this library). Every relay thread blocks the signal for its lifetime, so the
+// write fails with EPIPE and the connection is closed by the ordinary error path. The embedding application's own signal
+// handling is not touched. Returns false when the mask could not be set.
+static bool block_sigpipe(void)
+{
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGPIPE);
+    return pthread_sigmask(SIG_BLOCK, &set, NULL) == 0;
+}
+
 // Caller holds R.jmu.
 static void worker_spawn_locked(void)
 {
@@ -881,6 +897,7 @@ out:
 static void *worker_main(void *arg)
 {
     (void)arg;
+    block_sigpipe();
     pthread_mutex_lock(&R.jmu);
     while (!atomic_load(&R.stopping)) {
         struct job *prev = NULL, *j;
@@ -917,6 +934,7 @@ static void *worker_main(void *arg)
 static void *acceptor_main(void *arg)
 {
     (void)arg;
+    block_sigpipe();
     int64_t last_cap_log = 0;
     while (!atomic_load(&R.stopping)) {
         struct pollfd p[2] = { { .fd = R.lfd, .events = POLLIN }, { .fd = R.stopfd, .events = POLLIN } };
@@ -1193,6 +1211,7 @@ static void free_grave(struct dthread *t)
 static void *data_main(void *arg)
 {
     struct dthread *t = arg;
+    if (!block_sigpipe()) t->nosplice = true;         // the copy path sends with MSG_NOSIGNAL
     struct epoll_event evs[64];
     int64_t last_sweep = now_ms();
     int64_t sweep_every = (int64_t)R.cfg.tcp_idle_timeout_s * 250;      // idle/4, clamped to 1s..5s
@@ -1647,6 +1666,7 @@ static void udp_sweep(void)
 static void *udp_main(void *arg)
 {
     (void)arg;
+    block_sigpipe();
     struct epoll_event evs[64];
     while (!atomic_load(&R.stopping)) {
         int n = epoll_wait(R.uep, evs, 64, 1000);
