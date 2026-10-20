@@ -1,6 +1,7 @@
 #include "gui.h"
 #include "gui_events.h"
 #include <time.h>
+#include <pthread.h>
 
 #define RING_CAPACITY 4096
 #define SLOT_SIZE 512
@@ -9,6 +10,7 @@
 #define DRAIN_INTERVAL_MS 100
 #define CONN_HISTORY 2000
 #define LOG_HISTORY 1000
+#define AUTO_CLEAR_LINES 500      // a log is wiped once it grows past this, when auto-clear is on
 
 typedef struct {
     GtkTextBuffer **buffer;
@@ -21,6 +23,24 @@ typedef struct {
 static View conn_view = {&conn_buffer, NULL, CONN_HISTORY, NULL, false};
 static View log_view = {&log_buffer, NULL, LOG_HISTORY, NULL, false};
 static char *drain_buf = NULL;
+
+// Connection-log filters. The library calls the connection callback from its own threads, so the copy has its own lock.
+static pthread_mutex_t filter_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct pbp_filter *filters;
+static size_t nfilters;
+
+void gui_logs_set_filters(const struct pbp_filter *f, size_t n) {
+    struct pbp_filter *copy = calloc(n ? n : 1, sizeof *copy);
+    for (size_t i = 0; copy && i < n; i++) copy[i] = pbp_filter_dup(&f[i]);
+    pthread_mutex_lock(&filter_mu);
+    struct pbp_filter *old = filters;
+    size_t nold = nfilters;
+    filters = copy;
+    nfilters = copy ? n : 0;
+    pthread_mutex_unlock(&filter_mu);
+    for (size_t i = 0; i < nold; i++) pbp_filter_clear(&old[i]);
+    free(old);
+}
 static guint drain_source = 0;
 
 static void filter_from_line(GtkTextBuffer *buffer, int first_line, const char *lower_search) {
@@ -95,7 +115,12 @@ static void append_batch(View *v, const char *text, uint64_t dropped) {
 
     if (v->filter) filter_from_line(buffer, first_line, v->filter);
 
-    int excess = gtk_text_buffer_get_line_count(buffer) - 1 - v->max_lines;
+    int lines = gtk_text_buffer_get_line_count(buffer) - 1;
+    if (g_chk_auto_clear && lines > AUTO_CLEAR_LINES) {
+        gtk_text_buffer_set_text(buffer, "", 0);
+        return;
+    }
+    int excess = lines - v->max_lines;
     if (excess > 0) {
         GtkTextIter start, cut;
         gtk_text_buffer_get_start_iter(buffer, &start);
@@ -140,6 +165,7 @@ void gui_logs_free() {
     conn_view.filter = log_view.filter = NULL;
     g_free(drain_buf);
     drain_buf = NULL;
+    gui_logs_set_filters(NULL, 0);
 }
 
 uint64_t gui_conn_event_count() {
@@ -177,7 +203,15 @@ void gui_log(const char *format, ...) {
     lib_log_callback(msg);
 }
 
-void lib_connection_callback(const char *process_name, uint32_t pid, const char *dest_ip, uint16_t dest_port, const char *proxy_info) {
-    push_line(&conn_view, "%s (PID:%u) -> %s:%u via %s", process_name ? process_name : "", pid,
-              dest_ip ? dest_ip : "", dest_port, proxy_info ? proxy_info : "");
+void lib_connection_callback_ex(const char *process_name, uint32_t pid, const char *dest_ip, uint16_t dest_port, const char *protocol,
+                                const char *proxy_info) {
+    const char *info = proxy_info ? proxy_info : "";
+    const char *action = strcmp(info, "DIRECT") == 0 ? "Direct" : strcmp(info, "BLOCK") == 0 ? "Blocked" : "Proxy";
+    char port[8];
+    snprintf(port, sizeof port, "%u", dest_port);
+    pthread_mutex_lock(&filter_mu);
+    bool show = pbp_filters_pass(filters, nfilters, process_name ? process_name : "", dest_ip ? dest_ip : "", port, protocol ? protocol : "", action);
+    pthread_mutex_unlock(&filter_mu);
+    if (!show) return;
+    push_line(&conn_view, "%s (PID:%u) -> %s:%u via %s", process_name ? process_name : "", pid, dest_ip ? dest_ip : "", dest_port, info);
 }

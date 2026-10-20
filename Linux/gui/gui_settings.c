@@ -1,4 +1,5 @@
 #include "gui.h"
+#include "gui_boot.h"
 
 GList *g_proxies_list = NULL;
 char *g_default_proxy = NULL;
@@ -485,6 +486,11 @@ typedef struct {
 } ProfilesInfo;
 
 static void update_profile_ui() {
+    char *boot_err = NULL;
+    if (!boot_refresh(g_active_profile, &boot_err)) {              // the boot service runs the active profile
+        gui_log("could not update the boot service: %s", boot_err ? boot_err : "unknown error");
+        g_free(boot_err);
+    }
     char *title = g_strdup_printf("ProxyBridge - %s", g_active_profile);
     gtk_window_set_title(GTK_WINDOW(window), title);
     g_free(title);
@@ -716,4 +722,199 @@ void on_profiles_clicked(GtkWidget *widget, gpointer data) {
     gtk_widget_show_all(pi.dialog);
     gtk_dialog_run(GTK_DIALOG(pi.dialog));
     gtk_widget_destroy(pi.dialog);
+}
+
+
+// ---- connection log filters ----
+typedef struct {
+    GtkWidget *dialog, *tree;
+    GtkListStore *store;
+    struct pbp_filter *work;     // working copy; every change is applied at once
+    size_t n;
+} FiltersInfo;
+
+static void filters_commit(FiltersInfo *fi) {
+    struct pbp_filter *copy = calloc(fi->n ? fi->n : 1, sizeof *copy);
+    for (size_t i = 0; copy && i < fi->n; i++) copy[i] = pbp_filter_dup(&fi->work[i]);
+    gui_filters_replace(copy, copy ? fi->n : 0);
+    save_config();
+}
+
+static void filters_refresh(FiltersInfo *fi) {
+    gtk_list_store_clear(fi->store);
+    for (size_t i = 0; i < fi->n; i++) {
+        const struct pbp_filter *f = &fi->work[i];
+        GtkTreeIter it;
+        gtk_list_store_append(fi->store, &it);
+        gtk_list_store_set(fi->store, &it, 0, f->exclude ? "Exclude" : "Include", 1, f->process, 2, f->ip, 3, f->port, 4, f->protocol, 5, f->action, -1);
+    }
+}
+
+static bool port_pattern_ok(const char *p) {
+    if (!*p || strcasecmp(p, "All") == 0) return true;
+    for (; *p; p++) if (!g_ascii_isdigit(*p) && *p != '*' && *p != '?') return false;
+    return true;
+}
+
+// edits *f in place; false when cancelled
+static bool filter_edit_dialog(GtkWindow *parent, struct pbp_filter *f) {
+    GtkWidget *d = gtk_dialog_new_with_buttons("Log Filter", parent, GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                                               "Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, NULL);
+    gtk_widget_set_name(d, "dlg_filter");
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 6);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
+    gtk_container_set_border_width(GTK_CONTAINER(grid), 12);
+    gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(d))), grid, TRUE, TRUE, 0);
+    GtkWidget *mode = combo_new("Include", "Exclude", NULL), *proto = combo_new("All", "TCP", "UDP", NULL);
+    GtkWidget *action = combo_new("All", "Direct", "Proxy", "Blocked", NULL);
+    GtkWidget *proc = gtk_entry_new(), *ip = gtk_entry_new(), *port = gtk_entry_new();
+    gtk_entry_set_max_length(GTK_ENTRY(proc), 255);
+    gtk_entry_set_max_length(GTK_ENTRY(ip), 63);
+    gtk_entry_set_max_length(GTK_ENTRY(port), 15);
+    GtkWidget *err = hint_label("");
+    gtk_widget_set_name(mode, "flt_mode"); gtk_widget_set_name(proc, "flt_process"); gtk_widget_set_name(ip, "flt_ip");
+    gtk_widget_set_name(port, "flt_port"); gtk_widget_set_name(proto, "flt_proto"); gtk_widget_set_name(action, "flt_action");
+    gtk_widget_set_name(err, "flt_error");
+    grid_row(grid, 0, "Mode:", mode);
+    grid_row(grid, 1, "Process:", proc);
+    grid_row(grid, 2, "IP address:", ip);
+    grid_row(grid, 3, "Port:", port);
+    grid_row(grid, 4, "Protocol:", proto);
+    grid_row(grid, 5, "Action:", action);
+    gtk_grid_attach(GTK_GRID(grid), hint_label("Include shows only matching connections, Exclude hides them (Exclude wins). Patterns are case-insensitive: * and ? match anything, empty matches all."), 0, 6, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), err, 0, 7, 2, 1);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(mode), f->exclude ? 1 : 0);
+    gtk_entry_set_text(GTK_ENTRY(proc), f->process ? f->process : "");
+    gtk_entry_set_text(GTK_ENTRY(ip), f->ip ? f->ip : "");
+    gtk_entry_set_text(GTK_ENTRY(port), f->port ? f->port : "");
+    const char *protos[] = {"All", "TCP", "UDP"}, *actions[] = {"All", "Direct", "Proxy", "Blocked"};
+    int pi = 0, ai = 0;
+    for (int i = 0; i < 3; i++) if (f->protocol && !strcasecmp(f->protocol, protos[i])) pi = i;
+    for (int i = 0; i < 4; i++) if (f->action && !strcasecmp(f->action, actions[i])) ai = i;
+    gtk_combo_box_set_active(GTK_COMBO_BOX(proto), pi);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(action), ai);
+    gtk_widget_show_all(d);
+
+    bool saved = false;
+    while (!saved && gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_ACCEPT) {
+        const char *pt = gtk_entry_get_text(GTK_ENTRY(port));
+        if (!port_pattern_ok(pt)) { set_error_label(err, "Port must be digits, * or ? (or empty)."); continue; }
+        pbp_filter_clear(f);
+        f->exclude = gtk_combo_box_get_active(GTK_COMBO_BOX(mode)) == 1;
+        f->process = strdup(gtk_entry_get_text(GTK_ENTRY(proc)));
+        f->ip = strdup(gtk_entry_get_text(GTK_ENTRY(ip)));
+        f->port = strdup(pt);
+        int p2 = gtk_combo_box_get_active(GTK_COMBO_BOX(proto)), a2 = gtk_combo_box_get_active(GTK_COMBO_BOX(action));
+        f->protocol = strdup(protos[p2 < 0 ? 0 : p2]);
+        f->action = strdup(actions[a2 < 0 ? 0 : a2]);
+        saved = true;
+    }
+    gtk_widget_destroy(d);
+    return saved;
+}
+
+static int filters_selected(FiltersInfo *fi) {
+    GtkTreeModel *model;
+    GtkTreeIter it;
+    if (!gtk_tree_selection_get_selected(gtk_tree_view_get_selection(GTK_TREE_VIEW(fi->tree)), &model, &it)) return -1;
+    GtkTreePath *path = gtk_tree_model_get_path(model, &it);
+    int idx = gtk_tree_path_get_indices(path)[0];
+    gtk_tree_path_free(path);
+    return idx;
+}
+
+static void on_filter_add(GtkWidget *w, gpointer data) {
+    FiltersInfo *fi = data;
+    if (fi->n >= PBP_MAX_FILTERS) {
+        show_message(GTK_WINDOW(fi->dialog), GTK_MESSAGE_WARNING, "At most %d filters are supported.", PBP_MAX_FILTERS);
+        return;
+    }
+    struct pbp_filter f = { false, strdup(""), strdup(""), strdup(""), strdup("All"), strdup("All") };
+    if (filter_edit_dialog(GTK_WINDOW(fi->dialog), &f)) {
+        fi->work = realloc(fi->work, (fi->n + 1) * sizeof *fi->work);
+        fi->work[fi->n++] = f;
+        filters_commit(fi);
+        filters_refresh(fi);
+    } else {
+        pbp_filter_clear(&f);
+    }
+}
+
+static void on_filter_edit(GtkWidget *w, gpointer data) {
+    FiltersInfo *fi = data;
+    int i = filters_selected(fi);
+    if (i < 0) { show_message(GTK_WINDOW(fi->dialog), GTK_MESSAGE_WARNING, "Select a filter first."); return; }
+    struct pbp_filter f = pbp_filter_dup(&fi->work[i]);
+    if (filter_edit_dialog(GTK_WINDOW(fi->dialog), &f)) {
+        pbp_filter_clear(&fi->work[i]);
+        fi->work[i] = f;
+        filters_commit(fi);
+        filters_refresh(fi);
+    } else {
+        pbp_filter_clear(&f);
+    }
+}
+
+static void on_filter_delete(GtkWidget *w, gpointer data) {
+    FiltersInfo *fi = data;
+    int i = filters_selected(fi);
+    if (i < 0) { show_message(GTK_WINDOW(fi->dialog), GTK_MESSAGE_WARNING, "Select a filter first."); return; }
+    pbp_filter_clear(&fi->work[i]);
+    memmove(&fi->work[i], &fi->work[i + 1], (fi->n - (size_t)i - 1) * sizeof *fi->work);
+    fi->n--;
+    filters_commit(fi);
+    filters_refresh(fi);
+}
+
+static void on_filter_row_activated(GtkTreeView *tree, GtkTreePath *path, GtkTreeViewColumn *col, gpointer data) {
+    on_filter_edit(NULL, data);
+}
+
+void on_log_filters_clicked(GtkWidget *widget, gpointer data) {
+    FiltersInfo fi = {0};
+    size_t n = 0;
+    struct pbp_filter *cur = gui_filters(&n);
+    fi.work = calloc(n ? n : 1, sizeof *fi.work);
+    for (size_t i = 0; i < n; i++) fi.work[i] = pbp_filter_dup(&cur[i]);
+    fi.n = n;
+
+    fi.dialog = gtk_dialog_new_with_buttons("Connection Log Filters", GTK_WINDOW(window), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                                            "Close", GTK_RESPONSE_CLOSE, NULL);
+    gtk_widget_set_name(fi.dialog, "dlg_filters");
+    gtk_window_set_default_size(GTK_WINDOW(fi.dialog), 640, 380);
+    GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(fi.dialog));
+    gtk_container_set_border_width(GTK_CONTAINER(box), 10);
+    fi.store = gtk_list_store_new(6, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    fi.tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(fi.store));
+    gtk_widget_set_name(fi.tree, "filter_tree");
+    g_object_unref(fi.store);
+    const char *titles[] = {"Mode", "Process", "IP address", "Port", "Protocol", "Action"};
+    for (int i = 0; i < 6; i++) {
+        GtkTreeViewColumn *c = gtk_tree_view_column_new_with_attributes(titles[i], gtk_cell_renderer_text_new(), "text", i, NULL);
+        gtk_tree_view_column_set_resizable(c, TRUE);
+        gtk_tree_view_column_set_expand(c, i == 1 || i == 2);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(fi.tree), c);
+    }
+    g_signal_connect(fi.tree, "row-activated", G_CALLBACK(on_filter_row_activated), &fi);
+    GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
+    gtk_container_add(GTK_CONTAINER(scroll), fi.tree);
+    gtk_box_pack_start(GTK_BOX(box), hint_label("Filters hide or show lines of the connection log for new connections. They belong to the active profile."), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), scroll, TRUE, TRUE, 5);
+    GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    const char *labels[] = {"Add", "Edit", "Delete"}, *names[] = {"flt_add", "flt_edit", "flt_delete"};
+    void (*cbs[])(GtkWidget *, gpointer) = {on_filter_add, on_filter_edit, on_filter_delete};
+    for (int i = 0; i < 3; i++) {
+        GtkWidget *b = gtk_button_new_with_label(labels[i]);
+        gtk_widget_set_name(b, names[i]);
+        g_signal_connect(b, "clicked", G_CALLBACK(cbs[i]), &fi);
+        gtk_box_pack_start(GTK_BOX(btns), b, FALSE, FALSE, 0);
+    }
+    gtk_box_pack_start(GTK_BOX(box), btns, FALSE, FALSE, 5);
+    filters_refresh(&fi);
+    gtk_widget_show_all(fi.dialog);
+    gtk_dialog_run(GTK_DIALOG(fi.dialog));
+    gtk_widget_destroy(fi.dialog);
+    for (size_t i = 0; i < fi.n; i++) pbp_filter_clear(&fi.work[i]);
+    free(fi.work);
 }

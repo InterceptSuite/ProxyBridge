@@ -470,6 +470,16 @@ void pb_bpf_set_exempt(const uint32_t *tgids, size_t n)
     pthread_mutex_unlock(&G.lock);
 }
 
+bool pb_bpf_exe_path(uint32_t dev, uint64_t ino, char *out, size_t n)
+{
+    bool found = false;
+    pthread_mutex_lock(&G.lock);
+    struct exe_ent *e = ino ? exe_find(dev, ino) : NULL;
+    if (e && e->path) { snprintf(out, n, "%s", e->path); found = true; }
+    pthread_mutex_unlock(&G.lock);
+    return found;
+}
+
 void pb_bpf_dom_set(uint32_t rule_idx, uint32_t ip_host)
 {
     if (!G.skel) return;

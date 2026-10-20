@@ -36,6 +36,7 @@ static struct {
     uint64_t warned[16]; size_t nwarned;
     LogCallback log_cb;
     ConnectionCallback conn_cb;
+    ConnectionCallbackEx conn_cb_ex;
 } G = { .lock = PTHREAD_RWLOCK_INITIALIZER, .maint_mu = PTHREAD_MUTEX_INITIALIZER, .maint_cv = PTHREAD_COND_INITIALIZER,
        .next_rule_id = 1, .next_proxy_id = 1, .dns_via_proxy = true };
 
@@ -160,6 +161,7 @@ static void emit_connection(uint32_t pid, const char *comm, int family, const ui
         snprintf(info, sizeof info, "%s", action == PB_ACT_PROXY ? "PROXY" : action == PB_ACT_BLOCK ? "BLOCK" : "DIRECT");
     pthread_mutex_lock(&cb_lock);
     if (G.conn_cb) G.conn_cb(name, pid, dest, port, info);
+    if (G.conn_cb_ex) G.conn_cb_ex(name, pid, dest, port, proto == IPPROTO_UDP ? "UDP" : "TCP", info);
     pthread_mutex_unlock(&cb_lock);
 }
 
@@ -175,7 +177,13 @@ static void on_bpf_event(const struct pb_event *e)
 void pb_core_flow_event(const struct pb_orig *o, int action)
 {
     if (o->action != PB_ACT_DECIDE) return;
-    emit_connection(o->pid, NULL, o->family, o->addr, o->port, o->proto, action, o->proxy_id);
+    char hint[4096];
+    const char *comm = NULL;                       // the process may be gone already: the kernel's executable identity still names it
+    if (pb_bpf_exe_path(o->exe_dev, o->exe_ino, hint, sizeof hint)) {
+        const char *base = strrchr(hint, '/');
+        comm = base ? base + 1 : hint;
+    }
+    emit_connection(o->pid, comm, o->family, o->addr, o->port, o->proto, action, o->proxy_id);
 }
 
 static struct pb_proxy *find_proxy_locked(uint32_t id)
@@ -341,7 +349,7 @@ int pb_core_name_for(const struct pb_orig *o, char *out, size_t n)
 void pb_core_decide(const struct pb_orig *o, struct pb_decision *out)
 {
     char path[4096];
-    exe_path_of_pid(o->pid, path, sizeof path);
+    if (!exe_path_of_pid(o->pid, path, sizeof path) && !pb_bpf_exe_path(o->exe_dev, o->exe_ino, path, sizeof path)) path[0] = 0;
     out->action = PB_ACT_DIRECT;
     out->proxy_id = 0;
 
@@ -770,6 +778,13 @@ void ProxyBridge_SetLogCallback(LogCallback cb)
 {
     pthread_mutex_lock(&cb_lock);
     G.log_cb = cb;
+    pthread_mutex_unlock(&cb_lock);
+}
+
+void ProxyBridge_SetConnectionCallbackEx(ConnectionCallbackEx cb)
+{
+    pthread_mutex_lock(&cb_lock);
+    G.conn_cb_ex = cb;
     pthread_mutex_unlock(&cb_lock);
 }
 

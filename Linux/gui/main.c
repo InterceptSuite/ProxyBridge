@@ -1,4 +1,5 @@
 #include "gui.h"
+#include "gui_boot.h"
 #include <glib-unix.h>
 #include <signal.h>
 
@@ -12,7 +13,14 @@ GList *g_rules_list = NULL;
 bool g_chk_logging = true;
 bool g_chk_dns = true;
 bool g_chk_log_every = false;
-static GtkWidget *log_item, *dns_item, *every_item, *enable_item;
+bool g_chk_auto_clear = true;
+int g_zoom = 100;
+bool g_chk_updates = true;
+static GtkWidget *log_item, *dns_item, *every_item, *enable_item, *clear_item, *boot_item, *update_item;
+static GtkCssProvider *zoom_provider;
+static char zoom_css[96];
+
+static void sync_update_item();
 
 static void on_log_traffic_toggled(GtkCheckMenuItem *item, gpointer data) {
     bool active = gtk_check_menu_item_get_active(item);
@@ -41,11 +49,66 @@ static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
     save_config();
 }
 
+static void on_auto_clear_toggled(GtkCheckMenuItem *item, gpointer data) {
+    g_chk_auto_clear = gtk_check_menu_item_get_active(item);
+    save_config();
+}
+
+static bool boot_syncing;
+
+static void on_boot_toggled(GtkCheckMenuItem *item, gpointer data) {
+    if (boot_syncing) return;
+    bool want = gtk_check_menu_item_get_active(item);
+    char *err = NULL;
+    if (!boot_set(want, g_active_profile, &err)) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not %s starting at boot: %s", want ? "enable" : "disable", err ? err : "unknown error");
+        g_free(err);
+        boot_syncing = true;
+        gtk_check_menu_item_set_active(item, boot_is_enabled());
+        boot_syncing = false;
+        return;
+    }
+    gui_log("ProxyBridge %s at boot (service proxybridge.service, profile '%s')", want ? "will start" : "will no longer start", g_active_profile);
+}
+
+static void on_update_startup_toggled(GtkCheckMenuItem *item, gpointer data) {
+    g_chk_updates = gtk_check_menu_item_get_active(item);
+    save_config();
+}
+
+static void sync_update_item() {
+    if (update_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(update_item), g_chk_updates);
+}
+
+// ---- font zoom ----
+const char *gui_zoom_css() { return zoom_css; }
+
+static void apply_zoom_css() {
+    snprintf(zoom_css, sizeof zoom_css, "window, dialog, messagedialog { font-size: %d%%; }", g_zoom);
+    if (!zoom_provider) {
+        zoom_provider = gtk_css_provider_new();
+        gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(zoom_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+    }
+    gtk_css_provider_load_from_data(zoom_provider, zoom_css, -1, NULL);
+}
+
+void gui_set_zoom(int percent) {
+    g_zoom = percent < PBP_ZOOM_MIN ? PBP_ZOOM_MIN : percent > PBP_ZOOM_MAX ? PBP_ZOOM_MAX : percent;
+    apply_zoom_css();
+    save_config();
+}
+
+static void on_zoom_in(GtkWidget *w, gpointer d) { gui_set_zoom(g_zoom + 10); }
+static void on_zoom_out(GtkWidget *w, gpointer d) { gui_set_zoom(g_zoom - 10); }
+static void on_zoom_reset(GtkWidget *w, gpointer d) { gui_set_zoom(100); }
+
 // the switches belong to the profile: after a profile change, show and apply the new profile's values
 void gui_sync_switches() {
     ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
     ProxyBridge_SetDnsViaProxy(g_chk_dns);
     ProxyBridge_SetLogEveryConnection(g_chk_log_every);
+    apply_zoom_css();
+    if (clear_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(clear_item), g_chk_auto_clear);
     if (every_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(every_item), g_chk_log_every);
     if (log_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_item), g_chk_logging);
     if (dns_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_item), g_chk_dns);
@@ -131,91 +194,130 @@ static const char *update_feed_url() {
     return UPD_FEED_URL;
 }
 
-static void on_check_update(GtkWidget *widget, gpointer data) {
+typedef struct {
+    char *version, *download, *notes;
+    char *problem;                 // why no answer could be had
+    GtkMessageType problem_type;
+    bool newer;
+    bool startup;                  // started by the program, not by the user: stay quiet unless there is news
+} UpdateInfo;
+
+static void update_free(UpdateInfo *u) {
+    g_free(u->version); g_free(u->download); g_free(u->notes); g_free(u->problem);
+    g_free(u);
+}
+
+// Asks the feed (curl) and compares versions. Runs on any thread.
+static UpdateInfo *update_lookup(void) {
+    UpdateInfo *u = g_malloc0(sizeof *u);
     char *argv[] = {
-        (char *)"curl", (char *)"-sS",
+        (char *)"curl", (char *)"-sS", (char *)"-m", (char *)"15",
         (char *)"-H", (char *)"User-Agent: ProxyBridge-UpdateChecker",
         (char *)update_feed_url(),
         NULL
     };
-    char *json = NULL;
-    char *curl_err = NULL;
+    char *json = NULL, *curl_err = NULL;
     GError *spawn_err = NULL;
     int exit_code = 0;
-
-    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
-                      &json, &curl_err, &exit_code, &spawn_err)) {
-        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed: %s",
-                     spawn_err ? spawn_err->message : "unknown");
+    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, &json, &curl_err, &exit_code, &spawn_err)) {
+        u->problem = g_strdup_printf("Update check failed: %s", spawn_err ? spawn_err->message : "unknown");
+        u->problem_type = GTK_MESSAGE_ERROR;
         if (spawn_err) g_error_free(spawn_err);
         g_free(curl_err);
-        return;
+        return u;
     }
     if (exit_code != 0 || !json || json[0] == '\0') {
-        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed (curl exit %d).", exit_code);
-        g_free(json);
-        g_free(curl_err);
-        return;
+        u->problem = g_strdup_printf("Update check failed (curl exit %d).", exit_code);
+        u->problem_type = GTK_MESSAGE_ERROR;
+        g_free(json); g_free(curl_err);
+        return u;
     }
-
     char *linux_obj = extract_platform_block(json, "linux");
     g_free(json);
     g_free(curl_err);
     if (!linux_obj) {
-        show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse linux update info.");
-        return;
+        u->problem = g_strdup("Could not parse linux update info.");
+        u->problem_type = GTK_MESSAGE_WARNING;
+        return u;
     }
-
-    char *version = extract_sub_json_str(linux_obj, "version");
-    char *download = extract_sub_json_str(linux_obj, "download");
-    char *notes = extract_sub_json_str(linux_obj, "release_notes");
+    u->version = extract_sub_json_str(linux_obj, "version");
+    u->download = extract_sub_json_str(linux_obj, "download");
+    u->notes = extract_sub_json_str(linux_obj, "release_notes");
     g_free(linux_obj);
-
-    if (!version || !version[0]) {
-        show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse version info.");
-        g_free(version);
-        g_free(download);
-        g_free(notes);
-        return;
+    if (!u->version || !u->version[0]) {
+        u->problem = g_strdup("Could not parse version info.");
+        u->problem_type = GTK_MESSAGE_WARNING;
+        return u;
     }
-
     int cur[3], lat[3];
     parse_ver(PROXYBRIDGE_VERSION, cur);
-    parse_ver(version, lat);
-    if (ver_cmp(lat, cur) <= 0) {
-        show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO, "You are using the latest version (%s).", PROXYBRIDGE_VERSION);
-        g_free(version);
-        g_free(download);
-        g_free(notes);
+    parse_ver(u->version, lat);
+    u->newer = ver_cmp(lat, cur) > 0;
+    return u;
+}
+
+// Main thread. A user-started check reports everything; a start-up check only speaks up when a newer version exists.
+static void update_show(UpdateInfo *u) {
+    if (u->problem) {
+        if (!u->startup) show_message(GTK_WINDOW(window), u->problem_type, "%s", u->problem);
         return;
     }
-
+    if (!u->newer) {
+        if (!u->startup) show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO, "You are using the latest version (%s).", PROXYBRIDGE_VERSION);
+        return;
+    }
     GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT,
         GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
         "Version %s is available (current %s).\nOpen the download page in your browser?",
-        version, PROXYBRIDGE_VERSION);
+        u->version, PROXYBRIDGE_VERSION);
     gtk_dialog_add_button(GTK_DIALOG(dialog), "Open in Browser", GTK_RESPONSE_ACCEPT);
     gtk_dialog_add_button(GTK_DIALOG(dialog), "Close", GTK_RESPONSE_CANCEL);
+    if (u->startup) gtk_dialog_add_button(GTK_DIALOG(dialog), "Don't Check at Startup", GTK_RESPONSE_REJECT);
     int resp = gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);
-    if (resp == GTK_RESPONSE_ACCEPT) {
+    if (resp == GTK_RESPONSE_REJECT) {
+        g_chk_updates = false;
+        save_config();
+        sync_update_item();
+    } else if (resp == GTK_RESPONSE_ACCEPT) {
         const char *url = NULL;
-        if (https_url_ok(notes)) url = notes;
-        else if (https_url_ok(download)) url = download;
+        if (https_url_ok(u->notes)) url = u->notes;
+        else if (https_url_ok(u->download)) url = u->download;
         if (!url) {
             show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "No safe https url in update feed.");
         } else {
             GError *uri_err = NULL;
             if (!gtk_show_uri_on_window(GTK_WINDOW(window), url, GDK_CURRENT_TIME, &uri_err)) {
-                show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not open browser: %s",
-                             uri_err ? uri_err->message : "unknown");
+                show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not open browser: %s", uri_err ? uri_err->message : "unknown");
                 if (uri_err) g_error_free(uri_err);
             }
         }
     }
-    g_free(version);
-    g_free(download);
-    g_free(notes);
+}
+
+static void on_check_update(GtkWidget *widget, gpointer data) {
+    UpdateInfo *u = update_lookup();
+    update_show(u);
+    update_free(u);
+}
+
+static gboolean update_show_idle(gpointer data) {
+    UpdateInfo *u = data;
+    update_show(u);
+    update_free(u);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer update_startup_thread(gpointer data) {
+    UpdateInfo *u = update_lookup();
+    u->startup = true;
+    g_idle_add(update_show_idle, u);
+    return NULL;
+}
+
+// Looks for a new version without blocking the window (the answer arrives on the main loop).
+void gui_check_updates_on_startup() {
+    g_thread_unref(g_thread_new("update_check", update_startup_thread, NULL));
 }
 
 static void on_about(GtkWidget *widget, gpointer data) {
@@ -497,14 +599,28 @@ int main(int argc, char *argv[]) {
     log_item = add_check_item(proxy_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
     dns_item = add_check_item(proxy_menu, "DNS via Proxy", g_chk_dns, G_CALLBACK(on_dns_proxy_toggled));
     every_item = add_check_item(proxy_menu, "Log Every Connection", g_chk_log_every, G_CALLBACK(on_log_every_toggled));
+    clear_item = add_check_item(proxy_menu, "Auto-clear Logs", g_chk_auto_clear, G_CALLBACK(on_auto_clear_toggled));
+    add_menu_item(proxy_menu, "Log Filters...", G_CALLBACK(on_log_filters_clicked));
     enable_item = add_check_item(proxy_menu, "Enable ProxyBridge", true, G_CALLBACK(on_enable_toggled));
     add_separator(proxy_menu);
+    boot_item = add_check_item(proxy_menu, "Start at Boot (systemd service)", boot_is_enabled(), G_CALLBACK(on_boot_toggled));
     start_item = add_menu_item(proxy_menu, "Start Engine", G_CALLBACK(on_start_engine));
     stop_item = add_menu_item(proxy_menu, "Stop Engine", G_CALLBACK(on_stop_engine));
     add_menu_item(proxy_menu, "Exit", G_CALLBACK(on_window_destroy));
+    GtkWidget *view_menu = add_submenu(menubar, "View");
+    GtkAccelGroup *accel = gtk_accel_group_new();
+    gtk_window_add_accel_group(GTK_WINDOW(window), accel);
+    GtkWidget *zin = add_menu_item(view_menu, "Zoom In", G_CALLBACK(on_zoom_in));
+    GtkWidget *zout = add_menu_item(view_menu, "Zoom Out", G_CALLBACK(on_zoom_out));
+    GtkWidget *zreset = add_menu_item(view_menu, "Reset Zoom", G_CALLBACK(on_zoom_reset));
+    gtk_widget_add_accelerator(zin, "activate", accel, GDK_KEY_plus, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
+    gtk_widget_add_accelerator(zin, "activate", accel, GDK_KEY_equal, GDK_CONTROL_MASK, GTK_ACCEL_MASK);
+    gtk_widget_add_accelerator(zout, "activate", accel, GDK_KEY_minus, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
+    gtk_widget_add_accelerator(zreset, "activate", accel, GDK_KEY_0, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
     GtkWidget *about_menu = add_submenu(menubar, "About");
     add_menu_item(about_menu, "About", G_CALLBACK(on_about));
     add_menu_item(about_menu, "Check for Updates", G_CALLBACK(on_check_update));
+    update_item = add_check_item(about_menu, "Check for Updates on Startup", g_chk_updates, G_CALLBACK(on_update_startup_toggled));
     gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
 
     GtkWidget *notebook = gtk_notebook_new();
@@ -525,7 +641,7 @@ int main(int argc, char *argv[]) {
     gui_logs_init();
 
     ProxyBridge_SetLogCallback(lib_log_callback);
-    ProxyBridge_SetConnectionCallback(lib_connection_callback);
+    ProxyBridge_SetConnectionCallbackEx(lib_connection_callback_ex);
     ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
     ProxyBridge_SetDnsViaProxy(g_chk_dns);
     ProxyBridge_SetLogEveryConnection(g_chk_log_every);
@@ -539,6 +655,8 @@ int main(int argc, char *argv[]) {
     update_status_info();
     status_source = g_timeout_add_seconds(1, status_tick, NULL);
     engine_request(true);
+    apply_zoom_css();
+    if (g_chk_updates && !pb_gui_ready_hook) gui_check_updates_on_startup();
     if (pb_gui_ready_hook) pb_gui_ready_hook();
     else gtk_main();
 

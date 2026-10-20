@@ -41,6 +41,10 @@ void pb_bpf_learn(const struct pb_orig *o, const char *exe_path, const struct pb
 void pb_bpf_set_exempt(const uint32_t *tgids, size_t n);
 
 // (rule, address) pairs whose DNS name matches a domain rule.
+// Path of an executable the kernel identified by (dev, ino) that this process has seen before; false if it has not.
+// Lets a decision be made for a process that exited before the relay got to it.
+bool pb_bpf_exe_path(uint32_t dev, uint64_t ino, char *out, size_t n);
+
 void pb_bpf_dom_set(uint32_t rule_idx, uint32_t ip_host);
 void pb_bpf_dom_clear(void);
 

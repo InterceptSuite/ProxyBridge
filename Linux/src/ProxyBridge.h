@@ -87,6 +87,9 @@ PB_API void ProxyBridge_SetEnabled(bool enable);
 PB_API void ProxyBridge_SetLogEveryConnection(bool enable);
 PB_API void ProxyBridge_SetLogCallback(LogCallback callback);
 PB_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
+/* Same events with the protocol ("TCP" or "UDP") as well; both callbacks may be set. */
+typedef void (*ConnectionCallbackEx)(const char* process_name, uint32_t pid, const char* dest_ip, uint16_t dest_port, const char* protocol, const char* proxy_info);
+PB_API void ProxyBridge_SetConnectionCallbackEx(ConnectionCallbackEx callback);
 PB_API void ProxyBridge_SetTrafficLoggingEnabled(bool enable);
 PB_API void ProxyBridge_ClearConnectionLogs(void);
 PB_API bool ProxyBridge_Start(void);   /* needs root (CAP_BPF/CAP_SYS_ADMIN) and a BTF kernel >= 5.11; returns false and logs why on failure */

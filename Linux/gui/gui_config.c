@@ -40,7 +40,26 @@ static void free_profile(Profile *p) {
     g_free(p->default_proxy);
     g_free(p->name);
     free(p->saved);
+    for (size_t i = 0; i < p->nfilters; i++) pbp_filter_clear(&p->filters[i]);
+    free(p->filters);
     g_free(p);
+}
+
+struct pbp_filter pbp_filter_dup(const struct pbp_filter *f) {
+    struct pbp_filter d = { f->exclude, strdup(f->process ? f->process : ""), strdup(f->ip ? f->ip : ""), strdup(f->port ? f->port : ""),
+                            strdup(f->protocol ? f->protocol : "All"), strdup(f->action ? f->action : "All") };
+    return d;
+}
+
+void pbp_filter_clear(struct pbp_filter *f) {
+    free(f->process); free(f->ip); free(f->port); free(f->protocol); free(f->action);
+    memset(f, 0, sizeof *f);
+}
+
+static struct pbp_filter *filters_dup(const struct pbp_filter *src, size_t n) {
+    struct pbp_filter *d = calloc(n ? n : 1, sizeof *d);
+    for (size_t i = 0; d && i < n; i++) d[i] = pbp_filter_dup(&src[i]);
+    return d;
 }
 
 Profile *profile_find(const char *name) {
@@ -60,6 +79,8 @@ static void profile_sync_active() {
     p->logging = g_chk_logging;
     p->dns = g_chk_dns;
     p->log_every = g_chk_log_every;
+    p->auto_clear = g_chk_auto_clear;
+    p->zoom = g_zoom;
 }
 
 static void load_globals_from(Profile *p) {
@@ -69,6 +90,9 @@ static void load_globals_from(Profile *p) {
     g_chk_logging = p->logging;
     g_chk_dns = p->dns;
     g_chk_log_every = p->log_every;
+    g_chk_auto_clear = p->auto_clear;
+    g_zoom = p->zoom;
+    gui_logs_set_filters(p->filters, p->nfilters);
 }
 
 void config_free_all() {
@@ -85,6 +109,8 @@ static Profile *profile_new_empty(const char *name) {
     Profile *p = g_malloc0(sizeof(Profile));
     p->name = g_strdup(name);
     p->logging = p->dns = true;
+    p->auto_clear = true;
+    p->zoom = 100;
     g_profiles = g_list_append(g_profiles, p);
     return p;
 }
@@ -127,6 +153,10 @@ Profile *profile_create(const char *name, bool copy_active) {
         p->logging = src->logging;
         p->dns = src->dns;
         p->log_every = src->log_every;
+        p->auto_clear = src->auto_clear;
+        p->zoom = src->zoom;
+        p->filters = filters_dup(src->filters, src->nfilters);
+        p->nfilters = src->nfilters;
     }
     return p;
 }
@@ -186,6 +216,10 @@ static void profile_to_pbp(const Profile *prof, struct pbp_profile *out) {
     out->logging = prof->logging;
     out->dns_via_proxy = prof->dns;
     out->log_every = prof->log_every;
+    out->auto_clear = prof->auto_clear;
+    out->font_zoom = prof->zoom;
+    out->filters = prof->filters;
+    out->nfilters = prof->nfilters;
     out->nproxies = g_list_length(prof->proxies);
     out->nrules = g_list_length(prof->rules);
     out->proxies = g_new0(struct pbp_proxy, out->nproxies + 1);
@@ -262,6 +296,12 @@ static void fill_profile_from_pbp(Profile *p, const struct pbp_profile *src) {
     p->logging = src->logging;
     p->dns = src->dns_via_proxy;
     p->log_every = src->log_every;
+    p->auto_clear = src->auto_clear;
+    p->zoom = src->font_zoom >= PBP_ZOOM_MIN && src->font_zoom <= PBP_ZOOM_MAX ? src->font_zoom : 100;
+    for (size_t i = 0; i < p->nfilters; i++) pbp_filter_clear(&p->filters[i]);
+    free(p->filters);
+    p->filters = filters_dup(src->filters, src->nfilters);
+    p->nfilters = src->nfilters;
 }
 
 bool profile_export(const Profile *prof, const char *path, char *err, size_t errlen) {
@@ -350,7 +390,7 @@ void save_config() {
         g_free(path);
     }
     char *settings = g_strdup_printf("%s/settings.json", dir);
-    if (pbp_settings_save(settings, g_active_profile, err, sizeof err) != 0)
+    if (pbp_settings_save(settings, g_active_profile, g_chk_updates, err, sizeof err) != 0)
         fprintf(stderr, "failed to save settings: %s\n", err);
     g_free(settings);
 out:
@@ -566,7 +606,7 @@ void load_config() {
 
     load_profile_files(dir);
     char *settings = g_strdup_printf("%s/settings.json", dir);
-    pbp_settings_load(settings, &settings_active);
+    pbp_settings_load(settings, &settings_active, &g_chk_updates);
     g_free(settings);
     if (!g_profiles) {
         migrate = load_legacy_ini(dir, &legacy_active);
@@ -588,4 +628,20 @@ void load_config() {
         g_free(to);
     }
     g_free(dir);
+}
+
+struct pbp_filter *gui_filters(size_t *n) {
+    Profile *p = profile_find(g_active_profile);
+    if (n) *n = p ? p->nfilters : 0;
+    return p ? p->filters : NULL;
+}
+
+void gui_filters_replace(struct pbp_filter *filters, size_t n) {
+    Profile *p = profile_find(g_active_profile);
+    if (!p) return;
+    for (size_t i = 0; i < p->nfilters; i++) pbp_filter_clear(&p->filters[i]);
+    free(p->filters);
+    p->filters = filters;
+    p->nfilters = n;
+    gui_logs_set_filters(p->filters, p->nfilters);
 }
