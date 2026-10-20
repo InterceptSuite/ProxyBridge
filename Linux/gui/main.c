@@ -77,6 +77,37 @@ static gboolean on_focus_out(GtkWidget *w, GdkEvent *ev, gpointer menubar) {
     return FALSE;
 }
 
+// ---- Profile > Switch Profile: one radio item per profile, the active one is checked ----
+static GtkWidget *switch_menu;
+static guint switch_rebuild_source;
+
+static void free_closure_name(gpointer data, GClosure *closure) { g_free(data); }
+
+static gboolean rebuild_switch_menu(gpointer unused) {
+    switch_rebuild_source = 0;
+    if (!switch_menu) return G_SOURCE_REMOVE;
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(switch_menu));
+    for (GList *k = kids; k; k = k->next) gtk_widget_destroy(GTK_WIDGET(k->data));
+    g_list_free(kids);
+    GSList *group = NULL;
+    for (GList *l = g_profiles; l; l = l->next) {
+        Profile *p = l->data;
+        GtkWidget *item = gtk_radio_menu_item_new_with_label(group, p->name);
+        group = gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(item));
+        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), strcmp(p->name, g_active_profile) == 0);   // before the handler exists
+        g_signal_connect_data(item, "toggled", G_CALLBACK(on_profile_switch_item), g_strdup(p->name), free_closure_name, 0);
+        gtk_menu_shell_append(GTK_MENU_SHELL(switch_menu), item);
+    }
+    gtk_widget_show_all(switch_menu);
+    return G_SOURCE_REMOVE;
+}
+
+// called after any change of the profile list or of the active profile. Deferred: it is usually called from the handler of a
+// menu item that the rebuild would destroy.
+void gui_refresh_profile_menu(void) {
+    if (!switch_rebuild_source) switch_rebuild_source = g_idle_add(rebuild_switch_menu, NULL);
+}
+
 static void on_auto_clear_toggled(GtkCheckMenuItem *item, gpointer data) {
     g_chk_auto_clear = gtk_check_menu_item_get_active(item);
     save_config();
@@ -570,7 +601,6 @@ int main(int argc, char *argv[]) {
     GtkWidget *proxy_menu = add_submenu(menubar, "Proxy");
     add_menu_item(proxy_menu, "Proxy Settings...", G_CALLBACK(on_proxy_configure));
     add_menu_item(proxy_menu, "Proxy Rules...", G_CALLBACK(on_proxy_rules_clicked));
-    add_menu_item(proxy_menu, "Profiles...", G_CALLBACK(on_profiles_clicked));
     add_separator(proxy_menu);
     log_item = add_check_item(proxy_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
     every_item = add_check_item(proxy_menu, "Log Every Connection", g_chk_log_every, G_CALLBACK(on_log_every_toggled));
@@ -582,6 +612,21 @@ int main(int argc, char *argv[]) {
     start_item = add_menu_item(proxy_menu, "Start Engine", G_CALLBACK(on_start_engine));
     stop_item = add_menu_item(proxy_menu, "Stop Engine", G_CALLBACK(on_stop_engine));
     add_menu_item(proxy_menu, "Exit", G_CALLBACK(on_window_destroy));
+    // like the Windows app: Profile is a menu of its own and every item acts at once on the active profile
+    GtkWidget *profile_menu = add_submenu(menubar, "Profile");
+    add_menu_item(profile_menu, "New Profile...", G_CALLBACK(on_profile_new));
+    add_menu_item(profile_menu, "Duplicate Profile...", G_CALLBACK(on_profile_duplicate));
+    add_menu_item(profile_menu, "Rename Profile...", G_CALLBACK(on_profile_rename));
+    add_menu_item(profile_menu, "Delete Profile...", G_CALLBACK(on_profile_delete));
+    add_separator(profile_menu);
+    add_menu_item(profile_menu, "Import Profile...", G_CALLBACK(on_profile_import));
+    add_menu_item(profile_menu, "Export Profile...", G_CALLBACK(on_profile_export));
+    add_separator(profile_menu);
+    GtkWidget *switch_item = gtk_menu_item_new_with_label("Switch Profile");
+    switch_menu = gtk_menu_new();
+    gtk_menu_item_set_submenu(GTK_MENU_ITEM(switch_item), switch_menu);
+    gtk_menu_shell_append(GTK_MENU_SHELL(profile_menu), switch_item);
+    rebuild_switch_menu(NULL);
     GtkWidget *view_menu = add_submenu(menubar, "View");
     GtkAccelGroup *accel = gtk_accel_group_new();
     gtk_window_add_accel_group(GTK_WINDOW(window), accel);

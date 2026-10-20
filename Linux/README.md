@@ -102,7 +102,7 @@ The GTK3-based GUI provides:
 The CLI takes the same options as the Windows CLI. Everything else (proxies, rules, DNS via proxy, connection-log setting) lives in a **profile**, which you build in the GUI (or write by hand) and run with `--profile`.
 
 ```
-sudo ProxyBridge --profile work                          # a profile saved by the GUI (Proxy > Profiles)
+sudo ProxyBridge --profile work                          # a profile saved by the GUI (the Profile menu)
 sudo ProxyBridge --profile ./myconfig.pbprofile --verbose 2   # any .pbprofile, e.g. exported from the Windows or macOS app
 ProxyBridge --update                                     # look for a newer version (no root)
 ```
@@ -143,7 +143,7 @@ Rules are evaluated **in order and the first match wins** (put specific rules be
 
 ### Profiles
 
-A profile is a named set of proxies and rules. The GUI keeps any number of them (Proxy menu, **Profiles**: Switch, New, Duplicate, Rename, Delete, **Import**, **Export**), and the CLI runs one with `--profile`.
+A profile is a named set of proxies and rules. The GUI keeps any number of them, in a **Profile** menu of its own like the Windows app (New, Duplicate, Rename, Delete, **Import**, **Export**, and **Switch Profile** with the active profile checked); every item works on the active profile at once, with no list dialog, and the CLI runs one with `--profile`.
 Profiles are stored in the **same `.pbprofile` JSON format as the Windows and macOS apps**, so a file exported on one platform imports on the others:
 
 ```bash

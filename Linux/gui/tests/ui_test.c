@@ -201,29 +201,7 @@ static int model_rows(const char *tree_name) {
     return t ? gtk_tree_model_iter_n_children(gtk_tree_view_get_model(GTK_TREE_VIEW(t)), NULL) : -1;
 }
 
-static bool select_by_first_column(const char *tree_name, const char *text) {
-    GtkWidget *t = find_named(tree_name);
-    if (!t) return false;
-    GtkTreeModel *m = gtk_tree_view_get_model(GTK_TREE_VIEW(t));
-    GtkTreeIter it;
-    bool ok = gtk_tree_model_get_iter_first(m, &it);
-    while (ok) {
-        char *v = NULL;
-        gtk_tree_model_get(m, &it, 0, &v, -1);
-        bool hit = v && strcmp(v, text) == 0;
-        g_free(v);
-        if (hit) { gtk_tree_selection_select_iter(gtk_tree_view_get_selection(GTK_TREE_VIEW(t)), &it); return true; }
-        ok = gtk_tree_model_iter_next(m, &it);
-    }
-    return false;
-}
 
-static void show_profiles(const char *when) {
-    printf("    profiles %s:", when);
-    for (GList *l = g_profiles; l; l = l->next) printf(" [%s]", ((Profile *)l->data)->name);
-    printf("  active=%s\n", g_active_profile);
-    fflush(stdout);
-}
 
 // ---- the profile file on disk ---------------------------------------------------------------------------------------------
 static bool load_disk(const char *profile, struct pbp_profile *p) {
@@ -608,114 +586,164 @@ static void submit_refused(GtkWidget *d, gpointer arg) {
     arm("msg", msg_then_arm_cancel, NULL, GTK_RESPONSE_OK);
 }
 
-static void profiles_body(GtkWidget *dlg, gpointer arg) {
-    (void)arg;
-    STEP("profiles dialog open");
-    CHECK(model_rows("profile_tree") == 1);
+// Profile > Switch Profile > <name>. The submenu is rebuilt in an idle callback after every change, hence the pumps.
+static void switch_to_profile(const char *name) {
+    pump(150);
+    GtkWidget *sw = menu_item("Switch Profile");
+    CHECK(sw != NULL);
+    GtkWidget *sub = sw ? gtk_menu_item_get_submenu(GTK_MENU_ITEM(sw)) : NULL;
+    GtkWidget *hit = NULL;
+    GList *kids = sub ? gtk_container_get_children(GTK_CONTAINER(sub)) : NULL;
+    for (GList *k = kids; k; k = k->next)
+        if (strcmp(gtk_menu_item_get_label(GTK_MENU_ITEM(k->data)), name) == 0) hit = k->data;
+    g_list_free(kids);
+    CHECK(hit != NULL);
+    if (hit) gtk_menu_item_activate(GTK_MENU_ITEM(hit));
+    pump(150);
+}
+
+// the names in Profile > Switch Profile, in order, and which one is checked
+static char *switch_menu_text(void) {
+    pump(150);
+    GtkWidget *sw = menu_item("Switch Profile");
+    GtkWidget *sub = sw ? gtk_menu_item_get_submenu(GTK_MENU_ITEM(sw)) : NULL;
+    GString *out = g_string_new("");
+    GList *kids = sub ? gtk_container_get_children(GTK_CONTAINER(sub)) : NULL;
+    for (GList *k = kids; k; k = k->next)
+        g_string_append_printf(out, "%s%s;", gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(k->data)) ? "*" : "", gtk_menu_item_get_label(GTK_MENU_ITEM(k->data)));
+    g_list_free(kids);
+    return g_string_free(out, FALSE);
+}
+
+static void profiles_scenario(void) {
+    STEP("profile menu");
+    // like the Windows app: Profile is a menu of its own, and there is no list dialog any more
+    CHECK(menu_item("New Profile...") && menu_item("Duplicate Profile...") && menu_item("Rename Profile...") && menu_item("Delete Profile...") &&
+          menu_item("Import Profile...") && menu_item("Export Profile...") && menu_item("Switch Profile"));
+    CHECK(menu_item("Profiles...") == NULL);
+    char *shown = switch_menu_text();
+    CHECK_STR(shown, "*Default;");
+    g_free(shown);
 
     arm("dlg_profile_name", fill_name, (gpointer)"Work", GTK_RESPONSE_ACCEPT);
-    click("pf_new");
-    CHECK(profile_find("Work") && model_rows("profile_tree") == 2);
+    activate("New Profile...");
+    pump(150);
+    CHECK(profile_find("Work") != NULL);
+    CHECK_STR(g_active_profile, "Work");                      // a new profile becomes the active one at once
+    CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Work");
     struct pbp_profile disk;
     CHECK(load_disk("Work", &disk) && disk.nrules == 0 && disk.nproxies == 0);
     pbp_free(&disk);
+    shown = switch_menu_text();
+    CHECK_STR(shown, "Default;*Work;");                       // the check follows the active profile
+    g_free(shown);
 
     refused_name = "";
     arm("dlg_profile_name", submit_refused, NULL, GTK_RESPONSE_ACCEPT);
-    click("pf_new");
+    activate("New Profile...");
     CHECK_HAS(last_msg, "cannot be empty");
     refused_name = "Work";
     arm("dlg_profile_name", submit_refused, NULL, GTK_RESPONSE_ACCEPT);
-    click("pf_new");
+    activate("New Profile...");
     CHECK_HAS(last_msg, "already exists");
-    CHECK(model_rows("profile_tree") == 2);
-
-    STEP("duplicate");
-    // duplicate copies proxies, rules and switches
-    CHECK(select_by_first_column("profile_tree", "Default"));
-    arm("dlg_profile_name", fill_name, (gpointer)"Home", GTK_RESPONSE_ACCEPT);
-    click("pf_duplicate");
-    Profile *home = profile_find("Home");
-    CHECK(home && g_list_length(home->proxies) == 1 && g_list_length(home->rules) == 1);
-
-    // rename
-    CHECK(select_by_first_column("profile_tree", "Home"));
-    arm("dlg_profile_name", fill_name, (gpointer)"Office", GTK_RESPONSE_ACCEPT);
-    click("pf_rename");
-    CHECK(profile_find("Home") == NULL && profile_find("Office"));
-    struct pbp_profile d2;
-    CHECK(load_disk("Office", &d2));
-    pbp_free(&d2);
-    CHECK(!load_disk("Home", &d2));                              // the old file is gone
+    CHECK(g_list_length(g_profiles) == 2);
 
     STEP("switch");
     // switch: the window title, the engine's rules and the profile's own switches follow
+    switch_to_profile("Default");
+    CHECK_STR(g_active_profile, "Default");
     GtkWidget *log_item = menu_item("Enable Traffic Logging");
     CHECK(log_item && menu_item("DNS via Proxy") == NULL);     // DNS via proxy is a per-proxy option, not a menu switch
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_item), FALSE);        // Default: logging off
     CHECK(!g_chk_logging);
-    CHECK(select_by_first_column("profile_tree", "Work"));
-    click("pf_switch");
+    switch_to_profile("Work");
     CHECK_STR(g_active_profile, "Work");
     CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Work");
     CHECK(g_chk_logging && gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(log_item)));   // Work has its own, default-on switches
     g_chk_dns = false; save_config();                                                       // Work: DNS routing off (profile field)
-    CHECK(select_by_first_column("profile_tree", "Default"));
-    click("pf_switch");
+    switch_to_profile("Default");
     CHECK_STR(g_active_profile, "Default");
     CHECK(!gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(log_item)) && g_chk_dns);
+    struct pbp_profile d2;
     CHECK(load_disk("Work", &d2) && !d2.dns_via_proxy && d2.logging);
     pbp_free(&d2);
+    switch_to_profile("Default");                              // choosing the active profile again changes nothing
+    CHECK_STR(g_active_profile, "Default");
+
+    STEP("duplicate");
+    // duplicate copies proxies, rules and switches of the active profile, and the copy becomes the active one
+    arm("dlg_profile_name", fill_name, (gpointer)"Home", GTK_RESPONSE_ACCEPT);
+    activate("Duplicate Profile...");
+    pump(150);
+    Profile *home = profile_find("Home");
+    CHECK(home && g_list_length(home->proxies) == 1 && g_list_length(home->rules) == 1);
+    CHECK_STR(g_active_profile, "Home");
+
+    // rename: the active profile
+    arm("dlg_profile_name", fill_name, (gpointer)"Office", GTK_RESPONSE_ACCEPT);
+    activate("Rename Profile...");
+    pump(150);
+    CHECK(profile_find("Home") == NULL && profile_find("Office"));
+    CHECK_STR(g_active_profile, "Office");
+    CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Office");
+    CHECK(load_disk("Office", &d2));
+    pbp_free(&d2);
+    CHECK(!load_disk("Home", &d2));                              // the old file is gone
+    shown = switch_menu_text();
+    CHECK_STR(shown, "Default;Work;*Office;");
+    g_free(shown);
 
     STEP("profile export / import");
-    // export and import through the file chooser
+    // export the active profile and import it again: the import becomes the active profile
     char *file = tmp_path("exported.pbprofile");
     unlink(file);
-    CHECK(select_by_first_column("profile_tree", "Office"));
     arm("chooser", choose_file, file, GTK_RESPONSE_ACCEPT);
     arm_msg(GTK_RESPONSE_OK);
-    click("pf_export");
+    activate("Export Profile...");
     CHECK_HAS(last_msg, "exported");
     struct stat st;
     CHECK(stat(file, &st) == 0 && (st.st_mode & 0777) == 0600);
     arm("chooser", choose_file, file, GTK_RESPONSE_ACCEPT);
-    arm_msg(GTK_RESPONSE_OK);
-    click("pf_import");
-    CHECK_HAS(last_msg, "Imported as profile");
+    activate("Import Profile...");
+    pump(150);
     CHECK(profile_find("Office (2)") != NULL);
+    CHECK_STR(g_active_profile, "Office (2)");
     char *junk = tmp_path("junk.pbprofile");
     g_file_set_contents(junk, "{ nope", -1, NULL);
     arm("chooser", choose_file, junk, GTK_RESPONSE_ACCEPT);
     arm_msg(GTK_RESPONSE_OK);
-    click("pf_import");
+    activate("Import Profile...");
     CHECK_HAS(last_msg, "Import failed");
+    CHECK_STR(g_active_profile, "Office (2)");
     g_free(file); g_free(junk);
 
     STEP("profile delete");
-    // delete: asks first; the last profile stays
-    CHECK(select_by_first_column("profile_tree", "Office (2)"));
-    show_profiles("before deleting");
+    // delete the active profile: asks first, another profile becomes active; the last profile stays
     arm_msg(GTK_RESPONSE_NO);
-    click("pf_delete");
+    activate("Delete Profile...");
     CHECK(profile_find("Office (2)") != NULL);
     arm_msg(GTK_RESPONSE_YES);
-    click("pf_delete");
+    activate("Delete Profile...");
+    pump(150);
     CHECK(profile_find("Office (2)") == NULL);
-    CHECK(select_by_first_column("profile_tree", "Office"));
+    CHECK(g_active_profile && profile_find(g_active_profile) != NULL);          // an existing profile is active
+    switch_to_profile("Office");
     arm_msg(GTK_RESPONSE_YES);
-    click("pf_delete");
-    show_profiles("after deleting Office");
-    CHECK(select_by_first_column("profile_tree", "Work"));
+    activate("Delete Profile...");
+    pump(150);
+    switch_to_profile("Work");
     arm_msg(GTK_RESPONSE_YES);
-    click("pf_delete");
-    show_profiles("after deleting Work");
+    activate("Delete Profile...");
+    pump(150);
     CHECK(g_list_length(g_profiles) == 1);
-    CHECK(select_by_first_column("profile_tree", "Default"));
+    CHECK_STR(g_active_profile, "Default");
+    shown = switch_menu_text();
+    CHECK_STR(shown, "*Default;");
+    g_free(shown);
     arm_msg(GTK_RESPONSE_OK);
-    click("pf_delete");
+    activate("Delete Profile...");
     CHECK_HAS(last_msg, "last profile");
     CHECK(profile_find("Default") != NULL);
-    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
 }
 
 
@@ -912,6 +940,7 @@ static void zoom_scenario(void)
     gui_set_zoom(130);
     CHECK(profile_create("Zoomed", false) != NULL);
     CHECK(profile_activate("Zoomed"));
+    gui_refresh_profile_menu();                                  // (the menu items do this themselves; here the engine calls are used directly)
     gui_sync_switches();
     CHECK(g_zoom == 100 && strstr(gui_zoom_css(), "100%") != NULL);
     gui_set_zoom(180);
@@ -1119,13 +1148,6 @@ static void make_fake_systemctl(const char *path, const char *log)
     g_free(script);
 }
 
-static void switch_to(GtkWidget *dlg, gpointer arg)
-{
-    select_by_first_column("profile_tree", arg);
-    click("pf_switch");
-    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
-}
-
 static void boot_scenario(void)
 {
     STEP("start at boot");
@@ -1155,16 +1177,14 @@ static void boot_scenario(void)
     g_free(log);
 
     // another active profile is what the service runs after the next boot
-    arm("dlg_profiles", switch_to, (gpointer)"Zoomed", 0);
-    activate("Profiles...");
+    switch_to_profile("Zoomed");
     CHECK_STR(g_active_profile, "Zoomed");
     CHECK(g_file_get_contents(unit, &text, NULL, NULL));
     char *want_zoom = g_strdup_printf("--profile \"%s\"", zoom_path);
     CHECK_HAS(text, want_zoom);
     g_free(want_zoom);
     g_free(text);
-    arm("dlg_profiles", switch_to, (gpointer)"Default", 0);
-    activate("Profiles...");
+    switch_to_profile("Default");
     CHECK(g_file_get_contents(unit, &text, NULL, NULL));
     char *want_def2 = g_strdup_printf("--profile \"%s\"", def_path);
     CHECK_HAS(text, want_def2);
@@ -1256,7 +1276,7 @@ static void startup_update_scenario(void)
 static void ui_main(void) {
     pump(300);
     CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Default");
-    CHECK(menu_item("Proxy Settings...") && menu_item("Proxy Rules...") && menu_item("Profiles..."));
+    CHECK(menu_item("Proxy Settings...") && menu_item("Proxy Rules..."));
 
     printf("== proxy settings\n");
     arm("dlg_proxies", proxies_body, NULL, 0);
@@ -1272,8 +1292,7 @@ static void ui_main(void) {
     rules_scenario();
 
     printf("== profiles\n");
-    arm("dlg_profiles", profiles_body, NULL, 0);
-    activate("Profiles...");
+    profiles_scenario();
 
     printf("== update check\n");
     updates_scenario();

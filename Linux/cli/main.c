@@ -55,7 +55,7 @@ static void show_help(void)
     show_banner();
     printf("Options:\n");
     printf("  --profile <path>     Path to a .pbprofile file exported from the GUI, or the name of a\n");
-    printf("                       profile saved by the GUI (Proxy > Profiles)\n\n");
+    printf("                       profile saved by the GUI (the Profile menu)\n\n");
     printf("  --verbose <0-3>      Logging verbosity\n");
     printf("                         0 - Silent (default)\n");
     printf("                         1 - Log messages only\n");

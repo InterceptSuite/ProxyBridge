@@ -114,7 +114,15 @@ bool profile_export(const Profile *prof, const char *path, char *err, size_t err
 Profile *profile_import(const char *path, char *err, size_t errlen);   // not activated
 
 void on_proxy_configure(GtkWidget *widget, gpointer data);
-void on_profiles_clicked(GtkWidget *widget, gpointer data);
+// Profile menu: every action works on the active profile
+void on_profile_new(GtkWidget *widget, gpointer data);
+void on_profile_duplicate(GtkWidget *widget, gpointer data);
+void on_profile_rename(GtkWidget *widget, gpointer data);
+void on_profile_delete(GtkWidget *widget, gpointer data);
+void on_profile_import(GtkWidget *widget, gpointer data);
+void on_profile_export(GtkWidget *widget, gpointer data);
+void on_profile_switch_item(GtkWidget *item, gpointer data);       // data: the profile name
+void gui_refresh_profile_menu(void);                               // rebuilds Profile > Switch (main.c)
 ProxyData *find_proxy_by_name(const char *name);
 uint32_t resolve_proxy_id(const char *name);
 void free_proxy_data(ProxyData *p);
