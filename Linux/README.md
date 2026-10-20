@@ -35,7 +35,7 @@ curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/
 This script will:
 - Download the latest release from GitHub automatically
 - Detect your Linux distribution
-- Install all required dependencies (libelf, zlib, GTK3)
+- Install GTK3 if the GUI is included and GTK3 is missing (the command line program needs nothing)
 - Install ProxyBridge CLI, GUI, and library to system paths
 - Update library cache (ldconfig)
 - Verify installation
@@ -64,7 +64,7 @@ This script will:
    ```
 
 The setup script will:
-- Install runtime dependencies (libelf, zlib, GTK3)
+- Install GTK3 if the GUI is included and it is missing (the command line program is a single self-contained file)
 - Copy binaries to `/usr/local/bin` (ProxyBridge CLI and GUI)
 - Copy library to `/usr/local/lib` (libproxybridge.so)
 - Update library cache
@@ -344,9 +344,9 @@ ProxyBridge hooks the **socket calls** (`connect()`, `sendmsg()`, `recvmsg()`) w
 
 - Linux kernel 5.11+ with BTF and cgroup v2 (to run); GCC, Make, **clang** and **bpftool** (to build the eBPF object and skeleton)
 - Development libraries:
-  - libelf-dev + zlib1g-dev (Debian/Ubuntu) or elfutils-libelf-devel + zlib-devel (Fedora/RHEL). libbpf itself is built from a pinned
-    release and linked statically, so it is not needed at run time
-  - curl (fetches the pinned libbpf source on first build)
+  - curl and bzip2 (the first build downloads pinned, checksum-verified libbpf, libelf (elfutils) and zlib sources, builds them
+    as static libraries into `~/.cache/proxybridge`, and links them in: the library and the command line program need only glibc
+    at run time, no libelf, zlib or libbpf package)
   - libgtk-3-dev (optional, for GUI) or gtk3-devel (Fedora/RHEL)
   - pkg-config
 
@@ -361,19 +361,19 @@ full RELRO, BIND_NOW, PIE, stack protector and CET flags; `Linux/tests/check_bin
    ```bash
    sudo apt-get update
    sudo apt-get install build-essential gcc make clang bpftool \
-       libelf-dev zlib1g-dev curl libgtk-3-dev pkg-config
+       curl bzip2 libgtk-3-dev pkg-config
    ```
 
    **Fedora:**
    ```bash
    sudo dnf install gcc make clang bpftool \
-       elfutils-libelf-devel zlib-devel curl gtk3-devel pkg-config
+       curl bzip2 gtk3-devel pkg-config
    ```
 
    **Arch/Manjaro:**
    ```bash
    sudo pacman -S base-devel gcc make clang bpf \
-       libelf zlib curl gtk3 pkg-config
+       curl bzip2 gtk3 pkg-config
    ```
 
 2. **Clone or download ProxyBridge source code:**

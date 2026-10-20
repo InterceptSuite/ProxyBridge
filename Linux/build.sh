@@ -25,7 +25,7 @@ need() {  # command, install hint
     command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found. $2"; exit 1; }
 }
 need gcc     "Install: sudo apt install build-essential | sudo dnf install gcc"
-need curl    "Needed to fetch the pinned libbpf source. Install: sudo apt install curl"
+need curl    "Needed to fetch the pinned libbpf, libelf and zlib sources. Install: sudo apt install curl"
 need make    "Install: sudo apt install make | sudo dnf install make"
 need clang   "Needed to compile the eBPF program. Install: sudo apt install clang | sudo dnf install clang"
 BPFTOOL="${BPFTOOL:-bpftool}"   # set BPFTOOL=/path/to/bpftool if it is not on PATH (e.g. /usr/lib/linux-tools/*/bpftool on Ubuntu)
@@ -35,12 +35,12 @@ if [ "${STATIC_LIBBPF:-1}" != 1 ] && [ ! -f /usr/include/bpf/libbpf.h ] && ! pkg
     echo "ERROR: libbpf development files not found. Install: sudo apt install libbpf-dev | sudo dnf install libbpf-devel"
     exit 1
 fi
-for h in libelf.h zlib.h; do
-    [ -f "/usr/include/$h" ] || find /usr/include -name "$h" -print -quit 2>/dev/null | grep -q . || {
-        echo "ERROR: $h not found (needed to build the static libbpf). Install: sudo apt install libelf-dev zlib1g-dev | sudo dnf install elfutils-libelf-devel zlib-devel"
-        exit 1
-    }
-done
+if [ "${STATIC_LIBBPF:-1}" = 1 ]; then
+    # libbpf, libelf and zlib are downloaded (checksum-verified) and built once into ~/.cache/proxybridge, then linked statically
+    need curl "Needed to download the pinned libbpf, libelf and zlib sources."
+    need bzip2 "Needed to unpack elfutils. Install: sudo apt install bzip2 | sudo dnf install bzip2"
+    need make "Needed to build."
+fi
 
 if [ -e "$OUTPUT_DIR" ]; then
     echo "Removing existing output directory..."
@@ -73,7 +73,7 @@ echo "Library build successful"
 echo ""
 
 echo "=== Building CLI ==="
-make -j"$JOBS" -C "$SCRIPT_DIR/cli" BUILD_DIR="$BUILD_DIR/cli" LIBDIR="$BUILD_DIR/lib"
+make -j"$JOBS" -C "$SCRIPT_DIR/cli" BUILD_DIR="$BUILD_DIR/cli" LIBDIR="$BUILD_DIR/lib" "${LIBBPF_ARGS[@]}"
 [ -f "$BUILD_DIR/cli/ProxyBridge" ] || { echo "CLI build failed!"; exit 1; }
 echo "CLI build successful"
 echo ""

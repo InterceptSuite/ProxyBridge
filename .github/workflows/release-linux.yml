@@ -35,12 +35,11 @@ jobs:
           build-essential \
           gcc \
           make \
+          bzip2 \
           clang \
           linux-tools-common \
           linux-tools-generic \
           libbpf-dev \
-          libelf-dev \
-          zlib1g-dev \
           libgtk-3-dev \
           pkg-config
       shell: bash

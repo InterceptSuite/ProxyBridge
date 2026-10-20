@@ -129,10 +129,19 @@ detect_distro() {
     echo "Detected distribution: $DISTRO"
 }
 
-# Install dependencies based on distribution
+# The command line program and the library are self-contained (libbpf, libelf and zlib are linked in; only glibc is used), so
+# nothing needs installing for them. The GUI needs GTK3, which cannot be linked statically: install it only if it is missing.
 install_dependencies() {
     echo ""
-    echo "Checking and installing dependencies..."
+    if [ ! -f "$TEMP_DIR/ProxyBridgeGUI" ]; then
+        echo "No dependencies to install (the command line program is self-contained)."
+        return
+    fi
+    if ldconfig -p 2>/dev/null | grep -q 'libgtk-3\.so\.0'; then
+        echo "GTK3 is already installed (needed by the GUI)."
+        return
+    fi
+    echo "Installing GTK3 (needed by the GUI)..."
 
     # Normalize distro name using ID_LIKE fallback
     local distro_family="$DISTRO"
@@ -148,47 +157,19 @@ install_dependencies() {
 
     case "$distro_family" in
         ubuntu|debian|linuxmint|pop|elementary|zorin|kali|raspbian|mx|antix|deepin|lmde)
-            echo "Using apt package manager..."
             apt-get update -qq
-            apt-get install -y libelf1 zlib1g libgtk-3-0
+            apt-get install -y libgtk-3-0
             ;;
-        fedora)
-            echo "Using dnf package manager..."
-            dnf install -y elfutils-libelf zlib gtk3
-            ;;
-        rhel|centos|rocky|almalinux)
-            echo "Using yum package manager..."
-            yum install -y elfutils-libelf zlib gtk3
-            ;;
-        arch|manjaro|endeavouros|garuda)
-            echo "Using pacman package manager..."
-            pacman -Sy --noconfirm libelf zlib gtk3
-            ;;
-        opensuse*|sles)
-            echo "Using zypper package manager..."
-            zypper install -y libelf1 libz1 gtk3
-            ;;
-        void)
-            echo "Using xbps package manager..."
-            xbps-install -Sy libelf zlib gtk3
-            ;;
+        fedora)         dnf install -y gtk3 ;;
+        rhel|centos|rocky|almalinux) yum install -y gtk3 ;;
+        arch|manjaro|endeavouros|garuda) pacman -Sy --noconfirm gtk3 ;;
+        opensuse*|sles) zypper install -y gtk3 ;;
+        void)           xbps-install -Sy gtk3 ;;
         *)
-            echo "WARNING: Unknown distribution '$DISTRO' (family: '$DISTRO_LIKE')"
-            echo ""
-            echo "Please manually install the following packages:"
-            echo "  Debian/Ubuntu: sudo apt install libelf1 zlib1g libgtk-3-0"
-            echo "  Fedora:        sudo dnf install elfutils-libelf zlib gtk3"
-            echo "  Arch:          sudo pacman -S libelf zlib gtk3"
-            echo ""
-            read -p "Continue anyway? (y/n) " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                exit 1
-            fi
+            echo "WARNING: Unknown distribution '$DISTRO'. The GUI needs GTK3 (Debian/Ubuntu: libgtk-3-0, Fedora: gtk3, Arch: gtk3)."
+            echo "The command line program works without it."
             ;;
     esac
-
-    echo "Dependencies installed"
 }
 
 # Use /usr/local/lib (matches RPATH in binary)
