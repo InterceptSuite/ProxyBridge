@@ -50,6 +50,24 @@ $nexusHash = 'D20D00364FD4344D333760DF74053CAB85070960590A54559DDA8AD5B7B07E4B'
 $nexusJs = Join-Path $Out 'nexus.js'
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/InterceptSuite/nexus-proxy/$nexusSha/script.js" -OutFile $nexusJs -UseBasicParsing
 if ((Get-FileHash $nexusJs -Algorithm SHA256).Hash -ne $nexusHash) { Write-Host "nexus.js hash mismatch" -ForegroundColor Red; exit 2 }
+
+# Stock Nexus cannot do UDP ASSOCIATE with current Node.js: its relay socket is IPv6 (dual-stack) but is bound to the IPv4
+# address '0.0.0.0', which Node rejects, so it answers "general failure". The Linux suite carries the same fix as a patch
+# (Linux/tests/nexus-linux-udp.patch). It only changes the UDP part of the test proxy, never ProxyBridge. Each edit must
+# match exactly once, so a new Nexus version cannot silently slip through unpatched.
+$nx = [IO.File]::ReadAllText($nexusJs)
+$edits = @(
+    @("udpRelay.bind(0, '0.0.0.0', () => {", "udpRelay.bind(0, '::', () => {"),
+    @("udpRelay.send(data, port, host);", "udpRelay.send(data, port, host.includes(':') ? host : '::ffff:' + host);"),
+    @("handleRemoteToClient(msg, rinfo, udpRelay, remoteMap) {", "handleRemoteToClient(msg, rinfo, udpRelay, remoteMap) {`n    rinfo = { ...rinfo, address: rinfo.address.replace(/^::ffff:/i, '') };")
+)
+foreach ($e in $edits) {
+    $n = ([regex]::Matches($nx, [regex]::Escape($e[0]))).Count
+    if ($n -ne 1) { Write-Host "Nexus UDP patch: expected one match of '$($e[0])', found $n" -ForegroundColor Red; exit 2 }
+    $nx = $nx.Replace($e[0], $e[1])
+}
+$nexusJs = Join-Path $Out 'nexus-udp.js'
+[IO.File]::WriteAllText($nexusJs, $nx)
 $node = (Get-Command node -ErrorAction Stop).Source
 $python = (Get-Command python -ErrorAction Stop).Source
 
@@ -240,10 +258,11 @@ try {
     $o = ''
     for ($i = 0; $i -lt 2; $i++) {
         $o = (& $udpClient 'example.com' '1.1.1.1' 2>&1 | Out-String)
-        if ($o -match 'Address') { break }
+        if ($o -match 'Name:\s+example\.com' -and $o -notmatch 'timed out') { break }
         Start-Sleep -Seconds 2
     }
-    Check 'UDP: a DNS answer comes back' ($o -match 'Address') ($o.Trim() -replace '\s+', ' ')
+    # nslookup prints "Server / Address" for the resolver even when the query timed out: only an answer section counts
+    Check 'UDP: a DNS answer comes back' ($o -match 'Name:\s+example\.com' -and $o -notmatch 'timed out') ($o.Trim() -replace '\s+', ' ')
     Check 'UDP: the proxy relayed the datagrams' ((Count $logOpen '[UDP]') -gt $b) 'no [UDP] line in the Nexus log'
 
     Write-Host "`n=== IPv4-only proxy recipe (IPv6 blocked for the program, rest proxied)" -ForegroundColor Cyan
