@@ -1355,6 +1355,187 @@ static void startup_update_scenario(void)
 }
 
 // ================================================================================================================================
+// Documentation screenshots: only with PB_SCREENSHOT_DIR set (tests/gui_shots.sh). A demo profile is built through the real
+// dialogs and every window is rendered to a PNG, so the pictures in the documentation are the program's own.
+// ================================================================================================================================
+static const char *shot_dir;
+
+// renders a widget to <dir>/<name>.png; a window gets a plain title bar (Broadway has no window manager to draw one)
+static void snap_titled(GtkWidget *w, const char *name, const char *title) {
+    if (!shot_dir || !w) return;
+    pump(400);
+    int width = gtk_widget_get_allocated_width(w), height = gtk_widget_get_allocated_height(w);
+    int bar = title ? 34 : 0;
+    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height + bar);
+    cairo_t *cr = cairo_create(surf);
+    if (title) {
+        cairo_set_source_rgb(cr, 0.90, 0.89, 0.88);
+        cairo_rectangle(cr, 0, 0, width, bar);
+        cairo_fill(cr);
+        cairo_set_source_rgb(cr, 0.80, 0.79, 0.78);
+        cairo_rectangle(cr, 0, bar - 1, width, 1);
+        cairo_fill(cr);
+        cairo_set_source_rgb(cr, 0.15, 0.15, 0.15);
+        cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, 14);
+        cairo_text_extents_t te;
+        cairo_text_extents(cr, title, &te);
+        cairo_move_to(cr, (width - te.width) / 2, 22);
+        cairo_show_text(cr, title);
+        cairo_translate(cr, 0, bar);
+    }
+    gtk_widget_draw(w, cr);
+    char *path = g_strdup_printf("%s/%s.png", shot_dir, name);
+    cairo_status_t st = cairo_surface_write_to_png(surf, path);
+    printf("  screenshot %s (%dx%d)%s\n", path, width, height + bar, st == CAIRO_STATUS_SUCCESS ? "" : "  FAILED");
+    g_free(path);
+    cairo_destroy(cr);
+    cairo_surface_destroy(surf);
+}
+
+// Broadway draws the window decorations itself, so a window is captured as it is
+static void snap(GtkWidget *w, const char *name) {
+    snap_titled(w, name, NULL);
+}
+
+static GtkWidget *find_notebook(GtkWidget *w) {
+    if (GTK_IS_NOTEBOOK(w)) return w;
+    if (!GTK_IS_CONTAINER(w)) return NULL;
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(w));
+    GtkWidget *hit = NULL;
+    for (GList *k = kids; k && !hit; k = k->next) hit = find_notebook(k->data);
+    g_list_free(kids);
+    return hit;
+}
+
+typedef struct { void *form; const char *shot; } ShotForm;
+static void fill_px_shot(GtkWidget *d, gpointer arg) { ShotForm *s = arg; fill_px(d, s->form); if (s->shot) snap(d, s->shot); }
+static void fill_rule_shot(GtkWidget *d, gpointer arg) { ShotForm *s = arg; fill_rule(d, s->form); if (s->shot) snap(d, s->shot); }
+static void fill_flt_shot(GtkWidget *d, gpointer arg) { ShotForm *s = arg; fill_flt(d, s->form); if (s->shot) snap(d, s->shot); }
+static ShotForm *shot_form(void *form, const char *shot) { ShotForm *s = g_malloc0(sizeof *s); s->form = form; s->shot = shot; return s; }
+
+static void shots_proxies_body(GtkWidget *dlg, gpointer arg) {
+    (void)arg;
+    arm("dlg_proxy", fill_px_shot, shot_form(px("Corporate SOCKS5", 1, "proxy.corp.example.com", "1080", "alice", "s3cret", true), "proxy-editor"), GTK_RESPONSE_ACCEPT);
+    click("px_add");
+    arm("dlg_proxy", fill_px_shot, shot_form(px("Burp Suite", 0, "127.0.0.1", "8080", "", "", true), NULL), GTK_RESPONSE_ACCEPT);
+    click("px_add");
+    arm("dlg_proxy", fill_px_shot, shot_form(px("Tor", 1, "127.0.0.1", "9050", "", "", true), NULL), GTK_RESPONSE_ACCEPT);
+    click("px_add");
+    arm("dlg_proxy", fill_px_shot, shot_form(px("Local SOCKS5", 1, "127.0.0.1", "19080", "", "", true), NULL), GTK_RESPONSE_ACCEPT);
+    click("px_add");
+    select_row("proxy_tree", 3);                                 // Local SOCKS5 answers the test
+    set_text(dlg, "px_test_host", "example.com");
+    set_text(dlg, "px_test_port", "80");
+    click("px_test");
+    for (int i = 0; i < 80; i++) {
+        char *out = buffer_of("px_test_output");
+        bool done = strstr(out, "Result:") != NULL;
+        g_free(out);
+        if (done) break;
+        pump(150);
+    }
+    GtkWidget *out_view = find_named("px_test_output");
+    if (out_view) {                                              // show the end of the report
+        GtkTextBuffer *tb = gtk_text_view_get_buffer(GTK_TEXT_VIEW(out_view));
+        GtkTextIter end;
+        gtk_text_buffer_get_end_iter(tb, &end);
+        gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(out_view), &end, 0.0, FALSE, 0, 0);
+        pump(300);
+    }
+    snap(dlg, "proxy-settings");
+    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
+}
+
+static void shots_filters_body(GtkWidget *dlg, gpointer arg) {
+    (void)arg;
+    arm("dlg_filter", fill_flt_shot, shot_form(ff("Exclude", "systemd-resolved", "", "", "All", "All"), "log-filter-editor"), GTK_RESPONSE_ACCEPT);
+    click("flt_add");
+    arm("dlg_filter", fill_flt_shot, shot_form(ff("Include", "firefox*", "", "443", "TCP", "Proxy"), NULL), GTK_RESPONSE_ACCEPT);
+    click("flt_add");
+    snap(dlg, "log-filters");
+    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
+}
+
+static void shots_scenario(void) {
+    shot_dir = getenv("PB_SCREENSHOT_DIR");
+    if (!shot_dir || !*shot_dir) return;
+    printf("== documentation screenshots\n");
+    g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", FALSE, NULL);    // the documentation is light
+    gtk_window_resize(GTK_WINDOW(window), 1000, 600);
+
+    // a clean demo profile with proxies and rules made through the dialogs
+    arm("dlg_profile_name", fill_name, (gpointer)"Pentest lab", GTK_RESPONSE_ACCEPT);
+    activate("New Profile...");
+    pump(300);
+    arm("dlg_proxies", shots_proxies_body, NULL, 0);
+    activate("Proxy Settings...");
+    pump(300);
+
+    activate("Proxy Rules...");
+    pump(300);
+    // proxies are listed in the order they were added: 1 Corporate SOCKS5, 2 Burp Suite, 3 Tor, 4 Local SOCKS5
+    arm("dlg_rule", fill_rule_shot, shot_form(rf("Browsers through Burp", "firefox;chromium;google-chrome", "*", "80;443", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, 2, false), "rule-editor"), GTK_RESPONSE_ACCEPT);
+    click("rules_add");
+    arm("dlg_rule", fill_rule_shot, shot_form(rf("Company network", "*", "10.0.0.0/8;*.corp.example.com", "*", RULE_PROTOCOL_BOTH, RULE_ACTION_PROXY, 1, false), "rule-editor-domains"), GTK_RESPONSE_ACCEPT);
+    click("rules_add");
+    arm("dlg_rule", fill_rule_shot, shot_form(rf("curl and wget through Tor", "curl;wget", "*", "*", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, 3, false), NULL), GTK_RESPONSE_ACCEPT);
+    click("rules_add");
+    arm("dlg_rule", fill_rule_shot, shot_form(rf("Block telemetry", "telemetry*", "*", "*", RULE_PROTOCOL_BOTH, RULE_ACTION_BLOCK, 0, false), NULL), GTK_RESPONSE_ACCEPT);
+    click("rules_add");
+    arm("dlg_rule", fill_rule_shot, shot_form(rf("Keep git and ssh direct", "ssh;git", "*", "22;9418", RULE_PROTOCOL_TCP, RULE_ACTION_DIRECT, 0, false), NULL), GTK_RESPONSE_ACCEPT);
+    click("rules_add");
+    pump(500);
+    snap(find_named("win_rules"), "rules-window");
+    gtk_widget_destroy(find_named("win_rules"));
+    pump(300);
+
+    GtkWidget *nb = find_notebook(window);
+    // Live Connections: connections that really go through the proxy
+    char err[256] = "";
+    ProxyData *lab = proxy_named("Local SOCKS5");
+    uint32_t live_rule = lab ? ProxyBridge_AddRule("python3*", "192.0.2.40-192.0.2.60", "80", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, lab->id, err, sizeof err) : 0;
+    if (live_rule) {
+        g_spawn_command_line_async("python3 -c \"import socket,time; a=socket.create_connection(('192.0.2.40',80)); b=socket.create_connection(('192.0.2.41',80)); a.sendall(b'x'*40000); time.sleep(40)\"", NULL);
+        if (nb) gtk_notebook_set_current_page(GTK_NOTEBOOK(nb), 2);
+        pump(3500);
+        snap(window, "live-connections");
+        ProxyBridge_DeleteRule(live_rule);
+    }
+
+    // the main window: connection lines like the engine reports them. Traffic logging is switched off and the logs cleared first,
+    // so that the real traffic of this machine does not mix with the demo lines
+    ProxyBridge_SetTrafficLoggingEnabled(false);                 // the engine stays up, it just reports nothing
+    pump(800);
+    click("conn_clear");
+    click("log_clear");
+    pump(300);
+    lib_connection_callback_ex("firefox", 21408, "104.18.32.47 (example.com)", 443, "TCP", "HTTP 127.0.0.1:8080");
+    lib_connection_callback_ex("firefox", 21408, "151.101.1.69 (static.example.org)", 443, "TCP", "HTTP 127.0.0.1:8080");
+    lib_connection_callback_ex("curl", 22117, "93.184.216.34 (example.com)", 80, "TCP", "SOCKS5 127.0.0.1:9050");
+    lib_connection_callback_ex("curl", 22140, "140.82.112.3 (github.com)", 443, "TCP", "SOCKS5 127.0.0.1:9050");
+    lib_connection_callback_ex("chromium", 20977, "10.12.4.20 (intranet.corp.example.com)", 443, "TCP", "SOCKS5 proxy.corp.example.com:1080");
+    lib_connection_callback_ex("chromium", 20977, "142.250.74.14", 443, "UDP", "SOCKS5 proxy.corp.example.com:1080");
+    lib_connection_callback_ex("git", 22301, "140.82.112.3 (github.com)", 22, "TCP", "DIRECT");
+    lib_connection_callback_ex("telemetry-agent", 1984, "198.51.100.23 (metrics.vendor.example)", 443, "TCP", "BLOCK");
+    lib_connection_callback_ex("ssh", 22290, "192.168.1.20", 22, "TCP", "DIRECT");
+    gui_log("Rule 'Browsers through Burp' loaded");
+    gui_log("Proxy 'Local SOCKS5' reachable");
+    pump(1500);
+    if (nb) gtk_notebook_set_current_page(GTK_NOTEBOOK(nb), 0);
+    snap(window, "connections");
+    if (nb) gtk_notebook_set_current_page(GTK_NOTEBOOK(nb), 1);
+    pump(300);
+    snap(window, "activity-log");
+
+    arm("dlg_filters", shots_filters_body, NULL, 0);
+    activate("Log Filters...");
+    pump(300);
+
+    printf("  screenshots written to %s\n", shot_dir);
+}
+
+// ================================================================================================================================
 static void ui_main(void) {
     pump(300);
     CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Default");
@@ -1414,6 +1595,8 @@ static void ui_main(void) {
     CHECK_STR(g_active_profile, "Default");
     CHECK(g_list_length(g_profiles) == 1 && g_list_length(g_proxies_list) == 1 && g_list_length(g_rules_list) == 1);
     CHECK(strcmp(((RuleData *)g_rules_list->data)->name, "Keep") == 0);
+
+    shots_scenario();                                            // only with PB_SCREENSHOT_DIR
 
     printf("ui_test: %d checks, %d failed\n", checks, fails);
 }
