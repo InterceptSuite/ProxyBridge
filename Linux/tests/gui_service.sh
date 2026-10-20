@@ -98,6 +98,29 @@ stop_gui
 sleep 1
 out=$(curl -s -m 5 http://192.0.2.7/); [[ "$out" == *"hello-from-A"* ]] && ok "the service keeps routing after the window closed" || bad "routing stopped with the window: $out"
 
+echo "== the service restarts while a window is open"
+python3 - <<PY
+import sys; sys.path.insert(0, "$HERE")
+import pbd
+d = pbd.Daemon.connect("/run/proxybridge/ctl.sock"); d.ok("hello", "1"); d.ok("boot.set", "0")
+PY
+run_gui nobody --clear-groups
+wait_routing && ok "window started" || bad "window did not start routing"
+sleep 1
+stop_service
+out=$(curl -s -m 3 http://192.0.2.7/ 2>&1); [[ "$out" != *hello-from* ]] && ok "the service is gone: traffic is direct" || bad "still routed"
+start_service
+back=0
+for _ in $(seq 40); do out=$(curl -s -m 2 http://192.0.2.7/ 2>&1); [[ "$out" == *"hello-from-A"* ]] && { back=1; break; }; sleep 0.5; done
+[ $back = 1 ] && ok "the open window reconnected, sent its rules again and restarted the engine" || bad "routing did not come back after the service restarted"
+kill -0 $GUI_PID 2>/dev/null && ok "the window stayed open throughout" || bad "the window died"
+stop_gui
+python3 - <<PY
+import sys; sys.path.insert(0, "$HERE")
+import pbd
+d = pbd.Daemon.connect("/run/proxybridge/ctl.sock"); d.ok("hello", "1"); d.ok("boot.set", "1")
+PY
+
 echo "== the service restarts: a fresh service applies the profile by itself"
 stop_service
 out=$(curl -s -m 3 http://192.0.2.7/ 2>&1); [[ "$out" != *hello-from* ]] && ok "stopping the service ends routing (fail-open)" || bad "routed with no service"

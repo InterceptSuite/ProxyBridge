@@ -597,6 +597,7 @@ static GtkWidget *add_flows_tab(GtkWidget *notebook) {
 
 // The service went away (restarted, updated, stopped). Try again every two seconds and send the window's configuration once it is back.
 static guint reconnect_source;
+static bool resume_engine;                      // the engine was running when the connection broke: start it again afterwards
 
 static gboolean reconnect_tick(gpointer data) {
     if (!pbc_reconnect()) return G_SOURCE_CONTINUE;
@@ -609,6 +610,8 @@ static gboolean reconnect_tick(gpointer data) {
     gui_sync_switches();
     ProxyBridge_SetEnabled(gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(enable_item)));
     set_engine_state(pbc_service_engine_running() ? ENGINE_RUNNING : ENGINE_STOPPED);
+    if (resume_engine) engine_request(true);          // a restarted service that is not set to start at boot waits for us
+    resume_engine = false;
     gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "Connected to the ProxyBridge service again.");
     gui_log("connected to the ProxyBridge service again");
     return G_SOURCE_REMOVE;
@@ -618,6 +621,7 @@ static gboolean service_lost_idle(gpointer data) {
     if (reconnect_source) return G_SOURCE_REMOVE;
     gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "Lost the connection to the ProxyBridge service. Trying to reconnect...");
     gui_log("lost the connection to the ProxyBridge service; trying to reconnect");
+    resume_engine = engine_state == ENGINE_RUNNING;
     set_engine_state(ENGINE_STOPPED);
     reconnect_source = g_timeout_add_seconds(2, reconnect_tick, NULL);
     return G_SOURCE_REMOVE;
