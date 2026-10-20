@@ -1,5 +1,6 @@
 #include "gui.h"
 #include "gui_boot.h"
+#include "gui_icon.h"
 #include <glib-unix.h>
 #include <signal.h>
 
@@ -16,7 +17,7 @@ bool g_chk_log_every = false;
 bool g_chk_auto_clear = true;
 int g_zoom = 100;
 bool g_chk_updates = true;
-static GtkWidget *log_item, *dns_item, *every_item, *enable_item, *clear_item, *boot_item, *update_item;
+static GtkWidget *log_item, *every_item, *enable_item, *clear_item, *boot_item, *update_item;
 static GtkCssProvider *zoom_provider;
 static char zoom_css[96];
 
@@ -42,11 +43,38 @@ static void on_enable_toggled(GtkCheckMenuItem *item, gpointer data) {
     gui_log("ProxyBridge %s", gtk_check_menu_item_get_active(item) ? "enabled" : "paused: new connections are not redirected");
 }
 
-static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
-    bool active = gtk_check_menu_item_get_active(item);
-    ProxyBridge_SetDnsViaProxy(active);
-    g_chk_dns = active;
-    save_config();
+// the logo for the title bar, task switcher and dock
+static void set_app_icon(void) {
+    GList *icons = NULL;
+    const struct { const unsigned char *data; size_t len; } src[] = { { gui_icon_128, sizeof gui_icon_128 }, { gui_icon_256, sizeof gui_icon_256 } };
+    for (size_t i = 0; i < sizeof src / sizeof *src; i++) {
+        GdkPixbufLoader *loader = gdk_pixbuf_loader_new_with_type("png", NULL);
+        if (!loader) continue;
+        if (gdk_pixbuf_loader_write(loader, src[i].data, src[i].len, NULL) && gdk_pixbuf_loader_close(loader, NULL)) {
+            GdkPixbuf *pb = gdk_pixbuf_loader_get_pixbuf(loader);
+            if (pb) icons = g_list_append(icons, g_object_ref(pb));
+        } else {
+            gdk_pixbuf_loader_close(loader, NULL);
+        }
+        g_object_unref(loader);
+    }
+    if (icons) {
+        gtk_window_set_default_icon_list(icons);
+        g_list_free_full(icons, g_object_unref);
+    }
+}
+
+static void close_open_menus(GtkWidget *menubar) {
+    if (menubar) gtk_menu_shell_cancel(GTK_MENU_SHELL(menubar));
+}
+
+static void on_active_changed(GObject *w, GParamSpec *pspec, gpointer menubar) {
+    if (!gtk_window_is_active(GTK_WINDOW(w))) close_open_menus(menubar);
+}
+
+static gboolean on_focus_out(GtkWidget *w, GdkEvent *ev, gpointer menubar) {
+    close_open_menus(menubar);
+    return FALSE;
 }
 
 static void on_auto_clear_toggled(GtkCheckMenuItem *item, gpointer data) {
@@ -114,7 +142,6 @@ void gui_sync_switches() {
     if (clear_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(clear_item), g_chk_auto_clear);
     if (every_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(every_item), g_chk_log_every);
     if (log_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_item), g_chk_logging);
-    if (dns_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_item), g_chk_dns);
 }
 
 // same feed as windows/mac: https://download.interceptsuite.com/proxybridge.json
@@ -524,6 +551,7 @@ int main(int argc, char *argv[]) {
     GtkSettings *settings = gtk_settings_get_default();
     if (settings) g_object_set(settings, "gtk-application-prefer-dark-theme", TRUE, NULL);
 
+    set_app_icon();
     window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     char *win_title = g_strdup_printf("ProxyBridge - %s", g_active_profile);
     gtk_window_set_title(GTK_WINDOW(window), win_title);
@@ -535,13 +563,16 @@ int main(int argc, char *argv[]) {
     gtk_container_add(GTK_CONTAINER(window), vbox);
 
     GtkWidget *menubar = gtk_menu_bar_new();
+    // An open menu holds a grab. When the user moves to another program (often a native Wayland window this X11 client
+    // never gets pointer events from) the menu would stay on top of it: close it as soon as this window loses focus.
+    g_signal_connect(window, "notify::is-active", G_CALLBACK(on_active_changed), menubar);
+    g_signal_connect(window, "focus-out-event", G_CALLBACK(on_focus_out), menubar);
     GtkWidget *proxy_menu = add_submenu(menubar, "Proxy");
     add_menu_item(proxy_menu, "Proxy Settings...", G_CALLBACK(on_proxy_configure));
     add_menu_item(proxy_menu, "Proxy Rules...", G_CALLBACK(on_proxy_rules_clicked));
     add_menu_item(proxy_menu, "Profiles...", G_CALLBACK(on_profiles_clicked));
     add_separator(proxy_menu);
     log_item = add_check_item(proxy_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
-    dns_item = add_check_item(proxy_menu, "DNS via Proxy", g_chk_dns, G_CALLBACK(on_dns_proxy_toggled));
     every_item = add_check_item(proxy_menu, "Log Every Connection", g_chk_log_every, G_CALLBACK(on_log_every_toggled));
     clear_item = add_check_item(proxy_menu, "Auto-clear Logs", g_chk_auto_clear, G_CALLBACK(on_auto_clear_toggled));
     add_menu_item(proxy_menu, "Log Filters...", G_CALLBACK(on_log_filters_clicked));

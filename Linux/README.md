@@ -90,10 +90,11 @@ The GTK3-based GUI provides:
 - Proxy configuration (SOCKS5/HTTP with authentication)
 - Visual rule management with process selection
 - Font zoom, auto-clear logs, connection-log filters, *Start at Boot* and an update check on startup (see [Appearance, logs and start-up](#appearance-logs-and-start-up))
-- Real-time connection monitoring, a **Live Connections** tab (every proxied TCP connection and UDP flow with its process, destination, proxy, age and bytes), and *Log Every Connection* / *Enable ProxyBridge* switches in the Proxy menu
+- Real-time connection monitoring (UDP flows are marked `(UDP)`), a **Live Connections** tab (every proxied TCP connection and UDP flow with its process, destination, proxy, age and bytes), and *Log Every Connection* / *Enable ProxyBridge* switches in the Proxy menu
 - Profiles: create, switch, duplicate, rename, delete, **import and export** `.pbprofile` files (the Windows/macOS format, see [Profiles](#profiles))
 - Import/Export rules (JSON format compatible with Windows/macOS)
-- DNS via Proxy toggle
+- DNS via proxy is chosen per proxy in the proxy settings (no global switch), like the Windows app
+- One *Action* choice per rule: Direct, Block, or one of your proxies; the rule list shows `Proxy: <name>`
 
 
 ### Command Line Interface (CLI)
@@ -172,7 +173,7 @@ sudo ProxyBridge --profile ~/exported.pbprofile    # any .pbprofile file, e.g. e
 - Linux keeps domain names in the host list. On export they are written to `TargetDomains` (as the Windows app does) and merged back on import.
 - Fields this version has no use for (`LogFilters`, ...) are ignored on import. `DnsViaProxy` and `DefaultProxyId` are Linux additions that other apps ignore. `LogEveryConnection` is the same per-profile setting as in the Windows app. `Name` (proxies and rules), `SendDomainToProxy` (per proxy, default `true`) and `LocalhostViaProxy` (per rule, default `false`) mean the same as in the Windows app; a top-level `LocalhostViaProxy` from older profiles is the default for rules that have none of their own. The CLI takes DNS-via-proxy and the connection-log setting from the profile, and uses `--verbose` instead of the logging flag.
 - Disabled rules (`"IsEnabled": false`) are kept in the GUI and skipped by the CLI.
-- **GUI storage:** `/etc/proxybridge/profiles/<name>.pbprofile` (one file per profile) and `/etc/proxybridge/settings.json`, which holds only the name of the active profile. Everything else, including the *Enable Traffic Logging* and *DNS via Proxy* switches, is saved inside the profile, so switching profiles switches those too. The directory is `0700` and the files `0600`, because they hold proxy passwords; exported files are `0600` as well, and the CLI warns when a profile with credentials is readable by others. The `config.ini` of earlier versions is converted on the first start and kept as `config.ini.bak`.
+- **GUI storage:** `/etc/proxybridge/profiles/<name>.pbprofile` (one file per profile) and `/etc/proxybridge/settings.json`, which holds only the name of the active profile. Everything else, including the *Enable Traffic Logging* switch, is saved inside the profile, so switching profiles switches those too. The directory is `0700` and the files `0600`, because they hold proxy passwords; exported files are `0600` as well, and the CLI warns when a profile with credentials is readable by others. The `config.ini` of earlier versions is converted on the first start and kept as `config.ini.bak`.
 - Files are limited to 4 MiB, 256 proxies and 4096 rules; malformed files are rejected with the reason, never partly applied.
 
 ## Domain rules
@@ -195,7 +196,7 @@ Cost: DNS from covered processes takes one extra loopback hop (about +90 µs per
 ## Options shared with the Windows and macOS apps
 
 - **Names.** Every proxy and every rule can carry a name (the GUI shows it, profiles store it).
-- **DNS via proxy, per proxy** (*SendDomainToProxy*, on by default, like Windows and macOS). When a connection goes to an address whose name the application resolved, the proxy is asked for the *name* (SOCKS5 domain address, or `CONNECT host:port`), so the proxy does the resolving. Off sends the IP address (`?dns=local` on the command line). The name comes from the application's own unencrypted DNS answers (the DNS tap that already powers domain rules; DoH/DoT bypass it), the most recent lookup for that address wins, and without a known name the IP is sent. UDP datagrams always carry the IP. Names are checked before they reach a proxy, so a hostile DNS answer cannot inject anything into a request. This is separate from the menu switch **DNS via Proxy**, which decides whether DNS queries themselves are routed through the rules.
+- **DNS via proxy, per proxy** (*SendDomainToProxy*, on by default, like Windows and macOS). When a connection goes to an address whose name the application resolved, the proxy is asked for the *name* (SOCKS5 domain address, or `CONNECT host:port`), so the proxy does the resolving. Off sends the IP address (`?dns=local` on the command line). The name comes from the application's own unencrypted DNS answers (the DNS tap that already powers domain rules; DoH/DoT bypass it), the most recent lookup for that address wins, and without a known name the IP is sent. UDP datagrams always carry the IP. Names are checked before they reach a proxy, so a hostile DNS answer cannot inject anything into a request. Whether DNS queries themselves follow your rules is not a menu switch any more: DNS (port 53) follows the rules like other traffic (the profile field `DnsViaProxy`, default `true`, still controls it; the CLI honours it).
 - **Also proxy localhost traffic, per rule** (*LocalhostViaProxy*, off by default, PROXY rules only). Without it a PROXY rule leaves connections to this computer (`127.0.0.0/8`, `::1`) direct, as on Windows, which is usually what you want. With it, matching loopback TCP and UDP connections go to the proxy, for example to inspect a local application in an intercepting proxy. First match still wins: a PROXY rule without the option stops the walk and the connection stays local. Differences from Windows: BLOCK and DIRECT rules never touch loopback, and DNS to a local resolver (port 53, e.g. `127.0.0.53`) is never proxied, so a broad rule cannot break name resolution.
 
 ## Connection log, live connections and the main switch
@@ -276,7 +277,7 @@ Add as many proxies as you need (GUI or profile); each rule chooses its own. Pro
 
 - **Stalled proxies do not hold everything up.** Connections that need a handshake with their proxy are served by a pool of workers that starts with 8 and grows to 64 while handshakes queue up (extra workers leave after 20 idle seconds). No single proxy may occupy more than 48 workers at once, so a proxy that accepts connections and then never answers (up to the 10 s handshake timeout each) cannot delay connections that use another proxy.
 
-- **DNS Traffic Handling**: with *DNS via Proxy* on (default) DNS (port 53) follows your rules like any other traffic; when off, DNS always uses a direct connection regardless of rules.
+- **DNS Traffic Handling**: by default DNS (port 53) follows your rules like any other traffic; a profile with `"DnsViaProxy": false` makes DNS always use a direct connection regardless of rules.
 
 - **Automatic Direct Routing**: Certain IP addresses and ports automatically use direct connection regardless of proxy rules:
   - **Loopback** (127.0.0.0/8, ::1) and **0.0.0.0/8**, unless a PROXY rule has *Also proxy localhost traffic* (then only that rule's matches are proxied, and never port 53 or the relay itself)

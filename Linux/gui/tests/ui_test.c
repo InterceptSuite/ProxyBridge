@@ -375,13 +375,44 @@ static RuleForm *rf(const char *name, const char *proc, const char *hosts, const
     return f;
 }
 
+// The single Action combo lists Direct, Block, then one entry per proxy.
+static int action_idx(int action, int proxy_idx) {
+    return action == RULE_ACTION_DIRECT ? 0 : action == RULE_ACTION_BLOCK ? 1 : 2 + (proxy_idx > 0 ? proxy_idx - 1 : 0);
+}
+
+static bool label_with_text(GtkWidget *w, const char *text) {
+    if (GTK_IS_LABEL(w) && strcmp(gtk_label_get_text(GTK_LABEL(w)), text) == 0) return true;
+    if (GTK_IS_CONTAINER(w)) {
+        GList *kids = gtk_container_get_children(GTK_CONTAINER(w));
+        bool found = false;
+        for (GList *l = kids; l && !found; l = l->next) found = label_with_text(l->data, text);
+        g_list_free(kids);
+        return found;
+    }
+    return false;
+}
+
+static int combo_count(GtkWidget *d, const char *name) {
+    GtkWidget *w = find_in(d, name);
+    return w ? gtk_tree_model_iter_n_children(gtk_combo_box_get_model(GTK_COMBO_BOX(w)), NULL) : -1;
+}
+
+static char *combo_text_at(GtkWidget *d, const char *name, int idx) {
+    GtkWidget *w = find_in(d, name);
+    GtkTreeIter it;
+    char *t = NULL;
+    GtkTreeModel *m = w ? gtk_combo_box_get_model(GTK_COMBO_BOX(w)) : NULL;
+    if (m && gtk_tree_model_iter_nth_child(m, &it, NULL, idx)) gtk_tree_model_get(m, &it, 0, &t, -1);
+    return t;
+}
+
 static void fill_rule(GtkWidget *d, gpointer arg) {
     RuleForm *f = arg;
     set_text(d, "rule_name", f->name); set_text(d, "rule_process", f->proc); set_text(d, "rule_hosts", f->hosts);
     set_text(d, "rule_ports", f->ports);
-    set_combo(d, "rule_proto", f->proto); set_combo(d, "rule_proxy", f->proxy_idx);
+    set_combo(d, "rule_proto", f->proto);
     set_check(d, "rule_localhost", f->localhost);
-    set_combo(d, "rule_action", f->action);                    // last: the localhost option follows the action
+    set_combo(d, "rule_action", action_idx(f->action, f->proxy_idx));   // last: the localhost option follows the action
 }
 
 static char *rule_error;
@@ -398,7 +429,7 @@ static void check_dialog_shows_web(GtkWidget *d, gpointer arg) {
     char *name = get_text(d, "rule_name"), *proc = get_text(d, "rule_process"), *ports = get_text(d, "rule_ports");
     CHECK_STR(name, "Web"); CHECK_STR(proc, "curl"); CHECK_STR(ports, "80;443");
     CHECK(get_check(d, "rule_localhost") && is_sensitive(d, "rule_localhost"));
-    CHECK(get_combo(d, "rule_proto") == RULE_PROTOCOL_TCP && get_combo(d, "rule_action") == RULE_ACTION_PROXY && get_combo(d, "rule_proxy") == 1);
+    CHECK(get_combo(d, "rule_proto") == RULE_PROTOCOL_TCP && get_combo(d, "rule_action") == 2);   // Direct, Block, Proxy: p1x
     g_free(name); g_free(proc); g_free(ports);
     set_text(d, "rule_name", "Web2");
     set_check(d, "rule_localhost", false);
@@ -406,18 +437,45 @@ static void check_dialog_shows_web(GtkWidget *d, gpointer arg) {
 
 static void check_localhost_follows_action(GtkWidget *d, gpointer arg) {
     RuleForm *f = arg;
-    set_combo(d, "rule_action", RULE_ACTION_PROXY);
-    CHECK(is_sensitive(d, "rule_localhost") && is_sensitive(d, "rule_proxy"));
-    set_combo(d, "rule_action", RULE_ACTION_DIRECT);
-    CHECK(!is_sensitive(d, "rule_localhost") && !is_sensitive(d, "rule_proxy"));
-    set_combo(d, "rule_action", RULE_ACTION_BLOCK);
+    set_combo(d, "rule_action", action_idx(RULE_ACTION_PROXY, 1));
+    CHECK(is_sensitive(d, "rule_localhost"));
+    set_combo(d, "rule_action", 0);
+    CHECK(!is_sensitive(d, "rule_localhost"));
+    set_combo(d, "rule_action", 1);
     CHECK(!is_sensitive(d, "rule_localhost"));
     fill_rule(d, f);
+}
+
+// a new rule: Direct, Block and the proxy; the default proxy is preselected
+static void check_new_rule_choices(GtkWidget *d, gpointer arg) {
+    (void)arg;
+    CHECK(combo_count(d, "rule_action") == 3);
+    char *t0 = combo_text_at(d, "rule_action", 0), *t1 = combo_text_at(d, "rule_action", 1), *t2 = combo_text_at(d, "rule_action", 2);
+    CHECK_STR(t0, "Direct"); CHECK_STR(t1, "Block"); CHECK_STR(t2, "Proxy: p1x");
+    g_free(t0); g_free(t1); g_free(t2);
+    CHECK(get_combo(d, "rule_action") == 2 && is_sensitive(d, "rule_localhost"));
+    CHECK(find_in(d, "rule_proxy") == NULL);                                  // there is no second combo any more
+}
+
+// no proxy configured: only Direct and Block
+static void check_no_proxy_choices(GtkWidget *d, gpointer arg) {
+    (void)arg;
+    CHECK(combo_count(d, "rule_action") == 2 && get_combo(d, "rule_action") == 0 && !is_sensitive(d, "rule_localhost"));
 }
 
 static void rules_scenario(void) {
     GtkWidget *win = find_named("win_rules");
     CHECK(win != NULL);
+    STEP("rule action choices");
+    arm("dlg_rule", check_new_rule_choices, NULL, GTK_RESPONSE_CANCEL);
+    click("rules_add");
+    {
+        GList *saved = g_proxies_list;
+        g_proxies_list = NULL;
+        arm("dlg_rule", check_no_proxy_choices, NULL, GTK_RESPONSE_CANCEL);
+        click("rules_add");
+        g_proxies_list = saved;
+    }
     STEP("rules window: add r1");
 
     arm("dlg_rule", fill_rule, rf("Web", "curl", "10.0.0.0/8;\nexample.com", "80;443", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, 1, true), GTK_RESPONSE_ACCEPT);
@@ -426,6 +484,7 @@ static void rules_scenario(void) {
     CHECK(g_list_length(g_rules_list) == 1 && r1 && r1->id != 0);
     CHECK(r1 && strcmp(r1->name, "Web") == 0 && strcmp(r1->process_name, "curl") == 0 && r1->localhost && r1->enabled);
     CHECK_STR(r1 ? r1->proxy_name : NULL, "p1x");
+    CHECK(label_with_text(win, "Proxy: p1x (+localhost)"));        // the list says which proxy the rule uses, like the Windows app
     CHECK_HAS(r1 ? r1->target_hosts : NULL, "example.com");
     CHECK(r1 && strchr(r1->target_hosts, '\n') == NULL);       // line breaks in the editor are only for reading
 
@@ -591,8 +650,8 @@ static void profiles_body(GtkWidget *dlg, gpointer arg) {
 
     STEP("switch");
     // switch: the window title, the engine's rules and the profile's own switches follow
-    GtkWidget *log_item = menu_item("Enable Traffic Logging"), *dns_item = menu_item("DNS via Proxy");
-    CHECK(log_item && dns_item);
+    GtkWidget *log_item = menu_item("Enable Traffic Logging");
+    CHECK(log_item && menu_item("DNS via Proxy") == NULL);     // DNS via proxy is a per-proxy option, not a menu switch
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_item), FALSE);        // Default: logging off
     CHECK(!g_chk_logging);
     CHECK(select_by_first_column("profile_tree", "Work"));
@@ -600,11 +659,11 @@ static void profiles_body(GtkWidget *dlg, gpointer arg) {
     CHECK_STR(g_active_profile, "Work");
     CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Work");
     CHECK(g_chk_logging && gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(log_item)));   // Work has its own, default-on switches
-    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_item), FALSE);                   // Work: DNS off
+    g_chk_dns = false; save_config();                                                       // Work: DNS routing off (profile field)
     CHECK(select_by_first_column("profile_tree", "Default"));
     click("pf_switch");
     CHECK_STR(g_active_profile, "Default");
-    CHECK(!gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(log_item)) && gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(dns_item)));
+    CHECK(!gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(log_item)) && g_chk_dns);
     CHECK(load_disk("Work", &d2) && !d2.dns_via_proxy && d2.logging);
     pbp_free(&d2);
 

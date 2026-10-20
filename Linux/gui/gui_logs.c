@@ -213,5 +213,7 @@ void lib_connection_callback_ex(const char *process_name, uint32_t pid, const ch
     bool show = pbp_filters_pass(filters, nfilters, process_name ? process_name : "", dest_ip ? dest_ip : "", port, protocol ? protocol : "", action);
     pthread_mutex_unlock(&filter_mu);
     if (!show) return;
-    push_line(&conn_view, "%s (PID:%u) -> %s:%u via %s", process_name ? process_name : "", pid, dest_ip ? dest_ip : "", dest_port, info);
+    // like the Windows app: a UDP flow is marked, a TCP connection is not
+    push_line(&conn_view, "%s (PID:%u) -> %s:%u via %s%s", process_name ? process_name : "", pid, dest_ip ? dest_ip : "", dest_port, info,
+              protocol && !strcmp(protocol, "UDP") ? " (UDP)" : "");
 }

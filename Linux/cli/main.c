@@ -21,10 +21,10 @@ static void log_callback(const char* message)
         printf("[LOG] %s\n", message);
 }
 
-static void connection_callback(const char* process_name, uint32_t pid, const char* dest_ip, uint16_t dest_port, const char* proxy_info)
+static void connection_callback(const char* process_name, uint32_t pid, const char* dest_ip, uint16_t dest_port, const char* protocol, const char* proxy_info)
 {
     if (verbose_level == 2 || verbose_level == 3)
-        printf("[CONN] %s (PID:%u) -> %s:%u via %s\n", process_name, pid, dest_ip, dest_port, proxy_info);
+        printf("[CONN] %s (PID:%u) -> %s:%u via %s%s\n", process_name, pid, dest_ip, dest_port, proxy_info, protocol && !strcmp(protocol, "UDP") ? " (UDP)" : "");
 }
 
 static void signal_handler(int sig)
@@ -256,7 +256,7 @@ int main(int argc, char *argv[])
     }
 
     ProxyBridge_SetLogCallback(verbose_level == 1 || verbose_level == 3 ? log_callback : NULL);
-    ProxyBridge_SetConnectionCallback(verbose_level == 2 || verbose_level == 3 ? connection_callback : NULL);
+    ProxyBridge_SetConnectionCallbackEx(verbose_level == 2 || verbose_level == 3 ? connection_callback : NULL);
     ProxyBridge_SetTrafficLoggingEnabled(verbose_level > 0);
     ProxyBridge_SetDnsViaProxy(prof.dns_via_proxy);
     ProxyBridge_SetLogEveryConnection(prof.log_every);
