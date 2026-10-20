@@ -33,7 +33,7 @@ typedef char pb_fd_setsize_fits_all_proxies[(FD_SETSIZE >= 2 * MAX_PROXY_CONFIGS
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 1024        // one process image name / path read from the OS
 #define MAX_RULE_PROCESS_LIST 24576  // a rule's Applications list in UTF-8: 8191 UTF-16 characters at up to 3 bytes each
-#define VERSION "4.2.0"
+#define VERSION "4.3.0"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 30000
 // Single packet-processor thread eliminates TCP packet reordering.

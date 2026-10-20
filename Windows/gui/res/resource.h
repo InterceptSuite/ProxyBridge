@@ -6,11 +6,11 @@
 // (exe Properties → Details). Also mirror the numeric form in res\app.manifest's
 // <assemblyIdentity version="..."> when bumping.
 #define PB_VER_MAJOR 4
-#define PB_VER_MINOR 2
+#define PB_VER_MINOR 3
 #define PB_VER_PATCH 0
 #define PB_VER_BUILD 0
-#define PB_VER_STR   "4.2.0"     // narrow, for the .rc VERSIONINFO strings
-#define PB_VER_STRW  L"4.2.0"    // wide, for the C/About UI
+#define PB_VER_STR   "4.3.0"     // narrow, for the .rc VERSIONINFO strings
+#define PB_VER_STRW  L"4.3.0"    // wide, for the C/About UI
 
 #define IDI_APPICON                 101
 
