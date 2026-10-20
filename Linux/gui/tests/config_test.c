@@ -16,7 +16,7 @@ void free_proxy_data(ProxyData *p) {
 }
 
 void free_rule_data(RuleData *r) {
-    g_free(r->process_name); g_free(r->target_hosts); g_free(r->target_ports); g_free(r->proxy_name); g_free(r);
+    g_free(r->name); g_free(r->process_name); g_free(r->target_hosts); g_free(r->target_ports); g_free(r->proxy_name); g_free(r);
 }
 
 static int failures = 0;
@@ -37,12 +37,14 @@ static void add_content(const char *proxy_name) {
     ProxyData *px = g_malloc0(sizeof(ProxyData));
     px->name = g_strdup(proxy_name); px->host = g_strdup("github.com"); px->port = 8080;
     px->username = g_strdup(""); px->password = g_strdup("s3cr|et");
+    px->send_domain = false;
     g_proxies_list = g_list_append(g_proxies_list, px);
     g_free(g_default_proxy);
     g_default_proxy = g_strdup(proxy_name);
     RuleData *r = g_malloc0(sizeof(RuleData));
     r->process_name = g_strdup("curl"); r->target_hosts = g_strdup("*.github.com"); r->target_ports = g_strdup("*");
     r->action = RULE_ACTION_PROXY; r->proxy_name = g_strdup(proxy_name); r->enabled = true;
+    r->name = g_strdup("Burp \"intercept\""); r->localhost = true;
     g_rules_list = g_list_append(g_rules_list, r);
 }
 
@@ -203,6 +205,8 @@ int main() {
     CHECK(strcmp(((ProxyData *)g_proxies_list->data)->name, "p 1|x") == 0);
     CHECK(strcmp(((ProxyData *)g_proxies_list->data)->password, "s3cr|et") == 0);
     CHECK(strcmp(((RuleData *)g_rules_list->data)->target_hosts, "*.github.com") == 0);
+    CHECK(!((ProxyData *)g_proxies_list->data)->send_domain);                       // per-proxy "DNS via proxy" survives a restart
+    CHECK(strcmp(((RuleData *)g_rules_list->data)->name, "Burp \"intercept\"") == 0 && ((RuleData *)g_rules_list->data)->localhost);
     CHECK(!g_chk_dns && !g_chk_logging);                    // restored from the Work profile file itself
     CHECK(profile_find("Home") && !profile_find("Home")->logging && profile_find("Home")->dns);   // migrated values of the old file, per profile
     CHECK(profile_find("Home") && g_list_length(profile_find("Home")->rules) == 1);

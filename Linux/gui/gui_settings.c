@@ -57,6 +57,7 @@ void apply_proxies_to_lib() {
         char err[256] = "";
         p->id = ProxyBridge_AddProxy(p->name, p->type, p->host, p->port, p->username, p->password, err, sizeof(err));
         if (p->id == 0) gui_log("Proxy '%s' rejected: %s", p->name, err[0] ? err : "unknown error");
+        else if (!p->send_domain) ProxyBridge_SetProxySendDomain(p->id, false);
     }
     ProxyBridge_SetDefaultProxy(resolve_proxy_id(g_default_proxy));
 }
@@ -211,8 +212,12 @@ static ProxyData *proxy_edit_dialog(GtkWindow *parent, ProxyData *existing) {
     grid_row(grid, 3, "Port:", port_entry);
     grid_row(grid, 4, "Username:", user_entry);
     grid_row(grid, 5, "Password:", pass_entry);
+    GtkWidget *dns_check = gtk_check_button_new_with_label("DNS via proxy (the proxy resolves host names)");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(dns_check), existing ? existing->send_domain : TRUE);
+    gtk_grid_attach(GTK_GRID(grid), dns_check, 1, 6, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), hint_label("On: connections to a name the application resolved are sent to the proxy by name. Off: the IP address is sent. UDP always uses the IP."), 1, 7, 1, 1);
     GtkWidget *err_label = hint_label("");
-    gtk_grid_attach(GTK_GRID(grid), err_label, 0, 6, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), err_label, 0, 8, 2, 1);
 
     gtk_combo_box_set_active(GTK_COMBO_BOX(type_combo), 1);
     if (existing) {
@@ -255,7 +260,8 @@ static ProxyData *proxy_edit_dialog(GtkWindow *parent, ProxyData *existing) {
                 id = ProxyBridge_AddProxy(name, type, host, (uint16_t)port, user, pass, err, sizeof(err));
                 ok = id != 0;
             }
-            if (!ok) msg = err[0] ? err : "Engine rejected the proxy settings.";
+            if (ok) ProxyBridge_SetProxySendDomain(id, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(dns_check)));
+            else msg = err[0] ? err : "Engine rejected the proxy settings.";
         }
         if (msg) {
             set_error_label(err_label, msg);
@@ -279,6 +285,7 @@ static ProxyData *proxy_edit_dialog(GtkWindow *parent, ProxyData *existing) {
         set_str(&p->password, pass);
         p->type = type;
         p->port = (uint16_t)port;
+        p->send_domain = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(dns_check));
 
         if (!find_proxy_by_name(g_default_proxy)) {
             set_str(&g_default_proxy, p->name);

@@ -11,7 +11,7 @@ PASS=0; FAIL=0; DNSIP=10.77.0.4
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 has() { [[ "$2" == *"$3"* ]] && ok "$1" || bad "$1 (got: ${2:0:160})"; }
-cleanup() { kill $GUI_PID $FAKE $DNSP $BW 2>/dev/null; wait 2>/dev/null; ip addr del $DNSIP/32 dev lo 2>/dev/null; rm -rf "$WORK"; }
+cleanup() { kill $GUI_PID $FAKE $DNSP $BW $WWW 2>/dev/null; wait 2>/dev/null; ip addr del $DNSIP/32 dev lo 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 ip addr add $DNSIP/32 dev lo 2>/dev/null
@@ -72,7 +72,7 @@ out=$(curl -s -m 5 http://198.51.100.7/);     has "rule 2: curl -> proxy b (with
 out=$(curl -s -m 5 http://203.0.114.7/ 2>&1; echo "rc=$?"); has "rule 3: BLOCK" "$out" "rc=7"
 out=$(curl -s -m 2 http://203.0.113.7/ 2>&1; echo "rc=$?"); [[ "$out" != *hello-from* ]] && ok "disabled rule 5 is not applied" || bad "disabled rule applied"
 ip4=$(dig @$DNSIP app.example.test +short +time=3 +tries=1 | head -1)
-out=$(curl -s -m 5 http://$ip4/);             has "domain rule from the config (*.example.test -> b) after a real DNS lookup" "$out" "hello-from-B dst=192.0.2.77:80"
+out=$(curl -s -m 5 http://$ip4/);             has "domain rule from the config (*.example.test -> b) after a real DNS lookup" "$out" "hello-from-B dst=app.example.test:80"
 stop_gui
 "${BPFTOOL:-bpftool}" prog show 2>/dev/null | grep -q pb_connect && bad "BPF programs left after GUI exit" || ok "programs detached after GUI exit"
 
@@ -96,11 +96,19 @@ echo "== a profile exported by the Windows app, dropped into the profiles direct
 cat > "$P/From Windows.pbprofile" <<'JSON'
 { "Version": "1.0", "LocalhostViaProxy": false, "IsTrafficLoggingEnabled": true,
   "ProxyConfigs": [ { "Id": 5, "Type": "socks5", "Host": "127.0.0.1", "Port": "19080", "Username": "", "Password": "", "SendDomainToProxy": true } ],
-  "ProxyRules": [ { "ProcessName": "curl", "TargetHosts": "192.0.2.0/24", "TargetPorts": "*", "TargetDomains": "", "Protocol": "TCP", "Action": "PROXY", "IsEnabled": true, "ProxyConfigId": 5 } ] }
+  "ProxyRules": [
+    { "ProcessName": "curl", "TargetHosts": "192.0.2.0/24", "TargetPorts": "*", "TargetDomains": "", "Protocol": "TCP", "Action": "PROXY", "IsEnabled": true, "ProxyConfigId": 5 },
+    { "Name": "Burp intercept", "ProcessName": "curl", "TargetHosts": "127.0.0.1", "TargetPorts": "18401", "Protocol": "TCP", "Action": "PROXY", "IsEnabled": true, "ProxyConfigId": 5, "LocalhostViaProxy": true } ] }
 JSON
+mkdir -p "$WORK/www"; echo local-origin > "$WORK/www/index.html"
+python3 -m http.server 18401 --bind 127.0.0.1 --directory "$WORK/www" >/dev/null 2>&1 & WWW=$!
+sleep 0.5
 run_gui "From Windows"
 out=$(curl -s -m 5 http://192.0.2.9/);        has "rule and proxy imported from the Windows file are applied" "$out" "hello-from-A dst=192.0.2.9:80"
+out=$(curl -s -m 5 http://127.0.0.1:18401/);  has "per-rule LocalhostViaProxy from the Windows file is applied" "$out" "hello-from-A dst=127.0.0.1:18401"
 stop_gui
+grep -q '"Name": "Burp intercept"' "$P/From Windows.pbprofile" && grep -q '"LocalhostViaProxy": true' "$P/From Windows.pbprofile" && grep -q '"SendDomainToProxy": true' "$P/From Windows.pbprofile" \
+  && ok "rule name, localhost flag and DNS-via-proxy survive the GUI saving the profile" || bad "fields lost: $(cat "$P/From Windows.pbprofile")"
 out=$(PROXYBRIDGE_CONFIG_DIR="$WORK/cfg" LD_LIBRARY_PATH="$LIBDIR" "$LIBDIR/ProxyBridge" --list-profiles 2>&1)
 has "the CLI lists the GUI's profiles" "$out" "From Windows"
 [ "$(stat -c %a "$P/From Windows.pbprofile")" = 600 ] && ok "the dropped-in file was tightened to 0600" || bad "dropped-in file mode"

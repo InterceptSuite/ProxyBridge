@@ -95,11 +95,14 @@ static ProxyData *copy_proxy(const ProxyData *src) {
     d->port = src->port;
     d->username = g_strdup(src->username ? src->username : "");
     d->password = g_strdup(src->password ? src->password : "");
+    d->send_domain = src->send_domain;
     return d;
 }
 
 static RuleData *copy_rule(const RuleData *src) {
     RuleData *d = g_malloc0(sizeof(RuleData));
+    d->name = g_strdup(src->name ? src->name : "");
+    d->localhost = src->localhost;
     d->process_name = g_strdup(src->process_name ? src->process_name : "");
     d->target_hosts = g_strdup(src->target_hosts ? src->target_hosts : "");
     d->target_ports = g_strdup(src->target_ports ? src->target_ports : "");
@@ -195,12 +198,15 @@ static void profile_to_pbp(const Profile *prof, struct pbp_profile *out) {
         x->port = p->port;
         x->user = p->username ? p->username : (char *)"";
         x->pass = p->password ? p->password : (char *)"";
+        x->send_domain = p->send_domain;
         if (prof->default_proxy && strcmp(prof->default_proxy, p->name) == 0) out->default_proxy_id = x->id;
     }
     size_t i = 0;
     for (GList *l = prof->rules; l != NULL; l = l->next) {
         RuleData *r = (RuleData *)l->data;
         struct pbp_rule *x = &out->rules[i++];
+        x->name = r->name ? r->name : (char *)"";
+        x->localhost = r->localhost;
         x->process = r->process_name ? r->process_name : (char *)"*";
         x->hosts = r->target_hosts ? r->target_hosts : (char *)"*";
         x->ports = r->target_ports ? r->target_ports : (char *)"*";
@@ -228,11 +234,14 @@ static void fill_profile_from_pbp(Profile *p, const struct pbp_profile *src) {
         px->port = x->port;
         px->username = g_strdup(x->user);
         px->password = g_strdup(x->pass);
+        px->send_domain = x->send_domain;
         p->proxies = g_list_append(p->proxies, px);
     }
     for (size_t i = 0; i < src->nrules; i++) {
         const struct pbp_rule *x = &src->rules[i];
         RuleData *r = g_malloc0(sizeof(RuleData));
+        r->name = g_strdup(x->name);
+        r->localhost = x->localhost;
         r->process_name = g_strdup(x->process);
         r->target_hosts = g_strdup(x->hosts);
         r->target_ports = g_strdup(x->ports);
@@ -363,6 +372,7 @@ static ProxyData *parse_proxy_line(char *line) {
     px->port = (port >= 1 && port <= 65535) ? (uint16_t)port : 0;
     px->username = unesc(n > 4 ? fields[4] : "");
     px->password = unesc(n > 5 ? fields[5] : "");
+    px->send_domain = true;
     return px;
 }
 
@@ -475,6 +485,7 @@ static bool load_legacy_ini(const char *dir, char **saved_active_out) {
             px->port = (uint16_t)old_port;
             px->username = g_strdup(old_user);
             px->password = g_strdup(old_pass);
+            px->send_domain = true;
             d->proxies = g_list_append(d->proxies, px);
             g_free(d->default_proxy);
             d->default_proxy = g_strdup("default");

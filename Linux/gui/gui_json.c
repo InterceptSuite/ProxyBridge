@@ -96,6 +96,8 @@ int rules_from_json(const char *json, RuleImportCb cb, void *ud) {
         cur = end + 1;
 
         RuleData r = {0};
+        r.name = extract_sub_json_str(obj, "name");
+        r.localhost = json_bool(obj, "localhostViaProxy", false);
         r.process_name = extract_sub_json_str(obj, "processNames");
         r.target_hosts = extract_sub_json_str(obj, "targetHosts");
         r.target_ports = extract_sub_json_str(obj, "targetPorts");
@@ -110,7 +112,7 @@ int rules_from_json(const char *json, RuleImportCb cb, void *ud) {
 
         cb(&r, ++count, ud);
 
-        g_free(r.process_name); g_free(r.target_hosts); g_free(r.target_ports); g_free(r.proxy_name);
+        g_free(r.name); g_free(r.process_name); g_free(r.target_hosts); g_free(r.target_ports); g_free(r.proxy_name);
         g_free(proto); g_free(act); g_free(obj);
     }
     return count;
@@ -128,10 +130,12 @@ char *rules_to_json(GList *rules, bool only_selected) {
         char *pxy = escape_json_string(r->action == RULE_ACTION_PROXY ? r->proxy_name : NULL);
         const char *proto = r->protocol == RULE_PROTOCOL_TCP ? "TCP" : r->protocol == RULE_PROTOCOL_UDP ? "UDP" : "BOTH";
         const char *act = r->action == RULE_ACTION_PROXY ? "PROXY" : r->action == RULE_ACTION_DIRECT ? "DIRECT" : "BLOCK";
-        g_string_append_printf(out, "%s  {\n    \"processNames\": \"%s\",\n    \"targetHosts\": \"%s\",\n    \"targetPorts\": \"%s\",\n"
+        char *nm = escape_json_string(r->name);
+        g_string_append_printf(out, "%s  {\n    \"name\": \"%s\",\n    \"localhostViaProxy\": %s,\n    \"processNames\": \"%s\",\n    \"targetHosts\": \"%s\",\n    \"targetPorts\": \"%s\",\n"
             "    \"protocol\": \"%s\",\n    \"ruleProtocol\": \"%s\",\n    \"action\": \"%s\",\n    \"ruleAction\": \"%s\",\n"
             "    \"proxy\": \"%s\",\n    \"enabled\": %s\n  }",
-            first ? "" : ",\n", proc, host, port, proto, proto, act, act, pxy, r->enabled ? "true" : "false");
+            first ? "" : ",\n", nm, r->localhost && r->action == RULE_ACTION_PROXY ? "true" : "false", proc, host, port, proto, proto, act, act, pxy, r->enabled ? "true" : "false");
+        g_free(nm);
         g_free(proc); g_free(host); g_free(port); g_free(pxy);
         first = false;
     }

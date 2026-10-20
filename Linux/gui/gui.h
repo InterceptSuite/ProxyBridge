@@ -19,16 +19,19 @@ typedef struct {
     uint16_t port;
     char *username;
     char *password;
+    bool send_domain;       // DNS via proxy: the proxy resolves host names (default on, like Windows and macOS)
 } ProxyData;
 
 typedef struct {
     uint32_t id;
+    char *name;             // label, may be empty
     char *process_name;
     char *target_hosts;
     char *target_ports;
     RuleProtocol protocol;
     RuleAction action;
     char *proxy_name;       // NULL or "" = default proxy
+    bool localhost;         // PROXY rule that also proxies loopback traffic
     bool enabled;
     bool selected;
 } RuleData;
