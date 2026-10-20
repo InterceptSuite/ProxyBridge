@@ -133,3 +133,6 @@ Windows/**/*.res
 Windows/tests/out/
 
 Windows/tests/e2e/out/
+
+# the end-to-end test helper is a script we ship
+!Windows/tests/e2e/*.py
