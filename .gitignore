@@ -131,3 +131,5 @@ Windows/**/*.obj
 Windows/gui/*.res
 Windows/**/*.res
 Windows/tests/out/
+
+Windows/tests/e2e/out/

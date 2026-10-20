@@ -97,6 +97,32 @@ jobs:
         .\compile.ps1 -NoSign
       shell: pwsh
 
+    # The unit tests above use made-up data. This step runs the REAL engine and WinDivert driver (through the CLI) with a
+    # real SOCKS5 proxy (Nexus Proxy), a small real HTTP proxy and real requests to real servers, and checks that traffic
+    # goes where the rules say. It loads a kernel driver, so it only runs here on the disposable runner (the script
+    # refuses to run elsewhere). Best effort for now: it depends on the internet and on the hosted runner allowing the
+    # driver, so a failure is reported without failing the build. See Windows\tests\e2e\run_e2e.ps1.
+    - name: Real-traffic end-to-end tests (best effort)
+      continue-on-error: true
+      timeout-minutes: 25
+      run: |
+        cd Windows
+        .\tests\e2e\run_e2e.ps1 -PbDir .\output
+      shell: pwsh
+
+    - name: Upload end-to-end logs
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ProxyBridge-E2E-Logs-${{ github.sha }}
+        path: |
+          Windows/tests/e2e/out/*.log
+          Windows/tests/e2e/out/*.err
+          Windows/tests/e2e/out/*.out
+          Windows/tests/e2e/out/*.pbprofile
+        if-no-files-found: ignore
+        retention-days: 7
+
     - name: Upload artifacts
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
