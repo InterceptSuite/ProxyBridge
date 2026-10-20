@@ -18,7 +18,7 @@
 
 
 #define VERSION "4.2.0"
-#define MAX_PROXY_CONFIGS 16
+#define MAX_PROXY_CONFIGS 32
 #define MAX_RULES         256
 
 
@@ -208,7 +208,7 @@ static void show_help(const char* prog)
     printf("  %s [options]\n\n", prog);
     printf("Options:\n");
     printf("  --profile <path>     Path to .pbprofile file\n");
-    printf("                       Export from the GUI: File > Export Profile\n\n");
+    printf("                       Export from the GUI: Profile > Export Profile\n\n");
     printf("  --verbose <0-3>      Logging verbosity\n");
     printf("                         0 - Silent (default)\n");
     printf("                         1 - Log messages only\n");

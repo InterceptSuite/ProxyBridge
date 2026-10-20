@@ -79,6 +79,21 @@ BOOL match_ip_pattern(const char *pattern, UINT32 ip)
     if (pattern == NULL || strcmp(pattern, "*") == 0)
         return TRUE;
 
+    // CIDR notation, e.g. "10.0.0.0/8" or "192.168.1.128/25": the first <prefix> bits must match.
+    // Strict on purpose: four numbers 0-255, a prefix of 0-32 and nothing after it, otherwise the entry matches nothing.
+    if (strchr(pattern, '/') != NULL)
+    {
+        int c1, c2, c3, c4, prefix, used = 0;
+        if (sscanf_s(pattern, "%d.%d.%d.%d/%d%n", &c1, &c2, &c3, &c4, &prefix, &used) != 5 || pattern[used] != '\0')
+            return FALSE;
+        if (c1 < 0 || c1 > 255 || c2 < 0 || c2 > 255 || c3 < 0 || c3 > 255 || c4 < 0 || c4 > 255 || prefix < 0 || prefix > 32)
+            return FALSE;
+        UINT32 ip_be   = ((ip & 0xFF) << 24) | ((ip & 0xFF00) << 8) | ((ip & 0xFF0000) >> 8) | ((ip & 0xFF000000) >> 24);
+        UINT32 net_be  = ((UINT32)c1 << 24) | ((UINT32)c2 << 16) | ((UINT32)c3 << 8) | (UINT32)c4;
+        UINT32 mask    = prefix == 0 ? 0 : (0xFFFFFFFFu << (32 - prefix));
+        return (ip_be & mask) == (net_be & mask);
+    }
+
     // check for IP range
     char *dash = strchr(pattern, '-');
     if (dash != NULL)

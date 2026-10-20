@@ -1032,7 +1032,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case IDM_HELP_DOCS:
-            ShellExecuteW(hwnd, L"open", L"https://interceptsuite.com/docs/proxybridge/", NULL, NULL, SW_SHOWNORMAL);
+            ShellExecuteW(hwnd, L"open", L"https://proxybridge.interceptsuite.com/docs/", NULL, NULL, SW_SHOWNORMAL);
             return 0;
         case IDM_HELP_UPDATE:
             UpdStartCheck(hwnd, TRUE);   // manual: also reports "up to date" / errors

@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-#define MAX_PROXY_CONFIGS 16
+#define MAX_PROXY_CONFIGS 32
 
 typedef void (*LogCallback)(const char* message);
 typedef void (*ConnectionCallback)(const char* process_name, DWORD pid, const char* dest_ip, UINT16 dest_port, const char* proxy_info);

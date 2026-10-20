@@ -108,5 +108,13 @@ int main(void)
     ProxyBridge_EnableRule(x);  CHECK(m4("zzz.exe", "8.8.8.8", 1) == RULE_ACTION_BLOCK);
     ProxyBridge_DeleteRule(x);  CHECK(m4("zzz.exe", "8.8.8.8", 1) == RULE_ACTION_DIRECT);
 
+    /* the GUI offers 32 proxy servers, so the engine must accept 32 (and refuse a 33rd, not overflow) */
+    { UINT32 ids[40]; int got = 0;
+      for (int i = 0; i < 40; i++) { ids[i] = ProxyBridge_AddProxyConfig(PROXY_TYPE_SOCKS5, "127.0.0.1", (UINT16)(2000 + i), NULL, NULL, TRUE); if (ids[i]) got++; }
+      CHECK(MAX_PROXY_CONFIGS == 32 && got == 32 && ids[31] != 0 && ids[32] == 0);
+      for (int i = 0; i < 40; i++) if (ids[i]) ProxyBridge_DeleteProxyConfig(ids[i]);
+      CHECK(ProxyBridge_AddProxyConfig(PROXY_TYPE_HTTP, "127.0.0.1", 3000, NULL, NULL, FALSE) != 0);   /* room again after deleting */
+    }
+
     return pbtest_done("test_engine");
 }

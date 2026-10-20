@@ -26,6 +26,25 @@ int main(void)
     CHECK(match_ip_list("", ip4("1.1.1.1")) && match_ip_list("*", ip4("1.1.1.1")));
     CHECK(!match_ip_list(";", ip4("1.1.1.1")));                                                                                       /* only separators: matches nothing (the GUI turns this into "*") */
 
+    /* IPv4 CIDR */
+    CHECK(match_ip_pattern("10.0.0.0/8", ip4("10.1.2.3")) && match_ip_pattern("10.0.0.0/8", ip4("10.255.255.255")) && match_ip_pattern("10.0.0.0/8", ip4("10.0.0.0")));
+    CHECK(!match_ip_pattern("10.0.0.0/8", ip4("11.0.0.1")) && !match_ip_pattern("10.0.0.0/8", ip4("9.255.255.255")));
+    CHECK(match_ip_pattern("192.168.1.128/25", ip4("192.168.1.200")) && match_ip_pattern("192.168.1.128/25", ip4("192.168.1.255")) &&
+          !match_ip_pattern("192.168.1.128/25", ip4("192.168.1.127")) && !match_ip_pattern("192.168.1.128/25", ip4("192.168.2.200")));    /* not on an octet boundary */
+    CHECK(match_ip_pattern("172.16.0.0/12", ip4("172.31.255.255")) && !match_ip_pattern("172.16.0.0/12", ip4("172.32.0.0")));
+    CHECK(match_ip_pattern("1.2.3.4/32", ip4("1.2.3.4")) && !match_ip_pattern("1.2.3.4/32", ip4("1.2.3.5")));                       /* /32 = one address */
+    CHECK(match_ip_pattern("0.0.0.0/0", ip4("8.8.8.8")) && match_ip_pattern("0.0.0.0/0", ip4("255.255.255.255")));                    /* /0 = everything */
+    CHECK(match_ip_pattern("10.1.2.3/8", ip4("10.99.0.1")));                                                                         /* host bits in the address are ignored */
+    CHECK(!match_ip_pattern("10.0.0.0/33", ip4("10.0.0.1")) && !match_ip_pattern("10.0.0.0/-1", ip4("10.0.0.1")) && !match_ip_pattern("10.0.0.0/", ip4("10.0.0.1")) &&
+          !match_ip_pattern("10.0.0.0/8x", ip4("10.0.0.1")) && !match_ip_pattern("10.0.0/8", ip4("10.0.0.1")) && !match_ip_pattern("300.0.0.0/8", ip4("10.0.0.1")) &&
+          !match_ip_pattern("10.*.*.*/8", ip4("10.0.0.1")) && !match_ip_pattern("/8", ip4("10.0.0.1")));                             /* malformed: matches nothing */
+    CHECK(match_ip_list("10.0.0.0/8;192.168.0.0/16;172.16.0.0-172.31.255.255", ip4("192.168.44.1")) &&
+          match_ip_list("10.0.0.0/8;192.168.0.0/16;172.16.0.0-172.31.255.255", ip4("172.20.0.1")) &&
+          !match_ip_list("10.0.0.0/8;192.168.0.0/16;172.16.0.0-172.31.255.255", ip4("8.8.8.8")));                                    /* CIDR, range and list together */
+    { UINT32 c = ProxyBridge_AddRule("cidr.exe", "10.0.0.0/8", "*", "*", RULE_PROTOCOL_BOTH, RULE_ACTION_BLOCK, 0, FALSE);
+      CHECK(c != 0 && m4("cidr.exe", "10.200.1.1", 443) == RULE_ACTION_BLOCK && m4("cidr.exe", "11.0.0.1", 443) == RULE_ACTION_DIRECT);   /* through a real rule */
+      ProxyBridge_DeleteRule(c); }
+
     /* ================= IPv6 patterns ================= */
     CHECK(v6("::1", "::1") && !v6("::1", "::2") && v6("*", "2001:db8::5"));
     CHECK(v6("2001:db8::/32", "2001:db8:ffff::1") && !v6("2001:db8::/32", "2001:db9::1"));

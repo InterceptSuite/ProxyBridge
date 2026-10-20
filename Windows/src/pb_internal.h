@@ -5,6 +5,11 @@
 // ProxyBridge.c (globals + lifecycle), pb_net.c, pb_rules.c, pb_conn.c.
 // Defines, structs, extern globals and cross-module prototypes live here.
 
+// select() sets hold 64 sockets by default and FD_SET silently drops the rest. The UDP relay watches two sockets per
+// SOCKS5 proxy plus its own two, which is 66 with 32 proxies, so the sets must be bigger. Must come before winsock2.h.
+#ifndef FD_SETSIZE
+#define FD_SETSIZE 128
+#endif
 #include <winsock2.h>
 #include <windows.h>
 #include "ProxyBridge.h"
@@ -16,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "windivert.h"
+
+typedef char pb_fd_setsize_fits_all_proxies[(FD_SETSIZE >= 2 * MAX_PROXY_CONFIGS + 4) ? 1 : -1];   // compile error if MAX_PROXY_CONFIGS grows past it
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
