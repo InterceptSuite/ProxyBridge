@@ -122,6 +122,12 @@ static uint32_t fnv(const uint8_t *p, size_t n)
     while (n--) { h ^= *p++; h *= 16777619u; }
     return h;
 }
+static atomic_int g_sender_bad;
+int pb_core_udp_sender_ok(const struct pb_orig *o, uint16_t client_port)
+{
+    (void)o; (void)client_port;
+    return !atomic_load(&g_sender_bad);
+}
 int pb_core_is_proxy_process(uint32_t pid, uint32_t proxy_id)
 {
     (void)pid; (void)proxy_id;
@@ -1261,6 +1267,16 @@ static void test_udp(void)
     CHECK(udp_echo_ok(c, "127.1.2.3", "hello-one"), "UDP via SOCKS5 UDP ASSOCIATE, reply from flow address 127.1.2.3");
     CHECK(udp_echo_ok(c, "127.1.2.4", "hello-two"), "second destination from same client socket, reply from 127.1.2.4");
     CHECK(udp_echo_ok(c, "127.1.2.3", "again"), "first destination again");
+    {   // a datagram that does not come from the flow's own process is dropped, and the flow keeps working for its owner
+        atomic_store(&g_sender_bad, 1);
+        int imp = udp_client();
+        char b[64], ip[32]; uint16_t sp;
+        udp_send_flow(imp, "127.1.2.3", "impostor");
+        CHECK(udp_recv_neg(imp, b, sizeof b, ip, &sp) < 0, "UDP from a process that does not own the flow gets nothing back");
+        atomic_store(&g_sender_bad, 0);
+        close(imp);
+        CHECK(udp_echo_ok(c, "127.1.2.3", "owner-again"), "the owner's datagrams still flow");
+    }
     CHECK(g_assoc_count - a0 == 1, "exactly one UDP ASSOCIATE for the session (got %d)", (int)g_assoc_count - a0);
 
     int c2 = udp_client();

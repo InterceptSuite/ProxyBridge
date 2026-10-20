@@ -487,7 +487,10 @@ typedef struct {
 
 static void update_profile_ui() {
     char *boot_err = NULL;
-    if (!boot_refresh(g_active_profile, &boot_err)) {              // the boot service runs the active profile
+    char *ppath = profile_path(g_active_profile);
+    bool refreshed = ppath && boot_refresh(ppath, &boot_err);         // the boot service runs the active profile
+    g_free(ppath);
+    if (!refreshed) {
         gui_log("could not update the boot service: %s", boot_err ? boot_err : "unknown error");
         g_free(boot_err);
     }

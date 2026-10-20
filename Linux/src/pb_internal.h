@@ -63,6 +63,11 @@ int  pb_core_name_for(const struct pb_orig *o, char *out, size_t n);
 // exemption refresh normally covers this; the relay asks for connections made in the moment before it ran.
 int  pb_core_is_proxy_process(uint32_t pid, uint32_t proxy_id);
 
+// True when the UDP datagram that arrived from 127.0.0.1:client_port really comes from the process that owns flow `o`
+// (that process holds a UDP socket on that port and is still the same executable). Flow addresses are guessable, so
+// without this any local process could send through another one's flow.
+int  pb_core_udp_sender_ok(const struct pb_orig *o, uint16_t client_port);
+
 // Full rule evaluation for a PB_ACT_DECIDE flow.
 void pb_core_decide(const struct pb_orig *o, struct pb_decision *out);
 

@@ -60,7 +60,10 @@ static void on_boot_toggled(GtkCheckMenuItem *item, gpointer data) {
     if (boot_syncing) return;
     bool want = gtk_check_menu_item_get_active(item);
     char *err = NULL;
-    if (!boot_set(want, g_active_profile, &err)) {
+    char *ppath = profile_path(g_active_profile);
+    bool set_ok = ppath && boot_set(want, ppath, &err);
+    g_free(ppath);
+    if (!set_ok) {
         show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not %s starting at boot: %s", want ? "enable" : "disable", err ? err : "unknown error");
         g_free(err);
         boot_syncing = true;
@@ -117,65 +120,6 @@ void gui_sync_switches() {
 // same feed as windows/mac: https://download.interceptsuite.com/proxybridge.json
 #define UPD_FEED_URL "https://download.interceptsuite.com/proxybridge.json"
 
-// match "linux": { ... } as a key, not a random "linux" string value
-static char *extract_platform_block(const char *json, const char *platform) {
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\"", platform);
-    size_t nlen = strlen(needle);
-    const char *p = json;
-    const char *key = NULL;
-    while ((p = strstr(p, needle)) != NULL) {
-        const char *after = p + nlen;
-        while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r') after++;
-        if (*after == ':') {
-            key = p;
-            break;
-        }
-        p += nlen;
-    }
-    if (!key) return NULL;
-    const char *brace = strchr(key, '{');
-    if (!brace) return NULL;
-    int depth = 0;
-    for (const char *q = brace; *q; q++) {
-        if (*q == '{') depth++;
-        else if (*q == '}') {
-            depth--;
-            if (depth == 0)
-                return g_strndup(brace, (gsize)(q - brace + 1));
-        }
-    }
-    return NULL;
-}
-
-static void parse_ver(const char *s, int out[3]) {
-    out[0] = out[1] = out[2] = 0;
-    if (!s) return;
-    while (*s && (*s < '0' || *s > '9')) s++;
-    int i = 0;
-    while (*s && i < 3) {
-        if (*s >= '0' && *s <= '9') {
-            int n = 0;
-            while (*s >= '0' && *s <= '9') {
-                n = n * 10 + (*s - '0');
-                s++;
-            }
-            out[i++] = n;
-        } else if (*s == '.') {
-            s++;
-        } else {
-            break;
-        }
-    }
-}
-
-static int ver_cmp(const int a[3], const int b[3]) {
-    for (int i = 0; i < 3; i++) {
-        if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
-    }
-    return 0;
-}
-
 static int https_url_ok(const char *url) {
     if (!url || strncmp(url, "https://", 8) != 0) return 0;
     for (const char *p = url; *p; p++) {
@@ -184,6 +128,14 @@ static int https_url_ok(const char *url) {
         if (c == ' ' || c == '"' || c == '\'' || c == '`' || c == '\\') return 0;
     }
     return 1;
+}
+
+// The browser is opened as root: only the project's own release pages are handed to it.
+static int release_host_ok(const char *url) {
+    static const char *const hosts[] = { "https://github.com/InterceptSuite/", "https://download.interceptsuite.com/", "https://interceptsuite.com/", "https://www.interceptsuite.com/" };
+    for (size_t i = 0; i < sizeof hosts / sizeof *hosts; i++)
+        if (g_str_has_prefix(url, hosts[i])) return 1;
+    return 0;
 }
 
 static const char *update_feed_url() {
@@ -211,8 +163,8 @@ static void update_free(UpdateInfo *u) {
 static UpdateInfo *update_lookup(void) {
     UpdateInfo *u = g_malloc0(sizeof *u);
     char *argv[] = {
-        (char *)"curl", (char *)"-sS", (char *)"-m", (char *)"15",
-        (char *)"-H", (char *)"User-Agent: ProxyBridge-UpdateChecker",
+        (char *)"curl", (char *)"-sS", (char *)"-m", (char *)"15", (char *)"--proto", (char *)"=https,file",
+        (char *)"-H", (char *)"User-Agent: ProxyBridge-UpdateChecker", (char *)"--",
         (char *)update_feed_url(),
         NULL
     };
@@ -226,33 +178,25 @@ static UpdateInfo *update_lookup(void) {
         g_free(curl_err);
         return u;
     }
-    if (exit_code != 0 || !json || json[0] == '\0') {
-        u->problem = g_strdup_printf("Update check failed (curl exit %d).", exit_code);
+    if (!g_spawn_check_wait_status(exit_code, NULL) || !json || json[0] == '\0') {
+        u->problem = g_strdup("Update check failed (could not fetch the update feed).");
         u->problem_type = GTK_MESSAGE_ERROR;
         g_free(json); g_free(curl_err);
         return u;
     }
-    char *linux_obj = extract_platform_block(json, "linux");
+    // the same strict parser and version check as the command line program (the feed is remote input)
+    char *version = NULL, *download = NULL, *notes = NULL;
+    int rc = pbp_update_parse(json, strlen(json), &version, &download, &notes);
     g_free(json);
     g_free(curl_err);
-    if (!linux_obj) {
+    if (rc != 0) {
         u->problem = g_strdup("Could not parse linux update info.");
         u->problem_type = GTK_MESSAGE_WARNING;
         return u;
     }
-    u->version = extract_sub_json_str(linux_obj, "version");
-    u->download = extract_sub_json_str(linux_obj, "download");
-    u->notes = extract_sub_json_str(linux_obj, "release_notes");
-    g_free(linux_obj);
-    if (!u->version || !u->version[0]) {
-        u->problem = g_strdup("Could not parse version info.");
-        u->problem_type = GTK_MESSAGE_WARNING;
-        return u;
-    }
-    int cur[3], lat[3];
-    parse_ver(PROXYBRIDGE_VERSION, cur);
-    parse_ver(u->version, lat);
-    u->newer = ver_cmp(lat, cur) > 0;
+    u->version = g_strdup(version); u->download = g_strdup(download ? download : ""); u->notes = g_strdup(notes ? notes : "");
+    free(version); free(download); free(notes);
+    u->newer = pbp_version_newer(u->version, PROXYBRIDGE_VERSION);
     return u;
 }
 
@@ -280,9 +224,9 @@ static void update_show(UpdateInfo *u) {
         save_config();
         sync_update_item();
     } else if (resp == GTK_RESPONSE_ACCEPT) {
-        const char *url = NULL;
-        if (https_url_ok(u->notes)) url = u->notes;
-        else if (https_url_ok(u->download)) url = u->download;
+        const char *url = NULL;                   // only pages of the project itself are opened in a browser running as root
+        if (https_url_ok(u->notes) && release_host_ok(u->notes)) url = u->notes;
+        else if (https_url_ok(u->download) && release_host_ok(u->download)) url = u->download;
         if (!url) {
             show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "No safe https url in update feed.");
         } else {

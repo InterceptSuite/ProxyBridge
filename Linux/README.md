@@ -239,8 +239,14 @@ Add as many proxies as you need (GUI or profile); each rule chooses its own. Pro
 ## Security model
 
 - **Redirected TCP connections** are bound to the client's source address and port. A process that connects to the relay from a different loopback address (for example `127.0.0.2`) cannot claim another process's pending flow, and an entry is consumed on first use.
-- **Redirected UDP flows** are addressed by a loopback flow address that the relay maps back to the original destination. These addresses are not secret (they are visible in `/proc/net/udp`), so on a **multi-user host** another local user can send datagrams to the relay's UDP port and have them forwarded to a destination that some other process is already talking to, through the same proxy. Run ProxyBridge on machines you trust locally.
-- A rule that needs a proxy that does not exist **blocks** instead of letting traffic through.
+- **Redirected UDP flows** are addressed by a loopback flow address that the relay maps back to the original destination and to the process that opened it. These addresses are not secret (they are visible in `/proc/net/udp`), so the relay checks, for every new client port, that the sender really is that process (it owns a UDP socket on that port and is still the same executable); datagrams from anyone else are dropped. A process that opens UDP sockets at a high rate displaces only its own oldest sessions, never other programs'.
+- **Decisions made in user space** (long host lists, domain rules) use the executable the kernel recorded when the connection was opened, not `/proc/<pid>/exe` looked up later, so a process that exits and has its PID reused cannot change a pending decision.
+- **The DNS tap** only learns from answer records that belong to the question (the asked name, CNAMEs chained from it, and A records owned by those names); unrelated records in a response are ignored. Note that any local process whose DNS passes through the relay can still teach the engine a name→address mapping for *its own* lookups, and domain rules are matched by address, so on a shared host another user's resolver answers can influence which addresses a domain rule matches. Run ProxyBridge on machines you trust locally.
+- **A local proxy is exempted** (its own connections go direct) when a process listens on the configured proxy address and port. While that port is free, for example because the proxy is not running yet, any local process that binds it is treated as the proxy. Point rules at proxies that are running, or at a proxy on another host, when other users share the machine.
+- **Fail-open on exit.** The kernel removes the eBPF programs when ProxyBridge stops or crashes. From that moment traffic flows normally: `BLOCK` rules no longer block and nothing is proxied. ProxyBridge is a routing tool, not a firewall; use the "start at boot" service (which restarts it on failure) and a real firewall for enforcement.
+- A rule that needs a proxy that does not exist **blocks** instead of letting traffic through. A connection whose proxy handshake fails is closed, never sent direct.
+- **Start at boot** writes `/etc/systemd/system/proxybridge.service` with the absolute path of the active profile file and of the `ProxyBridge` binary. The binary is accepted only when it and every directory above it belong to root and are writable by root only (so an install under `/usr/local/bin`, not a copy run from a home directory); the unit runs with `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only` and `PrivateTmp`.
+- Anything shown in the log that another local user controls (an executable's name, a DNS name) has control characters replaced before it reaches the terminal or the GUI, and profiles that contain control characters in any field are rejected.
 - The relay listens on loopback only (UDP is additionally bound to the `lo` device). Other network namespaces (containers) are never redirected.
 - Proxy passwords are kept in the profile files under `/etc/proxybridge/profiles/` (mode 0600, directory 0700, root). Credentials are never taken from the command line, so they cannot show up in the process list or shell history.
 
@@ -437,9 +443,14 @@ gcc -o ProxyBridge main.o \
 
 ## Uninstallation
 
-To remove ProxyBridge from your system:
+To remove ProxyBridge from your system, run `sudo ./setup.sh --uninstall` from the extracted release (add `--purge` to delete the profiles under `/etc/proxybridge` too), or by hand:
 
 ```bash
+# Stop and remove the boot service, if it was enabled in the GUI
+sudo systemctl disable --now proxybridge.service 2>/dev/null
+sudo rm -f /etc/systemd/system/proxybridge.service
+sudo systemctl daemon-reload
+
 # Remove binaries
 sudo rm -f /usr/local/bin/ProxyBridge
 sudo rm -f /usr/local/bin/ProxyBridgeGUI
@@ -458,7 +469,9 @@ sudo rm -f /etc/ld.so.conf.d/proxybridge.conf
 sudo ldconfig
 ```
 
-**Cleanup after crash:** nothing to do. ProxyBridge attaches its eBPF programs through BPF links, which the kernel removes when the process exits or crashes. To check: `sudo bpftool cgroup tree /sys/fs/cgroup` should list no `pb_*` programs.
+**Cleanup after crash:** nothing to do. ProxyBridge attaches its eBPF programs through BPF links, which the kernel removes when the process exits or crashes (traffic then flows normally, see [Security model](#security-model)). To check: `sudo bpftool cgroup tree /sys/fs/cgroup` should list no `pb_*` programs.
+
+**Verifying a download:** every release carries a `.sha256` file next to the tarball: `sha256sum -c ProxyBridge-Linux-v*.tar.gz.sha256`.
 
 ## License
 

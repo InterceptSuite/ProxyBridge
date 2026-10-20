@@ -97,14 +97,12 @@ static int parse_string(struct jp *j, char **out)
     char *buf = malloc((size_t)(q - s) + 1), *o = buf;
     if (!buf) return jfail(j, "out of memory");
     for (const char *r = s; r < q; r++) {
+        if ((unsigned char)*r < 0x20 || *r == 0x7F) { free(buf); return jfail(j, "control character in string"); }
         if (*r != '\\') { *o++ = *r; continue; }
         r++;
         switch (*r) {
-            case 'n': *o++ = '\n'; break;
-            case 't': *o++ = '\t'; break;
-            case 'r': *o++ = '\r'; break;
-            case 'b': *o++ = '\b'; break;
-            case 'f': *o++ = '\f'; break;
+            case 'n': case 't': case 'r': case 'b': case 'f':
+                free(buf); return jfail(j, "control character in string");      // no field of a profile may hold one
             case '"': case '\\': case '/': *o++ = *r; break;
             case 'u': {
                 int cp = (q - r >= 5) ? hex4(r + 1) : -1;
@@ -116,7 +114,7 @@ static int parse_string(struct jp *j, char **out)
                     cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                     r += 6;
                 } else if (cp >= 0xDC00 && cp <= 0xDFFF) { free(buf); return jfail(j, "bad surrogate pair"); }
-                if (cp == 0) { free(buf); return jfail(j, "NUL in string"); }
+                if (cp < 0x20 || cp == 0x7F) { free(buf); return jfail(j, "control character in string"); }
                 o = put_utf8(o, (unsigned)cp);
                 break;
             }
@@ -164,6 +162,8 @@ static int parse_container(struct jp *j, struct jv *v, int depth, bool obj)
             if (parse_string(j, &key) < 0) return -1;
             skip_ws(j);
             if (j->p >= j->end || *j->p != ':') { free(key); return jfail(j, "expected ':'"); }
+            for (size_t i = 0; i < v->nk; i++)
+                if (!strcasecmp(v->key[i], key)) { free(key); return jfail(j, "duplicate key"); }  // other readers take the last one
             j->p++;
         }
         struct jv child = {0};
@@ -198,15 +198,8 @@ static int parse_value(struct jp *j, struct jv *v, int depth)
         j->p += neg;
         if (j->p >= j->end || *j->p < '0' || *j->p > '9') return jfail(j, "bad number");
         while (j->p < j->end && *j->p >= '0' && *j->p <= '9') n = n * 10 + (*j->p++ - '0');
-        if (j->p < j->end && *j->p == '.') {
-            j->p++;
-            while (j->p < j->end && *j->p >= '0' && *j->p <= '9') j->p++;
-        }
-        if (j->p < j->end && (*j->p == 'e' || *j->p == 'E')) {
-            j->p++;
-            if (j->p < j->end && (*j->p == '+' || *j->p == '-')) j->p++;
-            while (j->p < j->end && *j->p >= '0' && *j->p <= '9') j->p++;
-        }
+        if (j->p < j->end && (*j->p == '.' || *j->p == 'e' || *j->p == 'E'))
+            return jfail(j, "numbers must be whole");                        // 1080e1 or 8.9 would be read differently elsewhere
         v->t = J_NUM;
         v->n = neg ? -n : n;
         return 0;
@@ -401,6 +394,10 @@ static int read_proxy(struct pbp_profile *p, const struct jv *o, size_t idx, cha
 
     long id = jnum(o, "Id", 0);
     uint32_t want = id > 0 ? (uint32_t)id : 0;
+    if (id > 0x7FFFFFFF) {
+        snprintf(err, errlen, "ProxyConfigs[%zu]: Id out of range", idx);
+        return -1;
+    }
     uint32_t max = 0;
     for (size_t i = 0; i + 1 < p->nproxies; i++) {
         if (p->proxies[i].id > max) max = p->proxies[i].id;
@@ -734,10 +731,11 @@ int pbp_write_file(const char *path, const char *data, char *err, size_t errlen)
             if (w <= 0) break;
             off += (size_t)w;
         }
-        if (off == n && fsync(fd) == 0 && close(fd) == 0 && rename(tmp, path) == 0) rc = 0;
+        bool written = off == n && fsync(fd) == 0;
+        int closed = close(fd);
+        if (written && closed == 0 && rename(tmp, path) == 0) rc = 0;
         else {
             snprintf(err, errlen, "cannot write %s: %s", path, strerror(errno));
-            close(fd);
             unlink(tmp);
         }
     }
@@ -808,6 +806,8 @@ int pbp_update_parse(const char *json, size_t len, char **version, char **downlo
         *download = jtext(lin, "download");
         *notes = jtext(lin, "release_notes");
     }
+    if (*version && (strlen(*version) > 32 || strspn(*version, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.+-") != strlen(*version)))
+        **version = 0;                                              // the feed is remote input: only a plain version string is shown
     if (!*version || !**version) {
         free(*version); free(*download); free(*notes);
         *version = *download = *notes = NULL;
@@ -842,19 +842,19 @@ bool pbp_version_newer(const char *candidate, const char *current)
 
 // ---- log filters ----
 
+// Case-insensitive glob with a single backtrack point (linear time): a pattern from an imported profile must not be able
+// to stall the connection callback, which runs this for every event.
 static bool ci_glob(const char *p, const char *s)
 {
-    while (*p) {
-        if (*p == '*') {
-            while (*p == '*') p++;
-            if (!*p) return true;
-            for (; *s; s++) if (ci_glob(p, s)) return true;
-            return false;
-        }
-        if (!*s || (*p != '?' && tolower((unsigned char)*p) != tolower((unsigned char)*s))) return false;
-        p++; s++;
+    const char *star = NULL, *mark = NULL;
+    while (*s) {
+        if (*p == '*') { star = ++p; mark = s; continue; }
+        if (*p == '?' || tolower((unsigned char)*p) == tolower((unsigned char)*s)) { p++; s++; continue; }
+        if (!star) return false;
+        p = star; s = ++mark;
     }
-    return !*s;
+    while (*p == '*') p++;
+    return !*p;
 }
 
 static bool pat_ok(const char *pat, const char *actual)
@@ -928,7 +928,7 @@ char *pbp_name_from_filename(const char *filename)
 
 const char *pbp_config_dir(void)
 {
-    const char *env = getenv("PROXYBRIDGE_CONFIG_DIR");
+    const char *env = secure_getenv("PROXYBRIDGE_CONFIG_DIR");
     return (env && *env) ? env : "/etc/proxybridge";
 }
 
@@ -937,8 +937,7 @@ char *pbp_resolve(const char *dir, const char *s)
     if (!s || !*s) return NULL;
     size_t n = strlen(s), e = sizeof PBP_EXT - 1;
     bool has_ext = n > e && !strcmp(s + n - e, PBP_EXT);
-    if (strchr(s, '/')) return strdup(s);
-    if (has_ext && access(s, R_OK) == 0) return strdup(s);
+    if (strchr(s, '/')) return strdup(s);                      // a path; a file in the current directory needs "./"
     char *name = strndup(s, has_ext ? n - e : n);
     char *file = name ? pbp_filename_for(name) : NULL, *path = NULL;
     if (file && asprintf(&path, "%s/profiles/%s", dir, file) < 0) path = NULL;

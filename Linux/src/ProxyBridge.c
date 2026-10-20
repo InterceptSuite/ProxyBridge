@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
 #include "ProxyBridge.h"
@@ -52,6 +53,14 @@ static void set_err(char *err, size_t n, const char *fmt, ...)
     va_end(ap);
 }
 
+// Anything shown to the operator may carry bytes chosen by another local user (an executable's name, a DNS answer);
+// a terminal or a log file must not receive control characters from them.
+static void sanitize(char *s)
+{
+    for (unsigned char *p = (unsigned char *)s; *p; p++)
+        if (*p < 0x20 || *p == 0x7F) *p = '?';
+}
+
 void pb_core_log(const char *fmt, ...)
 {
     char buf[1024];
@@ -59,6 +68,7 @@ void pb_core_log(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
+    sanitize(buf);
     pthread_mutex_lock(&cb_lock);
     if (G.log_cb) G.log_cb(buf);
     pthread_mutex_unlock(&cb_lock);
@@ -136,12 +146,15 @@ static bool log_wanted(uint64_t key, bool udp)
 static void emit_connection(uint32_t pid, const char *comm, int family, const uint8_t addr[16], uint16_t port, int proto, int action, uint32_t proxy_id)
 {
     if (!atomic_load(&G.traffic_logging)) return;
-    char path[4096], dest[INET6_ADDRSTRLEN + 280], info[400];
+    char path[4096], dest[INET6_ADDRSTRLEN + 280], info[400], shown[256];
     const char *name = comm && *comm ? comm : "unknown";
     if (exe_path_of_pid(pid, path, sizeof path)) {
         const char *base = strrchr(path, '/');
         name = base ? base + 1 : path;
     }
+    snprintf(shown, sizeof shown, "%s", name);
+    sanitize(shown);
+    name = shown;
     if (!log_wanted(conn_key(name, family, addr, port, proto, action, proxy_id), proto == IPPROTO_UDP)) return;
     if (family == AF_INET) {
         inet_ntop(AF_INET, addr + 12, dest, sizeof dest);
@@ -159,6 +172,7 @@ static void emit_connection(uint32_t pid, const char *comm, int family, const ui
         snprintf(info, sizeof info, "%s %s:%u", p.type == PROXY_TYPE_SOCKS5 ? "SOCKS5" : "HTTP", p.host, p.port);
     else
         snprintf(info, sizeof info, "%s", action == PB_ACT_PROXY ? "PROXY" : action == PB_ACT_BLOCK ? "BLOCK" : "DIRECT");
+    sanitize(dest);
     pthread_mutex_lock(&cb_lock);
     if (G.conn_cb) G.conn_cb(name, pid, dest, port, info);
     if (G.conn_cb_ex) G.conn_cb_ex(name, pid, dest, port, proto == IPPROTO_UDP ? "UDP" : "TCP", info);
@@ -349,7 +363,9 @@ int pb_core_name_for(const struct pb_orig *o, char *out, size_t n)
 void pb_core_decide(const struct pb_orig *o, struct pb_decision *out)
 {
     char path[4096];
-    if (!exe_path_of_pid(o->pid, path, sizeof path) && !pb_bpf_exe_path(o->exe_dev, o->exe_ino, path, sizeof path)) path[0] = 0;
+    // The executable the kernel saw at connect() time is authoritative; /proc/<pid>/exe may already belong to another
+    // program if the process exited and its PID was reused before this flow reached the relay.
+    if (!(o->exe_ino && pb_bpf_exe_path(o->exe_dev, o->exe_ino, path, sizeof path)) && !exe_path_of_pid(o->pid, path, sizeof path)) path[0] = 0;
     out->action = PB_ACT_DIRECT;
     out->proxy_id = 0;
 
@@ -427,6 +443,18 @@ static struct { uint32_t pid, proxy_id; int64_t until; bool hit; } loop_cache[LO
 static unsigned loop_next;
 static struct host_cache loop_hosts[4];
 static pthread_mutex_t loop_mu = PTHREAD_MUTEX_INITIALIZER;
+
+int pb_core_udp_sender_ok(const struct pb_orig *o, uint16_t client_port)
+{
+    if (!pb_proc_pid_owns_udp(o->pid, client_port)) return 0;
+    if (!o->exe_ino) return 1;                                   // kernel-side identity is only recorded for DECIDE flows
+    char link[64];
+    struct stat st;
+    snprintf(link, sizeof link, "/proc/%u/exe", o->pid);
+    if (stat(link, &st) != 0) return 0;
+    uint32_t dev = (major(st.st_dev) << 20) | minor(st.st_dev); // same encoding as the BPF program's exe2class key
+    return dev == o->exe_dev && st.st_ino == o->exe_ino;
+}
 
 int pb_core_is_proxy_process(uint32_t pid, uint32_t proxy_id)
 {

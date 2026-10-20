@@ -138,4 +138,7 @@ void on_search_log_changed(GtkSearchEntry *entry, gpointer user_data);
 void on_clear_conn_clicked(GtkButton *button, gpointer user_data);
 void on_clear_log_clicked(GtkButton *button, gpointer user_data);
 
+// Path of the stored profile file for a profile name (g_malloc'd), or NULL for an unusable name.
+char *profile_path(const char *name);
+
 #endif

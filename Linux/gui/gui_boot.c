@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <errno.h>
 
 #define UNIT_NAME "proxybridge.service"
 
@@ -25,22 +26,55 @@ static const char *systemctl_cmd() {
 
 static char *unit_path() { return g_strdup_printf("%s/" UNIT_NAME, unit_dir()); }
 
+// A program that systemd will start as root at every boot must not be replaceable by an ordinary user: the file and
+// every directory above it have to belong to root and be writable by root only. A copy run from ~/Downloads fails this.
+bool boot_path_trusted(const char *path, char **why) {
+    if (!path || path[0] != '/') { if (why) *why = g_strdup("not an absolute path"); return false; }
+    char *cur = g_strdup(path);
+    for (;;) {
+        struct stat st;
+        if (lstat(cur, &st) != 0) { if (why) *why = g_strdup_printf("%s: %s", cur, g_strerror(errno)); g_free(cur); return false; }
+        bool file = !strcmp(cur, path);
+        if (S_ISLNK(st.st_mode) || (file ? !S_ISREG(st.st_mode) : !S_ISDIR(st.st_mode))) {
+            if (why) *why = g_strdup_printf("%s is a symbolic link or not a regular %s", cur, file ? "file" : "directory");
+            g_free(cur); return false;
+        }
+        if (st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH))) {
+            if (why) *why = g_strdup_printf("%s is not owned by root or is writable by other users", cur);
+            g_free(cur); return false;
+        }
+        if (!strcmp(cur, "/")) break;
+        char *up = g_path_get_dirname(cur);
+        g_free(cur); cur = up;
+    }
+    g_free(cur);
+    return true;
+}
+
 // The command line program that sits next to this one (an installed pair), otherwise the default install location.
-static char *cli_path() {
+static char *cli_path(char **error) {
 #ifdef PB_TEST_HOOKS
     const char *e = getenv("PROXYBRIDGE_CLI");
     if (e && *e) return g_strdup(e);
 #endif
     char self[4096];
     ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+    char *cli = NULL;
     if (n > 0) {
         self[n] = 0;
-        char *dir = g_path_get_dirname(self), *cli = g_build_filename(dir, "ProxyBridge", NULL);
+        char *dir = g_path_get_dirname(self);
+        cli = g_build_filename(dir, "ProxyBridge", NULL);
         g_free(dir);
-        if (g_file_test(cli, G_FILE_TEST_IS_EXECUTABLE)) return cli;
-        g_free(cli);
+        if (!g_file_test(cli, G_FILE_TEST_IS_EXECUTABLE)) { g_free(cli); cli = NULL; }
     }
-    return g_strdup("/usr/local/bin/ProxyBridge");
+    if (!cli) cli = g_strdup("/usr/local/bin/ProxyBridge");
+    char *why = NULL;
+    if (!boot_path_trusted(cli, &why)) {
+        if (error) *error = g_strdup_printf("%s cannot be started at boot: %s. Install ProxyBridge with setup.sh and start the GUI from there.", cli, why);
+        g_free(why); g_free(cli);
+        return NULL;
+    }
+    return cli;
 }
 
 // systemd's own quoting for one ExecStart word: backslash, double quote, % (specifier) and $ (variable) are escaped
@@ -56,6 +90,10 @@ static void quote_word(GString *out, const char *s) {
 }
 
 char *boot_unit_text(const char *cli, const char *profile, char **error) {
+    if (profile[0] != '/') {                  // the stored file, never a name: a name is resolved relative to the service's cwd
+        if (error) *error = g_strdup("the profile must be given as an absolute path");
+        return NULL;
+    }
     for (const char *p = profile; *p; p++)
         if ((unsigned char)*p < 0x20 || *p == 0x7f) {
             if (error) *error = g_strdup("the profile name contains control characters and cannot be used in a service file");
@@ -70,7 +108,11 @@ char *boot_unit_text(const char *cli, const char *profile, char **error) {
     quote_word(s, cli);
     g_string_append(s, " --profile ");
     quote_word(s, profile);
-    g_string_append(s, "\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n");
+    g_string_append(s, "\nRestart=on-failure\nRestartSec=5\n"
+        // the engine needs root for eBPF and /proc, nothing else: no new privileges, no writable system or home directories
+        "NoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=read-only\nPrivateTmp=yes\nProtectKernelModules=yes\n"
+        "ProtectKernelLogs=yes\nProtectClock=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\n"
+        "\n[Install]\nWantedBy=multi-user.target\n");
     return g_string_free(s, FALSE);
 }
 
@@ -101,7 +143,8 @@ static bool run_systemctl(const char *a, const char *b, char **error) {
 }
 
 static bool write_unit(const char *profile, char **error) {
-    char *cli = cli_path();
+    char *cli = cli_path(error);
+    if (!cli) return false;
     char *text = boot_unit_text(cli, profile, error);
     g_free(cli);
     if (!text) return false;

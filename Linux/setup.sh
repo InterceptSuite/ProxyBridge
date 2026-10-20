@@ -130,22 +130,18 @@ install_files() {
     
     # Create directories if they don't exist
     mkdir -p "$LIB_PATH" /usr/local/bin /etc/proxybridge
-    chmod 755 /etc/proxybridge
-    
-    # Copy library
+    chmod 700 /etc/proxybridge                    # holds profiles with proxy passwords
+
+    # install(1) replaces the file and sets owner and mode, so a file left by someone else is never kept
     echo "Installing libproxybridge.so to $LIB_PATH..."
-    cp "$SCRIPT_DIR/libproxybridge.so" "$LIB_PATH/"
-    chmod 755 "$LIB_PATH/libproxybridge.so"
-    
-    # Copy binary
+    install -o root -g root -m 0755 "$SCRIPT_DIR/libproxybridge.so" "$LIB_PATH/libproxybridge.so"
+
     echo "Installing ProxyBridge to /usr/local/bin..."
-    cp "$SCRIPT_DIR/ProxyBridge" /usr/local/bin/
-    chmod 755 /usr/local/bin/ProxyBridge
+    install -o root -g root -m 0755 "$SCRIPT_DIR/ProxyBridge" /usr/local/bin/ProxyBridge
 
     if [ -f "$SCRIPT_DIR/ProxyBridgeGUI" ]; then
         echo "Installing ProxyBridgeGUI to /usr/local/bin..."
-        cp "$SCRIPT_DIR/ProxyBridgeGUI" /usr/local/bin/
-        chmod 755 /usr/local/bin/ProxyBridgeGUI 
+        install -o root -g root -m 0755 "$SCRIPT_DIR/ProxyBridgeGUI" /usr/local/bin/ProxyBridgeGUI
     fi
     
     echo "Files installed"
@@ -206,6 +202,34 @@ verify_installation() {
         echo "ProxyBridge may have issues - try: sudo ldconfig"
     fi
 }
+
+# Removes everything setup.sh and the GUI installed, including the boot service. Profiles are kept unless --purge is given.
+uninstall() {
+    echo "Removing ProxyBridge..."
+    if [ -f /etc/systemd/system/proxybridge.service ]; then
+        systemctl disable --now proxybridge.service 2>/dev/null || true
+        rm -f /etc/systemd/system/proxybridge.service
+        systemctl daemon-reload 2>/dev/null || true
+        echo "  boot service removed"
+    fi
+    rm -f /usr/local/bin/ProxyBridge /usr/local/bin/ProxyBridgeGUI
+    rm -f /usr/local/lib/libproxybridge.so /usr/local/lib64/libproxybridge.so /usr/lib/libproxybridge.so /usr/lib64/libproxybridge.so
+    rm -f /etc/ld.so.conf.d/proxybridge.conf
+    ldconfig 2>/dev/null || true
+    if [ "$1" = "--purge" ]; then
+        rm -rf /etc/proxybridge
+        echo "  profiles and settings removed"
+    else
+        echo "  profiles kept in /etc/proxybridge (use --uninstall --purge to remove them)"
+    fi
+    echo "Done."
+}
+
+if [ "$1" = "--uninstall" ]; then
+    [ "$(id -u)" = 0 ] || { echo "Please run as root: sudo $0 --uninstall"; exit 1; }
+    uninstall "$2"
+    exit 0
+fi
 
 # Main deployment
 main() {

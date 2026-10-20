@@ -64,6 +64,25 @@ static size_t listen_inodes(uint32_t ip_be, uint16_t port, uint64_t *inodes)
     return n;
 }
 
+// Sockets (any state, any local address) of /proc/net/udp or udp6 bound to `port`. The v6 address column is 32 hex digits,
+// which parse_number wraps; only the port is used here.
+static size_t udp_inodes(const char *file, uint16_t port, uint64_t *inodes, size_t n)
+{
+    FILE *f = fopen(file, "r");
+    if (!f) return n;
+    char line[512];
+    if (!fgets(line, sizeof line, f)) { fclose(f); return n; }
+    while (n < MAX_INODES && fgets(line, sizeof line, f)) {
+        uint32_t addr, lport;
+        unsigned state;
+        unsigned long long inode;
+        if (!parse_tcp_row(line, &addr, &lport, &state, &inode)) continue;
+        if (lport == port && inode) inodes[n++] = inode;
+    }
+    fclose(f);
+    return n;
+}
+
 static bool pid_has_socket(const char *pid, uint64_t inode)
 {
     char dir[300], link[400], want[40], got[64];
@@ -108,6 +127,18 @@ bool pb_proc_pid_listens(uint32_t pid, uint32_t ip_be, uint16_t port)
 {
     uint64_t inodes[MAX_INODES];
     size_t ni = listen_inodes(ip_be, port, inodes);
+    char name[24];
+    snprintf(name, sizeof name, "%u", pid);
+    for (size_t i = 0; i < ni; i++)
+        if (pid_has_socket(name, inodes[i])) return true;
+    return false;
+}
+
+bool pb_proc_pid_owns_udp(uint32_t pid, uint16_t port)
+{
+    uint64_t inodes[MAX_INODES];
+    size_t ni = udp_inodes("/proc/net/udp", port, inodes, 0);
+    ni = udp_inodes("/proc/net/udp6", port, inodes, ni);
     char name[24];
     snprintf(name, sizeof name, "%u", pid);
     for (size_t i = 0; i < ni; i++)

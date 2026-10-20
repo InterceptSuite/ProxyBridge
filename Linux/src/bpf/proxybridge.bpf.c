@@ -211,24 +211,25 @@ static __always_inline void orig_from_v6(struct pb_orig *o, const __u32 ip6[4], 
     o->family = (ip6[0] == 0 && ip6[1] == 0 && ip6[2] == bpf_htonl(0x0000ffff)) ? AF_INET : AF_INET6;
 }
 
-// Loopback flow address 127.1-255.x.y standing for one UDP destination; the relay recovers the destination from it.
+// Loopback flow address 127.1-255.x.y standing for one UDP destination of one process; the relay recovers the destination
+// from it and checks that the datagram really comes from that process. 0 when no address is free (the caller refuses the
+// send rather than borrowing another flow's address).
 static __always_inline __u32 udp_flow_addr(struct pb_orig *o)
 {
     const __u32 *w = (const __u32 *)o->addr;
     __u32 h = w[0] * 2654435761u ^ w[1] * 40503u ^ w[2] * 2246822519u ^ w[3] * 3266489917u;
     h ^= ((__u32)o->port << 16) | o->proxy_id;
     h ^= (__u32)o->action * 668265263u;
-    if (o->action == ACT_DECIDE) h ^= o->pid * 374761393u;
+    h ^= o->pid * 374761393u;
     h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
-    __u32 addr = 0;
     for (int i = 0; i < 8; i++) {
-        addr = bpf_htonl(0x7f000000 | (((h + i) & 0x00ffffff) | 0x00010000));
+        __u32 addr = bpf_htonl(0x7f000000 | (((h + i) & 0x00ffffff) | 0x00010000));
         struct pb_orig *ex = bpf_map_lookup_elem(&flows, &addr);
-        if (!ex) { bpf_map_update_elem(&flows, &addr, o, BPF_NOEXIST); break; }
+        if (!ex) { bpf_map_update_elem(&flows, &addr, o, BPF_NOEXIST); return addr; }
         if (!__builtin_memcmp(ex->addr, o->addr, 16) && ex->port == o->port && ex->proxy_id == o->proxy_id &&
-            ex->action == o->action && (o->action != ACT_DECIDE || ex->pid == o->pid)) break;
+            ex->action == o->action && ex->pid == o->pid) return addr;
     }
-    return addr;
+    return 0;
 }
 
 // 0: leave the call untouched, 1: redirected to the relay, -1: block.
@@ -259,7 +260,9 @@ int pb_connect4(struct bpf_sock_addr *ctx)
         ctx->user_ip4 = bpf_htonl(0x7f000001);
         ctx->user_port = bpf_htons(cfg.tcp_port);
     } else {
-        ctx->user_ip4 = udp_flow_addr(&o);
+        __u32 fa = udp_flow_addr(&o);
+        if (!fa) return 0;
+        ctx->user_ip4 = fa;
         ctx->user_port = bpf_htons(cfg.udp_port);
     }
     return 1;
@@ -280,7 +283,9 @@ int pb_connect6(struct bpf_sock_addr *ctx)
         set_mapped_v4(ctx->user_ip6, bpf_htonl(0x7f000001));
         ctx->user_port = bpf_htons(cfg.tcp_port);
     } else {
-        set_mapped_v4(ctx->user_ip6, udp_flow_addr(&o));
+        __u32 fa = udp_flow_addr(&o);
+        if (!fa) return 0;
+        set_mapped_v4(ctx->user_ip6, fa);
         ctx->user_port = bpf_htons(cfg.udp_port);
     }
     return 1;
@@ -294,7 +299,9 @@ int pb_sendmsg4(struct bpf_sock_addr *ctx)
     orig_from_v4(&o, ctx->user_ip4, ctx->user_port, IPPROTO_UDP);
     int r = route(&o);
     if (r <= 0) return r == 0;
-    ctx->user_ip4 = udp_flow_addr(&o);
+    __u32 fa = udp_flow_addr(&o);
+    if (!fa) return 0;
+    ctx->user_ip4 = fa;
     ctx->user_port = bpf_htons(cfg.udp_port);
     return 1;
 }

@@ -413,7 +413,9 @@ static int socks5_request(struct io *x, const struct pb_proxy *p, uint8_t cmd, c
         size_t o = 0;
         ab[o++] = 1; ab[o++] = (uint8_t)ul; memcpy(ab + o, p->user, ul); o += ul;
         ab[o++] = (uint8_t)pl; memcpy(ab + o, p->pass, pl); o += pl;
-        if (io_send(x, ab, o)) return -1;
+        int sent = io_send(x, ab, o);
+        explicit_bzero(ab, sizeof ab);
+        if (sent) return -1;
         if (io_recv_exact(x, r, 2)) return -1;
         if (r[1] != 0) { seterr(x, "SOCKS5 authentication failed (wrong username or password)"); return -1; }
     } else if (r[1] != 0) {
@@ -486,9 +488,13 @@ static int http_connect(struct io *x, const struct pb_proxy *p, const char *host
         if (cl < 0 || cl >= (int)sizeof cred) { seterr(x, "HTTP proxy credentials too long"); return -1; }
         b64(cred, (size_t)cl, enc);
         n += snprintf(req + n, sizeof req - (size_t)n, "Proxy-Authorization: Basic %s\r\n", enc);
+        explicit_bzero(cred, sizeof cred);
+        explicit_bzero(enc, sizeof enc);
     }
     n += snprintf(req + n, sizeof req - (size_t)n, "\r\n");
-    if (io_send(x, req, (size_t)n)) return -1;
+    int sent = io_send(x, req, (size_t)n);
+    explicit_bzero(req, sizeof req);
+    if (sent) return -1;
 
     uint8_t buf[HDR_MAX];
     size_t tot = 0, hend = 0;
@@ -589,6 +595,7 @@ struct sess {
     socklen_t dstlen;
     uint16_t dport;
     bool     dead, ok, warned;
+    uint32_t pid;                    // process the session belongs to
     int64_t  last, fail_until;
     struct pb_proxy proxy;
     char     err[700];
@@ -834,14 +841,25 @@ static void udp_job_run(struct sess *s)
         if (getpeername(ctl, (struct sockaddr *)&ra, &rl) < 0) { snprintf(s->err, sizeof s->err, "%s: getpeername: %s", desc, strerror(errno)); goto out; }
         if (ra.ss_family == AF_INET) ((struct sockaddr_in *)&ra)->sin_port = htons(b.port);
         else ((struct sockaddr_in6 *)&ra)->sin6_port = htons(b.port);
-    } else if (b.atyp == 1) {
-        struct sockaddr_in *a = (struct sockaddr_in *)&ra;
-        a->sin_family = AF_INET; a->sin_port = htons(b.port); memcpy(&a->sin_addr, b.addr, 4);
-        rl = sizeof *a;
     } else {
-        struct sockaddr_in6 *a = (struct sockaddr_in6 *)&ra;
-        a->sin6_family = AF_INET6; a->sin6_port = htons(b.port); memcpy(&a->sin6_addr, b.addr, 16);
-        rl = sizeof *a;
+        // A relay address inside this host is only plausible when the proxy itself is here; a remote proxy that names
+        // 127.x or ::1 would turn the relay into a blind sender towards local services.
+        struct sockaddr_storage pa;
+        socklen_t pl = sizeof pa;
+        bool peer_local = getpeername(ctl, (struct sockaddr *)&pa, &pl) == 0 &&
+            ((pa.ss_family == AF_INET && (ntohl(((struct sockaddr_in *)&pa)->sin_addr.s_addr) >> 24) == 127) ||
+             (pa.ss_family == AF_INET6 && IN6_IS_ADDR_LOOPBACK(&((struct sockaddr_in6 *)&pa)->sin6_addr)));
+        bool bnd_local = b.atyp == 1 ? b.addr[0] == 127 : IN6_IS_ADDR_LOOPBACK((const struct in6_addr *)b.addr);
+        if (bnd_local && !peer_local) { snprintf(s->err, sizeof s->err, "%s: UDP relay address points at this host", desc); goto out; }
+        if (b.atyp == 1) {
+            struct sockaddr_in *a = (struct sockaddr_in *)&ra;
+            a->sin_family = AF_INET; a->sin_port = htons(b.port); memcpy(&a->sin_addr, b.addr, 4);
+            rl = sizeof *a;
+        } else {
+            struct sockaddr_in6 *a = (struct sockaddr_in6 *)&ra;
+            a->sin6_family = AF_INET6; a->sin6_port = htons(b.port); memcpy(&a->sin6_addr, b.addr, 16);
+            rl = sizeof *a;
+        }
     }
     up = socket(ra.ss_family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (up < 0 || connect(up, (struct sockaddr *)&ra, rl) < 0) {
@@ -918,7 +936,13 @@ static void *acceptor_main(void *arg)
             }
             struct pb_orig o;
             if (pb_core_take_tcp_orig(pa.sin_addr.s_addr, ntohs(pa.sin_port), &o) != 0) {
-                pb_core_log("relay: no original destination for client %s:%u, closing", inet_ntoa(pa.sin_addr), ntohs(pa.sin_port));
+                static int64_t last_log; static unsigned long unknown;    // anyone can connect to the port: one line per 5 s
+                unknown++;
+                int64_t t = now_ms();
+                if (t - last_log > 5000) {
+                    pb_core_log("relay: no original destination for client %s:%u, closing (%lu such connections)", inet_ntoa(pa.sin_addr), ntohs(pa.sin_port), unknown);
+                    last_log = t;
+                }
                 close(fd);
                 continue;
             }
@@ -1257,12 +1281,21 @@ static void sess_free_grave(void)
     while (R.sgrave) { struct sess *n = R.sgrave->next; free(R.sgrave); R.sgrave = n; }
 }
 
-static struct sess *sess_new(const struct sockaddr_in *cli, uint32_t id, uint32_t flow, int kind)
+// One process gets at most half of the session table: past that, its own least recently used session makes room, so a
+// program that opens UDP sockets at a high rate only ever displaces itself and cannot starve every other one of UDP.
+#define MAX_UDP_SESS_PER_PID (MAX_UDP_SESS / 2)
+
+static struct sess *sess_new(const struct sockaddr_in *cli, uint32_t id, uint32_t flow, int kind, uint32_t pid)
 {
+    int mine = 0;
+    struct sess *oldest = NULL;
+    for (struct sess *t = R.sess_head; t; t = t->next)
+        if (t->pid == pid) { mine++; if (!oldest || t->last < oldest->last) oldest = t; }
+    if (mine >= MAX_UDP_SESS_PER_PID && oldest) sess_destroy(oldest);
     if (R.nsess >= MAX_UDP_SESS) return NULL;
     struct sess *s = calloc(1, sizeof *s);
     if (!s) return NULL;
-    s->cli = *cli; s->id = id; s->flow_be = flow; s->kind = kind;
+    s->cli = *cli; s->id = id; s->flow_be = flow; s->kind = kind; s->pid = pid;
     s->up_fd = s->ctl_fd = -1;
     s->ref[0].s = s->ref[1].s = s;
     s->ref[0].which = 0; s->ref[1].which = 1;
@@ -1349,7 +1382,10 @@ static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uin
         if (!keep) {
             int act = o.action;
             uint32_t pid = o.proxy_id;
-            if (act == PB_ACT_DECIDE) {
+            if (!pb_core_udp_sender_ok(&o, ntohs(cli->sin_port))) {
+                udp_droplog("datagram from a process other than the flow's");
+                act = PB_ACT_BLOCK;
+            } else if (act == PB_ACT_DECIDE) {
                 struct pb_decision d;
                 pb_core_decide(&o, &d);
                 act = d.action;
@@ -1389,7 +1425,7 @@ static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uin
     if (e->action == PB_ACT_DIRECT) {
         s = sess_find(cli, DIRECT_ID, flow_be);
         if (!s) {
-            s = sess_new(cli, DIRECT_ID, flow_be, SK_DIRECT);
+            s = sess_new(cli, DIRECT_ID, flow_be, SK_DIRECT, o->pid);
             if (!s) { udp_droplog("UDP session limit reached"); return; }
             s->dstlen = orig_to_sa(o, &s->dst);
             s->dport = o->port;
@@ -1412,7 +1448,7 @@ static void udp_dgram(const struct sockaddr_in *cli, uint32_t flow_be, const uin
     if (!s) {
         struct pb_proxy px;
         if (pb_core_get_proxy(e->pid, &px) != 0) { udp_droplog("proxy vanished"); return; }
-        s = sess_new(cli, px.id, 0, px.type == PROXY_TYPE_SOCKS5 ? SK_SOCKS5 : SK_DROP);
+        s = sess_new(cli, px.id, 0, px.type == PROXY_TYPE_SOCKS5 ? SK_SOCKS5 : SK_DROP, o->pid);
         if (!s) { udp_droplog("UDP session limit reached"); return; }
         s->proxy = px;
         if (s->kind == SK_DROP) {
@@ -1660,10 +1696,12 @@ static void teardown(void)
     R.jtail = NULL; R.jcount = 0;
     for (int i = 0; i < R.ndata; i++) {
         struct dthread *t = &R.data[i];
+        pthread_mutex_lock(&t->mu);                       // pb_relay_flows may still be walking the list
         for (struct conn *c = t->inq_head, *n; c; c = n) { n = c->next; close(c->fd[0]); close(c->fd[1]); conn_bufs_free(c); free(c); atomic_fetch_sub(&R.nconn, 1); }
         t->inq_head = t->inq_tail = NULL;
         for (struct conn *c = t->conns, *n; c; c = n) { n = c->next; close(c->fd[0]); close(c->fd[1]); conn_bufs_free(c); free(c); atomic_fetch_sub(&R.nconn, 1); }
         t->conns = NULL;
+        pthread_mutex_unlock(&t->mu);
         free_grave(t);
         free(t->scratch); t->scratch = NULL;
         close_fd(&t->pfd[0]); close_fd(&t->pfd[1]);

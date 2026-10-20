@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/auxv.h>
 #include "../src/ProxyBridge.h"
 #include "../profile/pb_profile.h"
 
@@ -86,7 +87,7 @@ static bool is_https(const char* url)
 /* --update: ask the feed with curl and print what it says. Nothing is downloaded or run. */
 static int check_update(void)
 {
-    const char* feed = getenv("PROXYBRIDGE_UPDATE_FEED");      /* a mirror, or a local file in tests */
+    const char* feed = getauxval(AT_SECURE) ? NULL : getenv("PROXYBRIDGE_UPDATE_FEED");   /* a mirror, or a local file in tests; never under setuid */
     if (!feed || !*feed)
         feed = UPDATE_FEED;
     int fds[2];
@@ -101,7 +102,7 @@ static int check_update(void)
         dup2(fds[1], STDOUT_FILENO);
         close(fds[0]);
         close(fds[1]);
-        execlp("curl", "curl", "-sS", "-m", "15", "-H", "User-Agent: ProxyBridge-UpdateChecker", feed, (char*)NULL);
+        execlp("curl", "curl", "-sS", "-m", "15", "--proto", "=https,file", "-H", "User-Agent: ProxyBridge-UpdateChecker", "--", feed, (char*)NULL);
         _exit(127);
     }
     close(fds[1]);

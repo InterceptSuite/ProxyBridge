@@ -1,5 +1,6 @@
 #include "gui.h"
 #include <fcntl.h>
+#include <errno.h>
 #include <dirent.h>
 #include "pb_profile.h"
 
@@ -10,7 +11,7 @@ static char *config_dir() {
     return g_strdup(pbp_config_dir());
 }
 
-static char *profile_path(const char *name) {
+char *profile_path(const char *name) {
     char *file = pbp_filename_for(name);
     if (!file) return NULL;
     char *dir = config_dir();
@@ -304,12 +305,32 @@ static void fill_profile_from_pbp(Profile *p, const struct pbp_profile *src) {
     p->nfilters = src->nfilters;
 }
 
+// Under sudo or pkexec the file is written by root into the invoking user's directory: hand it to that user, so the
+// "readable by you only" promise means the person at the keyboard. Only when the directory is theirs, never elsewhere.
+static void give_to_invoker(const char *path) {
+    const char *uid_s = getenv("PKEXEC_UID"), *gid_s = getenv("SUDO_GID");
+    if (!uid_s) uid_s = getenv("SUDO_UID");
+    if (!uid_s || !*uid_s) return;
+    char *end = NULL;
+    guint64 uid = g_ascii_strtoull(uid_s, &end, 10);
+    if (!end || *end || uid == 0 || uid > 0xFFFFFFFEull) return;
+    char *dir = g_path_get_dirname(path);
+    struct stat st;
+    bool theirs = stat(dir, &st) == 0 && st.st_uid == (uid_t)uid;
+    g_free(dir);
+    if (!theirs) return;
+    guint64 gid = st.st_gid;
+    if (gid_s && *gid_s) { gid = g_ascii_strtoull(gid_s, &end, 10); if (!end || *end || gid > 0xFFFFFFFEull) gid = st.st_gid; }
+    if (chown(path, (uid_t)uid, (gid_t)gid) != 0) g_warning("could not hand %s to the invoking user: %s", path, g_strerror(errno));
+}
+
 bool profile_export(const Profile *prof, const char *path, char *err, size_t errlen) {
     profile_sync_active();
     struct pbp_profile view;
     profile_to_pbp(prof, &view);
     bool ok = pbp_save_file(path, &view, err, errlen) == 0;
     free_pbp_view(&view);
+    if (ok) give_to_invoker(path);
     return ok;
 }
 

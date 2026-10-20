@@ -689,7 +689,8 @@ static void updates_scenario(void) {
     feed_case("feed_missing.json", NULL, GTK_RESPONSE_OK, "Update check failed", false);
     feed_case("feed_empty.json", "", GTK_RESPONSE_OK, "Update check failed", false);
     feed_case("feed_nolinux.json", "{\"windows\": {\"version\": \"9.0.0\"}}", GTK_RESPONSE_OK, "Could not parse linux update info", false);
-    feed_case("feed_noversion.json", "{\"linux\": {\"download\": \"https://example.test/d\"}}", GTK_RESPONSE_OK, "Could not parse version info", false);
+    feed_case("feed_noversion.json", "{\"linux\": {\"download\": \"https://example.test/d\"}}", GTK_RESPONSE_OK, "Could not parse", false);
+    feed_case("feed_escape.json", "{\"linux\": {\"version\": \"9.9.9\\u001b[31m\"}}", GTK_RESPONSE_OK, "Could not parse", false);   // remote text never reaches a dialog raw
     feed_case("feed_same.json", "{\"linux\": {\"version\": \"" PROXYBRIDGE_VERSION "\"}}", GTK_RESPONSE_OK, "latest version", false);
     feed_case("feed_beta_suffix.json", "{\"linux\": {\"version\": \"4.0.0\"}}", GTK_RESPONSE_OK, "latest version", false);
     feed_case("feed_older.json", "{\"linux\": {\"version\": \"3.2.0\"}}", GTK_RESPONSE_OK, "latest version", false);
@@ -698,6 +699,10 @@ static void updates_scenario(void) {
     feed_case("feed_patch.json", "{\"linux\": {\"version\": \"4.0.1\", \"download\": \"https://example.test/d\"}}", GTK_RESPONSE_CANCEL, "Version 4.0.1 is available", false);
     // a feed must never make the program open anything but an https page
     feed_case("feed_unsafe.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"http://insecure.test/x\", \"release_notes\": \"javascript:alert(1)\"}}",
+              GTK_RESPONSE_ACCEPT, "Version 9.9.9 is available", true);
+    CHECK_HAS(last_msg, "No safe https url");
+    // ...and, since the browser runs as root, only the project's own pages: a feed pointing elsewhere is not opened
+    feed_case("feed_foreign.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"https://evil.example/x\", \"release_notes\": \"https://evil.example/n\"}}",
               GTK_RESPONSE_ACCEPT, "Version 9.9.9 is available", true);
     CHECK_HAS(last_msg, "No safe https url");
     unsetenv("PB_UPDATE_FEED");
