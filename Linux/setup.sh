@@ -137,6 +137,49 @@ install_files() {
     echo "Files installed"
 }
 
+# The ProxyBridge service: the part that runs as root (it owns the engine and the profiles), so the window itself needs no root.
+# Who may use it: root and the members of the group "proxybridge", looked up at every connection (no new login needed).
+install_service() {
+    echo ""
+    echo "Setting up the ProxyBridge service..."
+
+    if ! getent group proxybridge >/dev/null 2>&1; then
+        groupadd --system proxybridge 2>/dev/null || groupadd -r proxybridge 2>/dev/null || addgroup --system proxybridge 2>/dev/null \
+            || echo "WARNING: could not create the group 'proxybridge'; only root will be able to use the window"
+    fi
+    SERVICE_USER=""
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && id "$SUDO_USER" >/dev/null 2>&1 && getent group proxybridge >/dev/null 2>&1; then
+        if usermod -aG proxybridge "$SUDO_USER" 2>/dev/null || gpasswd -a "$SUDO_USER" proxybridge >/dev/null 2>&1 || adduser "$SUDO_USER" proxybridge >/dev/null 2>&1; then
+            SERVICE_USER="$SUDO_USER"
+            echo "  $SUDO_USER may now use ProxyBridge without root (member of the group 'proxybridge')"
+        else
+            echo "WARNING: could not add $SUDO_USER to the group 'proxybridge'. Do it with: sudo usermod -aG proxybridge $SUDO_USER"
+        fi
+    fi
+
+    SERVICE_STARTED=0
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        if /usr/local/bin/ProxyBridge --print-unit /usr/local/bin/ProxyBridge > /etc/systemd/system/proxybridge.service.new; then
+            install -o root -g root -m 0644 /etc/systemd/system/proxybridge.service.new /etc/systemd/system/proxybridge.service
+            rm -f /etc/systemd/system/proxybridge.service.new
+            systemctl daemon-reload
+            systemctl enable proxybridge.service >/dev/null 2>&1 || true
+            if systemctl restart proxybridge.service; then
+                SERVICE_STARTED=1
+                echo "  proxybridge.service is installed, enabled and running"
+            else
+                echo "WARNING: proxybridge.service did not start. See: journalctl -u proxybridge"
+            fi
+        else
+            rm -f /etc/systemd/system/proxybridge.service.new
+            echo "WARNING: could not create the service file"
+        fi
+    else
+        echo "  systemd is not running here, so no service was installed."
+        echo "  Start it yourself with: sudo ProxyBridge --daemon     (or run the window with sudo: it then uses its own engine)"
+    fi
+}
+
 # Update library cache
 update_ldconfig() {
     echo ""
@@ -200,7 +243,7 @@ uninstall() {
         systemctl disable --now proxybridge.service 2>/dev/null || true
         rm -f /etc/systemd/system/proxybridge.service
         systemctl daemon-reload 2>/dev/null || true
-        echo "  boot service removed"
+        echo "  service removed"
     fi
     rm -f /usr/local/bin/ProxyBridge /usr/local/bin/ProxyBridgeGUI
     rm -f /usr/share/applications/proxybridge.desktop /usr/share/icons/hicolor/128x128/apps/proxybridge.png /usr/share/icons/hicolor/256x256/apps/proxybridge.png
@@ -209,6 +252,7 @@ uninstall() {
     rm -f /etc/ld.so.conf.d/proxybridge.conf
     ldconfig 2>/dev/null || true
     if [ "$1" = "--purge" ]; then
+        getent group proxybridge >/dev/null 2>&1 && { groupdel proxybridge 2>/dev/null || delgroup proxybridge 2>/dev/null || true; }
         rm -rf /etc/proxybridge
         echo "  profiles and settings removed"
     else
@@ -232,18 +276,27 @@ main() {
     install_files
     update_ldconfig
     verify_installation
+    install_service
     
     echo ""
     echo "==================================="
     echo "Installation Complete!"
     echo "==================================="
     echo ""
-    echo "You can now run ProxyBridge from anywhere:"
-    echo "  sudo ProxyBridge --help"
     if [ -f /usr/local/bin/ProxyBridgeGUI ]; then
-       echo "  sudo ProxyBridgeGUI      (Graphical Interface)"
+        if [ "${SERVICE_STARTED:-0}" = 1 ]; then
+            echo "Open the window (no sudo needed) from a terminal with:   ProxyBridgeGUI"
+            if [ -n "${SERVICE_USER:-}" ]; then
+                echo "  ($SERVICE_USER can use it right away; other users need: sudo usermod -aG proxybridge <user>)"
+            else
+                echo "  (add each user who may use it to the group: sudo usermod -aG proxybridge <user>)"
+            fi
+        else
+            echo "Open the window with:   sudo ProxyBridgeGUI"
+        fi
     fi
-    echo "  sudo ProxyBridge --profile <name or .pbprofile path>"
+    echo "Command line:                 sudo ProxyBridge --profile <name or .pbprofile path>"
+    echo "Help:                         ProxyBridge --help"
     echo ""
     echo "No cleanup is needed after a crash: the kernel detaches the eBPF programs automatically."
     echo ""

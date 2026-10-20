@@ -68,22 +68,36 @@ The setup script will:
 - Copy binaries to `/usr/local/bin` (ProxyBridge CLI and GUI)
 - Copy library to `/usr/local/lib` (libproxybridge.so)
 - Update library cache
+- Create the group `proxybridge`, add the user who ran `sudo` to it, and install, enable and start `proxybridge.service` (the root part of ProxyBridge, see [The service](#the-service-and-the-window))
 - Verify installation
 
 **What gets installed:**
-- `/usr/local/bin/ProxyBridge` - Command-line interface
-- `/usr/local/bin/ProxyBridgeGUI` - Graphical interface (if GTK3 available)
+- `/usr/local/bin/ProxyBridge` - Command-line interface, and the service (`ProxyBridge --daemon`)
+- `/usr/local/bin/ProxyBridgeGUI` - Graphical interface (if GTK3 available); **it needs no root**
 - `/usr/local/lib/libproxybridge.so` - Core library
-- `/etc/proxybridge/` - Configuration directory
+- `/etc/systemd/system/proxybridge.service` - The service
+- `/etc/proxybridge/` - Configuration directory (profiles and settings, root only)
+
+### The service and the window
+
+Loading eBPF programs needs root, but the window does not. ProxyBridge is split like the Windows app (a service plus a window):
+
+- **`proxybridge.service`** (`ProxyBridge --daemon`, runs as root) owns the engine, the profile files and the settings. It listens on `/run/proxybridge/ctl.sock`.
+- **`ProxyBridgeGUI`** runs as you. Everything it does (add a proxy, edit a rule, switch profile, start the engine, read the live connections and the logs) is a request to the service over that socket; its file choosers, browser and clipboard are your own.
+- **Who may use the service:** root and the members of the group `proxybridge`. The group is read at every connection, so `sudo usermod -aG proxybridge <user>` takes effect at once, without logging in again. Everyone else is refused (and the refusal is logged). The socket is owned by root and the window refuses to talk to a socket whose owner is not root.
+- **Start at Boot** (Settings menu) is a setting of the service. *On:* the service applies the active profile when the machine starts and keeps routing after the window is closed. *Off* (default): the service sits idle until a window opens, and closing the window stops routing, as it always did.
+- A window started as **root without a service** (for example on a system without systemd) still works: it runs the engine inside itself, like before. `sudo ProxyBridge --profile <name>` is unchanged and stays the way to run headless without the service.
+- If the service restarts (an update, a crash), the window reconnects by itself and sends its configuration again.
+- Lines the service wrote before the window connected (what it loaded at boot) are shown in the Activity Logs.
 
 ## Usage
 
 ### GUI Application
 
-**Launch GUI (requires GTK3):**
+**Launch GUI (requires GTK3 and the service, which the installer sets up):**
 
 ```bash
-sudo ProxyBridgeGUI
+ProxyBridgeGUI              # as yourself; no sudo
 ```
 
 The GTK3-based GUI provides:
@@ -212,7 +226,7 @@ Cost: DNS from covered processes takes one extra loopback hop (about +90 µs per
 - **Font zoom** (Settings menu, `Ctrl` + `+` / `-` / `0`): 60-300 % in steps of 10, saved in the profile (`FontZoom`).
 - **Auto-clear Logs** (Settings menu, on by default, saved in the profile as `AutoClearConnectionLogs`): a log is wiped once it grows past 500 lines. Switched off, each log keeps its recent history (1000 lines for activity, 2000 for connections).
 - **Log Filters...** (Proxy menu): rules for what the connection log shows, saved in the profile as `LogFilters`. A filter has a mode (*Include* or *Exclude*) and optional patterns for process, IP address, port, protocol (*All*/*TCP*/*UDP*) and action (*All*/*Direct*/*Proxy*/*Blocked*); patterns are case-insensitive globs (`*`, `?`), empty or `All` matches anything. Excludes run first (any match hides a line); if there are Include filters, a line must match one of them. Filters apply to new connections as they happen; the traffic itself is not affected.
-- **Start at Boot** (Settings menu): writes `/etc/systemd/system/proxybridge.service`, which runs the command line program next to the GUI (or `/usr/local/bin/ProxyBridge`) with the **active profile**, and enables it; unchecking disables the service and removes the file. The unit follows the active profile when you switch or rename it. Needs systemd and root (the GUI already runs as root); a failure is reported and the box stays unchecked.
+- **Start at Boot** (Settings menu, stored in `settings.json`): the service applies the **active profile** when the machine starts and keeps routing after the window is closed (see [The service and the window](#the-service-and-the-window)). Off (default): the service waits for a window, and routing ends when the last window closes. A window without a service (started as root) writes and enables the unit itself instead (`ProxyBridge --print-unit` prints it).
 - **Check for Updates on Startup** (Settings menu, on by default, stored in `settings.json`): asks the update feed in the background when the GUI starts. It stays quiet unless a newer version exists, then offers *Open in Browser*, *Close* or *Don't Check at Startup*. Only an `https` page is ever opened.
 
 ## Compared with the Windows app (4.3.0)
@@ -230,7 +244,8 @@ Cost: DNS from covered processes takes one extra loopback hop (about +90 µs per
 | Live connections | yes (GUI tab, `ProxyBridge_GetFlows`) |
 | Log Every Connection, main on/off switch | yes |
 | Connection-log filters (`LogFilters`), auto-clear logs (`AutoClearConnectionLogs`), font zoom (`FontZoom`) | yes, per profile |
-| Start with the OS | yes, as a systemd service that runs `ProxyBridge --profile <active profile>` (Settings menu, *Start at Boot*) |
+| Service plus window, no admin rights for the window | yes: `proxybridge.service` (root) and `ProxyBridgeGUI` (you), group `proxybridge` |
+| Start with the OS | yes (Settings menu, *Start at Boot*): the service applies the active profile at boot |
 | Update check on start-up | yes (*Check for Updates on Startup*, on by default, quiet unless a newer version exists) |
 | Language selection, close to tray | not implemented |
 
@@ -247,7 +262,7 @@ Add as many proxies as you need (GUI or profile); each rule chooses its own. Pro
 - **A local proxy is exempted** (its own connections go direct) when a process listens on the configured proxy address and port. While that port is free, for example because the proxy is not running yet, any local process that binds it is treated as the proxy. Point rules at proxies that are running, or at a proxy on another host, when other users share the machine.
 - **Fail-open on exit.** The kernel removes the eBPF programs when ProxyBridge stops or crashes. From that moment traffic flows normally: `BLOCK` rules no longer block and nothing is proxied. ProxyBridge is a routing tool, not a firewall; use the "start at boot" service (which restarts it on failure) and a real firewall for enforcement.
 - A rule that needs a proxy that does not exist **blocks** instead of letting traffic through. A connection whose proxy handshake fails is closed, never sent direct.
-- **Start at boot** writes `/etc/systemd/system/proxybridge.service` with the absolute path of the active profile file and of the `ProxyBridge` binary. The binary is accepted only when it and every directory above it belong to root and are writable by root only (so an install under `/usr/local/bin`, not a copy run from a home directory); the unit runs with `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only` and `PrivateTmp`.
+- **The service** (`proxybridge.service`) runs as root with `NoNewPrivileges`, `ProtectSystem=strict` (only `/etc/proxybridge` is writable), `ProtectHome`, `PrivateTmp`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectClock`, `RestrictSUIDSGID`, `LockPersonality` and `RestrictRealtime`. Its socket accepts connections from every user, but a connection is served only for root and the members of the group `proxybridge` (peer credentials from the kernel, group read at each connection); anyone else gets a refusal and a log line, and cannot make the service allocate more than one frame (40 MiB limit checked before reading), more than 16 windows are refused, and a window that stops reading has its events dropped, never blocking the engine. Membership of the group is administrative power: such a user can route, block and read the proxy credentials of every user's traffic, so add only people you would give `sudo` for ProxyBridge. The window checks that the socket belongs to root before it sends anything. A window started as root without a service installs its unit only when the program and every directory above it belong to root and are writable by root only (an install under `/usr/local/bin`, not a copy run from a home directory).
 - Anything shown in the log that another local user controls (an executable's name, a DNS name) has control characters replaced before it reaches the terminal or the GUI, and profiles that contain control characters in any field are rejected.
 - The relay listens on loopback only (UDP is additionally bound to the `lo` device). Other network namespaces (containers) are never redirected.
 - Proxy passwords are kept in the profile files under `/etc/proxybridge/profiles/` (mode 0600, directory 0700, root). Credentials are never taken from the command line, so they cannot show up in the process list or shell history.
@@ -265,7 +280,7 @@ Add as many proxies as you need (GUI or profile); each rule chooses its own. Pro
 ## Current Limitations
 
 - **Needs a recent kernel**: Linux 5.11+ with BTF (`/sys/kernel/btf/vmlinux`) and cgroup v2 mounted (default on current Ubuntu, Debian, Fedora, Arch). Older kernels are not supported
-- **Root privileges required** - loading the eBPF programs needs root (CAP_BPF/CAP_SYS_ADMIN)
+- **Root privileges required for the engine** - loading the eBPF programs needs root (CAP_BPF/CAP_SYS_ADMIN); the installed service has it, so the window does not
 - **Native IPv6 UDP to a PROXY rule fails closed** - an unconnected UDP socket sending to a native IPv6 address cannot be redirected (kernel limitation); the `sendto()` returns `EPERM` and applications fall back to IPv4/TCP. Connected IPv6 UDP sockets, IPv6 TCP and UDP to IPv4 destinations through dual-stack sockets all work
 - **IPv4 is the fully supported path**; IPv6 (TCP, connected UDP) works for IP rules but has no domain matching and the limits above
 - **IPv6-only (`IPV6_V6ONLY`) sockets** connecting to a proxied destination fail (the redirect uses a v4-mapped loopback address)
@@ -298,11 +313,11 @@ Add as many proxies as you need (GUI or profile); each rule chooses its own. Pro
   - Many UDP applications use HTTP/3 and DTLS protocols. Even if your SOCKS5 proxy supports UDP ASSOCIATE, ensure it can handle DTLS and HTTP/3 UDP traffic, as they require separate handling beyond raw UDP packets.
   - **Testing UDP/HTTP3/DTLS Support**: If you need to test UDP, HTTP/3, and DTLS support with a SOCKS5 proxy, try [Nexus Proxy](https://github.com/InterceptSuite/nexus-proxy) - a proxy application created specifically to test ProxyBridge with advanced UDP protocols.
 
-- **Root Privileges**: ProxyBridge requires root access to:
+- **Root Privileges**: the engine requires root access to:
   - Load the eBPF programs and attach them to the root cgroup
   - Listen on its local relay ports (24010 for TCP, 24011 for UDP; the next free pair is used if they are taken)
 
-  Always run with `sudo` or as root user.
+  That is the job of `proxybridge.service`; the window does not need root (see [The service and the window](#the-service-and-the-window)). `ProxyBridge --profile` and a window without a service must be started with `sudo`.
 
 - **Process Name Matching**: Linux process names are case-sensitive. Use exact process names or wildcard patterns:
   - Exact: `firefox` matches only "firefox"
@@ -453,7 +468,7 @@ gcc -o ProxyBridge main.o \
 To remove ProxyBridge from your system, run `sudo ./setup.sh --uninstall` from the extracted release (add `--purge` to delete the profiles under `/etc/proxybridge` too), or by hand:
 
 ```bash
-# Stop and remove the boot service, if it was enabled in the GUI
+# Stop and remove the service
 sudo systemctl disable --now proxybridge.service 2>/dev/null
 sudo rm -f /etc/systemd/system/proxybridge.service
 sudo systemctl daemon-reload
@@ -509,7 +524,10 @@ sudo ./e2e_udp.sh                                 # UDP through SOCKS5 UDP ASSOC
 sudo ./e2e_rules_diff.sh                          # random rule sets vs an independent reference: kernel fast path and slow path, TCP and UDP (root)
 sudo ./e2e_logging.sh                             # connection log: de-duplication, log-every-connection, one line per decision (root)
 ./e2e_checker.sh                                  # the proxy check against working and broken proxies (no root)
-sudo ./gui_ui.sh                                  # drives the real windows and dialogs: proxies, rules, profiles, file choosers, menus, engine (root, needs broadwayd)
+sudo ./gui_ui.sh                                  # drives the real windows and dialogs: proxies, rules, profiles, file choosers, menus, engine - once with its own engine and once through a service (root, needs broadwayd)
+sudo ./e2e_daemon.sh                              # the service: protocol and random garbage, access control by group, profile store, engine control, live connections, batch, Start at Boot (root)
+sudo ./e2e_service.sh                             # the service under real systemd with the installer's exact unit: sandbox, eBPF, crash and restart, stop (root, systemd)
+sudo ./gui_service.sh                             # the shipped GUI run by an unprivileged user in front of a real service (root, needs broadwayd and setpriv)
 sudo ./coverage.sh                                # line coverage of everything above plus the unit tests; `./coverage.sh unit` needs no root
 sudo ./e2e_parity.sh                              # per-proxy host-name sending and per-rule localhost, incl. a hostile DNS name (root, needs dig)
 sudo ./api_live.sh                                # library API: edit/move/disable/delete rules and proxies on the live datapath (root)
