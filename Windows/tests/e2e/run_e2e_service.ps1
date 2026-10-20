@@ -294,7 +294,7 @@ try {
 
     $null = Svc-Ok 'clearlogs'; $null = Svc-Ok "logall`t0"
     # One program opens the same connection twice (the log remembers per process, so it has to be one process).
-    function Twice($client) { & $client -s -o NUL --forbid-reuse --max-time 20 http://example.com/ --next -s -o NUL --forbid-reuse --max-time 20 http://example.com/ 2>&1 | Out-Null; Start-Sleep -Seconds 2 }
+    function Twice($client) { & $client -s -o NUL -H "Connection: close" --max-time 20 http://example.com/ --next -s -o NUL -H "Connection: close" --max-time 20 http://example.com/ 2>&1 | Out-Null; Start-Sleep -Seconds 2 }
     function Web-Events([string]$proc) { @($script:driver.Events() | Where-Object { $_ -match "^EVT`tCONN`t[^`t]*$([regex]::Escape($proc))`t\d+`t[^`t]+`t80`t" }).Count }
     Twice $exe.nomatch
     # default: a connection is logged once per program, destination, port and action; "every connection" logs each one
