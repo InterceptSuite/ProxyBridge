@@ -78,6 +78,7 @@ jobs:
       timeout-minutes: 15
       run: |
         Linux/profile/tests/run_tests.sh
+        Linux/gui/tests/run_tests.sh
         cd Linux/src
         make test-rules BUILD_DIR="$RUNNER_TEMP/pb-tests"
         cd tests
@@ -182,16 +183,35 @@ jobs:
       continue-on-error: true
       timeout-minutes: 15
       run: |
-        sudo apt-get install -y dnsutils >/dev/null
+        sudo apt-get install -y dnsutils libgtk-3-bin >/dev/null
         uname -r
         ls /sys/kernel/btf/vmlinux && mount | grep -q "type cgroup2" || { echo "kernel lacks BTF or cgroup2: skipping"; exit 0; }
         fail=0
-        for t in e2e e2e_rules e2e_domains e2e_security e2e_profile e2e_parity api_live; do
+        for t in e2e e2e_rules e2e_domains e2e_security e2e_profile e2e_parity e2e_cli e2e_faults e2e_udp e2e_rules_diff e2e_logging e2e_exempt e2e_lifecycle api_live; do
           echo "::group::$t"
           sudo env PB_DIR="$PWD/Linux/output" BPFTOOL="$BPFTOOL" bash "Linux/tests/$t.sh" || fail=1
           echo "::endgroup::"
         done
+        echo "::group::e2e_checker"
+        env PB_DIR="$PWD/Linux/output" bash Linux/tests/e2e_checker.sh || fail=1
+        echo "::endgroup::"
+        for t in gui_headless gui_ui; do
+          echo "::group::$t"
+          if command -v broadwayd > /dev/null; then
+            if [ "$t" = gui_headless ]; then sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_headless.sh "$PWD/Linux/output/ProxyBridgeGUI" "$PWD/Linux/output" || fail=1
+            else sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_ui.sh "$PWD/Linux/output" || fail=1; fi
+          else echo "broadwayd not available: skipped"; fi
+          echo "::endgroup::"
+        done
         exit $fail
+      shell: bash
+
+    - name: Coverage report
+      # Measures the whole suite; reported, never gating the build.
+      continue-on-error: true
+      timeout-minutes: 40
+      run: |
+        sudo env BPFTOOL="$BPFTOOL" COV_DIR="$RUNNER_TEMP/pb-coverage" bash Linux/tests/coverage.sh
       shell: bash
 
     - name: Upload artifacts
