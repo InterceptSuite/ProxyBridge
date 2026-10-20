@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Documentation
-    url: https://github.com/InterceptSuite/ProxyBridge
-    about: Check the documentation before creating an issue
+    url: https://proxybridge.interceptsuite.com/docs/
+    about: Check the documentation (install, configuration, troubleshooting) before creating an issue
