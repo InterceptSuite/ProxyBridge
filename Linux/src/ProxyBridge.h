@@ -40,6 +40,11 @@ PB_API uint32_t ProxyBridge_AddProxy(const char* name, ProxyType type, const cha
                               const char* username, const char* password, char* err, size_t err_size);
 PB_API bool     ProxyBridge_EditProxy(uint32_t proxy_id, const char* name, ProxyType type, const char* host, uint16_t port,
                                const char* username, const char* password, char* err, size_t err_size);
+/* "DNS via proxy" of one proxy (default true, as in the Windows and macOS apps): connections to an address whose host name the
+ * application resolved are sent to the proxy by name, so the proxy resolves it (SOCKS5 domain address / HTTP CONNECT host name).
+ * False sends the IP address. Names come from the application's own unencrypted DNS answers; without one the IP is sent.
+ * UDP datagrams always carry the IP. */
+PB_API bool     ProxyBridge_SetProxySendDomain(uint32_t proxy_id, bool send_domain);
 PB_API bool     ProxyBridge_DeleteProxy(uint32_t proxy_id);   /* rules that used it fall back to the default proxy */
 PB_API void     ProxyBridge_ClearProxies(void);
 /* Which proxy a rule with proxy_id == 0 uses. 0 = the first proxy added. */
@@ -56,6 +61,10 @@ PB_API uint32_t ProxyBridge_AddRule(const char* process_name, const char* target
                              RuleProtocol protocol, RuleAction action, uint32_t proxy_id, char* err, size_t err_size);
 PB_API bool     ProxyBridge_EditRule(uint32_t rule_id, const char* process_name, const char* target_hosts, const char* target_ports,
                               RuleProtocol protocol, RuleAction action, uint32_t proxy_id, char* err, size_t err_size);
+/* "Also proxy localhost traffic" of one PROXY rule (default false): connections to 127.0.0.0/8 and ::1 that match the rule go to
+ * the proxy. Without it a PROXY rule leaves loopback traffic direct, as Windows does. BLOCK and DIRECT rules never touch
+ * loopback, and neither does DNS to the local resolver stub (port 53). */
+PB_API bool     ProxyBridge_SetRuleLocalhost(uint32_t rule_id, bool localhost_via_proxy);
 PB_API bool     ProxyBridge_EnableRule(uint32_t rule_id);
 PB_API bool     ProxyBridge_DisableRule(uint32_t rule_id);
 PB_API bool     ProxyBridge_DeleteRule(uint32_t rule_id);

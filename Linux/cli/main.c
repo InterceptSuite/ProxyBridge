@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <ctype.h>
+#include <strings.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include "../src/ProxyBridge.h"
@@ -22,6 +23,7 @@ typedef struct {
     RuleProtocol protocol;
     RuleAction action;
     char proxy_ref[64];     /* proxy name or 1-based index; empty = default */
+    bool localhost;         /* PROXY rule that also proxies 127.0.0.0/8 and ::1 */
 } ProxyRule;
 
 typedef struct {
@@ -32,6 +34,7 @@ typedef struct {
     char username[256];
     char password[256];
     uint32_t id;
+    bool send_domain;       /* the proxy resolves host names (default); false sends the IP address */
 } ProxyEntry;
 
 static volatile bool keep_running = false;
@@ -90,6 +93,8 @@ static void show_help(const char* prog)
     printf("                                   work=http://alice:secret@proxy.corp:8080\n");
     printf("                                   tor=socks5://[::1]:9050\n");
     printf("                         Legacy form type://host:port:user:pass is still accepted.\n");
+    printf("                         Append ?dns=local to send IP addresses instead of host names; the default\n");
+    printf("                         (?dns=proxy) sends the name the application resolved, so the proxy resolves it.\n");
     printf("                         Default: socks5://127.0.0.1:4444\n\n");
 
     printf("  --rule <rule>          Traffic routing rule (repeatable, first match wins)\n");
@@ -101,13 +106,15 @@ static void show_help(const char* prog)
     printf("                                      (domains are matched via the DNS answers the application received)\n");
     printf("                           ports    - *, 443, 80;8080, 8000-9000\n");
     printf("                           protocol - TCP, UDP, or BOTH\n");
-    printf("                           action   - PROXY, DIRECT, or BLOCK; PROXY=name (or PROXY=2) picks a specific proxy\n");
+    printf("                           action   - PROXY, DIRECT, or BLOCK; PROXY=name (or PROXY=2) picks a specific proxy;\n");
+    printf("                                      PROXY+localhost (or PROXY=name+localhost) also proxies 127.0.0.0/8 and ::1\n");
     printf("                         Examples:\n");
     printf("                           curl:*:*:TCP:PROXY\n");
     printf("                           firefox:*:*:BOTH:PROXY=work\n");
     printf("                           curl;wget:10.0.0.0/8:*:TCP:DIRECT\n");
     printf("                           *:*:53:UDP:PROXY=tor\n");
-    printf("                           firefox:*.github.com;github.com:443:TCP:PROXY=work\n\n");
+    printf("                           firefox:*.github.com;github.com:443:TCP:PROXY=work\n");
+    printf("                           burp-client:*:8080:TCP:PROXY=work+localhost\n\n");
 
     printf("  --profile <name|file>  Load proxies and rules from a .pbprofile (a file path, or the name of a profile saved\n");
     printf("                         by the GUI). Same format as the Windows and macOS apps; repeatable, and can be\n");
@@ -153,12 +160,19 @@ static RuleProtocol parse_protocol(const char* str)
     exit(1);
 }
 
-/* action[=proxy] */
-static RuleAction parse_action(const char* str, char* proxy_ref, size_t ref_size)
+/* action[=proxy][+localhost] */
+static RuleAction parse_action(const char* str, char* proxy_ref, size_t ref_size, bool* localhost)
 {
     char buf[128];
     snprintf(buf, sizeof(buf), "%s", str);
     proxy_ref[0] = '\0';
+    *localhost = false;
+    size_t bl = strlen(buf), sl = strlen("+localhost");
+    if (bl > sl && strcasecmp(buf + bl - sl, "+localhost") == 0)
+    {
+        buf[bl - sl] = '\0';
+        *localhost = true;
+    }
     char* eq = strchr(buf, '=');
     if (eq)
     {
@@ -168,7 +182,7 @@ static RuleAction parse_action(const char* str, char* proxy_ref, size_t ref_size
     char upper[16];
     upper_copy(upper, buf, sizeof(upper));
     if (strcmp(upper, "PROXY") == 0) return RULE_ACTION_PROXY;
-    if (eq && proxy_ref[0]) { fprintf(stderr, "ERROR: '=proxy' is only valid with PROXY\n"); exit(1); }
+    if ((eq && proxy_ref[0]) || *localhost) { fprintf(stderr, "ERROR: '=proxy' and '+localhost' are only valid with PROXY\n"); exit(1); }
     if (strcmp(upper, "DIRECT") == 0) return RULE_ACTION_DIRECT;
     if (strcmp(upper, "BLOCK") == 0) return RULE_ACTION_BLOCK;
     fprintf(stderr, "ERROR: Invalid action '%s'. Use PROXY, DIRECT, or BLOCK\n", buf);
@@ -227,7 +241,7 @@ static bool parse_rule(const char* rule_str, ProxyRule* rule)
     default_if_empty(rule->target_hosts, hosts, "*", sizeof(rule->target_hosts));
     default_if_empty(rule->target_ports, ports, "*", sizeof(rule->target_ports));
     rule->protocol = parse_protocol(protocol);
-    rule->action = parse_action(action, rule->proxy_ref, sizeof(rule->proxy_ref));
+    rule->action = parse_action(action, rule->proxy_ref, sizeof(rule->proxy_ref), &rule->localhost);
     return true;
 }
 
@@ -237,6 +251,7 @@ static bool parse_proxy_spec(const char* spec, ProxyEntry* p)
     char buffer[768];
     snprintf(buffer, sizeof(buffer), "%s", spec);
     memset(p, 0, sizeof(*p));
+    p->send_domain = true;
 
     char* scheme_end = strstr(buffer, "://");
     if (scheme_end == NULL)
@@ -273,6 +288,18 @@ static bool parse_proxy_spec(const char* spec, ProxyEntry* p)
         if (colon) { *colon = '\0'; snprintf(p->password, sizeof(p->password), "%s", colon + 1); }
         snprintf(p->username, sizeof(p->username), "%s", rest);
         rest = at + 1;
+    }
+
+    char* query = strchr(rest, '?');           /* ?dns=proxy (default) | ?dns=local */
+    if (query)
+    {
+        *query++ = '\0';
+        if (strcasecmp(query, "dns=local") == 0) p->send_domain = false;
+        else if (strcasecmp(query, "dns=proxy") != 0)
+        {
+            fprintf(stderr, "ERROR: Unknown proxy option '%s' in '%s'. Use dns=proxy or dns=local\n", query, spec);
+            return false;
+        }
     }
 
     char* port_str = NULL;
@@ -373,6 +400,7 @@ static bool load_profile(const char* arg, ProxyEntry* proxies, int* num_proxies,
         p->port = prof.proxies[i].port;
         snprintf(p->username, sizeof(p->username), "%s", prof.proxies[i].user);
         snprintf(p->password, sizeof(p->password), "%s", prof.proxies[i].pass);
+        p->send_domain = prof.proxies[i].send_domain;
     }
     for (size_t i = 0; ok && i < prof.nrules; i++)
     {
@@ -392,6 +420,7 @@ static bool load_profile(const char* arg, ProxyEntry* proxies, int* num_proxies,
         snprintf(out->target_ports, sizeof(out->target_ports), "%s", r->ports);
         out->protocol = (RuleProtocol)r->protocol;
         out->action = (RuleAction)r->action;
+        out->localhost = r->action == RULE_ACTION_PROXY && r->localhost;
         const struct pbp_proxy* px = r->action == RULE_ACTION_PROXY && r->proxy_id ? pbp_find_proxy(&prof, r->proxy_id) : NULL;
         if (px)
             snprintf(out->proxy_ref, sizeof(out->proxy_ref), "%s", px->name);
@@ -577,8 +606,11 @@ int main(int argc, char *argv[])
             fprintf(stderr, "ERROR: Proxy %d (%s:%u): %s\n", i + 1, p->host, p->port, err);
             return 1;
         }
-        printf("  [%d]%s%s%s %s://%s:%u%s\n", i + 1, p->name[0] ? " " : "", p->name, i == 0 ? " (default)" : "",
-               p->type == PROXY_TYPE_HTTP ? "http" : "socks5", p->host, p->port, p->username[0] ? " (auth)" : "");
+        if (!p->send_domain)
+            ProxyBridge_SetProxySendDomain(p->id, false);
+        printf("  [%d]%s%s%s %s://%s:%u%s%s\n", i + 1, p->name[0] ? " " : "", p->name, i == 0 ? " (default)" : "",
+               p->type == PROXY_TYPE_HTTP ? "http" : "socks5", p->host, p->port, p->username[0] ? " (auth)" : "",
+               p->send_domain ? "" : " (dns:local)");
     }
     if (profile_default_ref)
     {
@@ -616,9 +648,11 @@ int main(int argc, char *argv[])
                         rules[i].target_hosts, rules[i].target_ports, err);
                 return 1;
             }
-            printf("  [%u] %s:%s:%s:%s -> %s%s%s\n", rule_id, rules[i].process_name, rules[i].target_hosts,
+            if (rules[i].localhost)
+                ProxyBridge_SetRuleLocalhost(rule_id, true);
+            printf("  [%u] %s:%s:%s:%s -> %s%s%s%s\n", rule_id, rules[i].process_name, rules[i].target_hosts,
                    rules[i].target_ports, protocol_str, action_str,
-                   rules[i].proxy_ref[0] ? " via " : "", rules[i].proxy_ref);
+                   rules[i].proxy_ref[0] ? " via " : "", rules[i].proxy_ref, rules[i].localhost ? " (+localhost)" : "");
         }
     }
     else

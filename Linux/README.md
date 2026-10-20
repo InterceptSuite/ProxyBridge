@@ -179,6 +179,8 @@ OPTIONS:
                                    work=http://alice:secret@proxy.corp:8080
                                    tor=socks5://[::1]:9050
                          Legacy form type://host:port:user:pass is still accepted.
+                         Append ?dns=local to send IP addresses instead of host names; the default
+                         (?dns=proxy) sends the name the application resolved, so the proxy resolves it.
                          Default: socks5://127.0.0.1:4444
 
   --rule <rule>          Traffic routing rule (repeatable, first match wins)
@@ -188,7 +190,8 @@ OPTIONS:
                                       octet patterns (192.168.*.*) or *; several separated by ; or ,
                            ports    - *, 443, 80;8080, 8000-9000
                            protocol - TCP, UDP, or BOTH
-                           action   - PROXY, DIRECT, or BLOCK; PROXY=name (or PROXY=2) picks a specific proxy
+                           action   - PROXY, DIRECT, or BLOCK; PROXY=name (or PROXY=2) picks a specific proxy;
+                                      PROXY+localhost (or PROXY=name+localhost) also proxies 127.0.0.0/8 and ::1
                          Examples:
                            curl:*:*:TCP:PROXY
                            firefox:*:*:BOTH:PROXY=work
@@ -253,6 +256,9 @@ Rules are evaluated **in order and the first match wins** (put specific rules be
 
 # Domain names (exact and wildcard), each rule with its own proxy
 --rule "firefox:*.github.com;github.com:443:TCP:PROXY=work"
+
+# Also proxy this application's localhost traffic (e.g. to intercept it in a local proxy tool)
+--rule "myapp:*:8080:TCP:PROXY=work+localhost"
 --rule "*:*.internal.corp:*:BOTH:PROXY=burp"
 
 # IP range / CIDR / IPv6
@@ -290,19 +296,19 @@ sudo ProxyBridge --profile work --rule "curl:*:*:TCP:DIRECT"   # profile first, 
   "DnsViaProxy": true,
   "DefaultProxyId": 1,
   "ProxyConfigs": [
-    { "Id": 1, "Name": "corp", "Type": "SOCKS5", "Host": "proxy.corp", "Port": "1080", "Username": "", "Password": "", "SendDomainToProxy": false },
+    { "Id": 1, "Name": "corp", "Type": "SOCKS5", "Host": "proxy.corp", "Port": "1080", "Username": "", "Password": "", "SendDomainToProxy": true },
     { "Id": 2, "Name": "web",  "Type": "HTTP",   "Host": "10.0.0.2",   "Port": "8080", "Username": "bob", "Password": "secret" }
   ],
   "ProxyRules": [
-    { "ProcessName": "firefox;chrome", "TargetHosts": "*", "TargetPorts": "80;443", "TargetDomains": "*.github.com",
-      "Protocol": "TCP", "Action": "PROXY", "IsEnabled": true, "ProxyConfigId": 2 }
+    { "Name": "Browsers", "ProcessName": "firefox;chrome", "TargetHosts": "*", "TargetPorts": "80;443", "TargetDomains": "*.github.com",
+      "Protocol": "TCP", "Action": "PROXY", "IsEnabled": true, "ProxyConfigId": 2, "LocalhostViaProxy": false }
   ]
 }
 ```
 
 - Rules point at proxies by `ProxyConfigId`; `0` means the default proxy (`DefaultProxyId`, otherwise the first proxy). A rule that names a proxy that is not in the file makes the profile invalid, rather than silently routing somewhere else.
 - Linux keeps domain names in the host list. On export they are written to `TargetDomains` (as the Windows app does) and merged back on import.
-- Fields this version has no use for (`LocalhostViaProxy`, `LogFilters`, `SendDomainToProxy`, ...) are ignored on import. `DnsViaProxy` and `DefaultProxyId` are Linux additions that other apps ignore. The CLI takes DNS-via-proxy from the profile unless `--dns-via-proxy` is given, and uses `--verbose` instead of the logging flag.
+- Fields this version has no use for (`LogFilters`, ...) are ignored on import. `DnsViaProxy` and `DefaultProxyId` are Linux additions that other apps ignore. `Name` (proxies and rules), `SendDomainToProxy` (per proxy, default `true`) and `LocalhostViaProxy` (per rule, default `false`) mean the same as in the Windows app; a top-level `LocalhostViaProxy` from older profiles is the default for rules that have none of their own. The CLI takes DNS-via-proxy from the profile unless `--dns-via-proxy` is given, and uses `--verbose` instead of the logging flag.
 - Disabled rules (`"IsEnabled": false`) are kept in the GUI and skipped by the CLI.
 - **GUI storage:** `/etc/proxybridge/profiles/<name>.pbprofile` (one file per profile) and `/etc/proxybridge/settings.json`, which holds only the name of the active profile. Everything else, including the *Enable Traffic Logging* and *DNS via Proxy* switches, is saved inside the profile, so switching profiles switches those too. The directory is `0700` and the files `0600`, because they hold proxy passwords; exported files are `0600` as well, and the CLI warns when a profile with credentials is readable by others. The `config.ini` of earlier versions is converted on the first start and kept as `config.ini.bak`.
 - Files are limited to 4 MiB, 256 proxies and 4096 rules; malformed files are rejected with the reason, never partly applied.
@@ -323,6 +329,12 @@ Cost: DNS from covered processes takes one extra loopback hop (about +90 µs per
 - Addresses that are hard-coded or taken from a config file instead of being resolved
 - IPv6 destinations (`AAAA` records are not mapped yet)
 - Shared hosting: if two names share one IP, whichever name was resolved last matches; a rule for the other name matches too
+
+## Options shared with the Windows and macOS apps
+
+- **Names.** Every proxy and every rule can carry a name (the GUI shows it, profiles store it).
+- **DNS via proxy, per proxy** (*SendDomainToProxy*, on by default, like Windows and macOS). When a connection goes to an address whose name the application resolved, the proxy is asked for the *name* (SOCKS5 domain address, or `CONNECT host:port`), so the proxy does the resolving. Off sends the IP address (`?dns=local` on the command line). The name comes from the application's own unencrypted DNS answers (the DNS tap that already powers domain rules; DoH/DoT bypass it), the most recent lookup for that address wins, and without a known name the IP is sent. UDP datagrams always carry the IP. Names are checked before they reach a proxy, so a hostile DNS answer cannot inject anything into a request. This is separate from the menu switch **DNS via Proxy**, which decides whether DNS queries themselves are routed through the rules.
+- **Also proxy localhost traffic, per rule** (*LocalhostViaProxy*, off by default, PROXY rules only). Without it a PROXY rule leaves connections to this computer (`127.0.0.0/8`, `::1`) direct, as on Windows, which is usually what you want. With it, matching loopback TCP and UDP connections go to the proxy, for example to inspect a local application in an intercepting proxy. First match still wins: a PROXY rule without the option stops the walk and the connection stays local. Differences from Windows: BLOCK and DIRECT rules never touch loopback, and DNS to a local resolver (port 53, e.g. `127.0.0.53`) is never proxied, so a broad rule cannot break name resolution.
 
 ## Multiple proxies
 
@@ -571,6 +583,7 @@ cd ../../tests && sudo ./e2e.sh                   # end-to-end with real kernel 
 sudo ./e2e_domains.sh                             # domain rules with a real resolver client (root, needs dig)
 sudo ./e2e_rules.sh                               # every rule form + every proxy type, incl. HTTP auth and UDP rules (root)
 sudo ./e2e_profile.sh                             # `ProxyBridge --profile`: Windows-format profiles on the live datapath (root)
+sudo ./e2e_parity.sh                              # per-proxy host-name sending and per-rule localhost, incl. a hostile DNS name (root, needs dig)
 sudo ./api_live.sh                                # library API: edit/move/disable/delete rules and proxies on the live datapath (root)
 sudo BPFTOOL=$(command -v bpftool) ./e2e_security.sh   # relay hand-off cannot be hijacked from another loopback address (root)
 sudo ./churn.sh 3000                              # rule/proxy churn with live traffic: memory, fds and threads must stay flat (root)

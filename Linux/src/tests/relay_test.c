@@ -121,6 +121,12 @@ static uint32_t fnv(const uint8_t *p, size_t n)
     while (n--) { h ^= *p++; h *= 16777619u; }
     return h;
 }
+int pb_core_name_for(const struct pb_orig *o, char *out, size_t n)
+{
+    (void)o; (void)out; (void)n;
+    return -1;
+}
+
 void pb_core_dns_observe(const uint8_t *m, size_t len)
 {
     int64_t t0 = mono_ms();

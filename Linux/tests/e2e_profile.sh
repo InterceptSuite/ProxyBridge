@@ -92,6 +92,31 @@ start_pb --profile "$WORK/dflt.pbprofile" --dns-via-proxy true
 has "explicit --dns-via-proxy wins"        "$(cat "$WORK/pb.out")" "DNS via Proxy: Enabled"
 stop_pb
 
+echo "== per-rule LocalhostViaProxy and per-proxy SendDomainToProxy from a profile"
+cat > "$WORK/lo.pbprofile" <<'JSON'
+{ "Version": "1.0", "LocalhostViaProxy": false,
+  "ProxyConfigs": [ { "Id": 1, "Name": "p", "Type": "socks5", "Host": "127.0.0.1", "Port": "19080", "SendDomainToProxy": false } ],
+  "ProxyRules": [
+    { "Name": "with", "ProcessName": "curl", "TargetHosts": "127.0.0.1", "TargetPorts": "18403", "Protocol": "TCP", "Action": "PROXY", "ProxyConfigId": 1, "LocalhostViaProxy": true },
+    { "Name": "without", "ProcessName": "curl", "TargetHosts": "127.0.0.1", "TargetPorts": "18404", "Protocol": "TCP", "Action": "PROXY", "ProxyConfigId": 1 } ] }
+JSON
+chmod 600 "$WORK/lo.pbprofile"
+start_pb --profile "$WORK/lo.pbprofile" || { bad "start"; cat "$WORK/pb.out"; }
+has "the proxy's dns:local option is shown" "$(cat "$WORK/pb.out")" "(dns:local)"
+has "the rule's localhost option is shown"  "$(cat "$WORK/pb.out")" "(+localhost)"
+out=$(curl -s -m 5 http://127.0.0.1:18403/);  has "LocalhostViaProxy=true: loopback goes to the proxy" "$out" "hello-from-A dst=127.0.0.1:18403"
+out=$(curl -s -m 3 http://127.0.0.1:18404/ 2>&1; echo "rc=$?"); has "no LocalhostViaProxy: loopback stays direct (nothing listens there)" "$out" "rc=7"
+stop_pb
+cat > "$WORK/legacy.pbprofile" <<'JSON'
+{ "Version": "1.0", "LocalhostViaProxy": true,
+  "ProxyConfigs": [ { "Id": 1, "Type": "socks5", "Host": "127.0.0.1", "Port": "19080" } ],
+  "ProxyRules": [ { "ProcessName": "curl", "TargetHosts": "127.0.0.1", "TargetPorts": "18405", "Protocol": "TCP", "Action": "PROXY", "ProxyConfigId": 1 } ] }
+JSON
+chmod 600 "$WORK/legacy.pbprofile"
+start_pb --profile "$WORK/legacy.pbprofile" || bad "start"
+out=$(curl -s -m 5 http://127.0.0.1:18405/);  has "an older profile's global LocalhostViaProxy becomes the rule default" "$out" "hello-from-A dst=127.0.0.1:18405"
+stop_pb
+
 echo "== bad input is rejected before anything is attached"
 expect_fail() { # name expected-text args...
   local name="$1" want="$2"; shift 2

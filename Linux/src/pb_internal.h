@@ -44,6 +44,7 @@ struct pb_proxy {
     uint16_t  port;
     char      user[256];   // empty = no authentication
     char      pass[256];
+    bool      send_domain; // send the host name the application resolved to the proxy (the proxy resolves DNS)
 };
 
 // ---- provided by the core ----
@@ -54,6 +55,9 @@ int  pb_core_take_tcp_orig(uint32_t client_ip_be, uint16_t client_port, struct p
 
 // Original destination behind a UDP flow address (the IP_PKTINFO destination of a datagram). Does not consume.
 int  pb_core_get_udp_flow(uint32_t flow_ip_be, struct pb_orig *out);
+
+// Host name the application most recently resolved to the destination of `o` (IPv4, from the DNS tap); 0 if known.
+int  pb_core_name_for(const struct pb_orig *o, char *out, size_t n);
 
 // Full rule evaluation for a PB_ACT_DECIDE flow.
 void pb_core_decide(const struct pb_orig *o, struct pb_decision *out);

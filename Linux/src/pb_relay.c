@@ -734,14 +734,17 @@ static void tcp_job_run(struct job *j)
             } else {
                 struct io x = { .fd = up, .dl = dl, .stopfd = R.stopfd };
                 int rc;
+                char hn[256];
+                bool named = px.send_domain && pb_core_name_for(o, hn, sizeof hn) == 0;
                 if (px.type == PROXY_TYPE_SOCKS5) {
                     struct s5dst d;
                     s5dst_from_orig(&d, o);
+                    if (named) { d.atyp = 3; snprintf(d.host, sizeof d.host, "%s", hn); }
                     rc = socks5_request(&x, &px, 1, &d, NULL);
                 } else {
                     char ip[INET6_ADDRSTRLEN];
                     fmt_ip(o->family, o->addr, ip, sizeof ip);
-                    rc = http_connect(&x, &px, ip, o->port, left, &leftn);
+                    rc = http_connect(&x, &px, named ? hn : ip, o->port, left, &leftn);
                 }
                 if (rc) {
                     snprintf(err, sizeof err, "proxy %s -> %s: %s", desc, dst, x.err);

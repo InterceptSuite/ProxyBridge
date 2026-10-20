@@ -2,13 +2,14 @@
 //
 //   { "Version": "1.0", "Name": "...", "IsTrafficLoggingEnabled": true,
 //     "ProxyConfigs": [ { "Id": 1, "Name": "work", "Type": "SOCKS5", "Host": "...", "Port": "1080",
-//                         "Username": "", "Password": "", "SendDomainToProxy": false } ],
-//     "ProxyRules":   [ { "ProcessName": "...", "TargetHosts": "...", "TargetPorts": "...", "TargetDomains": "...",
+//                         "Username": "", "Password": "", "SendDomainToProxy": true } ],
+//     "ProxyRules":   [ { "Name": "...", "ProcessName": "...", "TargetHosts": "...", "TargetPorts": "...", "TargetDomains": "...",
 //                         "Protocol": "TCP|UDP|BOTH", "Action": "PROXY|DIRECT|BLOCK", "IsEnabled": true,
-//                         "ProxyConfigId": 1 } ] }
+//                         "ProxyConfigId": 1, "LocalhostViaProxy": false } ] }
 //
 // Linux keeps domain names in the host list; they are split into TargetDomains on export and merged back on import.
-// Fields this program does not use (LocalhostViaProxy, LogFilters, ...) are ignored on import.
+// Fields this program does not use (LogFilters, ...) are ignored on import. A top-level LocalhostViaProxy from older profiles
+// becomes the default for rules that do not carry their own.
 #ifndef PB_PROFILE_H
 #define PB_PROFILE_H
 
@@ -28,13 +29,16 @@ struct pbp_proxy {
     char *host;
     uint16_t port;
     char *user, *pass;
+    bool  send_domain;   // SendDomainToProxy: the proxy resolves host names (default true)
 };
 
 struct pbp_rule {
+    char *name;                      // label shown in the rule list; may be empty
     char *process, *hosts, *ports;   // hosts holds IPs and domain names together
     int   protocol;                  // 0 TCP, 1 UDP, 2 BOTH (RuleProtocol)
     int   action;                    // 0 PROXY, 1 DIRECT, 2 BLOCK (RuleAction)
     bool  enabled;
+    bool  localhost;                 // LocalhostViaProxy: a PROXY rule that also proxies 127.0.0.0/8 and ::1
     uint32_t proxy_id;               // 0 = default proxy
 };
 

@@ -39,6 +39,7 @@ int main(void)
     check("invalid port rejected", !ProxyBridge_ValidateRule("curl", "*", "99999", err, sizeof err));
     check("domain accepted", ProxyBridge_ValidateRule("curl", "*.example.org", "443", err, sizeof err));
     check("AddRule with bad pattern returns 0 + message", ProxyBridge_AddRule("curl", "1.2.3", "*", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, 0, err, sizeof err) == 0 && err[0]);
+    check("SetProxySendDomain/SetRuleLocalhost refuse unknown ids", !ProxyBridge_SetProxySendDomain(9999, false) && !ProxyBridge_SetRuleLocalhost(9999, true));
     check("AddProxy with empty host rejected", ProxyBridge_AddProxy("x", PROXY_TYPE_SOCKS5, "", 1080, "", "", err, sizeof err) == 0);
     check("AddProxy with port 0 rejected", ProxyBridge_AddProxy("x", PROXY_TYPE_SOCKS5, "h", 0, "", "", err, sizeof err) == 0);
 

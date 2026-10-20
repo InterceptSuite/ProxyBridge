@@ -25,6 +25,7 @@ struct pb_rule {
     RuleProtocol protocol;
     RuleAction   action;
     uint32_t     proxy_id;         // action == PROXY: 0 = default proxy
+    bool         localhost;        // action == PROXY: also proxy loopback destinations that match
 
     char process_src[512], hosts_src[PB_HOSTS_MAX], ports_src[512];   // original text, kept for the UI / export
 

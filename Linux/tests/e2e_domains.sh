@@ -1,5 +1,6 @@
 #!/bin/bash
 # End-to-end test of domain-name rules (DNS tap). Needs root, dig, curl, python3.
+# Proxies get the resolved host name (the default "DNS via proxy"), so the fake proxy reports names, not addresses.
 #   sudo Linux/tests/e2e_domains.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
@@ -38,14 +39,14 @@ ip2=$(dig @$DNSIP +tcp tcp.example.test +short +time=3 +tries=1 | head -1); has 
 nx=$(dig @$DNSIP nope.example.test +time=3 +tries=1 | grep -c NXDOMAIN); [ "$nx" -ge 1 ] && ok "NXDOMAIN is passed through" || bad "NXDOMAIN lost"
 
 echo "== domain rules: resolve with one process, connect with another"
-out=$(curl -s -m 5 http://192.0.2.77/);       has "*.example.test -> proxy a (UDP DNS learned)" "$out" "hello-from-A dst=192.0.2.77:80"
-out=$(curl -s -m 5 http://192.0.2.80/);       has "*.example.test -> proxy a (TCP DNS learned)" "$out" "hello-from-A dst=192.0.2.80:80"
+out=$(curl -s -m 5 http://192.0.2.77/);       has "*.example.test -> proxy a (UDP DNS learned)" "$out" "hello-from-A dst=app.example.test:80"
+out=$(curl -s -m 5 http://192.0.2.80/);       has "*.example.test -> proxy a (TCP DNS learned)" "$out" "hello-from-A dst=tcp.example.test:80"
 resolve blocked.example.test >/dev/null
 out=$(curl -s -m 5 http://192.0.2.78/ 2>&1; echo "rc=$?"); has "exact-name BLOCK rule beats the wildcard rule" "$out" "rc=7"
 resolve www.corp.test >/dev/null
-out=$(curl -s -m 5 http://192.0.2.79/);       has "CNAME chain: rule on the canonical name -> proxy b" "$out" "hello-from-B dst=192.0.2.79:80"
+out=$(curl -s -m 5 http://192.0.2.79/);       has "CNAME chain: rule on the canonical name -> proxy b" "$out" "hello-from-B dst=www.corp.test:80"
 resolve svc.byname.test >/dev/null
-out=$(curl -s -m 5 http://192.0.2.81/);       has "domain rule + proxy configured by hostname (localhost)" "$out" "hello-from-A dst=192.0.2.81:80"
+out=$(curl -s -m 5 http://192.0.2.81/);       has "domain rule + proxy configured by hostname (localhost)" "$out" "hello-from-A dst=svc.byname.test:80"
 
 echo "== things that must NOT match"
 resolve plain.other.test >/dev/null

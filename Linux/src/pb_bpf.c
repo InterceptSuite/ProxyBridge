@@ -304,6 +304,7 @@ static void compile_rule(const struct pb_rule_view *v, struct pb_brule *b)
     b->proxy_id = v->action == RULE_ACTION_PROXY ? v->proxy_id : 0;
     b->proto_mask = r->protocol == RULE_PROTOCOL_TCP ? 1 : r->protocol == RULE_PROTOCOL_UDP ? 2 : 3;
     if (v->action == RULE_ACTION_PROXY && v->udp_direct) b->flags |= PB_RF_UDP_DIRECT;
+    if (v->action == RULE_ACTION_PROXY && v->localhost) b->flags |= PB_RF_LOCALHOST;
 
     if (r->any_port) b->flags |= PB_RF_ANY_PORT;
     for (int i = 0; i < r->nports; i++) {
@@ -331,7 +332,7 @@ static void class_for(const struct pb_rule_view *v, const struct pb_brule *br, s
     memset(out, 0, sizeof *out);
     for (size_t i = 0; i < n; i++) {
         if (!v[i].rule->enabled || !pb_rule_match_process(v[i].rule, path)) continue;
-        if (pb_rule_has_domains(v[i].rule)) out->tap = 1;
+        if (v[i].wants_names) out->tap = 1;
         if (out->n >= PB_RULES_PER_CLASS) {
             memset(out->rule, 0, sizeof out->rule);
             out->n = PB_CLASS_DECIDE;
@@ -400,13 +401,15 @@ int pb_bpf_sync(const struct pb_rule_view *v, size_t n)
     G.br = br; G.nbr = n;
 
     bool active = false, domains = false;
+    uint32_t localhost = 0;
     for (size_t i = 0; i < n; i++) {
         compile_rule(&v[i], &br[i]);
         uint32_t k = (uint32_t)i;
         bpf_map_update_elem(MAPFD(brules), &k, &br[i], BPF_ANY);
         if (v[i].rule->enabled) {
             active = true;
-            domains |= pb_rule_has_domains(v[i].rule) != 0;
+            domains |= v[i].wants_names;
+            localhost += v[i].localhost;
         }
     }
 
@@ -422,6 +425,7 @@ int pb_bpf_sync(const struct pb_rule_view *v, size_t n)
     free(stale);
 
     G.skel->bss->cfg.dns_tap = domains;
+    G.skel->bss->cfg.n_localhost = localhost;
     G.skel->bss->cfg.enabled = active;
     pthread_mutex_unlock(&G.lock);
     return 0;

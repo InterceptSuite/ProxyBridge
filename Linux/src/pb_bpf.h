@@ -19,6 +19,8 @@ struct pb_rule_view {
     int      action;         // PROXY with no usable proxy has already become BLOCK
     uint16_t proxy_id;
     bool     udp_direct;     // the proxy cannot carry UDP
+    bool     localhost;      // PROXY rule that also proxies loopback destinations
+    bool     wants_names;    // needs the DNS tap: a domain rule, or a proxy that is sent host names
 };
 
 typedef void (*pb_event_cb)(const struct pb_event *e);

@@ -47,6 +47,35 @@ static void test_windows_sample(void)
     pbp_free(&p);
 }
 
+static void test_parity_fields(void)
+{
+    struct pbp_profile p, q;
+    char err[256];
+    // per-rule names and localhost flag, per-proxy host-name sending, and the pre-4.2 global LocalhostViaProxy as the default
+    CHECK(parse("{ \"LocalhostViaProxy\": true, \"ProxyConfigs\": ["
+                "{ \"Id\": 1, \"Type\": \"socks5\", \"Host\": \"h\", \"Port\": \"1\", \"SendDomainToProxy\": false },"
+                "{ \"Id\": 2, \"Type\": \"http\", \"Host\": \"h\", \"Port\": \"2\" } ],"
+                "\"ProxyRules\": ["
+                "{ \"Name\": \"Burp\", \"ProcessName\": \"firefox\", \"Action\": \"PROXY\", \"ProxyConfigId\": 1, \"LocalhostViaProxy\": false },"
+                "{ \"ProcessName\": \"curl\", \"Action\": \"PROXY\", \"ProxyConfigId\": 2 },"
+                "{ \"ProcessName\": \"wget\", \"Action\": \"BLOCK\" },"
+                "{ \"Name\": \"own\", \"ProcessName\": \"x\", \"Action\": \"PROXY\", \"LocalhostViaProxy\": true } ] }", &p, err) == 0);
+    CHECK(!p.proxies[0].send_domain && p.proxies[1].send_domain);          // true unless the file says otherwise
+    CHECK(!strcmp(p.rules[0].name, "Burp") && !p.rules[0].localhost);      // the rule's own value wins over the global one
+    CHECK(!strcmp(p.rules[1].name, "") && p.rules[1].localhost);           // no value of its own: the old global default
+    CHECK(!p.rules[2].localhost);                                          // only PROXY rules can proxy localhost
+    CHECK(p.rules[3].localhost);
+    char *json = pbp_serialize(&p);
+    CHECK(json && strstr(json, "\"SendDomainToProxy\": false") && strstr(json, "\"SendDomainToProxy\": true"));
+    CHECK(json && strstr(json, "\"Name\": \"Burp\"") && strstr(json, "\"LocalhostViaProxy\": true"));
+    CHECK(json && !strstr(json, "\"LocalhostViaProxy\": true,\n  \"IsTraffic"));    // no top-level flag is written any more
+    CHECK(pbp_parse(json, strlen(json), &q, err, sizeof err) == 0);
+    CHECK(!q.proxies[0].send_domain && q.proxies[1].send_domain && !q.rules[0].localhost && q.rules[1].localhost && !strcmp(q.rules[0].name, "Burp"));
+    free(json);
+    pbp_free(&p);
+    pbp_free(&q);
+}
+
 static void test_roundtrip(void)
 {
     struct pbp_profile a, b;
@@ -266,6 +295,7 @@ int main(void)
 {
     test_windows_sample();
     test_roundtrip();
+    test_parity_fields();
     test_errors();
     test_leniency();
     test_hosts();

@@ -339,7 +339,7 @@ void pbp_free(struct pbp_profile *p)
         free(p->proxies[i].name); free(p->proxies[i].host); free(p->proxies[i].user); free(p->proxies[i].pass);
     }
     for (size_t i = 0; i < p->nrules; i++) {
-        free(p->rules[i].process); free(p->rules[i].hosts); free(p->rules[i].ports);
+        free(p->rules[i].name); free(p->rules[i].process); free(p->rules[i].hosts); free(p->rules[i].ports);
     }
     free(p->proxies);
     free(p->rules);
@@ -409,13 +409,14 @@ static int read_proxy(struct pbp_profile *p, const struct jv *o, size_t idx, cha
         free(x->name);
         x->name = strdup(fallback);
     }
+    x->send_domain = jbool(o, "SendDomainToProxy", true);
     x->user = dup_or(jtext(o, "Username"), "");
     x->pass = dup_or(jtext(o, "Password"), "");
     if (!x->name || !x->user || !x->pass) { snprintf(err, errlen, "out of memory"); return -1; }
     return 0;
 }
 
-static int read_rule(struct pbp_profile *p, const struct jv *o, size_t idx, char *err, size_t errlen)
+static int read_rule(struct pbp_profile *p, const struct jv *o, size_t idx, bool default_localhost, char *err, size_t errlen)
 {
     struct pbp_rule *r = &p->rules[p->nrules];
     memset(r, 0, sizeof *r);
@@ -425,9 +426,10 @@ static int read_rule(struct pbp_profile *p, const struct jv *o, size_t idx, char
     r->hosts = pbp_merge_hosts(hosts, domains);
     free(hosts);
     free(domains);
+    r->name = dup_or(jtext(o, "Name"), "");
     r->process = dup_or(jtext(o, "ProcessName"), "*");
     r->ports = dup_or(jtext(o, "TargetPorts"), "*");
-    if (!r->hosts || !r->process || !r->ports) { snprintf(err, errlen, "out of memory"); return -1; }
+    if (!r->name || !r->hosts || !r->process || !r->ports) { snprintf(err, errlen, "out of memory"); return -1; }
 
     char *proto = jtext(o, "Protocol"), *act = jtext(o, "Action");
     int rc = 0;
@@ -446,6 +448,7 @@ static int read_rule(struct pbp_profile *p, const struct jv *o, size_t idx, char
     if (rc) return rc;
 
     r->enabled = jbool(o, "IsEnabled", true);
+    r->localhost = r->action == 0 && jbool(o, "LocalhostViaProxy", default_localhost);
     long pid = jnum(o, "ProxyConfigId", 0);
     if (pid < 0 || (pid > 0 && !pbp_find_proxy(p, (uint32_t)pid))) {
         snprintf(err, errlen, "ProxyRules[%zu]: ProxyConfigId %ld does not match any proxy", idx, pid);
@@ -504,11 +507,12 @@ int pbp_parse(const char *json, size_t len, struct pbp_profile *out, char *err, 
             rc = -1;
         }
     }
+    bool default_localhost = jbool(&root, "LocalhostViaProxy", false);     // profiles from before the setting became per rule
     for (size_t i = 0; rc == 0 && cfgs && i < cfgs->nk; i++)
         rc = cfgs->kid[i].t == J_OBJ ? read_proxy(out, &cfgs->kid[i], i, err, errlen)
                                      : (snprintf(err, errlen, "ProxyConfigs[%zu] is not an object", i), -1);
     for (size_t i = 0; rc == 0 && rules && i < rules->nk; i++)
-        rc = rules->kid[i].t == J_OBJ ? read_rule(out, &rules->kid[i], i, err, errlen)
+        rc = rules->kid[i].t == J_OBJ ? read_rule(out, &rules->kid[i], i, default_localhost, err, errlen)
                                       : (snprintf(err, errlen, "ProxyRules[%zu] is not an object", i), -1);
     if (rc == 0 && out->default_proxy_id && !pbp_find_proxy(out, out->default_proxy_id)) {
         snprintf(err, errlen, "DefaultProxyId %u does not match any proxy", out->default_proxy_id);
@@ -585,7 +589,6 @@ char *pbp_serialize(const struct pbp_profile *p)
     struct sb b = {0};
     sb_puts(&b, "{\n  \"Version\": \"1.0\",\n");
     sb_kv(&b, "  ", "Name", p->name ? p->name : "", ",\n");
-    sb_puts(&b, "  \"LocalhostViaProxy\": false,\n");
     sb_puts(&b, p->logging ? "  \"IsTrafficLoggingEnabled\": true,\n" : "  \"IsTrafficLoggingEnabled\": false,\n");
     sb_puts(&b, p->dns_via_proxy ? "  \"DnsViaProxy\": true,\n" : "  \"DnsViaProxy\": false,\n");
     sb_fmt(&b, "  \"DefaultProxyId\": %u,\n", p->default_proxy_id);
@@ -603,7 +606,7 @@ char *pbp_serialize(const struct pbp_profile *p)
         sb_kv(&b, "      ", "Port", port, ",\n");
         sb_kv(&b, "      ", "Username", x->user, ",\n");
         sb_kv(&b, "      ", "Password", x->pass, ",\n");
-        sb_puts(&b, "      \"SendDomainToProxy\": false\n    }");
+        sb_puts(&b, x->send_domain ? "      \"SendDomainToProxy\": true\n    }" : "      \"SendDomainToProxy\": false\n    }");
     }
     sb_puts(&b, p->nproxies ? "\n  ],\n" : "],\n");
 
@@ -613,7 +616,7 @@ char *pbp_serialize(const struct pbp_profile *p)
         char *ips, *doms;
         pbp_split_hosts(r->hosts, &ips, &doms);
         sb_puts(&b, i ? ",\n    {\n" : "\n    {\n");
-        sb_kv(&b, "      ", "Name", "", ",\n");
+        sb_kv(&b, "      ", "Name", r->name ? r->name : "", ",\n");
         sb_kv(&b, "      ", "ProcessName", r->process, ",\n");
         sb_kv(&b, "      ", "TargetHosts", ips && *ips ? ips : "*", ",\n");
         sb_kv(&b, "      ", "TargetPorts", r->ports, ",\n");
@@ -621,7 +624,8 @@ char *pbp_serialize(const struct pbp_profile *p)
         sb_kv(&b, "      ", "Protocol", r->protocol == 1 ? "UDP" : r->protocol == 2 ? "BOTH" : "TCP", ",\n");
         sb_kv(&b, "      ", "Action", r->action == 1 ? "DIRECT" : r->action == 2 ? "BLOCK" : "PROXY", ",\n");
         sb_puts(&b, r->enabled ? "      \"IsEnabled\": true,\n" : "      \"IsEnabled\": false,\n");
-        sb_fmt(&b, "      \"ProxyConfigId\": %u\n    }", r->proxy_id);
+        sb_fmt(&b, "      \"ProxyConfigId\": %u,\n", r->proxy_id);
+        sb_puts(&b, r->localhost ? "      \"LocalhostViaProxy\": true\n    }" : "      \"LocalhostViaProxy\": false\n    }");
         free(ips);
         free(doms);
     }

@@ -28,7 +28,7 @@ static struct {
     struct pb_proxy proxies[MAX_PROXIES]; size_t nproxies;
     uint32_t next_rule_id, next_proxy_id, default_proxy;
     bool running;
-    atomic_bool dns_via_proxy, traffic_logging, has_domain_rules;
+    atomic_bool dns_via_proxy, traffic_logging, need_names, has_localhost;
     pthread_t maint;
     bool maint_started, maint_stop, maint_kick;
     pthread_mutex_t maint_mu;
@@ -183,12 +183,12 @@ static void arm_cb(uint32_t ip, const char *const *names, int n, void *ctx)
 static void rearm_all_locked(void)
 {
     pb_bpf_dom_clear();
-    if (atomic_load(&G.has_domain_rules)) pb_dns_for_each(arm_cb, NULL);
+    if (atomic_load(&G.need_names)) pb_dns_for_each(arm_cb, NULL);
 }
 
 void pb_core_dns_observe(const uint8_t *msg, size_t len)
 {
-    if (!atomic_load(&G.has_domain_rules)) return;
+    if (!atomic_load(&G.need_names)) return;
     struct pb_dns_result res;
     if (pb_dns_observe(msg, len, &res) <= 0) return;
     pthread_rwlock_rdlock(&G.lock);
@@ -223,19 +223,29 @@ static void rebuild_views_locked(void)
     free(G.views);
     G.views = calloc(G.nrules ? G.nrules : 1, sizeof *G.views);
     G.nviews = G.views ? G.nrules : 0;
-    bool domains = false;
+    bool names = false, localhost = false;
     for (size_t i = 0; i < G.nviews; i++) {
         const struct pb_rule *r = &G.rules[i];
         struct pb_rule_view *v = &G.views[i];
         v->rule = r;
         v->action = r->action;
-        domains |= r->enabled && r->ndomains > 0;
-        if (r->action != RULE_ACTION_PROXY) continue;
-        const struct pb_proxy *p = proxy_for_rule_locked(r);
-        if (!p) v->action = RULE_ACTION_BLOCK;      // no usable proxy: fail closed
-        else { v->proxy_id = (uint16_t)p->id; v->udp_direct = p->type == PROXY_TYPE_HTTP; }
+        v->wants_names = r->enabled && r->ndomains > 0;
+        if (r->action == RULE_ACTION_PROXY) {
+            const struct pb_proxy *p = proxy_for_rule_locked(r);
+            if (!p) {
+                v->action = RULE_ACTION_BLOCK;      // no usable proxy: fail closed
+            } else {
+                v->proxy_id = (uint16_t)p->id;
+                v->udp_direct = p->type == PROXY_TYPE_HTTP;
+                v->localhost = r->enabled && r->localhost;
+                v->wants_names |= r->enabled && p->send_domain;
+            }
+        }
+        names |= v->wants_names;
+        localhost |= v->localhost;
     }
-    atomic_store(&G.has_domain_rules, domains);
+    atomic_store(&G.need_names, names);
+    atomic_store(&G.has_localhost, localhost);
 }
 
 static void sync_locked(void)
@@ -248,6 +258,32 @@ static void sync_locked(void)
     warn_udp_over_http_locked();
 }
 
+static bool is_loopback(const struct pb_orig *o)
+{
+    if (o->family == AF_INET) return o->addr[12] == 127;
+    static const uint8_t lo6[16] = { [15] = 1 };
+    return memcmp(o->addr, lo6, 16) == 0;
+}
+
+int pb_core_name_for(const struct pb_orig *o, char *out, size_t n)
+{
+    if (o->family != AF_INET || !atomic_load(&G.need_names)) return -1;
+    uint32_t ip = ((uint32_t)o->addr[12] << 24) | ((uint32_t)o->addr[13] << 16) | ((uint32_t)o->addr[14] << 8) | o->addr[15];
+    char names[PB_DNS_MAX_NAMES][256];
+    int k = pb_dns_lookup(ip, names, PB_DNS_MAX_NAMES);
+    if (k <= 0) return -1;
+    const char *nm = names[k - 1];                // the lookup lists the most recent query name last
+    size_t len = strlen(nm);
+    if (len == 0 || len > 253 || len >= n) return -1;
+    for (size_t i = 0; i < len; i++) {            // the name came from the network: only host name characters go into a proxy request
+        unsigned char ch = (unsigned char)nm[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.')) return -1;
+    }
+    if (nm[0] == '.' || nm[len - 1] == '.' ) return -1;
+    memcpy(out, nm, len + 1);
+    return 0;
+}
+
 void pb_core_decide(const struct pb_orig *o, struct pb_decision *out)
 {
     char path[4096];
@@ -256,16 +292,21 @@ void pb_core_decide(const struct pb_orig *o, struct pb_decision *out)
     out->proxy_id = 0;
 
     pthread_rwlock_rdlock(&G.lock);
-    if (!pb_implicit_direct(o->family, o->addr, o->port, o->proto, atomic_load(&G.dns_via_proxy))) {
+    bool lo = atomic_load(&G.has_localhost) && is_loopback(o) && o->port != 53 &&
+              o->port != pb_relay_tcp_port() && o->port != pb_relay_udp_port();
+    if (lo || !pb_implicit_direct(o->family, o->addr, o->port, o->proto, atomic_load(&G.dns_via_proxy))) {
         char names[PB_DNS_MAX_NAMES][256];
         const char *ptrs[PB_DNS_MAX_NAMES] = { 0 };
         int nn = 0;
-        if (o->family == AF_INET && atomic_load(&G.has_domain_rules)) {
+        if (o->family == AF_INET && atomic_load(&G.need_names)) {
             uint32_t ip = ((uint32_t)o->addr[12] << 24) | ((uint32_t)o->addr[13] << 16) | ((uint32_t)o->addr[14] << 8) | o->addr[15];
             nn = pb_dns_lookup(ip, names, PB_DNS_MAX_NAMES);
             for (int k = 0; k < nn; k++) ptrs[k] = names[k];
         }
         int idx = pb_rules_eval(G.rules, G.nrules, path, o->family, o->addr, o->port, o->proto, ptrs, nn);
+        if (idx >= 0 && lo && !(G.rules[idx].action == RULE_ACTION_PROXY && G.rules[idx].localhost)) {
+            idx = -1;                                   // loopback stays direct unless the matching rule proxies it
+        }
         if (idx >= 0) {
             const struct pb_rule *r = &G.rules[idx];
             if (r->action != RULE_ACTION_PROXY) {
@@ -418,6 +459,7 @@ uint32_t ProxyBridge_AddProxy(const char *name, ProxyType type, const char *host
         struct pb_proxy *p = &G.proxies[G.nproxies++];
         memset(p, 0, sizeof *p);
         p->id = id = G.next_proxy_id++;
+        p->send_domain = true;
         fill_proxy(p, name, type, host, port, user, pass);
         sync_locked();
     }
@@ -435,6 +477,15 @@ bool ProxyBridge_EditProxy(uint32_t id, const char *name, ProxyType type, const 
     else set_err(err, en, "unknown proxy id %u", id);
     pthread_rwlock_unlock(&G.lock);
     if (p) maint_kick();
+    return p != NULL;
+}
+
+bool ProxyBridge_SetProxySendDomain(uint32_t id, bool send_domain)
+{
+    pthread_rwlock_wrlock(&G.lock);
+    struct pb_proxy *p = find_proxy_locked(id);
+    if (p) { p->send_domain = send_domain; sync_locked(); }
+    pthread_rwlock_unlock(&G.lock);
     return p != NULL;
 }
 
@@ -542,6 +593,7 @@ bool ProxyBridge_EditRule(uint32_t id, const char *proc, const char *hosts, cons
     } else {
         r.id = id;
         r.enabled = old->enabled;
+        r.localhost = old->localhost;
         r.protocol = protocol;
         r.action = action;
         r.proxy_id = proxy_id;
@@ -551,6 +603,15 @@ bool ProxyBridge_EditRule(uint32_t id, const char *proc, const char *hosts, cons
     }
     pthread_rwlock_unlock(&G.lock);
     return old != NULL;
+}
+
+bool ProxyBridge_SetRuleLocalhost(uint32_t id, bool on)
+{
+    pthread_rwlock_wrlock(&G.lock);
+    struct pb_rule *r = find_rule_locked(id, NULL);
+    if (r) { r->localhost = on; sync_locked(); }
+    pthread_rwlock_unlock(&G.lock);
+    return r != NULL;
 }
 
 static bool set_enabled(uint32_t id, bool on)
