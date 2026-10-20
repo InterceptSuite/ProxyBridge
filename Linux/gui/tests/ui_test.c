@@ -659,6 +659,155 @@ static void profiles_body(GtkWidget *dlg, gpointer arg) {
     gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
 }
 
+
+// ================================================================================================================================
+// Update check (the feed is a local file; only the UI test build honours PB_UPDATE_FEED)
+// ================================================================================================================================
+static char *first_msg;
+static void msg_then_ok(GtkWidget *d, gpointer arg) {
+    remember_msg(d, arg);
+    g_free(first_msg);
+    first_msg = g_strdup(last_msg);
+    arm_msg(GTK_RESPONSE_OK);
+}
+
+static void feed_case(const char *name, const char *content, int first_response, const char *want, bool second_ok) {
+    char *path = tmp_path(name);
+    char *url = g_strdup_printf("file://%s", path);
+    if (content) g_file_set_contents(path, content, -1, NULL);
+    setenv("PB_UPDATE_FEED", url, 1);
+    g_free(last_msg); last_msg = NULL;
+    if (second_ok) arm("msg", msg_then_ok, NULL, first_response);
+    else arm_msg(first_response);
+    activate("Check for Updates");
+    CHECK_HAS(second_ok ? first_msg : last_msg, want);
+    g_free(path); g_free(url);
+}
+
+static void updates_scenario(void) {
+    STEP("update check");
+    feed_case("feed_missing.json", NULL, GTK_RESPONSE_OK, "Update check failed", false);
+    feed_case("feed_empty.json", "", GTK_RESPONSE_OK, "Update check failed", false);
+    feed_case("feed_nolinux.json", "{\"windows\": {\"version\": \"9.0.0\"}}", GTK_RESPONSE_OK, "Could not parse linux update info", false);
+    feed_case("feed_noversion.json", "{\"linux\": {\"download\": \"https://example.test/d\"}}", GTK_RESPONSE_OK, "Could not parse version info", false);
+    feed_case("feed_same.json", "{\"linux\": {\"version\": \"" PROXYBRIDGE_VERSION "\"}}", GTK_RESPONSE_OK, "latest version", false);
+    feed_case("feed_beta_suffix.json", "{\"linux\": {\"version\": \"4.0.0\"}}", GTK_RESPONSE_OK, "latest version", false);
+    feed_case("feed_older.json", "{\"linux\": {\"version\": \"3.2.0\"}}", GTK_RESPONSE_OK, "latest version", false);
+    feed_case("feed_newer.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"https://example.test/d\", \"release_notes\": \"https://example.test/n\"}}",
+              GTK_RESPONSE_CANCEL, "Version 9.9.9 is available", false);
+    feed_case("feed_patch.json", "{\"linux\": {\"version\": \"4.0.1\", \"download\": \"https://example.test/d\"}}", GTK_RESPONSE_CANCEL, "Version 4.0.1 is available", false);
+    // a feed must never make the program open anything but an https page
+    feed_case("feed_unsafe.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"http://insecure.test/x\", \"release_notes\": \"javascript:alert(1)\"}}",
+              GTK_RESPONSE_ACCEPT, "Version 9.9.9 is available", true);
+    CHECK_HAS(last_msg, "No safe https url");
+    unsetenv("PB_UPDATE_FEED");
+}
+
+// ================================================================================================================================
+// Connection and activity logs
+// ================================================================================================================================
+static char *buffer_of(const char *view_name) {
+    GtkWidget *v = find_named(view_name);
+    if (!v) return g_strdup("");
+    GtkTextBuffer *b = gtk_text_view_get_buffer(GTK_TEXT_VIEW(v));
+    GtkTextIter s, e;
+    gtk_text_buffer_get_bounds(b, &s, &e);
+    return gtk_text_buffer_get_text(b, &s, &e, FALSE);
+}
+
+static int visible_lines_with(const char *view_name, const char *needle) {
+    GtkWidget *v = find_named(view_name);
+    if (!v) return -1;
+    GtkTextBuffer *b = gtk_text_view_get_buffer(GTK_TEXT_VIEW(v));
+    GtkTextTag *hidden = gtk_text_tag_table_lookup(gtk_text_buffer_get_tag_table(b), "hidden");
+    int n = 0;
+    for (int line = 0; line < gtk_text_buffer_get_line_count(b); line++) {
+        GtkTextIter s, e;
+        gtk_text_buffer_get_iter_at_line(b, &s, line);
+        e = s;
+        if (!gtk_text_iter_ends_line(&e)) gtk_text_iter_forward_to_line_end(&e);
+        char *text = gtk_text_buffer_get_text(b, &s, &e, FALSE);
+        if (strstr(text, needle) && !gtk_text_iter_has_tag(&s, hidden)) n++;
+        g_free(text);
+    }
+    return n;
+}
+
+static void connect_once(const char *ip) {
+    char *script = tmp_path("conn.py");
+    g_file_set_contents(script, "import socket, sys\ns = socket.socket(); s.settimeout(3)\n"
+                                "try:\n    s.connect((sys.argv[1], 80)); s.sendall(b'GET / HTTP/1.0\\r\\n\\r\\n'); s.recv(100)\nexcept OSError:\n    pass\n", -1, NULL);
+    char *argv[] = { (char *)"python3", script, (char *)ip, NULL };
+    g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    g_free(script);
+}
+
+static void logs_scenario(void) {
+    STEP("connection and activity logs");
+    GtkWidget *log_item = menu_item("Enable Traffic Logging");
+    if (log_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_item), TRUE);     // the profile scenario left it off for Default
+    ProxyData *p = proxy_named("p1x");
+    CHECK(p != NULL);
+    char err[200] = "";
+    uint32_t rule = p ? ProxyBridge_AddRule("python3*", "192.0.2.40-192.0.2.49", "80", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, p->id, err, sizeof err) : 0;
+    CHECK(rule != 0);
+
+    connect_once("192.0.2.40");
+    connect_once("192.0.2.41");
+    pump(900);
+    char *conns = buffer_of("conn_view");
+    CHECK_HAS(conns, "192.0.2.40:80");
+    CHECK_HAS(conns, "192.0.2.41:80");
+    CHECK_HAS(conns, "via SOCKS5 127.0.0.1:19080");
+    g_free(conns);
+    char *logs = buffer_of("log_view");
+    CHECK_HAS(logs, "ProxyBridge started");
+    g_free(logs);
+
+    // search hides the lines that do not match, and shows them again
+    set_text(find_named("conn_search"), "conn_search", "192.0.2.41");
+    pump(500);
+    CHECK(visible_lines_with("conn_view", "192.0.2.41") == 1 && visible_lines_with("conn_view", "192.0.2.40") == 0);
+    set_text(find_named("conn_search"), "conn_search", "");
+    pump(500);
+    CHECK(visible_lines_with("conn_view", "192.0.2.40") == 1 && visible_lines_with("conn_view", "192.0.2.41") == 1);
+    set_text(find_named("log_search"), "log_search", "started");
+    pump(500);
+    CHECK(visible_lines_with("log_view", "ProxyBridge started") >= 1);
+    set_text(find_named("log_search"), "log_search", "");
+    pump(300);
+
+    // pause keeps new lines back until it is released
+    GtkWidget *pause = find_named("conn_pause");
+    CHECK(pause != NULL);
+    if (pause) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pause), TRUE);
+    connect_once("192.0.2.42");
+    pump(900);
+    conns = buffer_of("conn_view");
+    CHECK(strstr(conns, "192.0.2.42") == NULL);
+    g_free(conns);
+    if (pause) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pause), FALSE);
+    pump(600);
+    conns = buffer_of("conn_view");
+    CHECK_HAS(conns, "192.0.2.42:80");
+    g_free(conns);
+
+    // the live connections tab is a view of the engine too
+    gui_refresh_flows();
+    GtkWidget *flows = find_named("flows_tree");
+    CHECK(flows != NULL);
+
+    click("conn_clear");
+    conns = buffer_of("conn_view");
+    CHECK(strlen(conns) == 0);
+    g_free(conns);
+    click("log_clear");
+    logs = buffer_of("log_view");
+    CHECK(strlen(logs) == 0);
+    g_free(logs);
+    ProxyBridge_DeleteRule(rule);
+}
+
 // ================================================================================================================================
 static void ui_main(void) {
     pump(300);
@@ -681,6 +830,12 @@ static void ui_main(void) {
     printf("== profiles\n");
     arm("dlg_profiles", profiles_body, NULL, 0);
     activate("Profiles...");
+
+    printf("== update check\n");
+    updates_scenario();
+
+    printf("== logs\n");
+    logs_scenario();
 
     printf("== menus and engine\n");
     GtkWidget *start = menu_item("Start Engine"), *stop = menu_item("Stop Engine");

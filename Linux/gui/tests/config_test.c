@@ -10,6 +10,7 @@ char *g_default_proxy = NULL;
 GList *g_rules_list = NULL;
 bool g_chk_logging = true;
 bool g_chk_dns = true;
+bool g_chk_log_every = false;
 
 void free_proxy_data(ProxyData *p) {
     g_free(p->name); g_free(p->host); g_free(p->username); g_free(p->password); g_free(p);
@@ -195,6 +196,7 @@ int main() {
     CHECK(g_chk_logging && g_chk_dns);                      // a new profile starts with both switches on
     g_chk_dns = false;
     g_chk_logging = false;
+    g_chk_log_every = true;
     save_config();
 
     check_storage(dir);
@@ -207,14 +209,14 @@ int main() {
     CHECK(strcmp(((RuleData *)g_rules_list->data)->target_hosts, "*.github.com") == 0);
     CHECK(!((ProxyData *)g_proxies_list->data)->send_domain);                       // per-proxy "DNS via proxy" survives a restart
     CHECK(strcmp(((RuleData *)g_rules_list->data)->name, "Burp \"intercept\"") == 0 && ((RuleData *)g_rules_list->data)->localhost);
-    CHECK(!g_chk_dns && !g_chk_logging);                    // restored from the Work profile file itself
+    CHECK(!g_chk_dns && !g_chk_logging && g_chk_log_every);   // restored from the Work profile file itself
     CHECK(profile_find("Home") && !profile_find("Home")->logging && profile_find("Home")->dns);   // migrated values of the old file, per profile
     CHECK(profile_find("Home") && g_list_length(profile_find("Home")->rules) == 1);
 
     CHECK(profile_activate("Home"));                        // switching profiles switches the values too
-    CHECK(!g_chk_logging && g_chk_dns);
+    CHECK(!g_chk_logging && g_chk_dns && !g_chk_log_every);
     CHECK(profile_activate("Work"));
-    CHECK(!g_chk_logging && !g_chk_dns);
+    CHECK(!g_chk_logging && !g_chk_dns && g_chk_log_every);
     CHECK(profile_activate("Home"));
     CHECK(profile_activate("Work"));
     CHECK(profile_delete(profile_find("Work")));

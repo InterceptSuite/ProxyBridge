@@ -26,7 +26,7 @@ unit_tests() {
       gcc $cf tests/rules_test.c pb_rules.c -o "$UNIT/rules_test" && "$UNIT/rules_test" &&
       gcc $cf tests/dns_test.c pb_dns.c -o "$UNIT/dns_test" && "$UNIT/dns_test" &&
       gcc $cf tests/proc_test.c pb_proc.c -o "$UNIT/proc_test" && "$UNIT/proc_test" &&
-      gcc $cf -I. tests/relay_test.c pb_relay.c -o "$UNIT/relay_test" -lpthread && "$UNIT/relay_test" ) 2>&1 | grep -E "FAIL|passed|RESULT" || true
+      gcc $cf -I. tests/relay_test.c pb_relay.c -o "$UNIT/relay_test" -lpthread && PB_CHURN_TCP=2000 PB_CHURN_UDP=500 PB_PERF_UDP=2000 PB_PERF_CONNS=100 "$UNIT/relay_test" ) 2>&1 | grep -E "FAIL|passed|RESULT" || true
     ( cd "$ROOT/profile/tests" && gcc $cf profile_test.c ../pb_profile.c -o "$UNIT/profile_test" && "$UNIT/profile_test" ) 2>&1 | tail -1
     if [ -n "$gtk" ]; then
         ( cd "$ROOT/gui" &&

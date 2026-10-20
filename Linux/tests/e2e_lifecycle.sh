@@ -96,5 +96,34 @@ start "$WORK/pb.out"; kill -INT $PB; wait $PB 2>/dev/null; PB=""
 sleep 5
 grep -q "still usable" "$WORK/long.out" && ok "an existing connection survives ProxyBridge starting and stopping" || bad "existing connection: $(cat "$WORK/long.out")"
 
+echo "== starting when it cannot work"
+cat > "$WORK/probe.c" <<'C'
+#include <stdio.h>
+#include <string.h>
+#include "ProxyBridge.h"
+static void log_cb(const char *m) { printf("log: %s\n", m); }
+int main(int argc, char **argv)
+{
+    char err[200];
+    ProxyBridge_SetLogCallback(log_cb);
+    if (argc > 1 && !strcmp(argv[1], "withproxy")) ProxyBridge_AddProxy("a", PROXY_TYPE_SOCKS5, "127.0.0.1", 19080, "", "", err, sizeof err);
+    ProxyBridge_AddRule("curl", "*", "*", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, 0, err, sizeof err);
+    printf("start=%d\n", ProxyBridge_Start());
+    printf("stop=%d\n", ProxyBridge_Stop());
+    return 0;
+}
+C
+if gcc -O1 -I"$ROOT/src" -o "$WORK/probe" "$WORK/probe.c" -L"$PB_DIR" -lproxybridge; then
+  chmod 755 "$WORK" "$WORK/probe"
+  out=$("$WORK/probe" 2>&1)
+  [[ "$out" == *"start=0"* && "$out" == *"no proxy is configured"* ]] && ok "a PROXY rule without any proxy refuses to start and says why" || bad "no proxy: $out"
+  out=$(setpriv --reuid=65534 --regid=65534 --clear-groups env LD_LIBRARY_PATH="$PB_DIR" "$WORK/probe" withproxy 2>&1)
+  [[ "$out" == *"start=0"* && "$out" == *"needs root"* ]] && ok "without root it fails cleanly and explains" || bad "not root: $out"
+  [[ "$out" == *"stop=1"* ]] && ok "Stop after a failed Start is harmless" || bad "stop after failed start: $out"
+  [ "$(progs)" = 0 ] && ok "a failed start attaches nothing" || bad "programs attached by a failed start"
+else
+  bad "could not build the probe"
+fi
+
 echo; echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" = 0 ]

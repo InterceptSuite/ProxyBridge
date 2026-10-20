@@ -123,11 +123,19 @@ static int https_url_ok(const char *url) {
     return 1;
 }
 
+static const char *update_feed_url() {
+#ifdef PB_TEST_HOOKS
+    const char *override = getenv("PB_UPDATE_FEED");      // only in the UI test build: the shipped program always uses the real feed
+    if (override && *override) return override;
+#endif
+    return UPD_FEED_URL;
+}
+
 static void on_check_update(GtkWidget *widget, gpointer data) {
     char *argv[] = {
         (char *)"curl", (char *)"-sS",
         (char *)"-H", (char *)"User-Agent: ProxyBridge-UpdateChecker",
-        (char *)UPD_FEED_URL,
+        (char *)update_feed_url(),
         NULL
     };
     char *json = NULL;
@@ -369,20 +377,26 @@ static GtkTextBuffer *add_text_tab(GtkWidget *notebook, const char *title, const
     gtk_container_set_border_width(GTK_CONTAINER(tab), 5);
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     GtkWidget *search = gtk_search_entry_new();
+    const char *prefix = strcmp(title, "Connections") == 0 ? "conn" : "log";     // widget names for the UI test
+    char wname[32];
+    snprintf(wname, sizeof wname, "%s_search", prefix); gtk_widget_set_name(search, wname);
     gtk_entry_set_placeholder_text(GTK_ENTRY(search), placeholder);
     g_signal_connect(search, "search-changed", on_search, NULL);
     GtkWidget *clear_btn = gtk_button_new_with_label("Clear Logs");
+    snprintf(wname, sizeof wname, "%s_clear", prefix); gtk_widget_set_name(clear_btn, wname);
     g_signal_connect(clear_btn, "clicked", on_clear, NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), search, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), clear_btn, FALSE, FALSE, 0);
     if (on_pause) {
         GtkWidget *pause_btn = gtk_toggle_button_new_with_label("Pause");
+        snprintf(wname, sizeof wname, "%s_pause", prefix); gtk_widget_set_name(pause_btn, wname);
         g_signal_connect(pause_btn, "toggled", on_pause, NULL);
         gtk_box_pack_start(GTK_BOX(toolbar), pause_btn, FALSE, FALSE, 0);
     }
     gtk_box_pack_start(GTK_BOX(tab), toolbar, FALSE, FALSE, 0);
 
     GtkWidget *view = gtk_text_view_new();
+    snprintf(wname, sizeof wname, "%s_view", prefix); gtk_widget_set_name(view, wname);
     gtk_text_view_set_editable(GTK_TEXT_VIEW(view), FALSE);
     gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(view), FALSE);
     GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));
