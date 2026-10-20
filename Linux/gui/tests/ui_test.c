@@ -1142,7 +1142,12 @@ static void boot_scenario(void)
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
     char *text = NULL;
     CHECK(g_file_get_contents(unit, &text, NULL, NULL));
-    CHECK_HAS(text, "ExecStart=\"/usr/local/bin/ProxyBridge\" --profile \"Default\"");
+    // the unit names the stored profile FILE by its absolute path (a bare name would be resolved against the service's cwd)
+    char *def_path = profile_path("Default"), *zoom_path = profile_path("Zoomed");
+    char *want_default = g_strdup_printf("ExecStart=\"/usr/local/bin/ProxyBridge\" --profile \"%s\"", def_path);
+    CHECK_HAS(text, want_default);
+    CHECK(def_path[0] == '/' && strstr(text, "LimitNOFILE=1048576") && strstr(text, "NoNewPrivileges=yes"));
+    g_free(want_default);
     g_free(text);
     char *log = NULL;
     g_file_get_contents(calls, &log, NULL, NULL);
@@ -1154,13 +1159,19 @@ static void boot_scenario(void)
     activate("Profiles...");
     CHECK_STR(g_active_profile, "Zoomed");
     CHECK(g_file_get_contents(unit, &text, NULL, NULL));
-    CHECK_HAS(text, "--profile \"Zoomed\"");
+    char *want_zoom = g_strdup_printf("--profile \"%s\"", zoom_path);
+    CHECK_HAS(text, want_zoom);
+    g_free(want_zoom);
     g_free(text);
     arm("dlg_profiles", switch_to, (gpointer)"Default", 0);
     activate("Profiles...");
     CHECK(g_file_get_contents(unit, &text, NULL, NULL));
-    CHECK_HAS(text, "--profile \"Default\"");
+    char *want_def2 = g_strdup_printf("--profile \"%s\"", def_path);
+    CHECK_HAS(text, want_def2);
+    g_free(want_def2);
     g_free(text);
+    g_free(def_path);
+    g_free(zoom_path);
 
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), FALSE);
     CHECK(!g_file_test(unit, G_FILE_TEST_EXISTS));

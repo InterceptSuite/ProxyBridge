@@ -109,8 +109,10 @@ def probes(rng, n):
     return out
 
 
-def connect(proto, ip, port):
+def connect(proto, ip, port, keep):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM if proto == "TCP" else socket.SOCK_DGRAM)
+    if proto == "UDP":
+        keep.append(s)              # open until the batch has been read: a closed socket's port could be taken by another process
     try:
         if proto == "TCP":
             s.setblocking(False)
@@ -124,7 +126,8 @@ def connect(proto, ip, port):
     except OSError as e:
         return e.errno
     finally:
-        s.close()
+        if proto != "UDP":
+            s.close()
     return None
 
 
@@ -152,18 +155,20 @@ def run_seed(seed):
         for proto in ("TCP", "UDP"):
             batch = probes(rng, PROBES)
             out.seek(0, 2); start = out.tell()
-            errs = {}
+            errs, keep = {}, []
             for ip, port in batch:
-                errs[(ip, port)] = connect(proto, ip, port)
+                errs[(ip, port)] = connect(proto, ip, port, keep)
             time.sleep(1.0)
             out.seek(start)
             seen = {}
             for line in out:
                 m = re.search(r"\[CONN\] .*\(PID:%d\) -> ([0-9.]+):(\d+) via (.*)" % os.getpid(), line)
                 if not m: continue
-                info = m.group(3).strip()
+                info = re.sub(r" \(UDP\)$", "", m.group(3).strip())     # UDP flows carry a "(UDP)" marker
                 act = "BLOCK" if info == "BLOCK" else "DIRECT" if info == "DIRECT" else "PROXY"
                 seen.setdefault((m.group(1), int(m.group(2))), set()).add(act)
+            for k in keep:
+                k.close()
             for ip, port in batch:
                 total += 1
                 want = expected(rules, ip, port, proto)

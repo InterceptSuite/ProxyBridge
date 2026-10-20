@@ -6,7 +6,7 @@ a genuine QUIC exchange (first datagram >= 1200 bytes, long header, connection i
 UDP the way HTTP/3 does without needing a TLS stack. Packets that are not QUIC long headers are answered with "NOTQUIC" + the
 first 8 bytes so the client can tell the server saw them.
 
-usage: full_quic_server.py <ip> [<ip> ...]      (listens on UDP port 4433 of each address)
+usage: full_quic_server.py <ip> [<ip> ...]      (listens on UDP port 4433 (QUIC) and 4434 (datagram counter) of each address)
 """
 import os, socket, struct, sys, threading, time
 
@@ -36,6 +36,28 @@ def version_negotiation(pkt):
     return out
 
 
+def counter(ip):
+    """UDP port 4434: counts datagrams "FF:<tag>:<n>" per tag and answers "COUNT:<tag>" with the number received. Lets a test
+    prove that datagrams of senders that closed their socket right after sending still arrived."""
+    c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    c.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+    c.bind((ip, 4434))
+    counts = {}
+
+    def loop():
+        while True:
+            d, a = c.recvfrom(2000)
+            if d.startswith(b"FF:"):
+                tag = d.split(b":", 2)[1]
+                counts[tag] = counts.get(tag, 0) + 1
+            elif d.startswith(b"COUNT:"):
+                try:
+                    c.sendto(str(counts.get(d[6:], 0)).encode(), a)
+                except OSError:
+                    pass
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def serve(ip):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
@@ -54,6 +76,7 @@ def serve(ip):
 
 for ip in sys.argv[1:]:
     serve(ip)
+    counter(ip)
 print("quic servers up", flush=True)
 while True:
     time.sleep(3600)

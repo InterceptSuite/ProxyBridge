@@ -57,7 +57,7 @@ chmod 600 "$WORK/win.pbprofile"
 echo "== a profile file (Windows format) by path"
 if start_pb --verbose 3 --profile "$WORK/win.pbprofile"; then ok "ProxyBridge starts from a profile"; else bad "start"; cat "$WORK/pb.out"; fi
 out=$(cat "$WORK/pb.out")
-has "profile path is reported"             "$out" "Profile: $WORK/win.pbprofile"
+has "profile path is reported"             "$out" "Loading profile: $WORK/win.pbprofile"
 has "both proxies loaded"                  "$out" "Proxies: 2"
 has "unnamed proxy gets a stable name"     "$out" "proxy1"
 has "named proxy keeps its name"           "$out" "bobby"

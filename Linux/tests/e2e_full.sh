@@ -22,8 +22,7 @@
 #   H3_CURL=/snap/bin/curl              curl with HTTP/3 support (default: any curl whose --version lists HTTP3)
 #   KEEP_LOGS=dir  copy the ProxyBridge, proxy and client output there when something fails
 #   DL_MB=100 UL_MB=50 STREAM_N=6000    sizes        PHASES="1 2"  only some phases        CLIENT_SCENARIOS="dns"  phases 1-5 run only these
-# Stock Nexus cannot do UDP ASSOCIATE on Linux and resets connections beyond 500 per source address: this script works on a
-# private copy with tests/nexus-linux-udp.patch applied and a higher limit (see the comment where the copy is made).
+# This script works on a private copy of Nexus (UDP patch and a higher per-address limit for older copies, see where it is made).
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"; PB_BIN="${PB_BIN:-$PB_DIR/ProxyBridge}"; PBL="$HERE/pbl"
@@ -62,9 +61,9 @@ try:
 except Exception: print("no")
 PY
   kill $p 2>/dev/null; wait $p 2>/dev/null; }
-# A private copy of Nexus: the UDP patch (stock Nexus cannot do UDP ASSOCIATE on Linux) and a higher per-address connection limit.
-# Stock Nexus resets connections beyond 500 per source address, and every proxied UDP socket holds one until its session expires:
-# the load phases would then measure Nexus's limit, not ProxyBridge.
+# A private copy of Nexus. Current Nexus does UDP ASSOCIATE on Linux and has --max-per-ip; older copies get the UDP patch and a
+# source edit instead. Nexus allows 500 connections per client address by default, and every proxied UDP socket holds one until
+# its session expires: without a higher limit the load phases would measure Nexus's limit, not ProxyBridge.
 mkdir -p "$WORK/nexus"; cp "$NEXUS_JS" "$WORK/nexus/script.js"
 NX_JS="$WORK/nexus/script.js"
 if [ "$(nexus_udp_ok "$NX_JS" 1099)" != yes ]; then
@@ -72,14 +71,16 @@ if [ "$(nexus_udp_ok "$NX_JS" 1099)" != yes ]; then
   [ "$(nexus_udp_ok "$NX_JS" 1099)" = yes ] || { echo "the patched Nexus still cannot do UDP ASSOCIATE"; exit 1; }
   info "stock Nexus cannot do UDP ASSOCIATE on Linux: using a patched private copy"
 fi
-sed -i 's/ipCount >= 500/ipCount >= 20000/; s/maxConnections = 10000/maxConnections = 50000/' "$NX_JS"
+NXOPT=()
+if grep -q -- '--max-per-ip' "$NX_JS"; then NXOPT=(--max-per-ip 20000)                       # current Nexus has the option
+else sed -i 's/ipCount >= 500/ipCount >= 20000/; s/maxConnections = 10000/maxConnections = 50000/' "$NX_JS"; fi   # older copies
 start_nx() { # port log [args]
   local port=$1 log=$2; shift 2
   "$NODE" "$NX_JS" -v -p "$port" "$@" > "$log" 2>&1 & NXPID=$!; PIDS+=($NXPID)
   for _ in $(seq 40); do ss -ltn 2>/dev/null | grep -q ":$port " && return 0; sleep 0.25; done; echo "nexus on $port did not start"; exit 1; }
 NX1LOG="$WORK/nx1.log"; NX2LOG="$WORK/nx2.log"
-start_nx 1080 "$NX1LOG"; NX1=$NXPID
-start_nx 1081 "$NX2LOG" -u nx -P secret; NX2=$NXPID
+start_nx 1080 "$NX1LOG" "${NXOPT[@]}"; NX1=$NXPID
+start_nx 1081 "$NX2LOG" -u nx -P secret "${NXOPT[@]}"; NX2=$NXPID
 
 # ---- the origins -------------------------------------------------------------------------------------------------------------
 python3 "$HERE/nexus_origins.py" > "$WORK/origins.log" 2>&1 & PIDS+=($!)
@@ -93,7 +94,10 @@ mk() { local n=$1; shift; "$PBL" --write "$WORK/$n.pbprofile" "$@" || exit 1; }
 # The origin servers are python3 programs too, and the client's source address is one of the 10.77.1.x aliases: a rule for the
 # whole /24 on every port would also catch the servers' replies (sendto to the client's ephemeral port) and proxy them back into
 # the proxy. The rules therefore name the service ports, like a real set-up would.
-UDPPORTS='18710;18711;53;4433'; TCPPORTS='18700-18705;53'
+# The kernel can decide up to 4 port entries per rule; with more, every datagram of a matching process goes through the relay's
+# slow path, which re-sends it from the relay's own socket. A server that shares the rule's process pattern with its client (as
+# in this test) then has its replies re-sent too and the client sees them from another source port. Port ranges keep the lists short.
+UDPPORTS='18710-18711;53;4433-4434'; TCPPORTS='18700-18705;53'      # at most 4 entries: longer lists cannot be decided in the kernel (see below)
 TCP_PROXY=(--rule "python3*:10.77.1.2:$TCPPORTS:TCP:PROXY=n2" --rule "python3*:10.77.1.0/24:$TCPPORTS:TCP:PROXY=n1")
 UDP_PROXY=(--rule "python3*:10.77.1.2:$UDPPORTS:UDP:PROXY=n2" --rule "python3*:10.77.1.0/24:$UDPPORTS:UDP:PROXY=n1")
 mk all           "${PX[@]}" "${TCP_PROXY[@]}" "${UDP_PROXY[@]}"
@@ -124,10 +128,14 @@ nx_delta() { D_TCP=$(( $(nx_count $NX1LOG "[CONNECT]") - NXB[tcp1] + $(nx_count 
              D_UDP=$(( $(nx_count $NX1LOG "[UDP]") - NXB[udp1] + $(nx_count $NX2LOG "[UDP]") - NXB[udp2] ))
              D_DST=$(( $(nx_count $NX1LOG "└─>") - NXB[dst1] + $(nx_count $NX2LOG "└─>") - NXB[dst2] )); }
 declare -A MET                                                 # METRIC <phase>/<name> -> value
+udp_rcvbuf_errors() { awk '/^Udp:/ { if (!h) { for (i = 1; i <= NF; i++) if ($i == "RcvbufErrors") c = i; h = 1 } else { print $c; exit } }' /proc/net/snmp; }
 run_client() { # phase scenario...  (output kept in $WORK/<phase>.txt)
   local ph=$1; shift
   nx_mark
+  local rb0; rb0=$(udp_rcvbuf_errors)
   python3 "$HERE/full_client.py" "$@" > "$WORK/$ph.txt" 2>&1
+  local rb1; rb1=$(udp_rcvbuf_errors)
+  [ "${rb1:-0}" -gt "${rb0:-0}" ] && info "$ph: the kernel dropped $((rb1 - rb0)) UDP datagrams because a receive buffer was full (system wide, any process)"
   nx_delta
   while read -r _ n v; do MET["$ph/$n"]=$v; done < <(grep "^METRIC " "$WORK/$ph.txt")
 }
@@ -277,7 +285,7 @@ try: print('GOT', c.http_get('10.77.1.1', 18700, timeout=6))
 except OSError as e: print('FAILED', type(e).__name__)" 2>&1)
 [[ "$out" != *origin-1* ]] && ok "proxy down: TCP fails closed, no leak around it ($out)" || bad "TCP leaked around the dead proxy: $out"
 python3 "$HERE/full_client.py" udpblock | grep -q "RESULT ok" && ok "proxy down: UDP gets no answer either" || bad "UDP answered although its proxy is down"
-start_nx 1080 "$NX1LOG.2"; NX1=$NXPID; sleep 1
+start_nx 1080 "$NX1LOG.2" "${NXOPT[@]}"; NX1=$NXPID; sleep 1
 out=$(python3 -c "
 import sys; sys.path.insert(0, '$HERE'); import full_client as c
 print(c.http_get('10.77.1.1', 18700))" 2>&1); has "proxy restarted: TCP works again" "$out" "origin-1"

@@ -64,20 +64,25 @@ static size_t listen_inodes(uint32_t ip_be, uint16_t port, uint64_t *inodes)
     return n;
 }
 
-// Sockets (any state, any local address) of /proc/net/udp or udp6 bound to `port`. The v6 address column is 32 hex digits,
-// which parse_number wraps; only the port is used here.
-static size_t udp_inodes(const char *file, uint16_t port, uint64_t *inodes, size_t n)
+// Owners (uids) of the UDP sockets (v4 and v6, any local address) that are bound to `port`: the uid column of /proc/net/udp. The
+// v6 address column is 32 hex digits, which parse_number wraps; only the port is used here.
+static size_t udp_uids(const char *file, uint16_t port, uint32_t *uids, size_t n, size_t max)
 {
     FILE *f = fopen(file, "r");
     if (!f) return n;
     char line[512];
     if (!fgets(line, sizeof line, f)) { fclose(f); return n; }
-    while (n < MAX_INODES && fgets(line, sizeof line, f)) {
-        uint32_t addr, lport;
-        unsigned state;
-        unsigned long long inode;
-        if (!parse_tcp_row(line, &addr, &lport, &state, &inode)) continue;
-        if (lport == port && inode) inodes[n++] = inode;
+    while (n < max && fgets(line, sizeof line, f)) {
+        // sl local rem st tx:rx tr:when retrnsmt uid timeout inode ...
+        char *fields[10], *save = NULL;
+        size_t k = 0;
+        for (char *t = strtok_r(line, " \t\n", &save); t && k < 10; t = strtok_r(NULL, " \t\n", &save)) fields[k++] = t;
+        if (k < 10) continue;
+        unsigned long long a, p, uid;
+        const char *colon;
+        if (!parse_number(fields[1], 16, &a, &colon) || *colon != ':' || !parse_number(colon + 1, 16, &p, NULL)) continue;
+        if (p != port || !parse_number(fields[7], 10, &uid, NULL)) continue;
+        uids[n++] = (uint32_t)uid;
     }
     fclose(f);
     return n;
@@ -134,16 +139,10 @@ bool pb_proc_pid_listens(uint32_t pid, uint32_t ip_be, uint16_t port)
     return false;
 }
 
-bool pb_proc_pid_owns_udp(uint32_t pid, uint16_t port)
+size_t pb_proc_udp_port_uids(uint16_t port, uint32_t *uids, size_t max)
 {
-    uint64_t inodes[MAX_INODES];
-    size_t ni = udp_inodes("/proc/net/udp", port, inodes, 0);
-    ni = udp_inodes("/proc/net/udp6", port, inodes, ni);
-    char name[24];
-    snprintf(name, sizeof name, "%u", pid);
-    for (size_t i = 0; i < ni; i++)
-        if (pid_has_socket(name, inodes[i])) return true;
-    return false;
+    size_t n = udp_uids("/proc/net/udp", port, uids, 0, max);
+    return udp_uids("/proc/net/udp6", port, uids, n, max);
 }
 
 bool pb_proc_is_local_ip(uint32_t ip_be)

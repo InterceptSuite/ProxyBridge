@@ -446,25 +446,30 @@ static pthread_mutex_t loop_mu = PTHREAD_MUTEX_INITIALIZER;
 
 int pb_core_udp_sender_ok(const struct pb_orig *o, uint16_t client_port)
 {
-    /* The owner's fd table is read through /proc while the owner may be opening and closing sockets in other threads: a directory
-     * listing taken during such changes can miss an entry. A miss is therefore repeated before a datagram is refused. */
-    for (int attempt = 0; attempt < 4; attempt++) {
-        if (pb_proc_pid_owns_udp(o->pid, client_port)) {
-            if (!o->exe_ino) return 1;                           /* kernel-side identity is only recorded for DECIDE flows */
-            char link[64];
-            struct stat st;
-            snprintf(link, sizeof link, "/proc/%u/exe", o->pid);
-            if (stat(link, &st) != 0) return 1;                  /* exited in the meantime: it did own the socket a moment ago */
-            uint32_t dev = (major(st.st_dev) << 20) | minor(st.st_dev);   /* same encoding as the BPF program's exe2class key */
-            return dev == o->exe_dev && st.st_ino == o->exe_ino;
+    /* Best effort, not a proof. The datagram is refused only on positive evidence that another USER sent it: a socket bound to the
+     * source port belongs to a uid that is neither the flow's owner nor root. Programs of one user are not a security boundary
+     * and the check never looks into descriptor tables, so it costs the same for a process with ten sockets and with ten
+     * thousand. When nobody holds the port any more (the sender closed its socket or exited right after sending) nothing can be
+     * told and the datagram is delivered: a program that sends one datagram and quits must still get it through. */
+    uint32_t uids[8];
+    size_t n = pb_proc_udp_port_uids(client_port, uids, 8);
+    if (!n) return 1;
+    char dir[32];
+    struct stat st;
+    snprintf(dir, sizeof dir, "/proc/%u", o->pid);
+    if (stat(dir, &st) != 0) return 1;                           /* the flow's owner has exited */
+    if (o->exe_ino) {
+        char link[64];
+        struct stat ex;
+        snprintf(link, sizeof link, "/proc/%u/exe", o->pid);
+        if (stat(link, &ex) == 0) {
+            uint32_t dev = (major(ex.st_dev) << 20) | minor(ex.st_dev);   /* same encoding as the BPF program's exe2class key */
+            if (dev != o->exe_dev || ex.st_ino != o->exe_ino) return 0;   /* the pid now runs another program */
         }
-        char dir[32];
-        snprintf(dir, sizeof dir, "/proc/%u", o->pid);
-        if (access(dir, F_OK) != 0) return 1;                    /* the owner has exited: a program that sends one datagram and
-                                                                    quits cannot be verified afterwards, and its datagram must
-                                                                    still arrive */
     }
-    return 0;
+    for (size_t i = 0; i < n; i++)
+        if (uids[i] != 0 && uids[i] != (uint32_t)st.st_uid) return 0;
+    return 1;
 }
 
 int pb_core_is_proxy_process(uint32_t pid, uint32_t proxy_id)
