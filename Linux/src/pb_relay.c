@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -35,7 +36,7 @@
 #define MAX_DATA        8
 #define PIPE_SZ         (1 << 20)
 #define JOBQ_MAX        4096    // handshake queue; excess accepts are shed with a log
-#define MAX_UDP_SESS    1024
+#define MAX_UDP_SESS    4096
 #define MAX_FLOWS       64
 #define UDP_QMAX        32
 #define UDP_QBYTES      (256 * 1024)
@@ -1302,15 +1303,23 @@ static void sess_free_grave(void)
 
 // One process gets at most half of the session table: past that, its own least recently used session makes room, so a
 // program that opens UDP sockets at a high rate only ever displaces itself and cannot starve every other one of UDP.
+// A session whose setup is still running on a worker thread is never the one to go (the worker still writes into it): when
+// every session of the process is in that state, the new one is refused instead.
 #define MAX_UDP_SESS_PER_PID (MAX_UDP_SESS / 2)
 
 static struct sess *sess_new(const struct sockaddr_in *cli, uint32_t id, uint32_t flow, int kind, uint32_t pid)
 {
     int mine = 0;
     struct sess *oldest = NULL;
-    for (struct sess *t = R.sess_head; t; t = t->next)
-        if (t->pid == pid) { mine++; if (!oldest || t->last < oldest->last) oldest = t; }
-    if (mine >= MAX_UDP_SESS_PER_PID && oldest) sess_destroy(oldest);
+    for (struct sess *t = R.sess_head; t; t = t->next) {
+        if (t->pid != pid) continue;
+        mine++;
+        if (t->state != ST_SETUP && (!oldest || t->last < oldest->last)) oldest = t;
+    }
+    if (mine >= MAX_UDP_SESS_PER_PID) {
+        if (!oldest) return NULL;
+        sess_destroy(oldest);
+    }
     if (R.nsess >= MAX_UDP_SESS) return NULL;
     struct sess *s = calloc(1, sizeof *s);
     if (!s) return NULL;
@@ -1752,6 +1761,19 @@ static int add_ep(int ep, int fd, void *tag, uint32_t ev)
     return epoll_ctl(ep, EPOLL_CTL_ADD, fd, &e);
 }
 
+// Every relayed TCP connection holds two descriptors and every UDP session two more, while the usual soft limit is 1024 (it is
+// also the default of a systemd service): without this the relay would run out at about 500 connections. The hard limit is the
+// ceiling the administrator chose; the soft limit may always be raised up to it.
+static void raise_fd_limit(void)
+{
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) return;
+    rlim_t want = rl.rlim_max == RLIM_INFINITY || rl.rlim_max > 1048576 ? 1048576 : rl.rlim_max;
+    if (rl.rlim_cur >= want) return;
+    rl.rlim_cur = want;
+    if (setrlimit(RLIMIT_NOFILE, &rl) != 0) pb_core_log("relay: could not raise the open file limit: %s", strerror(errno));
+}
+
 int pb_relay_start(const struct pb_relay_cfg *cfg)
 {
     pthread_mutex_lock(&R.life);
@@ -1764,6 +1786,7 @@ int pb_relay_start(const struct pb_relay_cfg *cfg)
     if (c.tcp_idle_timeout_s <= 0) c.tcp_idle_timeout_s = 300;
     if (c.udp_idle_timeout_s <= 0) c.udp_idle_timeout_s = 60;
     if (c.handshake_timeout_s <= 0) c.handshake_timeout_s = 10;
+    raise_fd_limit();
     R.cfg = c;
     atomic_store(&R.stopping, false);
     atomic_store(&R.nconn, 0);

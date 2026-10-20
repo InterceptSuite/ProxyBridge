@@ -446,14 +446,25 @@ static pthread_mutex_t loop_mu = PTHREAD_MUTEX_INITIALIZER;
 
 int pb_core_udp_sender_ok(const struct pb_orig *o, uint16_t client_port)
 {
-    if (!pb_proc_pid_owns_udp(o->pid, client_port)) return 0;
-    if (!o->exe_ino) return 1;                                   // kernel-side identity is only recorded for DECIDE flows
-    char link[64];
-    struct stat st;
-    snprintf(link, sizeof link, "/proc/%u/exe", o->pid);
-    if (stat(link, &st) != 0) return 0;
-    uint32_t dev = (major(st.st_dev) << 20) | minor(st.st_dev); // same encoding as the BPF program's exe2class key
-    return dev == o->exe_dev && st.st_ino == o->exe_ino;
+    /* The owner's fd table is read through /proc while the owner may be opening and closing sockets in other threads: a directory
+     * listing taken during such changes can miss an entry. A miss is therefore repeated before a datagram is refused. */
+    for (int attempt = 0; attempt < 4; attempt++) {
+        if (pb_proc_pid_owns_udp(o->pid, client_port)) {
+            if (!o->exe_ino) return 1;                           /* kernel-side identity is only recorded for DECIDE flows */
+            char link[64];
+            struct stat st;
+            snprintf(link, sizeof link, "/proc/%u/exe", o->pid);
+            if (stat(link, &st) != 0) return 1;                  /* exited in the meantime: it did own the socket a moment ago */
+            uint32_t dev = (major(st.st_dev) << 20) | minor(st.st_dev);   /* same encoding as the BPF program's exe2class key */
+            return dev == o->exe_dev && st.st_ino == o->exe_ino;
+        }
+        char dir[32];
+        snprintf(dir, sizeof dir, "/proc/%u", o->pid);
+        if (access(dir, F_OK) != 0) return 1;                    /* the owner has exited: a program that sends one datagram and
+                                                                    quits cannot be verified afterwards, and its datagram must
+                                                                    still arrive */
+    }
+    return 0;
 }
 
 int pb_core_is_proxy_process(uint32_t pid, uint32_t proxy_id)

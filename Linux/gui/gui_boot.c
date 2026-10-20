@@ -110,7 +110,7 @@ char *boot_unit_text(const char *cli, const char *profile, char **error) {
     quote_word(s, profile);
     g_string_append(s, "\nRestart=on-failure\nRestartSec=5\n"
         // the engine needs root for eBPF and /proc, nothing else: no new privileges, no writable system or home directories
-        "NoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=read-only\nPrivateTmp=yes\nProtectKernelModules=yes\n"
+        "LimitNOFILE=1048576\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=read-only\nPrivateTmp=yes\nProtectKernelModules=yes\n"
         "ProtectKernelLogs=yes\nProtectClock=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\n"
         "\n[Install]\nWantedBy=multi-user.target\n");
     return g_string_free(s, FALSE);

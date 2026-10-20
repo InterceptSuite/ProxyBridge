@@ -1307,6 +1307,35 @@ static void test_handshake_timeout(void)
     close(fd);
 }
 
+// More concurrent UDP sockets of one process than its share of the session table. Sessions are replaced oldest first, but never
+// one that a worker thread is still setting up (that was a use-after-free found by the full end-to-end suite). Under ASan this
+// test fails on the old code; in every build the relay must survive and keep serving.
+static void test_udp_session_cap(void)
+{
+    set_flow("127.1.2.3", "127.0.0.1", g_uecho1, PB_ACT_PROXY, 1);
+    enum { N = 2400 };            // more than the per-process share (half of 4096)
+    int fds[N];
+    for (int i = 0; i < N; i++) {
+        fds[i] = udp_client();
+        char m[16];
+        snprintf(m, sizeof m, "cap%d", i);
+        udp_send_flow(fds[i], "127.1.2.3", m);
+    }
+    msleep(2500);                                    // let the associations finish and the answers arrive
+    int answered = 0;
+    for (int i = 0; i < N; i++) {
+        char b[64], ip[32];
+        uint16_t sp;
+        if (udp_recv_to(fds[i], b, sizeof b, ip, &sp, 20) > 0) answered++;   // sockets whose session was replaced get nothing
+        close(fds[i]);
+    }
+    CHECK(answered >= 1000, "UDP: %d sockets past the per-process session share, the relay survives and answers (%d answered)", (int)N, answered);
+    msleep(500);
+    int c = udp_client();
+    CHECK(udp_echo_ok(c, "127.1.2.3", "after-cap"), "UDP still works after the session table was full");
+    close(c);
+}
+
 static void test_udp(void)
 {
     char b[256], ip[32];
@@ -1968,6 +1997,7 @@ int main(void)
     RUN(test_tcp_halfclose);
     RUN(test_sigpipe);
     RUN(test_udp);
+    RUN(test_udp_session_cap);
     RUN(test_flows);
     RUN(test_proxy_process_loop);
     RUN(test_proxy_helper);

@@ -2,6 +2,7 @@
 #include "../pb_proc.h"
 #include <arpa/inet.h>
 #include <ifaddrs.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,6 +90,55 @@ int main(void)
         freeifaddrs(list);
     }
     CHECK(found > 0 && ok == found);                                              // every configured address is local
+
+    // which process owns a UDP socket bound to a port (the relay uses it to tell a flow's own datagrams from an impostor's)
+    {
+        int u = socket(AF_INET, SOCK_DGRAM, 0);
+        struct sockaddr_in ua = { .sin_family = AF_INET };
+        inet_pton(AF_INET, "127.0.0.1", &ua.sin_addr);
+        bind(u, (struct sockaddr *)&ua, sizeof ua);
+        socklen_t ul = sizeof ua;
+        getsockname(u, (struct sockaddr *)&ua, &ul);
+        uint16_t up = ntohs(ua.sin_port);
+        CHECK(pb_proc_pid_owns_udp((uint32_t)getpid(), up));                          // our own socket
+        CHECK(!pb_proc_pid_owns_udp((uint32_t)getppid(), up));                        // not the parent's
+        CHECK(!pb_proc_pid_owns_udp((uint32_t)getpid(), (uint16_t)(up == 65535 ? 1 : up + 1)));   // a port nobody here owns
+        CHECK(!pb_proc_pid_owns_udp(4194000u, up));                                   // a process that does not exist
+        int u6 = socket(AF_INET6, SOCK_DGRAM, 0);
+        if (u6 >= 0) {
+            struct sockaddr_in6 a6 = { .sin6_family = AF_INET6, .sin6_addr = IN6ADDR_LOOPBACK_INIT };
+            bind(u6, (struct sockaddr *)&a6, sizeof a6);
+            socklen_t l6 = sizeof a6;
+            getsockname(u6, (struct sockaddr *)&a6, &l6);
+            CHECK(pb_proc_pid_owns_udp((uint32_t)getpid(), ntohs(a6.sin6_port)));     // IPv6 sockets are found too
+            close(u6);
+        }
+        int pp[2];
+        pipe(pp);
+        pid_t kid2 = fork();
+        if (kid2 == 0) {                                                              // the child owns a socket, we do not
+            int k = socket(AF_INET, SOCK_DGRAM, 0);
+            struct sockaddr_in ka = { .sin_family = AF_INET };
+            inet_pton(AF_INET, "127.0.0.1", &ka.sin_addr);
+            bind(k, (struct sockaddr *)&ka, sizeof ka);
+            socklen_t kl = sizeof ka;
+            getsockname(k, (struct sockaddr *)&ka, &kl);
+            uint16_t kp = ntohs(ka.sin_port);
+            write(pp[1], &kp, sizeof kp);
+            pause();
+            _exit(0);
+        }
+        uint16_t kport = 0;
+        CHECK(read(pp[0], &kport, sizeof kport) == (ssize_t)sizeof kport && kport != 0);
+        CHECK(pb_proc_pid_owns_udp((uint32_t)kid2, kport));                           // the child owns it ...
+        CHECK(!pb_proc_pid_owns_udp((uint32_t)getpid(), kport));                      // ... and we do not
+        kill(kid2, SIGKILL);
+        waitpid(kid2, NULL, 0);
+        CHECK(!pb_proc_pid_owns_udp((uint32_t)kid2, kport));                          // gone with the process
+        close(pp[0]);
+        close(pp[1]);
+        close(u);
+    }
 
     printf("proc_test: %d checks, %d failed\n", checks, fails);
     return fails != 0;

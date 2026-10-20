@@ -37,7 +37,7 @@ int main(void)
     CHECK(t == NULL && err && strstr(err, "absolute"));
     g_free(err); err = NULL;
     t = boot_unit_text("/usr/local/bin/ProxyBridge", "/etc/proxybridge/profiles/Work.pbprofile", &err);
-    CHECK(t && strstr(t, "NoNewPrivileges=yes") && strstr(t, "ProtectSystem=strict") && strstr(t, "ProtectHome=read-only"));
+    CHECK(t && strstr(t, "LimitNOFILE=1048576") && strstr(t, "NoNewPrivileges=yes") && strstr(t, "ProtectSystem=strict") && strstr(t, "ProtectHome=read-only"));
     g_free(t);
 
     // only root-owned, root-writable-only paths may be started at boot
