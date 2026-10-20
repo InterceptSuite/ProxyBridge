@@ -294,19 +294,24 @@ try {
 
     $null = Svc-Ok 'clearlogs'; $null = Svc-Ok "logall`t0"
     $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
-    Check 'Log Every Connection off: a program with no rule is not logged' ((Conn-Events 'pbe_nomatch.exe') -eq 0) (Conn-Text 'pbe_nomatch.exe')
-    $null = Svc-Ok "logall`t1"
+    $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'
     $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
-    Check 'Log Every Connection on: that connection is logged' ((Conn-Events 'pbe_nomatch.exe') -ge 1) "$(Conn-Events 'pbe_nomatch.exe') events"
+    # default: a connection is logged once per program, destination, port and action; "every connection" logs each one
+    Check 'Log Every Connection off: the same connection twice is logged once' ((Conn-Events 'pbe_nomatch.exe') -eq 1) (Conn-Text 'pbe_nomatch.exe')
+    $before = Conn-Events 'pbe_nomatch.exe'
+    $null = Svc-Ok "logall`t1"
+    $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'
+    $r = Get-Ok $exe.nomatch 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
+    Check 'Log Every Connection on: each of two connections is logged' ((Conn-Events 'pbe_nomatch.exe') -ge ($before + 2)) "$before -> $(Conn-Events 'pbe_nomatch.exe') events"
     $null = Svc-Ok "logall`t0"
 
     $before = Conn-Events 'pbe_svc.exe'
     $r = Get-Ok $exe.svc 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
-    Check 'Traffic logging on: a proxied connection is logged with its process' ((Conn-Events 'pbe_svc.exe') -gt $before)
+    Check 'A proxied connection is logged with its process and the proxy it used' ((Conn-Events 'pbe_svc.exe') -gt $before -and (Conn-Text 'pbe_svc.exe') -match "Proxy SOCKS5://127.0.0.1:$PORT_OPEN") (Conn-Text 'pbe_svc.exe')
     $null = Svc-Ok "traffic`t0"; Start-Sleep -Seconds 1
-    $before = Conn-Events 'pbe_svc.exe'; $bo = Count $logOpen '[CONNECT]'
-    $r = Get-Ok $exe.svc 'http://example.com/' 'Example Domain'; Start-Sleep -Seconds 2
-    Check 'Traffic logging off: nothing is logged, but the traffic still goes through the proxy' ((Conn-Events 'pbe_svc.exe') -eq $before -and (Count $logOpen '[CONNECT]') -gt $bo) "events $before -> $(Conn-Events 'pbe_svc.exe'); last: $((Conn-Text 'pbe_svc.exe') -replace '^.*\| ','')"
+    $bo = Count $logOpen '[CONNECT]'
+    $r = Get-Ok $exe.svc 'http://example.com/' 'Example Domain'
+    Check 'Switching traffic logging off does not change where the traffic goes' ($r.Exit -eq 0 -and (Count $logOpen '[CONNECT]') -gt $bo)
     $null = Svc-Ok "traffic`t1"
 
     # ---- editing rules while running
