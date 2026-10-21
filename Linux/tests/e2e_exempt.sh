@@ -33,7 +33,8 @@ echo "== proxy on 127.0.0.1 running first"
 start_fwd 127.0.0.1 19090
 start_pb socks5://127.0.0.1:19090 || bad "start"
 out=$(fetch); [[ "$out" == *origin-ok* ]] && ok "request reaches the origin through the forwarding proxy" || bad "no answer (${out:0:100}): $(tail -3 "$WORK/fwd.log")"
-n=$(grep -c "FWD $MYIP:18399" "$WORK/fwd.log")
+# the proxy may be given the host name of the origin address (ProxyBridge sends the name it knows, e.g. from /etc/hosts), so count by port
+n=$(grep -c "^FWD .*:18399" "$WORK/fwd.log")
 [ "$n" = 1 ] && ok "the proxy was asked exactly once: its own connection to the origin was not looped back" || { bad "proxy saw $n requests"; diag; }
 grep -q "FAIL" "$WORK/fwd.log" && bad "forwarding failed: $(grep FAIL "$WORK/fwd.log")"
 stop_pb; stop_fwd
@@ -57,7 +58,8 @@ start_fwd 127.0.0.1 19090
 good=no
 for _ in $(seq 40); do out=$(fetch); if [[ "$out" == *origin-ok* ]]; then good=yes; break; fi; sleep 0.5; done
 [ $good = yes ] && ok "once the proxy is up it is exempted and the request works" || bad "never worked after the proxy started"
-n=$(grep -c "FWD $MYIP:18399" "$WORK/fwd.log")
+# the proxy may be given the host name of the origin address (ProxyBridge sends the name it knows, e.g. from /etc/hosts), so count by port
+n=$(grep -c "^FWD .*:18399" "$WORK/fwd.log")
 [ "$n" -ge 1 ] && [ "$n" -le 2 ] && ok "no request storm from a loop ($n requests)" || { bad "proxy saw $n requests"; diag; }
 stop_pb; stop_fwd
 
