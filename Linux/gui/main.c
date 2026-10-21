@@ -666,8 +666,14 @@ int main(int argc, char *argv[]) {
     GtkWidget *menubar = gtk_menu_bar_new();
     // An open menu holds a grab. When the user moves to another program (often a native Wayland window this X11 client
     // never gets pointer events from) the menu would stay on top of it: close it as soon as this window loses focus.
-    g_signal_connect(window, "notify::is-active", G_CALLBACK(on_active_changed), menubar);
-    g_signal_connect(window, "focus-out-event", G_CALLBACK(on_focus_out), menubar);
+    // Only on X11, where a menu holds a grab that can outlive a switch to another program. On Wayland (the window now runs as the user, so
+    // it is a native Wayland window) opening a menu moves the keyboard focus to the menu's own popup: closing menus when the window
+    // "loses focus" would close every menu the moment it opens, and the compositor already dismisses popups itself.
+    GdkDisplay *gdisp = gdk_display_get_default();
+    if (gdisp && strcmp(G_OBJECT_TYPE_NAME(gdisp), "GdkX11Display") == 0) {
+        g_signal_connect(window, "notify::is-active", G_CALLBACK(on_active_changed), menubar);
+        g_signal_connect(window, "focus-out-event", G_CALLBACK(on_focus_out), menubar);
+    }
     // The same four menus as the Windows app: Proxy, Profile, Settings, Help
     GtkWidget *proxy_menu = add_submenu(menubar, "Proxy");
     enable_item = add_check_item(proxy_menu, "Enable ProxyBridge", true, G_CALLBACK(on_enable_toggled));      // the main on/off switch
