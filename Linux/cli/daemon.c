@@ -769,6 +769,27 @@ static void handle(struct client *c, pb_msg *m)
     } else if (!strcmp(cmd, "store.delete")) {
         NEED(1);
         store_delete(c, id, ARG(0));
+    } else if (!strcmp(cmd, "store.legacy")) {
+        // the config.ini of 3.2.x and the Linux beta: handed to the window once, to be converted into a profile
+        NEED(0);
+        char path[4400];
+        snprintf(path, sizeof path, "%s/config.ini", pbp_config_dir());
+        struct stat lst;
+        FILE *lf = lstat(path, &lst) == 0 && S_ISREG(lst.st_mode) && lst.st_size <= (1 << 20) ? fopen(path, "rb") : NULL;
+        if (!lf) { reply_err(c, id, "none"); return; }
+        char *lbuf = malloc((size_t)lst.st_size + 1);
+        size_t ln = lbuf ? fread(lbuf, 1, (size_t)lst.st_size, lf) : 0;
+        fclose(lf);
+        if (!lbuf) { reply_err(c, id, "out of memory"); return; }
+        lbuf[ln] = '\0';
+        reply_ok1(c, id, lbuf);
+        free(lbuf);
+    } else if (!strcmp(cmd, "store.legacy_done")) {
+        NEED(0);
+        char from[4400], to[4400];
+        snprintf(from, sizeof from, "%s/config.ini", pbp_config_dir());
+        snprintf(to, sizeof to, "%s/config.ini.bak", pbp_config_dir());
+        if (rename(from, to) != 0 && errno != ENOENT) reply_err(c, id, strerror(errno)); else reply_ok(c, id);
     } else if (!strcmp(cmd, "store.settings.get")) {
         NEED(0);
         char *active = NULL;

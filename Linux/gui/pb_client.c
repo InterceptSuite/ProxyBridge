@@ -633,4 +633,15 @@ static bool st_settings_set(const char *active, bool updates, bool boot, char *e
 
 static bool st_exists(const char *name) { (void)name; return true; }     // the service owns the files; nothing can delete them behind our back
 
-const struct gui_store pbc_store = { st_list, st_get, st_put, st_del, st_exists, st_settings_get, st_settings_set };
+static char *st_legacy_get(void)
+{
+    reply_t r;
+    char *out = NULL;
+    if (rpc(&r, "store.legacy", 0, NULL, NULL, NULL) && r.n) out = g_strdup(r.f[0]);
+    reply_free(&r);
+    return out;
+}
+
+static void st_legacy_done(void) { simple("store.legacy_done", 0, NULL); }
+
+const struct gui_store pbc_store = { st_list, st_get, st_put, st_del, st_exists, st_settings_get, st_settings_set, st_legacy_get, st_legacy_done };

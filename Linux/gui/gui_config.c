@@ -97,7 +97,25 @@ static bool file_settings_set(const char *active, bool updates, bool boot, char 
     return ok;
 }
 
-const struct gui_store gui_store_files = { file_list, file_get, file_put, file_del, file_exists, file_settings_get, file_settings_set };
+static char *file_legacy_get(void) {
+    char *path = g_strdup_printf("%s/config.ini", config_dir_path());
+    chmod(path, 0600);
+    char *data = NULL;
+    gsize len = 0;
+    if (!g_file_get_contents(path, &data, &len, NULL) || len > (1u << 20)) { g_free(data); data = NULL; }
+    g_free(path);
+    return data;
+}
+
+static void file_legacy_done(void) {
+    char *from = g_strdup_printf("%s/config.ini", config_dir_path()), *to = g_strdup_printf("%s/config.ini.bak", config_dir_path());
+    if (rename(from, to) != 0) perror("could not set the old config.ini aside");
+    g_free(from);
+    g_free(to);
+}
+
+const struct gui_store gui_store_files = { file_list, file_get, file_put, file_del, file_exists, file_settings_get, file_settings_set,
+                                           file_legacy_get, file_legacy_done };
 static const struct gui_store *g_store = &gui_store_files;
 void gui_store_use(const struct gui_store *s) { g_store = s ? s : &gui_store_files; }
 
@@ -534,11 +552,8 @@ static RuleData *parse_rule_line(char *line) {
 
 // config.ini of the previous versions; files without profile blocks end up in a profile called "Default".
 // Returns false when there is no such file.
-static bool load_legacy_ini(const char *dir, char **saved_active_out) {
-    char *path = g_strdup_printf("%s/config.ini", dir);
-    chmod(path, 0600);
-    FILE *f = fopen(path, "r");
-    g_free(path);
+static bool load_legacy_ini(const char *text, char **saved_active_out) {
+    FILE *f = fmemopen((void *)text, strlen(text), "r");
     if (!f) return false;
 
     char line[8192];
@@ -676,14 +691,17 @@ static void load_profile_files() {
 
 // profiles/<name>.pbprofile + settings.json; a config.ini from an older version is converted on first start
 void load_config() {
-    char *dir = config_dir();
     char *settings_active = NULL, *legacy_active = NULL;
     bool migrate = false;
 
     load_profile_files();
     g_store->settings_get(&settings_active, &g_chk_updates, &g_chk_boot);
-    if (!g_profiles && g_store == &gui_store_files) {          // a config.ini of an older version only exists next to the files
-        migrate = load_legacy_ini(dir, &legacy_active);
+    if (!g_profiles) {                                          // a config.ini of an older version (3.2.x, the Linux beta) sits next to the profiles
+        char *old = g_store->legacy_get();
+        if (old) {
+            migrate = load_legacy_ini(old, &legacy_active);
+            g_free(old);
+        }
         for (GList *l = g_profiles; l != NULL; l = l->next) {      // the old file had one pair of switches for all profiles
             ((Profile *)l->data)->logging = g_chk_logging;
             ((Profile *)l->data)->dns = g_chk_dns;
@@ -696,12 +714,8 @@ void load_config() {
 
     if (migrate) {
         save_config();
-        char *from = g_strdup_printf("%s/config.ini", dir), *to = g_strdup_printf("%s/config.ini.bak", dir);
-        if (rename(from, to) != 0) perror("could not set the old config.ini aside");
-        g_free(from);
-        g_free(to);
+        g_store->legacy_done();
     }
-    g_free(dir);
 }
 
 struct pbp_filter *gui_filters(size_t *n) {

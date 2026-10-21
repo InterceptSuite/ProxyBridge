@@ -60,6 +60,8 @@ struct gui_store {
     bool   (*exists)(const char *name);
     bool   (*settings_get)(char **active, bool *check_updates, bool *start_at_boot);   // *active g_malloc'd or NULL
     bool   (*settings_set)(const char *active, bool check_updates, bool start_at_boot, char *err, size_t errn);
+    char  *(*legacy_get)(void);                                          // text of a config.ini from an older version, g_malloc'd, or NULL
+    void   (*legacy_done)(void);                                         // set that file aside (config.ini.bak) once it has been converted
 };
 extern const struct gui_store gui_store_files;
 extern const struct gui_store pbc_store;          // pb_client.c

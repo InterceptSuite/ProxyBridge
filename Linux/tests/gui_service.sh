@@ -59,6 +59,32 @@ wait_routing() { for _ in $(seq 40); do bpf_up && return 0; kill -0 $GUI_PID 2>/
 stop_gui() { kill -TERM $GUI_PID 2>/dev/null; for _ in $(seq 40); do kill -0 $GUI_PID 2>/dev/null || break; sleep 0.25; done
   if kill -0 $GUI_PID 2>/dev/null; then kill -KILL $GUI_PID; bad "the window did not exit on SIGTERM"; else wait $GUI_PID; fi; GUI_PID=; }
 
+echo "== upgrade: the config.ini of 3.2.x / the Linux beta is converted through the service"
+cat > "$WORK/cfg/config.ini" <<CFG
+[SETTINGS]
+activeProfile=Default
+logging=1
+dns=1
+[PROFILE:Default]
+defaultProxy=a
+[PROXIES]
+a|1|127.0.0.1|19080||
+[RULES]
+1|0|0|1|curl|192.0.2.0/24|*|a
+CFG
+chmod 600 "$WORK/cfg/config.ini"
+usermod -aG proxybridge nobody
+start_service
+run_gui nobody --clear-groups
+if wait_routing; then ok "the window started the engine from the old configuration"; else bad "no routing: $(head -5 "$WORK/gui.out")"; fi
+sleep 1
+out=$(curl -s -m 5 http://192.0.2.7/); [[ "$out" == *"hello-from-A dst=192.0.2.7:80"* ]] && ok "the old rule and proxy work through the service" || bad "old configuration not applied: $out"
+stop_gui
+[ -f "$WORK/cfg/profiles/Default.pbprofile" ] && ok "it became a profile held by the service" || bad "no profile written: $(ls "$WORK/cfg" "$WORK/cfg/profiles" 2>&1)"
+[ -f "$WORK/cfg/config.ini.bak" ] && [ ! -f "$WORK/cfg/config.ini" ] && ok "the old file was set aside as config.ini.bak" || bad "config.ini handling"
+stop_service
+rm -rf "$WORK/cfg"; mkdir -p "$WORK/cfg"
+
 echo "== the service is running, the window is not root"
 start_service
 ok "service started (socket present)"
