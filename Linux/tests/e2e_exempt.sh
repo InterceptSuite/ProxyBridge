@@ -11,6 +11,7 @@ HERE="${HERE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"; PBL="$HERE/pbl"; 
 WORK="$(mktemp -d)"; PASS=0; FAIL=0; PB=""; FWD=""; WWW=""
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
+diag() { echo "---- diagnostics: ProxyBridge output"; tail -15 "$WORK/pb.out" 2>/dev/null; echo "---- proxy log"; tail -8 "$WORK/fwd.log" 2>/dev/null; echo "---- address and kernel"; echo "origin address: $MYIP"; uname -r; ip -4 addr show 2>/dev/null | grep -E 'inet |^[0-9]' | head -8; echo "----"; }
 cleanup() { kill $PB $FWD $WWW 2>/dev/null; wait 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 export LD_LIBRARY_PATH="$PB_DIR"
@@ -33,7 +34,7 @@ start_fwd 127.0.0.1 19090
 start_pb socks5://127.0.0.1:19090 || bad "start"
 out=$(fetch); [[ "$out" == *origin-ok* ]] && ok "request reaches the origin through the forwarding proxy" || bad "no answer (${out:0:100}): $(tail -3 "$WORK/fwd.log")"
 n=$(grep -c "FWD $MYIP:18399" "$WORK/fwd.log")
-[ "$n" = 1 ] && ok "the proxy was asked exactly once: its own connection to the origin was not looped back" || bad "proxy saw $n requests"
+[ "$n" = 1 ] && ok "the proxy was asked exactly once: its own connection to the origin was not looped back" || { bad "proxy saw $n requests"; diag; }
 grep -q "FAIL" "$WORK/fwd.log" && bad "forwarding failed: $(grep FAIL "$WORK/fwd.log")"
 stop_pb; stop_fwd
 
@@ -57,7 +58,7 @@ good=no
 for _ in $(seq 40); do out=$(fetch); if [[ "$out" == *origin-ok* ]]; then good=yes; break; fi; sleep 0.5; done
 [ $good = yes ] && ok "once the proxy is up it is exempted and the request works" || bad "never worked after the proxy started"
 n=$(grep -c "FWD $MYIP:18399" "$WORK/fwd.log")
-[ "$n" -ge 1 ] && [ "$n" -le 2 ] && ok "no request storm from a loop ($n requests)" || bad "proxy saw $n requests"
+[ "$n" -ge 1 ] && [ "$n" -le 2 ] && ok "no request storm from a loop ($n requests)" || { bad "proxy saw $n requests"; diag; }
 stop_pb; stop_fwd
 
 echo "== a proxy that is NOT local is not exempted"
