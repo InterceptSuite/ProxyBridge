@@ -170,6 +170,15 @@ int main(void)
     char buf[512] = "";
     check("TestProxy through a SOCKS5 proxy works", ProxyBridge_TestProxy(pb2, "192.0.2.77", 80, buf, sizeof buf) == 0);
     printf("        (%s)\n", buf);
+    {
+        char longhost[5001];
+        memset(longhost, 'a', sizeof longhost - 1);
+        longhost[sizeof longhost - 1] = 0;
+        buf[0] = 0;
+        check("TestProxy with a 5000-character target host fails cleanly (no read past the request buffer)", ProxyBridge_TestProxy(pb2, longhost, 80, buf, sizeof buf) != 0);
+        printf("        (%s)\n", buf);
+        check("and the proxy still works afterwards", ProxyBridge_TestProxy(pb2, "192.0.2.77", 80, buf, sizeof buf) == 0);
+    }
     uint32_t dead = ProxyBridge_AddProxy("dead", PROXY_TYPE_SOCKS5, "127.0.0.1", 19999, "", "", err, sizeof err);
     buf[0] = 0; check("TestProxy against a dead proxy fails with a readable message", ProxyBridge_TestProxy(dead, "192.0.2.77", 80, buf, sizeof buf) != 0 && strlen(buf) > 5);
     printf("        (%s)\n", buf);

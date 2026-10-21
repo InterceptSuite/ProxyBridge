@@ -1,10 +1,13 @@
 #!/bin/bash
-
-set -e
+# Downloads the latest ProxyBridge release for Linux, checks it, and installs it with the setup.sh that is inside the archive:
+#   curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh && sudo bash deploy.sh
+# Everything that is installed (programs, the ProxyBridge service, the group) is done by setup.sh, so there is one installer.
+#   PB_ALLOW_UNVERIFIED=1   install a release that has no .sha256 file next to the archive (nothing else is skipped)
+set -euo pipefail
 
 GITHUB_REPO="InterceptSuite/ProxyBridge"
 GITHUB_API="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
-TEMP_DIR="/tmp/proxybridge-install-$$"
+DOWNLOAD_PREFIX="https://github.com/$GITHUB_REPO/releases/download/"
 
 echo ""
 echo "==================================="
@@ -12,325 +15,83 @@ echo "ProxyBridge Auto-Deploy Script"
 echo "==================================="
 echo ""
 
-# Check if running as root
 if [ "$EUID" -ne 0 ]; then
     echo "ERROR: This script must be run as root"
     echo "Please run: sudo bash deploy.sh"
     exit 1
 fi
 
-# Check for required tools
-check_requirements() {
-    echo "Checking required tools..."
+missing=()
+for tool in curl tar sha256sum mktemp; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+    echo "ERROR: missing required tools: ${missing[*]}"
+    echo "  Debian/Ubuntu: sudo apt install curl tar coreutils"
+    echo "  Fedora:        sudo dnf install curl tar coreutils"
+    echo "  Arch:          sudo pacman -S curl tar coreutils"
+    exit 1
+fi
 
-    local missing_tools=()
+# A directory only root can use, with a name nobody can predict: nothing in it can be swapped by another user between the download and
+# the moment it is installed (a fixed name under /tmp could be created in advance by any local user).
+WORK="$(mktemp -d /var/tmp/proxybridge-install.XXXXXX)"
+chmod 700 "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+umask 077
+fetch() { curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 "$@"; }
 
-    if ! command -v curl &> /dev/null; then
-        missing_tools+=("curl")
-    fi
+echo "Fetching latest release information..."
+api_response="$(fetch "$GITHUB_API")" || { echo "ERROR: Failed to fetch release information from GitHub"; exit 1; }
 
-    if ! command -v tar &> /dev/null; then
-        missing_tools+=("tar")
-    fi
+if command -v jq >/dev/null 2>&1; then
+    download_url="$(printf '%s' "$api_response" | jq -r '.assets[] | select(.name | test("^ProxyBridge-Linux-.*\\.tar\\.gz$")) | .browser_download_url' | head -1)"
+else
+    download_url="$(printf '%s' "$api_response" | grep -o '"browser_download_url": *"[^"]*ProxyBridge-Linux-[^"/]*\.tar\.gz"' | head -1 | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')"
+fi
+if [ -z "$download_url" ] || [ "${download_url#"$DOWNLOAD_PREFIX"}" = "$download_url" ]; then
+    echo "ERROR: Could not find the Linux release archive in the latest release"
+    echo "Please check if a Linux release is available at: https://github.com/$GITHUB_REPO/releases/latest"
+    exit 1
+fi
+filename="$(basename "$download_url")"
+case "$filename" in
+    *[!A-Za-z0-9._-]*|"") echo "ERROR: unexpected file name in the release"; exit 1 ;;
+esac
+echo "Found release: $filename"
 
-    if ! command -v jq &> /dev/null; then
-        echo "WARNING: jq not found. Attempting to parse JSON manually."
-    fi
+echo ""
+echo "Downloading $filename..."
+fetch -o "$WORK/$filename" "$download_url" || { echo "ERROR: Failed to download the release archive"; exit 1; }
 
-    if [ ${#missing_tools[@]} -gt 0 ]; then
-        echo "ERROR: Missing required tools: ${missing_tools[*]}"
-        echo ""
-        echo "Please install them first:"
-        echo "  Debian/Ubuntu: sudo apt install curl tar jq"
-        echo "  Fedora:        sudo dnf install curl tar jq"
-        echo "  Arch:          sudo pacman -S curl tar jq"
+echo "Checking the download..."
+if fetch -o "$WORK/$filename.sha256" "$download_url.sha256" 2>/dev/null; then
+    expected="$(awk '{print $1; exit}' "$WORK/$filename.sha256")"
+    actual="$(sha256sum "$WORK/$filename" | awk '{print $1}')"
+    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+        echo "ERROR: the checksum of the download does not match ($filename.sha256). Nothing was installed."
         exit 1
     fi
+    echo "  SHA-256 matches"
+elif [ "${PB_ALLOW_UNVERIFIED:-0}" = 1 ]; then
+    echo "WARNING: this release has no .sha256 file; installing without checking it (PB_ALLOW_UNVERIFIED=1)"
+else
+    echo "ERROR: this release has no .sha256 file to check the download against."
+    echo "       Verify the archive yourself and run again with PB_ALLOW_UNVERIFIED=1, or install from the downloaded archive by hand."
+    exit 1
+fi
 
-    echo "All required tools available"
-}
+echo ""
+echo "Extracting..."
+if tar -tzf "$WORK/$filename" | grep -qE '(^/|(^|/)\.\.(/|$))'; then
+    echo "ERROR: the archive contains absolute paths or '..'; refusing to extract it"
+    exit 1
+fi
+mkdir "$WORK/pkg"
+tar -xzf "$WORK/$filename" -C "$WORK/pkg" --no-same-owner --no-same-permissions
+[ -f "$WORK/pkg/setup.sh" ] || { echo "ERROR: setup.sh is not in the archive"; exit 1; }
 
-# Download latest release
-download_latest_release() {
-    echo ""
-    echo "Fetching latest release information..."
-
-    # Create temp directory
-    mkdir -p "$TEMP_DIR"
-    cd "$TEMP_DIR"
-
-    # Get release info from GitHub API
-    local api_response
-    api_response=$(curl -sL "$GITHUB_API")
-
-    if [ -z "$api_response" ]; then
-        echo "ERROR: Failed to fetch release information from GitHub"
-        exit 1
-    fi
-
-    # Extract download URL for Linux tar.gz
-    local download_url
-    if command -v jq &> /dev/null; then
-        download_url=$(echo "$api_response" | jq -r '.assets[] | select(.name | test("ProxyBridge-Linux-.*\\.tar\\.gz$")) | .browser_download_url' | head -1)
-    else
-        # Fallback: manual parsing
-        download_url=$(echo "$api_response" | grep -o '"browser_download_url": *"[^"]*ProxyBridge-Linux-[^"]*\.tar\.gz"' | head -1 | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')
-    fi
-
-    if [ -z "$download_url" ]; then
-        echo "ERROR: Could not find Linux release archive in latest release"
-        echo ""
-        echo "Please check if a Linux release is available at:"
-        echo "  https://github.com/$GITHUB_REPO/releases/latest"
-        exit 1
-    fi
-
-    # Extract version from URL
-    local filename
-    filename=$(basename "$download_url")
-    echo "Found release: $filename"
-    echo "Download URL: $download_url"
-
-    echo ""
-    echo "Downloading $filename..."
-    if ! curl -L -o "$filename" "$download_url"; then
-        echo "ERROR: Failed to download release archive"
-        exit 1
-    fi
-
-    echo "Download complete"
-
-    # Extract archive
-    echo ""
-    echo "Extracting archive..."
-    if ! tar -xzf "$filename"; then
-        echo "ERROR: Failed to extract archive"
-        exit 1
-    fi
-
-    echo "Extraction complete"
-    echo "Files extracted to: $TEMP_DIR"
-    ls -lh
-}
-
-# Detect Linux distribution
-detect_distro() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        DISTRO=$ID
-        DISTRO_LIKE=$ID_LIKE
-    elif [ -f /etc/lsb-release ]; then
-        . /etc/lsb-release
-        DISTRO=$DISTRIB_ID
-    else
-        DISTRO=$(uname -s)
-    fi
-    echo ""
-    echo "Detected distribution: $DISTRO"
-}
-
-# The command line program and the library are self-contained (libbpf, libelf and zlib are linked in; only glibc is used), so
-# nothing needs installing for them. The GUI needs GTK3, which cannot be linked statically: install it only if it is missing.
-install_dependencies() {
-    echo ""
-    if [ ! -f "$TEMP_DIR/ProxyBridgeGUI" ]; then
-        echo "No dependencies to install (the command line program is self-contained)."
-        return
-    fi
-    if ldconfig -p 2>/dev/null | grep -q 'libgtk-3\.so\.0'; then
-        echo "GTK3 is already installed (needed by the GUI)."
-        return
-    fi
-    echo "Installing GTK3 (needed by the GUI)..."
-
-    # Normalize distro name using ID_LIKE fallback
-    local distro_family="$DISTRO"
-    if [ -n "$DISTRO_LIKE" ]; then
-        case "$DISTRO_LIKE" in
-            *ubuntu*|*debian*) distro_family="debian" ;;
-            *fedora*) distro_family="fedora" ;;
-            *rhel*|*centos*) distro_family="rhel" ;;
-            *arch*) distro_family="arch" ;;
-            *suse*) distro_family="opensuse" ;;
-        esac
-    fi
-
-    case "$distro_family" in
-        ubuntu|debian|linuxmint|pop|elementary|zorin|kali|raspbian|mx|antix|deepin|lmde)
-            apt-get update -qq
-            apt-get install -y libgtk-3-0
-            ;;
-        fedora)         dnf install -y gtk3 ;;
-        rhel|centos|rocky|almalinux) yum install -y gtk3 ;;
-        arch|manjaro|endeavouros|garuda) pacman -Sy --noconfirm gtk3 ;;
-        opensuse*|sles) zypper install -y gtk3 ;;
-        void)           xbps-install -Sy gtk3 ;;
-        *)
-            echo "WARNING: Unknown distribution '$DISTRO'. The GUI needs GTK3 (Debian/Ubuntu: libgtk-3-0, Fedora: gtk3, Arch: gtk3)."
-            echo "The command line program works without it."
-            ;;
-    esac
-}
-
-# Use /usr/local/lib (matches RPATH in binary)
-detect_lib_path() {
-    LIB_PATH="/usr/local/lib"
-    echo "Library installation path: $LIB_PATH"
-}
-
-# Check if files exist in extracted directory
-check_files() {
-    echo ""
-    echo "Checking for required files..."
-
-    if [ ! -f "$TEMP_DIR/libproxybridge.so" ]; then
-        echo "ERROR: libproxybridge.so not found in extracted archive"
-        exit 1
-    fi
-
-    if [ ! -f "$TEMP_DIR/ProxyBridge" ]; then
-        echo "ERROR: ProxyBridge binary not found in extracted archive"
-        exit 1
-    fi
-
-    if [ ! -f "$TEMP_DIR/ProxyBridgeGUI" ]; then
-        echo "WARNING: ProxyBridgeGUI binary not found - GUI will not be installed"
-    fi
-
-    echo "All required files present"
-}
-
-# Install files
-install_files() {
-    echo ""
-    echo "Installing ProxyBridge..."
-
-    # Create directories if they don't exist
-    mkdir -p "$LIB_PATH" /usr/local/bin /etc/proxybridge
-    chmod 755 /etc/proxybridge
-
-    # Copy library
-    echo "Installing libproxybridge.so to $LIB_PATH..."
-    cp "$TEMP_DIR/libproxybridge.so" "$LIB_PATH/"
-    chmod 755 "$LIB_PATH/libproxybridge.so"
-
-    # Copy binary
-    echo "Installing ProxyBridge to /usr/local/bin..."
-    cp "$TEMP_DIR/ProxyBridge" /usr/local/bin/
-    chmod 755 /usr/local/bin/ProxyBridge
-
-    if [ -f "$TEMP_DIR/ProxyBridgeGUI" ]; then
-        echo "Installing ProxyBridgeGUI to /usr/local/bin..."
-        cp "$TEMP_DIR/ProxyBridgeGUI" /usr/local/bin/
-        chmod 755 /usr/local/bin/ProxyBridgeGUI
-    fi
-    if [ -f "$TEMP_DIR/ProxyBridgeGUI" ] && [ -f "$TEMP_DIR/proxybridge.desktop" ]; then
-        echo "Installing the launcher entry and icon..."
-        install -d -m 0755 /usr/share/applications /usr/share/icons/hicolor/128x128/apps /usr/share/icons/hicolor/256x256/apps
-        install -o root -g root -m 0644 "$TEMP_DIR/proxybridge.desktop" /usr/share/applications/proxybridge.desktop
-        install -o root -g root -m 0644 "$TEMP_DIR/proxybridge-128.png" /usr/share/icons/hicolor/128x128/apps/proxybridge.png
-        install -o root -g root -m 0644 "$TEMP_DIR/proxybridge-256.png" /usr/share/icons/hicolor/256x256/apps/proxybridge.png
-        command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
-        command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications 2>/dev/null || true
-    fi
-
-
-    echo "Files installed"
-}
-
-# Update library cache
-update_ldconfig() {
-    echo ""
-    echo "Updating library cache..."
-
-    # Add /usr/local/lib to ld.so.conf if not already there
-    if [ -d /etc/ld.so.conf.d ]; then
-        if ! grep -q "^/usr/local/lib" /etc/ld.so.conf.d/* 2>/dev/null; then
-            echo "/usr/local/lib" > /etc/ld.so.conf.d/proxybridge.conf
-            if [ "$LIB_PATH" = "/usr/local/lib64" ]; then
-                echo "/usr/local/lib64" >> /etc/ld.so.conf.d/proxybridge.conf
-            fi
-        fi
-    fi
-
-    # Run ldconfig
-    if command -v ldconfig &> /dev/null; then
-        ldconfig 2>/dev/null || true
-        ldconfig -v 2>/dev/null | grep -q proxybridge || true
-        echo "Library cache updated"
-    else
-        echo "WARNING: ldconfig not found. You may need to reboot."
-    fi
-}
-
-# Verify installation
-verify_installation() {
-    echo ""
-    echo "Verifying installation..."
-
-    # Check if binary is in PATH
-    if command -v ProxyBridge &> /dev/null; then
-        echo "ProxyBridge binary found in PATH"
-    else
-        echo "ProxyBridge binary not found in PATH"
-        echo "  You may need to add /usr/local/bin to your PATH"
-    fi
-
-    # Check if library is loadable
-    if ldd /usr/local/bin/ProxyBridge 2>/dev/null | grep -q "libproxybridge.so"; then
-        if ldd /usr/local/bin/ProxyBridge 2>/dev/null | grep "libproxybridge.so" | grep -q "not found"; then
-            echo "libproxybridge.so not loadable"
-        else
-            echo "libproxybridge.so is loadable"
-        fi
-    fi
-
-    # Final test - try to run --help
-    if /usr/local/bin/ProxyBridge --help &>/dev/null; then
-        echo "ProxyBridge executable is working"
-    else
-        echo "⚠ ProxyBridge may have issues - try: sudo ldconfig"
-    fi
-}
-
-# Cleanup temp directory
-cleanup() {
-    echo ""
-    echo "Cleaning up temporary files..."
-    rm -rf "$TEMP_DIR"
-    echo "Cleanup complete"
-}
-
-# Main deployment
-main() {
-    check_requirements
-    download_latest_release
-    detect_distro
-    check_files
-    install_dependencies
-    detect_lib_path
-    install_files
-    update_ldconfig
-    verify_installation
-    cleanup
-
-    echo ""
-    echo "==================================="
-    echo "Installation Complete!"
-    echo "==================================="
-    echo ""
-    echo "You can now run ProxyBridge from anywhere:"
-    echo "  sudo ProxyBridge --help"
-    if [ -f /usr/local/bin/ProxyBridgeGUI ]; then
-       echo "  sudo ProxyBridgeGUI      (Graphical Interface)"
-    fi
-    echo "  sudo ProxyBridge --proxy socks5://IP:PORT --rule \"app:*:*:TCP:PROXY\""
-    echo ""
-    echo "No cleanup is needed after a crash: the kernel detaches the eBPF programs automatically."
-    echo ""
-}
-
-# Trap errors and cleanup
-trap 'echo ""; echo "ERROR: Installation failed. Cleaning up..."; rm -rf "$TEMP_DIR"; exit 1' ERR
-
-main
+echo ""
+umask 022
+cd "$WORK/pkg"
+bash ./setup.sh

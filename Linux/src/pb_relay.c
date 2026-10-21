@@ -1929,6 +1929,11 @@ int pb_relay_test_proxy(const struct pb_proxy *proxy, const char *host, uint16_t
     }
     char req[600];
     int n = snprintf(req, sizeof req, "HEAD / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host);
+    if (n < 0 || (size_t)n >= sizeof req) {      // snprintf reports the length it wanted: sending that many bytes would read past the buffer
+        snprintf(buf, buflen, "Target host name too long");
+        close(fd);
+        return -1;
+    }
     char resp[1024];
     size_t got = 0;
     if (io_send(&x, req, (size_t)n)) { snprintf(buf, buflen, "%s", x.err); close(fd); return -1; }
@@ -2041,11 +2046,12 @@ int pb_relay_check_proxy(const struct pb_proxy *proxy, const char *host, uint16_
         struct io x = { .fd = fd, .dl = now_ms() + 8000, .stopfd = -1 };
         char req[600];
         int n = snprintf(req, sizeof req, "HEAD / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: ProxyBridge-check\r\n\r\n", host);
+        if (n < 0 || (size_t)n >= sizeof req) { chk(cb, user, "      skipped: the target host name is too long for the request"); n = 0; }
         char resp[1024];
         size_t got = leftn < sizeof resp - 1 ? leftn : sizeof resp - 1;
         memcpy(resp, left, got);
         int64_t t1 = now_ms();
-        if (io_send(&x, req, (size_t)n) == 0) {
+        if (n > 0 && io_send(&x, req, (size_t)n) == 0) {
             while (!memchr(resp, '\n', got) && got < sizeof resp - 1) {
                 ssize_t r = io_recv(&x, resp + got, sizeof resp - 1 - got);
                 if (r < 0) break;

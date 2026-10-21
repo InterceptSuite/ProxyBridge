@@ -41,7 +41,9 @@ run_ui() {   # $1 = label; the environment says whether the window talks to a se
 rc=0
 if [ "${UI_MODES:-both}" != service ]; then
     mkdir -p "$WORK/cfg"
-    PROXYBRIDGE_CONFIG_DIR="$WORK/cfg" run_ui "its own engine (root, no service)" || rc=1
+    # PROXYBRIDGE_SOCKET points at nothing: a service installed on this machine must not be used (or changed) by this run
+    mkdir -p "$WORK/units"
+    PROXYBRIDGE_SYSTEMD_DIR="$WORK/units" PROXYBRIDGE_SOCKET="$WORK/no-service.sock" PROXYBRIDGE_CONFIG_DIR="$WORK/cfg" run_ui "its own engine (root, no service)" || rc=1
 fi
 if [ "${UI_MODES:-both}" != embedded ] && [ -x "$LIBDIR/ProxyBridge" ]; then
     # the same suite, every engine and profile call going over the socket to a ProxyBridge --daemon

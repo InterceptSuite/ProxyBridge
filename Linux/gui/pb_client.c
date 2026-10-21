@@ -5,6 +5,8 @@
 #include "pb_ipc.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -128,7 +130,24 @@ static int open_connection(const char *path, int *fd_out, bool *running, char *e
     strcpy(a.sun_path, path);
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) { snprintf(err, errn, "%s", strerror(errno)); return PBC_REFUSED; }
-    if (connect(fd, (struct sockaddr *)&a, sizeof a) != 0) {
+    // Not a plain blocking connect: this runs on the window's main loop when it reconnects, and a service whose queue is full must not
+    // freeze the window.
+    int fl = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    int cr = connect(fd, (struct sockaddr *)&a, sizeof a);
+    if (cr != 0 && (errno == EAGAIN || errno == EINPROGRESS)) {
+        struct pollfd pf = { .fd = fd, .events = POLLOUT };
+        if (poll(&pf, 1, 3000) == 1) {
+            int soerr = 0;
+            socklen_t sl = sizeof soerr;
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl);
+            if (soerr == 0) cr = 0; else errno = soerr;
+        } else {
+            errno = ETIMEDOUT;
+        }
+    }
+    if (cr == 0) fcntl(fd, F_SETFL, fl);
+    if (cr != 0) {
         int e = errno;
         close(fd);
         if (e == ENOENT || e == ECONNREFUSED) { snprintf(err, errn, "the ProxyBridge service is not running"); return PBC_NO_SERVICE; }
@@ -239,6 +258,7 @@ static bool rpc(reply_t *r, const char *cmd, unsigned nargs, const char *const *
     memset(p, 0, sizeof *p);
     p->used = true;
     p->lines = g_queue_new();
+    int fd = C.fd;                                   // the descriptor this request belongs to; a reconnect gets a new one
     snprintf(p->id, sizeof p->id, "%lu", ++C.next_id);
     char idcopy[24];
     snprintf(idcopy, sizeof idcopy, "%s", p->id);
@@ -249,7 +269,7 @@ static bool rpc(reply_t *r, const char *cmd, unsigned nargs, const char *const *
     f[n++] = "q"; f[n++] = idcopy; f[n++] = cmd;
     for (unsigned i = 0; i < nargs && n < 3 + 16; i++) f[n++] = args[i];
     pthread_mutex_lock(&C.send_mu);
-    int sent = pb_ipc_send(C.fd, n, f, NULL);
+    int sent = pb_ipc_send(fd, n, f, NULL);
     pthread_mutex_unlock(&C.send_mu);
 
     pthread_mutex_lock(&C.mu);

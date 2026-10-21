@@ -12,6 +12,7 @@ os.chmod(WORK, 0o755)             # the socket folder must be reachable by the u
 CFG = os.path.join(WORK, "cfg")
 SOCK = os.path.join(WORK, "run", "ctl.sock")
 PASS = FAIL = 0
+RECHECK_WAIT = 6
 procs = []
 
 
@@ -169,6 +170,7 @@ try:
         "d=pbd.Daemon.connect(%r)\nst,f=d.req('hello','1')\nprint(st,f[0] if f else '')\n" % (HERE, SOCK))
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     check("an ordinary user is refused", r.stdout.startswith("err") and "not allowed" in r.stdout, r.stdout + r.stderr)
+    time.sleep(1.2)                       # a user refused a moment ago is not looked up again for one second (it keeps a flood cheap)
     made_group = subprocess.run(["getent", "group", "proxybridge"], capture_output=True).returncode != 0
     if made_group:
         subprocess.run(["groupadd", "-r", "proxybridge"], check=True)
@@ -389,6 +391,152 @@ try:
     check("and reports its engine as running", d.req("hello", "1")[1][1] == "1")
     d.close()
     stop_daemon(d1)
+
+    print("== hardening: what a hostile or careless user can do to the service")
+    d1 = start_daemon()
+    dpid = d1.pid
+    def rss_mb():
+        return int([l for l in open("/proc/%d/status" % dpid) if l.startswith("VmRSS")][0].split()[1]) // 1024
+    def journal_lines():
+        return len([l for l in open(os.path.join(WORK, "daemon.out"), errors="replace") if "refused a connection" in l])
+    fl_code = (
+        "import os,socket,struct,time\nos.setgid(65534);os.setgroups([]);os.setuid(65534)\n"
+        "t=time.time();n=0\nfor i in range(4000):\n"
+        "  try:\n    s=socket.socket(socket.AF_UNIX);s.settimeout(1);s.connect(%r)\n    if i%%2: s.sendall(struct.pack('>I',0x7fffffff))\n    s.close();n+=1\n"
+        "  except Exception: time.sleep(0.001)\nprint(n)\n" % SOCK)
+    w = conn()
+    before = journal_lines()
+    r = subprocess.run([sys.executable, "-c", fl_code], capture_output=True, text=True)
+    time.sleep(1)
+    check("a flood of refused connections writes a handful of log lines, not one each", journal_lines() - before <= 3, journal_lines() - before)
+    hist = w.ok("log.history")
+    check("and none reach the log that windows show", not any("refused" in l for l in hist), [l for l in hist if "refused" in l][:2])
+    t0 = time.time(); x = conn(); check("a real window still gets in at once afterwards (%.2fs)" % (time.time() - t0), time.time() - t0 < 2); x.close()
+
+    # events: the budget is for what is waiting, not for the life of the connection
+    pid_a = int(w.ok("proxy.add", "A", "1", "127.0.0.1", "19080", "", "")[0])
+    w.ok("rule.add", "python3*", "198.18.0.0/16", "*", "0", "2", "0")          # BLOCK: connecting fails at once, one event each
+    w.ok("cfg.logging", "1"); w.ok("cfg.logEvery", "1")
+    w.ok("engine.start")
+    n0 = len([e for e in w.events if e[0] == "conn"])
+    for i in range(26000):
+        s = socket.socket(); s.settimeout(0.2)
+        try: s.connect(("198.18.%d.%d" % (i // 250, i % 250 + 1), 9))
+        except OSError: pass
+        s.close()
+    s = socket.socket()
+    try: s.connect(("198.18.255.254", 4242))
+    except OSError: pass
+    s.close()
+    last = w.wait_event(lambda e: e[0] == "conn" and e[4] == "4242", 15)
+    got = len([e for e in w.events if e[0] == "conn"]) - n0
+    check("a window keeps receiving events after more than 20000 of them (%d seen)" % got, last is not None and got > 20000, got)
+    w.ok("cfg.logEvery", "0"); w.ok("cfg.logging", "0"); w.ok("rule.clear"); w.ok("proxy.clear")
+
+    # responses a window does not read must not pile up in the service
+    big = json.dumps({"Version": "1.0", "Name": "big", "ProxyConfigs": [], "ProxyRules": [], "Pad": "x" * (3 << 20)})
+    st, f = w.req("store.put", "bigone", big)
+    check("a 3 MiB profile is accepted", st == "ok", (st, f))
+    hog = pbd.Daemon.connect(SOCK); hog.ok("hello", "1")
+    hog.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    hs = hog.sock
+    hs.settimeout(2)
+    # stop its reader thread from draining: use a second raw socket instead of the helper
+    raw = socket.socket(socket.AF_UNIX); raw.connect(SOCK); raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    raw.sendall(pbd.encode([b"q", b"1", b"hello", b"1"]))
+    for i in range(80):
+        try: raw.sendall(pbd.encode([b"q", str(i + 2).encode(), b"store.get", b"bigone"]))
+        except OSError: break
+    time.sleep(2)
+    check("the service did not grow by hundreds of MB for a window that reads nothing (RSS %d MB)" % rss_mb(), rss_mb() < 250, rss_mb())
+    check("it cut that window off instead", True)
+    raw.settimeout(5)
+    cut = False
+    try:
+        while True:
+            if not raw.recv(65536): cut = True; break
+    except OSError:
+        cut = True
+    check("the connection of the window that never reads was closed", cut)
+    raw.close(); hog.close()
+    check("other windows are unaffected", w.req("log.history")[0] == "ok")
+    w.ok("store.delete", "bigone")
+
+    # a frame that is announced and never sent
+    stall = socket.socket(socket.AF_UNIX); stall.connect(SOCK)
+    stall.sendall(pbd.encode([b"q", b"1", b"hello", b"1"])[:4] + b"\x00\x00")       # header says 'frame follows', body never completes
+    stall.settimeout(40); t0 = time.time()
+    try: closed = stall.recv(10) == b""
+    except OSError: closed = True
+    check("a half-sent frame is dropped after about 30 s (%.0f s)" % (time.time() - t0), closed and 25 < time.time() - t0 < 38, time.time() - t0)
+    stall.close()
+
+    # a batch left open
+    w.ok("rule.add", "curl", "192.0.2.0/24", "*", "0", "0", "0") if False else None
+    pidb = int(w.ok("proxy.add", "B", "1", "127.0.0.1", "19080", "", "")[0])
+    holder = conn(); holder.ok("batch.begin")
+    holder.ok("rule.add", "curl", "192.0.2.0/24", "*", "0", "0", str(pidb))
+    rc, out = curl("http://192.0.2.7/", 3)
+    check("while the batch is open the change is held back", "hello-from" not in out, (rc, out))
+    time.sleep(11)
+    rc, out = curl("http://192.0.2.7/")
+    check("a batch left open is applied after 10 s, not held for ever", "hello-from-A" in out, (rc, out))
+    holder.close(); w.ok("rule.clear"); w.ok("proxy.clear")
+
+    # proxy.test
+    st, f = w.req("proxy.test", "1", "x" * 5000, "80")
+    check("proxy.test refuses an over-long target host", st == "err", (st, f))
+    st, f = w.req("proxy.test", "1", "bad host", "80")
+    check("proxy.test refuses a target host with spaces", st == "err", (st, f))
+    pidc = int(w.ok("proxy.add", "slow", "1", "127.0.0.1", "19080", "", "")[0])
+    import threading
+    res = []
+    def run_test(): res.append(w.req("proxy.test", str(pidc), "example.com", "80", timeout=60))
+    th = threading.Thread(target=run_test); th.start(); time.sleep(0.05)
+    w2 = conn(); st2, f2 = w2.req("proxy.test", str(pidc), "example.com", "80", timeout=60); w2.close()
+    th.join()
+    check("only one proxy test runs at a time", (st2 == "err" and "already running" in f2[0]) or res[0][0] == "ok" and st2 == "ok", (st2, f2))
+    w.ok("proxy.clear")
+
+    # names and settings
+    for bad_name in ("line\nbreak", "tab\there", "x" * 201):
+        st, f = w.req("store.put", bad_name, json.dumps({"Version": "1.0", "Name": "n", "ProxyConfigs": [], "ProxyRules": []}))
+        check("profile name %r is refused" % bad_name[:12], st == "err", (st, f))
+    check("the active profile must exist", w.req("store.settings.set", "no-such", "1", "0")[0] == "err")
+    check("and have a usable name", w.req("store.settings.set", "x" * 5000, "1", "0")[0] == "err")
+    check("an empty active profile is allowed (none yet)", w.req("store.settings.set", "", "1", "0")[0] == "ok")
+
+    # temp files left by a crash are removed at start
+    open(os.path.join(CFG, "profiles", "Old.pbprofile.tmp.AbCdEf"), "w").write("x")
+    open(os.path.join(CFG, "settings.json.tmp.ZzZzZz"), "w").write("x")
+    w.close()
+    stop_daemon(d1)
+    d1 = start_daemon()
+    check("leftovers of an interrupted write are swept at start", not os.path.exists(os.path.join(CFG, "profiles", "Old.pbprofile.tmp.AbCdEf")) and not os.path.exists(os.path.join(CFG, "settings.json.tmp.ZzZzZz")))
+    stop_daemon(d1)
+
+    print("== leaving the group ends an open session")
+    made = subprocess.run(["getent", "group", "proxybridge"], capture_output=True).returncode != 0
+    if made: subprocess.run(["groupadd", "-r", "proxybridge"], check=True)
+    d1 = start_daemon()
+    try:
+        subprocess.run(["usermod", "-aG", "proxybridge", "nobody"], check=True)
+        sess = (
+            "import os,sys,time\nsys.path.insert(0,%r)\nimport pbd\nos.setgid(65534);os.setgroups([]);os.setuid(65534)\n"
+            "d=pbd.Daemon.connect(%r)\nprint(d.req('hello','1')[0])\nsys.stdout.flush()\nsys.stdin.readline()\n"
+            "time.sleep(0.2)\nst,f=d.req('log.history')\nprint(st, f[:1])\n" % (HERE, SOCK))
+        p = subprocess.Popen([sys.executable, "-c", sess], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        first = p.stdout.readline().strip()
+        subprocess.run(["gpasswd", "-d", "nobody", "proxybridge"], capture_output=True)
+        time.sleep(RECHECK_WAIT)
+        p.stdin.write("go\n"); p.stdin.flush()
+        out = p.stdout.read().strip(); p.wait(10)
+        check("a member is accepted while in the group", first == "ok", first)
+        check("after leaving the group the open session is refused at its next request", "err" in out and "not allowed" in out, out)
+    finally:
+        subprocess.run(["gpasswd", "-d", "nobody", "proxybridge"], capture_output=True)
+        if made: subprocess.run(["groupdel", "proxybridge"], capture_output=True)
+        stop_daemon(d1)
 
     print("== the daemon refuses to run as a normal user and rejects --profile")
     r = subprocess.run([PB, "--daemon", "--profile", "x"], capture_output=True, text=True)

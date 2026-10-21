@@ -7,6 +7,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
+#include <time.h>
 #include "../pb_ipc.h"
 
 static int checks, fails;
@@ -143,6 +145,32 @@ static void sockets(void)
     free(f1); free(f2); free(both);
 }
 
+static void stalled_frame(void)
+{
+    int sv[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    unsigned char hdr[4] = { 0, 0, 0, 100 };                    // announces 100 bytes, sends 3
+    CHECK(write(sv[0], hdr, 4) == 4 && write(sv[0], "abc", 3) == 3);
+    pb_msg m;
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    CHECK(pb_ipc_recv_timeout(sv[1], &m, 300) == -1);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    long ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
+    CHECK(ms >= 250 && ms < 1500);                              // gave up after about the limit, not at once and not for ever
+    // a frame that does arrive, slowly, inside the limit
+    const char *f[] = { "slow" };
+    size_t len;
+    unsigned char *frame = pb_ipc_encode(1, f, NULL, &len);
+    CHECK(write(sv[0], frame, 5) == 5);
+    pid_t pid = fork();
+    if (pid == 0) { usleep(100000); (void)!write(sv[0], frame + 5, len - 5); _exit(0); }
+    CHECK(pb_ipc_recv_timeout(sv[1], &m, 2000) == 0 && m.n == 1 && strcmp(m.f[0], "slow") == 0);
+    pb_msg_free(&m);
+    free(frame);
+    close(sv[0]); close(sv[1]);
+}
+
 int main(void)
 {
     roundtrip();
@@ -150,6 +178,7 @@ int main(void)
     every_truncation();
     fuzz();
     sockets();
+    stalled_frame();
     printf("ipc_test: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

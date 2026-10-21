@@ -29,6 +29,11 @@
 #define MAX_CLIENTS     16
 #define MAX_PROFILES    512
 #define EVENT_QUEUE_MAX 20000
+#define QUEUE_BYTES_MAX (64u << 20)     // what one window may have waiting to be read before it is cut off
+#define BODY_TIMEOUT_MS 30000           // a frame whose header arrived must follow within this
+#define BATCH_MAX_MS    10000           // a window may hold the kernel update back this long
+#define RECHECK_S       5               // how often an open connection is checked against the group again
+#define STORE_MAX_BYTES (256u << 20)    // all profile files together
 #define HISTORY_LINES   200
 
 // ---- clients ---------------------------------------------------------------------------------------------------------------
@@ -36,6 +41,7 @@ struct outmsg {
     struct outmsg *next;
     unsigned char *frame;
     size_t len;
+    bool event;
 };
 
 struct client {
@@ -44,13 +50,23 @@ struct client {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     struct outmsg *head, *tail;
-    size_t nevents;                 // queued events (responses are never dropped)
-    unsigned long dropped;
+    size_t nevents;                 // queued events (dropped when too many are waiting)
+    size_t qbytes;                  // bytes queued; responses are never dropped, a window that lets them pile up is disconnected
+    unsigned long dropped;          // events dropped since the window last caught up
     bool closing;
     int batch_depth;                // BeginBatch calls this client has not yet closed
+    int64_t batch_t0;               // when the first of them was made (ms, monotonic)
+    time_t last_check;              // last time uid_allowed() was asked for this connection
     atomic_int refs;
     struct client *next;
 };
+
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 static pthread_mutex_t clients_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct client *clients;
@@ -76,11 +92,21 @@ static void enqueue(struct client *c, unsigned char *frame, size_t len, bool is_
         free(frame);
         return;
     }
+    if (c->qbytes + len > QUEUE_BYTES_MAX) {
+        // A window that asks for things and does not read the answers would make the service hold them all: cut it off.
+        if (!is_event) { c->closing = true; pthread_cond_signal(&c->cv); }
+        else c->dropped++;
+        pthread_mutex_unlock(&c->mu);
+        if (!is_event) shutdown(c->fd, SHUT_RDWR);
+        free(frame);
+        return;
+    }
     struct outmsg *m = malloc(sizeof *m);
     if (!m) { pthread_mutex_unlock(&c->mu); free(frame); return; }
-    m->next = NULL; m->frame = frame; m->len = len;
+    m->next = NULL; m->frame = frame; m->len = len; m->event = is_event;
     if (c->tail) c->tail->next = m; else c->head = m;
     c->tail = m;
+    c->qbytes += len;
     if (is_event) c->nevents++;
     pthread_cond_signal(&c->cv);
     pthread_mutex_unlock(&c->mu);
@@ -119,6 +145,10 @@ static void *writer_main(void *arg)
         struct outmsg *m = c->head;
         c->head = m->next;
         if (!c->head) c->tail = NULL;
+        c->qbytes -= m->len;
+        if (m->event) c->nevents--;                  // the budget is for what is waiting, not for the life of the connection
+        unsigned long lost = 0;
+        if (!c->head && c->dropped) { lost = c->dropped; c->dropped = 0; }
         pthread_mutex_unlock(&c->mu);
         size_t off = 0;
         bool ok = true;
@@ -131,6 +161,14 @@ static void *writer_main(void *arg)
         }
         free(m->frame);
         free(m);
+        if (ok && lost) {                            // tell the window it missed something instead of letting it assume it saw everything
+            char note[96];
+            snprintf(note, sizeof note, "%lu connection or log events were dropped because this window was too slow", lost);
+            const char *nf[] = { "e", "log", note };
+            size_t nl;
+            unsigned char *nfr = pb_ipc_encode(3, nf, NULL, &nl);
+            if (nfr) { ok = send(c->fd, nfr, nl, MSG_NOSIGNAL) == (ssize_t)nl; free(nfr); }
+        }
         if (!ok) {
             pthread_mutex_lock(&c->mu);
             c->closing = true;
@@ -248,6 +286,16 @@ static bool ensure_store(void)
     return ensure_dir(pbp_config_dir()) && ensure_dir(sub);
 }
 
+// Profile names: stored encoded, so any name is safe on disk, but a name with control characters would reach menus, window titles and
+// logs of every user of the window. Rejected for new profiles.
+static bool name_ok(const char *name)
+{
+    if (!name || !*name || strlen(name) > 200) return false;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++)
+        if (*p < 0x20 || *p == 0x7f) return false;
+    return true;
+}
+
 static char *profile_file(const char *name)
 {
     char *file = pbp_filename_for(name);
@@ -306,9 +354,51 @@ static void store_get(struct client *c, const char *id, const char *name)
     free(buf);
 }
 
+static unsigned long long store_bytes(void)
+{
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s/profiles", pbp_config_dir());
+    DIR *d = opendir(dir);
+    unsigned long long total = 0;
+    struct dirent *de;
+    while (d && (de = readdir(d)) != NULL) {
+        char path[4400];
+        struct stat st;
+        snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
+        if (lstat(path, &st) == 0 && S_ISREG(st.st_mode)) total += (unsigned long long)st.st_size;
+    }
+    if (d) closedir(d);
+    return total;
+}
+
+// A crash in the middle of a write leaves "<file>.tmp.XXXXXX"; nothing else ever removes them
+static void sweep_temp_files(void)
+{
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s/profiles", pbp_config_dir());
+    DIR *d = opendir(dir);
+    struct dirent *de;
+    while (d && (de = readdir(d)) != NULL) {
+        if (!strstr(de->d_name, ".tmp.")) continue;
+        char path[4400];
+        snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
+        unlink(path);
+    }
+    if (d) closedir(d);
+    d = opendir(pbp_config_dir());                 // the same for a settings.json that was being replaced
+    while (d && (de = readdir(d)) != NULL) {
+        if (strncmp(de->d_name, "settings.json.tmp.", 17) != 0) continue;
+        char path[4400];
+        snprintf(path, sizeof path, "%s/%s", pbp_config_dir(), de->d_name);
+        unlink(path);
+    }
+    if (d) closedir(d);
+}
+
 static void store_put(struct client *c, const char *id, const char *name, const char *data, size_t dlen)
 {
     if (dlen > PBP_MAX_FILE) { reply_err(c, id, "profile too large"); return; }
+    if (!name_ok(name)) { reply_err(c, id, "unusable profile name (empty, over 200 bytes, or with control characters)"); return; }
     char *path = profile_file(name);
     if (!path) { reply_err(c, id, "unusable profile name"); return; }
     struct pbp_profile p;
@@ -326,6 +416,7 @@ static void store_put(struct client *c, const char *id, const char *name, const 
         if (count >= MAX_PROFILES) { free(path); reply_err(c, id, "too many profiles"); return; }
     }
     if (!ensure_store()) { free(path); reply_err(c, id, "cannot create the configuration folder"); return; }
+    if (store_bytes() + dlen > STORE_MAX_BYTES) { free(path); reply_err(c, id, "the profile store is full"); return; }
     if (pbp_write_file(path, data, err, sizeof err) != 0) { free(path); reply_err(c, id, err); return; }
     free(path);
     reply_ok(c, id);
@@ -341,21 +432,27 @@ static void store_delete(struct client *c, const char *id, const char *name)
 }
 
 // ---- engine control --------------------------------------------------------------------------------------------------------
+static pthread_mutex_t engine_mu = PTHREAD_MUTEX_INITIALIZER;     // one start or stop at a time, whoever asks
+
 static bool engine_start(void)
 {
+    pthread_mutex_lock(&engine_mu);
     bool ok = ProxyBridge_Start();
     pthread_mutex_lock(&state_mu);
     engine_running = ok;
     pthread_mutex_unlock(&state_mu);
+    pthread_mutex_unlock(&engine_mu);
     return ok;
 }
 
 static void engine_stop(void)
 {
+    pthread_mutex_lock(&engine_mu);
     ProxyBridge_Stop();
     pthread_mutex_lock(&state_mu);
     engine_running = false;
     pthread_mutex_unlock(&state_mu);
+    pthread_mutex_unlock(&engine_mu);
 }
 
 static void update_logging(void)
@@ -363,10 +460,10 @@ static void update_logging(void)
     pthread_mutex_lock(&clients_mu);
     int n = nclients;
     pthread_mutex_unlock(&clients_mu);
-    pthread_mutex_lock(&state_mu);
+    pthread_mutex_lock(&state_mu);                // decided and applied under one lock, so two threads cannot apply stale values
     bool on = logging_requested && n > 0;
-    pthread_mutex_unlock(&state_mu);
     ProxyBridge_SetTrafficLoggingEnabled(on || verbose == 2 || verbose == 3);
+    pthread_mutex_unlock(&state_mu);
 }
 
 // Loads the profile that was active when the service last ran, so the machine is routed from the moment it boots, before any
@@ -434,6 +531,7 @@ static void apply_active_profile(void)
 
 // ---- requests --------------------------------------------------------------------------------------------------------------
 struct test_ctx { struct client *c; const char *id; };
+static pthread_mutex_t test_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void test_line(const char *line, void *user)
 {
@@ -471,6 +569,11 @@ static void handle(struct client *c, pb_msg *m)
 {
     if (m->n < 3 || strcmp(m->f[0], "q") != 0) return;
     const char *id = m->f[1], *cmd = m->f[2];
+    if (m->len[1] > 24) {                           // an id is a short counter; anything else is not a window of ours
+        pthread_mutex_lock(&c->mu); c->closing = true; pthread_cond_signal(&c->cv); pthread_mutex_unlock(&c->mu);
+        shutdown(c->fd, SHUT_RDWR);
+        return;
+    }
     char err[256] = "";
     uint64_t a, b;
     bool on;
@@ -540,8 +643,16 @@ static void handle(struct client *c, pb_msg *m)
     } else if (!strcmp(cmd, "proxy.test")) {
         NEED(3);
         if (!pu(ARG(0), 0xffffffffu, &a) || !pu(ARG(2), 65535, &b)) { reply_err(c, id, "bad arguments"); return; }
+        size_t hl = strlen(ARG(1));
+        bool host_ok = hl > 0 && hl <= 253;
+        for (const unsigned char *p = (const unsigned char *)ARG(1); host_ok && *p; p++) if (*p <= 0x20 || *p >= 0x7f) host_ok = false;
+        if (!host_ok) { reply_err(c, id, "the target host must be 1 to 253 printable characters without spaces"); return; }
+        // The test makes this root service open connections. One at a time keeps a window from tying up the name-resolver threads
+        // that the relay needs for the proxies' own host names.
+        if (pthread_mutex_trylock(&test_mu) != 0) { reply_err(c, id, "another proxy test is already running"); return; }
         struct test_ctx t = { c, id };
         int rc = ProxyBridge_TestProxyEx((uint32_t)a, ARG(1), (uint16_t)b, test_line, &t);
+        pthread_mutex_unlock(&test_mu);
         char r[16];
         snprintf(r, sizeof r, "%d", rc);
         reply_ok1(c, id, r);
@@ -592,7 +703,7 @@ static void handle(struct client *c, pb_msg *m)
     else if (!strcmp(cmd, "batch.begin")) {
         NEED(0);
         ProxyBridge_BeginBatch();
-        c->batch_depth++;
+        if (c->batch_depth++ == 0) c->batch_t0 = now_ms();
         reply_ok(c, id);
     } else if (!strcmp(cmd, "batch.end")) {
         NEED(0);
@@ -670,6 +781,12 @@ static void handle(struct client *c, pb_msg *m)
         NEED(3);
         bool updates, boot;
         if (!bool_arg(ARG(1), &updates) || !bool_arg(ARG(2), &boot)) { reply_err(c, id, "bad value"); return; }
+        if (ARG(0)[0]) {                              // the active profile must be one that exists
+            char *pf = name_ok(ARG(0)) ? profile_file(ARG(0)) : NULL;
+            bool there = pf && access(pf, F_OK) == 0;
+            free(pf);
+            if (!there) { reply_err(c, id, "no such profile"); return; }
+        }
         if (write_settings(ARG(0), updates, boot, err, sizeof err) != 0) reply_err(c, id, err); else reply_ok(c, id);
     }
     // ---- start at boot: the service applies the active profile when it starts and keeps routing after the window closes
@@ -694,13 +811,45 @@ static void handle(struct client *c, pb_msg *m)
     }
 }
 
+static bool uid_allowed(uid_t uid);
+
 static void *reader_main(void *arg)
 {
     struct client *c = arg;
+    c->last_check = time(NULL);
     for (;;) {
+        // A window that opened a batch and went quiet would hold every other window's changes back from the kernel
+        if (c->batch_depth > 0) {
+            int64_t left = c->batch_t0 + BATCH_MAX_MS - now_ms();
+            struct pollfd pf = { .fd = c->fd, .events = POLLIN };
+            if (left <= 0 || poll(&pf, 1, (int)left) == 0) {
+                while (c->batch_depth > 0) { c->batch_depth--; ProxyBridge_EndBatch(); }
+                dlog("a window left a batch open for more than %d seconds: it was applied", BATCH_MAX_MS / 1000);
+                continue;
+            }
+        }
         pb_msg m;
-        int rc = pb_ipc_recv(c->fd, &m);
+        int rc = pb_ipc_recv_timeout(c->fd, &m, BODY_TIMEOUT_MS);
         if (rc != 0) break;
+        // Leaving the group ends the session, not only the next connection
+        time_t now = time(NULL);
+        if (now - c->last_check >= RECHECK_S) {
+            c->last_check = now;
+            if (!uid_allowed(c->uid)) {
+                const char *f[] = { "r", m.n > 1 ? m.f[1] : "0", "err", "not allowed any more: the user left the group 'proxybridge'" };
+                send_to(c, false, 4, f);
+                pb_msg_free(&m);
+                for (int i = 0; i < 100; i++) {          // let the writer thread deliver the explanation before the connection goes
+                    pthread_mutex_lock(&c->mu);
+                    bool empty = c->head == NULL;
+                    pthread_mutex_unlock(&c->mu);
+                    if (empty) break;
+                    usleep(10000);
+                }
+                usleep(20000);
+                break;
+            }
+        }
         handle(c, &m);
         pb_msg_free(&m);
     }
@@ -730,6 +879,36 @@ static void *reader_main(void *arg)
 // ---- access control --------------------------------------------------------------------------------------------------------
 // root, or a member of the group "proxybridge". Looked up in the group database at every connection, so adding a user to the
 // group takes effect at once, without a new login. No such group: root only.
+// ---- refusals --------------------------------------------------------------------------------------------------------------
+#define REFUSAL_SLOTS 32
+static struct { uid_t uid; int64_t until, last_log; unsigned long suppressed; } refusals[REFUSAL_SLOTS];
+
+static bool refused_recently(uid_t uid)
+{
+    int64_t now = now_ms();
+    for (int i = 0; i < REFUSAL_SLOTS; i++)
+        if (refusals[i].until > now && refusals[i].uid == uid) return true;
+    return false;
+}
+
+static void note_refusal(uid_t uid)
+{
+    int64_t now = now_ms();
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < REFUSAL_SLOTS; i++) {
+        if (refusals[i].uid == uid && refusals[i].last_log) { slot = i; break; }
+        if (refusals[i].last_log < refusals[oldest].last_log) oldest = i;
+    }
+    if (slot < 0) { slot = oldest; memset(&refusals[slot], 0, sizeof refusals[slot]); refusals[slot].uid = uid; }
+    refusals[slot].until = now + 1000;
+    if (refusals[slot].last_log && now - refusals[slot].last_log < 60000) { refusals[slot].suppressed++; return; }
+    printf("[PB] refused a connection from user %u: not root and not a member of the group '%s'%s\n", (unsigned)uid, GROUP_NAME,
+           refusals[slot].suppressed ? " (more of them were refused in the last minute)" : "");
+    fflush(stdout);
+    refusals[slot].last_log = now;
+    refusals[slot].suppressed = 0;
+}
+
 static bool uid_allowed(uid_t uid)
 {
     if (uid == 0) return true;
@@ -794,6 +973,7 @@ int pb_daemon_run(const char *socket_path, int verbose_level)
     if (!ensure_store()) { fprintf(stderr, "ERROR: cannot create %s\n", pbp_config_dir()); return 1; }
     int lfd = open_listener(socket_path);
     if (lfd < 0) { fprintf(stderr, "ERROR: cannot listen on %s: %s\n", socket_path, strerror(errno)); return 1; }
+    sweep_temp_files();
     dlog("ProxyBridge service %s listening on %s", PROXYBRIDGE_VERSION, socket_path);
 
     // Start at Boot: route from the moment the machine is up, with the profile that was active last. Without it the service is idle
@@ -821,11 +1001,14 @@ int pb_daemon_run(const char *socket_path, int verbose_level)
         }
         if (!(p[0].revents & POLLIN)) continue;
         int fd;
+        errno = 0;
         while ((fd = accept4(lfd, NULL, NULL, SOCK_CLOEXEC)) >= 0) {      // everything that is waiting, not one per wake-up
-        struct ucred cred;
+        struct ucred cred = { .pid = 0, .uid = (uid_t)-1, .gid = (gid_t)-1 };
         socklen_t cl = sizeof cred;
-        if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &cl) != 0 || !uid_allowed(cred.uid)) {
-            dlog("refused a connection from user %u: not root and not a member of the group '%s'", (unsigned)cred.uid, GROUP_NAME);
+        if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &cl) != 0 || refused_recently(cred.uid) || !uid_allowed(cred.uid)) {
+            // This path is open to every local user, so it must stay cheap: no group lookup for a user refused a moment ago, one
+            // journal line per user per minute, and nothing written to the log that windows are shown.
+            note_refusal(cred.uid);
             pb_ipc_sendv(fd, "r", "0", "err", "not allowed: only root and members of the group 'proxybridge' may control ProxyBridge", (char *)NULL);
             close(fd);
             continue;
@@ -875,6 +1058,7 @@ int pb_daemon_run(const char *socket_path, int verbose_level)
         }
         pthread_attr_destroy(&at);
         }
+        if (errno == EMFILE || errno == ENFILE || errno == ENOMEM || errno == ENOBUFS) usleep(100000);    // out of descriptors: do not spin on a listener that stays readable
     }
 
     dlog("stopping");

@@ -399,7 +399,8 @@ static void give_to_invoker(const char *path) {
     if (!theirs) return;
     guint64 gid = st.st_gid;
     if (gid_s && *gid_s) { gid = g_ascii_strtoull(gid_s, &end, 10); if (!end || *end || gid > 0xFFFFFFFEull) gid = st.st_gid; }
-    if (chown(path, (uid_t)uid, (gid_t)gid) != 0) g_warning("could not hand %s to the invoking user: %s", path, g_strerror(errno));
+    // lchown: if the invoker swapped the file for a symlink in their own directory, it is the link that changes hands, not its target
+    if (lchown(path, (uid_t)uid, (gid_t)gid) != 0) g_warning("could not hand %s to the invoking user: %s", path, g_strerror(errno));
 }
 
 bool profile_export(const Profile *prof, const char *path, char *err, size_t errlen) {

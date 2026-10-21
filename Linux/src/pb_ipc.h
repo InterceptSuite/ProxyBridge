@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 #define PB_IPC_PROTOCOL   1
-#define PB_IPC_MAX_FRAME  (40u << 20)     // a .pbprofile may be 4 MiB; a list of flows or names is far smaller
+#define PB_IPC_MAX_FRAME  (8u << 20)      // a .pbprofile may be 4 MiB; a list of flows or names is far smaller
 #define PB_IPC_MAX_FIELDS 4096
 #define PB_IPC_SOCKET_DIR  "/run/proxybridge"
 #define PB_IPC_SOCKET_PATH "/run/proxybridge/ctl.sock"
@@ -32,6 +32,9 @@ void pb_msg_free(pb_msg *m);
 
 // Blocking. 0 = ok, -1 = connection closed or I/O error, -2 = the peer broke the format (the connection must be dropped).
 int pb_ipc_recv(int fd, pb_msg *m);
+// The same, but once the header of a frame has arrived the rest must follow within body_ms (a peer that announces a frame and never
+// sends it would otherwise hold a thread and its buffer for ever). Waiting for the header itself has no limit. -1 also on timeout.
+int pb_ipc_recv_timeout(int fd, pb_msg *m, int body_ms);
 // len may be NULL (every field is a C string). 0 or -1.
 int pb_ipc_send(int fd, unsigned n, const char *const *f, const size_t *len);
 // Convenience: the arguments are C strings, the list ends with NULL.

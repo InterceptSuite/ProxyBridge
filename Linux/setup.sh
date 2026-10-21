@@ -147,11 +147,16 @@ install_service() {
         groupadd --system proxybridge 2>/dev/null || groupadd -r proxybridge 2>/dev/null || addgroup --system proxybridge 2>/dev/null \
             || echo "WARNING: could not create the group 'proxybridge'; only root will be able to use the window"
     fi
+    # Membership of the group is administrative power over ProxyBridge: a member can route, block and read the proxy passwords of every
+    # user's traffic. The user who ran sudo is added (that is who just installed it); PB_NO_GROUP_USER=1 skips that.
     SERVICE_USER=""
-    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && id "$SUDO_USER" >/dev/null 2>&1 && getent group proxybridge >/dev/null 2>&1; then
-        if usermod -aG proxybridge "$SUDO_USER" 2>/dev/null || gpasswd -a "$SUDO_USER" proxybridge >/dev/null 2>&1 || adduser "$SUDO_USER" proxybridge >/dev/null 2>&1; then
+    if [ -n "${SUDO_USER:-}" ] && [ "${PB_NO_GROUP_USER:-0}" != 1 ] && [ "$SUDO_USER" != root ] && [ "$(id -u -- "$SUDO_USER" 2>/dev/null || echo 0)" != 0 ] \
+       && getent group proxybridge >/dev/null 2>&1; then
+        if usermod -aG proxybridge -- "$SUDO_USER" 2>/dev/null || gpasswd -a "$SUDO_USER" proxybridge >/dev/null 2>&1 || adduser "$SUDO_USER" proxybridge >/dev/null 2>&1; then
             SERVICE_USER="$SUDO_USER"
             echo "  $SUDO_USER may now use ProxyBridge without root (member of the group 'proxybridge')"
+            echo "  NOTE: members of that group can route, block and read the proxy passwords of every user's traffic."
+            echo "        Add only people you would give sudo for ProxyBridge (sudo usermod -aG proxybridge <user>); remove with: sudo gpasswd -d <user> proxybridge"
         else
             echo "WARNING: could not add $SUDO_USER to the group 'proxybridge'. Do it with: sudo usermod -aG proxybridge $SUDO_USER"
         fi
@@ -257,6 +262,7 @@ uninstall() {
         echo "  profiles and settings removed"
     else
         echo "  profiles kept in /etc/proxybridge (use --uninstall --purge to remove them)"
+        echo "  the group 'proxybridge' and its members were kept too (--purge removes the group)"
     fi
     echo "Done."
 }

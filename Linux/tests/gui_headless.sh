@@ -13,8 +13,12 @@ bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 has() { [[ "$2" == *"$3"* ]] && ok "$1" || bad "$1 (got: ${2:0:160})"; }
 cleanup() { kill $GUI_PID 2>/dev/null; wait $GUI_PID 2>/dev/null; kill $FAKE $DNSP $BW $WWW 2>/dev/null; wait 2>/dev/null;   # the client first: the display daemon aborts when its client vanishes
     ip addr del $DNSIP/32 dev lo 2>/dev/null; rm -rf "$WORK"; }
+GUI_PID=; FAKE=; DNSP=; BW=; WWW=
 trap cleanup EXIT
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
+# A window started as root talks to a running ProxyBridge service instead of loading its own engine, and this test would then change
+# the real service's profiles and routing.
+[ ! -S /run/proxybridge/ctl.sock ] || { echo "SKIP: a ProxyBridge service is running here (stop it first: sudo systemctl stop proxybridge)"; exit 0; }
 ip addr add $DNSIP/32 dev lo 2>/dev/null
 python3 "$HERE/fake_proxies.py" "$PLOG" >/dev/null 2>&1 & FAKE=$!
 python3 "$HERE/fake_dns.py" $DNSIP "$DLOG" >/dev/null 2>&1 & DNSP=$!

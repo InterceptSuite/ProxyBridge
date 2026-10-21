@@ -38,7 +38,8 @@ int main(void)
     g_free(err); err = NULL;
     t = boot_unit_text("/usr/local/bin/ProxyBridge", &err);
     CHECK(t && strstr(t, "LimitNOFILE=1048576") && strstr(t, "NoNewPrivileges=yes") && strstr(t, "ProtectSystem=strict") && strstr(t, "ProtectHome=yes") &&
-          strstr(t, "RuntimeDirectory=proxybridge") && strstr(t, "ReadWritePaths=/etc/proxybridge\n"));
+          strstr(t, "RuntimeDirectory=proxybridge") && strstr(t, "ReadWritePaths=/etc/proxybridge\n") &&
+          strstr(t, "CapabilityBoundingSet=CAP_BPF ") && strstr(t, "RestrictAddressFamilies=") && strstr(t, "MemoryDenyWriteExecute=yes") && strstr(t, "UMask=0077"));
     g_free(t);
 
     // only root-owned, root-writable-only paths may be started at boot

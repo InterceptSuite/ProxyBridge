@@ -1,6 +1,8 @@
 #include "pb_ipc.h"
 
 #include <errno.h>
+#include <poll.h>
+#include <time.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -109,7 +111,35 @@ static int write_full(int fd, const void *buf, size_t n)
     return 0;
 }
 
-int pb_ipc_recv(int fd, pb_msg *m)
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+// body_ms < 0: no limit
+static int read_full_by(int fd, void *buf, size_t n, int body_ms)
+{
+    if (body_ms < 0) return read_full(fd, buf, n);
+    int64_t end = now_ms() + body_ms;
+    unsigned char *p = buf;
+    while (n) {
+        int64_t left = end - now_ms();
+        if (left <= 0) return -1;
+        struct pollfd pf = { .fd = fd, .events = POLLIN };
+        int r = poll(&pf, 1, (int)left);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return -1;
+        ssize_t got = read(fd, p, n);
+        if (got > 0) { p += got; n -= (size_t)got; continue; }
+        if (got < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        return -1;
+    }
+    return 0;
+}
+
+int pb_ipc_recv_timeout(int fd, pb_msg *m, int body_ms)
 {
     memset(m, 0, sizeof *m);
     unsigned char hdr[4];
@@ -118,10 +148,15 @@ int pb_ipc_recv(int fd, pb_msg *m)
     if (l < 2 || l > PB_IPC_MAX_FRAME) return -2;
     unsigned char *buf = malloc(l);
     if (!buf) return -1;
-    if (read_full(fd, buf, l) != 0) { free(buf); return -1; }
+    if (read_full_by(fd, buf, l, body_ms) != 0) { free(buf); return -1; }
     int rc = pb_ipc_decode(buf, l, m);
     free(buf);
     return rc;
+}
+
+int pb_ipc_recv(int fd, pb_msg *m)
+{
+    return pb_ipc_recv_timeout(fd, m, -1);
 }
 
 int pb_ipc_send(int fd, unsigned n, const char *const *f, const size_t *len)
