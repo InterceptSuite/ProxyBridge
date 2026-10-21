@@ -479,54 +479,27 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
     gtk_widget_destroy(info.dialog);
 }
 
-typedef struct {
-    GtkWidget *dialog;
-    GtkWidget *tree;
-    GtkListStore *store;
-} ProfilesInfo;
-
 static void update_profile_ui() {
-    char *boot_err = NULL;
-    if (!boot_refresh(g_active_profile, &boot_err)) {              // the boot service runs the active profile
-        gui_log("could not update the boot service: %s", boot_err ? boot_err : "unknown error");
-        g_free(boot_err);
-    }
     char *title = g_strdup_printf("ProxyBridge - %s", g_active_profile);
     gtk_window_set_title(GTK_WINDOW(window), title);
     g_free(title);
     title = g_strdup_printf("Active profile: %s", g_active_profile);
     gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, title);
     g_free(title);
+    gui_refresh_profile_menu();                         // the checkmark in Profile > Switch follows the active profile
 }
 
 // engine keeps running, only its proxies and rules are replaced
 static void reapply_active_profile() {
+    ProxyBridge_BeginBatch();                  // the datapath sees the new profile all at once, never a half-built one
     ProxyBridge_ClearRules();
     apply_proxies_to_lib();
     apply_rules_to_lib();
+    ProxyBridge_EndBatch();
     gui_sync_switches();
     save_config();
     refresh_rules_window();
     update_profile_ui();
-}
-
-static void refresh_profile_store(ProfilesInfo *pi) {
-    gtk_list_store_clear(pi->store);
-    for (GList *l = g_profiles; l != NULL; l = l->next) {
-        Profile *p = (Profile *)l->data;
-        GtkTreeIter iter;
-        gtk_list_store_append(pi->store, &iter);
-        gtk_list_store_set(pi->store, &iter, 0, p->name, 1, strcmp(p->name, g_active_profile) == 0 ? "Active" : "", -1);
-    }
-}
-
-static char *selected_profile_name(ProfilesInfo *pi) {
-    GtkTreeModel *model;
-    GtkTreeIter iter;
-    char *name = NULL;
-    if (gtk_tree_selection_get_selected(gtk_tree_view_get_selection(GTK_TREE_VIEW(pi->tree)), &model, &iter))
-        gtk_tree_model_get(model, &iter, 0, &name, -1);
-    return name;
 }
 
 // NULL on cancel
@@ -557,77 +530,60 @@ static char *ask_profile_name(GtkWindow *parent, const char *title, const char *
     return result;
 }
 
-static void on_profile_switch(GtkWidget *widget, gpointer data) {
-    ProfilesInfo *pi = (ProfilesInfo *)data;
-    char *name = selected_profile_name(pi);
-    if (name && strcmp(name, g_active_profile) != 0 && profile_activate(name)) {
-        reapply_active_profile();
-        refresh_profile_store(pi);
-    }
-    g_free(name);
+// ---- the Profile menu: every item acts on the active profile, like in the Windows app ----
+
+static GtkWindow *profile_parent() { return GTK_WINDOW(window); }
+
+static void profile_switch_to(const char *name) {
+    if (name && strcmp(name, g_active_profile) != 0 && profile_activate(name)) reapply_active_profile();
 }
 
-static void on_profile_new(GtkWidget *widget, gpointer data) {
-    ProfilesInfo *pi = (ProfilesInfo *)data;
-    char *name = ask_profile_name(GTK_WINDOW(pi->dialog), "New Profile", "");
+// Profile > Switch > <name>
+void on_profile_switch_item(GtkWidget *item, gpointer data) {
+    if (!gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(item))) return;       // the item that just lost its check
+    profile_switch_to((const char *)data);
+}
+
+void on_profile_new(GtkWidget *widget, gpointer data) {
+    char *name = ask_profile_name(profile_parent(), "New Profile", "");
     if (name && profile_create(name, false)) {
+        profile_switch_to(name);                          // like the Windows app: the new profile is the active one
         save_config();
-        refresh_profile_store(pi);
     }
     g_free(name);
 }
 
-static void on_profile_duplicate(GtkWidget *widget, gpointer data) {
-    ProfilesInfo *pi = (ProfilesInfo *)data;
-    char *src = selected_profile_name(pi);
-    if (!src) return;
-    char *initial = g_strdup_printf("%s copy", src);
-    char *name = ask_profile_name(GTK_WINDOW(pi->dialog), "Duplicate Profile", initial);
-    char *prev = g_strdup(g_active_profile);
-    // copies the active profile, so make the source active for a moment (library state is untouched)
-    if (name && profile_activate(src)) {
-        profile_create(name, true);
-        profile_activate(prev);
+void on_profile_duplicate(GtkWidget *widget, gpointer data) {
+    char *initial = g_strdup_printf("%s copy", g_active_profile);
+    char *name = ask_profile_name(profile_parent(), "Duplicate Profile", initial);
+    if (name && profile_create(name, true)) {             // a copy of the active profile
+        profile_switch_to(name);
         save_config();
-        refresh_profile_store(pi);
     }
-    g_free(prev); g_free(initial); g_free(name); g_free(src);
+    g_free(initial);
+    g_free(name);
 }
 
-static void on_profile_rename(GtkWidget *widget, gpointer data) {
-    ProfilesInfo *pi = (ProfilesInfo *)data;
-    char *old = selected_profile_name(pi);
-    if (!old) return;
-    char *name = ask_profile_name(GTK_WINDOW(pi->dialog), "Rename Profile", old);
-    if (name && profile_rename(profile_find(old), name)) {
+void on_profile_rename(GtkWidget *widget, gpointer data) {
+    char *name = ask_profile_name(profile_parent(), "Rename Profile", g_active_profile);
+    if (name && profile_rename(profile_find(g_active_profile), name)) {
         save_config();
-        refresh_profile_store(pi);
         update_profile_ui();
     }
     g_free(name);
-    g_free(old);
 }
 
-static void on_profile_delete(GtkWidget *widget, gpointer data) {
-    ProfilesInfo *pi = (ProfilesInfo *)data;
-    char *name = selected_profile_name(pi);
-    if (!name) return;
-    if (!g_profiles->next) {
-        show_message(GTK_WINDOW(pi->dialog), GTK_MESSAGE_WARNING, "The last profile cannot be deleted.");
-    } else if (confirm(GTK_WINDOW(pi->dialog), "Delete profile '%s' with all its proxies and rules?", name)) {
-        bool was_active = strcmp(g_active_profile, name) == 0;
-        if (profile_delete(profile_find(name))) {
-            if (was_active) reapply_active_profile();
-            else save_config();
-            refresh_profile_store(pi);
-        }
+void on_profile_delete(GtkWidget *widget, gpointer data) {
+    if (!g_profiles || !g_profiles->next) {
+        show_message(profile_parent(), GTK_MESSAGE_WARNING, "The last profile cannot be deleted.");
+    } else if (confirm(profile_parent(), "Delete profile '%s' with all its proxies and rules?", g_active_profile)) {
+        // the active profile goes: another one becomes active
+        if (profile_delete(profile_find(g_active_profile))) reapply_active_profile();
     }
-    g_free(name);
 }
 
-static void on_profile_import(GtkWidget *widget, gpointer data) {
-    ProfilesInfo *pi = (ProfilesInfo *)data;
-    GtkWidget *dialog = gtk_file_chooser_dialog_new("Import Profile", GTK_WINDOW(pi->dialog), GTK_FILE_CHOOSER_ACTION_OPEN,
+void on_profile_import(GtkWidget *widget, gpointer data) {
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Import Profile", profile_parent(), GTK_FILE_CHOOSER_ACTION_OPEN,
                                                     "Cancel", GTK_RESPONSE_CANCEL, "Import", GTK_RESPONSE_ACCEPT, NULL);
     GtkFileFilter *filter = gtk_file_filter_new();
     gtk_file_filter_set_name(filter, "ProxyBridge profiles (*.pbprofile)");
@@ -642,86 +598,37 @@ static void on_profile_import(GtkWidget *widget, gpointer data) {
         char err[256];
         Profile *p = filename ? profile_import(filename, err, sizeof err) : NULL;
         if (p) {
+            char *name = g_strdup(p->name);
             save_config();
-            refresh_profile_store(pi);
-            show_message(GTK_WINDOW(pi->dialog), GTK_MESSAGE_INFO, "Imported as profile '%s'. Use Switch to activate it.", p->name);
+            profile_switch_to(name);                      // like the Windows app: the imported profile becomes the active one
+            gui_refresh_profile_menu();
+            g_free(name);
         } else {
-            show_message(GTK_WINDOW(pi->dialog), GTK_MESSAGE_ERROR, "Import failed: %s", filename ? err : "no file selected");
+            show_message(profile_parent(), GTK_MESSAGE_ERROR, "Import failed: %s", filename ? err : "no file selected");
         }
         g_free(filename);
     }
     gtk_widget_destroy(dialog);
 }
 
-static void on_profile_export(GtkWidget *widget, gpointer data) {
-    ProfilesInfo *pi = (ProfilesInfo *)data;
-    char *name = selected_profile_name(pi);
-    if (!name) return;
-    GtkWidget *dialog = gtk_file_chooser_dialog_new("Export Profile", GTK_WINDOW(pi->dialog), GTK_FILE_CHOOSER_ACTION_SAVE,
+void on_profile_export(GtkWidget *widget, gpointer data) {
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Export Profile", profile_parent(), GTK_FILE_CHOOSER_ACTION_SAVE,
                                                     "Cancel", GTK_RESPONSE_CANCEL, "Export", GTK_RESPONSE_ACCEPT, NULL);
     gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dialog), TRUE);
-    char *suggested = g_strdup_printf("%s.pbprofile", name);
+    char *suggested = g_strdup_printf("%s.pbprofile", g_active_profile);
     gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), suggested);
     g_free(suggested);
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
         char err[256];
-        if (filename && profile_export(profile_find(name), filename, err, sizeof err))
-            show_message(GTK_WINDOW(pi->dialog), GTK_MESSAGE_INFO,
-                         "Profile '%s' exported to %s.\nThe file contains your proxy credentials, so it is readable by you only.", name, filename);
+        if (filename && profile_export(profile_find(g_active_profile), filename, err, sizeof err))
+            show_message(profile_parent(), GTK_MESSAGE_INFO,
+                         "Profile '%s' exported to %s.\nThe file contains your proxy credentials, so it is readable by you only.", g_active_profile, filename);
         else
-            show_message(GTK_WINDOW(pi->dialog), GTK_MESSAGE_ERROR, "Export failed: %s", filename ? err : "no file selected");
+            show_message(profile_parent(), GTK_MESSAGE_ERROR, "Export failed: %s", filename ? err : "no file selected");
         g_free(filename);
     }
     gtk_widget_destroy(dialog);
-    g_free(name);
-}
-
-static void on_profile_row_activated(GtkTreeView *tree, GtkTreePath *path, GtkTreeViewColumn *col, gpointer data) {
-    on_profile_switch(NULL, data);
-}
-
-void on_profiles_clicked(GtkWidget *widget, gpointer data) {
-    ProfilesInfo pi = {0};
-    pi.dialog = gtk_dialog_new_with_buttons("Profiles", GTK_WINDOW(window), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
-                                            "Close", GTK_RESPONSE_CLOSE, NULL);
-    gtk_window_set_default_size(GTK_WINDOW(pi.dialog), 560, 360);
-    gtk_widget_set_name(pi.dialog, "dlg_profiles");
-    GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(pi.dialog));
-    gtk_container_set_border_width(GTK_CONTAINER(box), 10);
-
-    pi.store = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_STRING);
-    pi.tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(pi.store));
-    g_object_unref(pi.store);
-    const char *titles[] = {"Profile", "Status"};
-    for (int i = 0; i < 2; i++) {
-        GtkTreeViewColumn *c = gtk_tree_view_column_new_with_attributes(titles[i], gtk_cell_renderer_text_new(), "text", i, NULL);
-        gtk_tree_view_column_set_expand(c, i == 0);
-        gtk_tree_view_append_column(GTK_TREE_VIEW(pi.tree), c);
-    }
-    gtk_widget_set_name(pi.tree, "profile_tree");
-    g_signal_connect(pi.tree, "row-activated", G_CALLBACK(on_profile_row_activated), &pi);
-    GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
-    gtk_container_add(GTK_CONTAINER(scroll), pi.tree);
-    gtk_box_pack_start(GTK_BOX(box), scroll, TRUE, TRUE, 0);
-
-    GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    const char *labels[] = {"Switch", "New", "Duplicate", "Rename", "Delete", "Import...", "Export..."};
-    void (*cbs[])(GtkWidget *, gpointer) = {on_profile_switch, on_profile_new, on_profile_duplicate, on_profile_rename, on_profile_delete,
-                                            on_profile_import, on_profile_export};
-    const char *bnames[] = {"pf_switch", "pf_new", "pf_duplicate", "pf_rename", "pf_delete", "pf_import", "pf_export"};
-    for (int i = 0; i < 7; i++) {
-        GtkWidget *b = gtk_button_new_with_label(labels[i]);
-        gtk_widget_set_name(b, bnames[i]);
-        g_signal_connect(b, "clicked", G_CALLBACK(cbs[i]), &pi);
-        gtk_box_pack_start(GTK_BOX(btns), b, FALSE, FALSE, 0);
-    }
-    gtk_box_pack_start(GTK_BOX(box), btns, FALSE, FALSE, 5);
-
-    refresh_profile_store(&pi);
-    gtk_widget_show_all(pi.dialog);
-    gtk_dialog_run(GTK_DIALOG(pi.dialog));
-    gtk_widget_destroy(pi.dialog);
 }
 
 

@@ -168,26 +168,33 @@ int pb_dns_observe(const uint8_t *m, size_t len, struct pb_dns_result *res)
         strcpy(rr[nrr].owner, owner); rr[nrr].type = type; rr[nrr].rdlen = rdlen; rr[nrr].rdata = rd; nrr++;
         off = rd + rdlen;
     }
-    for (int i = 0; i < nrr; i++) {
-        char target[256];
-        if (rr[i].type == 5) {                                  // CNAME: owner and target are both names of the final address
+    // Only records that descend from the question count: the question names, the targets of CNAMEs owned by one of
+    // those names (chained), and A records owned by a name in that set. An answer section that also carries
+    // "other.example A 1.2.3.4" or an unrelated CNAME must not teach the engine anything about those names.
+    bool in_set[128] = { false };
+    for (int round = 0; round < 8; round++) {
+        bool grew = false;
+        for (int i = 0; i < nrr; i++) {
+            if (rr[i].type != 5 || in_set[i]) continue;
+            bool owner_known = false;
+            for (int k = 0; k < nn; k++) if (!strcmp(names[k], rr[i].owner)) owner_known = true;
+            if (!owner_known) continue;
+            in_set[i] = true;
+            char target[256];
             size_t o2 = rr[i].rdata;
-            if (read_name(m, len, &o2, target, sizeof target)) {
-                for (int pass = 0; pass < 2; pass++) {
-                    const char *nm = pass ? target : rr[i].owner;
-                    bool dup = false;
-                    for (int k = 0; k < nn; k++) if (!strcmp(names[k], nm)) dup = true;
-                    if (!dup && nn < PB_DNS_MAX_NAMES) strcpy(names[nn++], nm);
-                }
-            }
-        } else if (rr[i].type == 1 && rr[i].rdlen == 4) {
-            if (nips < 64) {
-                ips[nips++] = ((uint32_t)m[rr[i].rdata] << 24) | ((uint32_t)m[rr[i].rdata + 1] << 16) | ((uint32_t)m[rr[i].rdata + 2] << 8) | m[rr[i].rdata + 3];
-                bool dup = false;
-                for (int k = 0; k < nn; k++) if (!strcmp(names[k], rr[i].owner)) dup = true;
-                if (!dup && nn < PB_DNS_MAX_NAMES) strcpy(names[nn++], rr[i].owner);
-            }
+            if (!read_name(m, len, &o2, target, sizeof target)) continue;
+            bool dup = false;
+            for (int k = 0; k < nn; k++) if (!strcmp(names[k], target)) dup = true;
+            if (!dup && nn < PB_DNS_MAX_NAMES) { strcpy(names[nn++], target); grew = true; }
         }
+        if (!grew) break;
+    }
+    for (int i = 0; i < nrr; i++) {
+        if (rr[i].type != 1 || rr[i].rdlen != 4 || nips >= 64) continue;
+        bool owner_known = false;
+        for (int k = 0; k < nn; k++) if (!strcmp(names[k], rr[i].owner)) owner_known = true;
+        if (!owner_known) continue;                              // out of bailiwick
+        ips[nips++] = ((uint32_t)m[rr[i].rdata] << 24) | ((uint32_t)m[rr[i].rdata + 1] << 16) | ((uint32_t)m[rr[i].rdata + 2] << 8) | m[rr[i].rdata + 3];
     }
     if (!nips || !nn) return 0;
 

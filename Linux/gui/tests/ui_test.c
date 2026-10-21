@@ -201,29 +201,7 @@ static int model_rows(const char *tree_name) {
     return t ? gtk_tree_model_iter_n_children(gtk_tree_view_get_model(GTK_TREE_VIEW(t)), NULL) : -1;
 }
 
-static bool select_by_first_column(const char *tree_name, const char *text) {
-    GtkWidget *t = find_named(tree_name);
-    if (!t) return false;
-    GtkTreeModel *m = gtk_tree_view_get_model(GTK_TREE_VIEW(t));
-    GtkTreeIter it;
-    bool ok = gtk_tree_model_get_iter_first(m, &it);
-    while (ok) {
-        char *v = NULL;
-        gtk_tree_model_get(m, &it, 0, &v, -1);
-        bool hit = v && strcmp(v, text) == 0;
-        g_free(v);
-        if (hit) { gtk_tree_selection_select_iter(gtk_tree_view_get_selection(GTK_TREE_VIEW(t)), &it); return true; }
-        ok = gtk_tree_model_iter_next(m, &it);
-    }
-    return false;
-}
 
-static void show_profiles(const char *when) {
-    printf("    profiles %s:", when);
-    for (GList *l = g_profiles; l; l = l->next) printf(" [%s]", ((Profile *)l->data)->name);
-    printf("  active=%s\n", g_active_profile);
-    fflush(stdout);
-}
 
 // ---- the profile file on disk ---------------------------------------------------------------------------------------------
 static bool load_disk(const char *profile, struct pbp_profile *p) {
@@ -375,13 +353,44 @@ static RuleForm *rf(const char *name, const char *proc, const char *hosts, const
     return f;
 }
 
+// The single Action combo lists Direct, Block, then one entry per proxy.
+static int action_idx(int action, int proxy_idx) {
+    return action == RULE_ACTION_DIRECT ? 0 : action == RULE_ACTION_BLOCK ? 1 : 2 + (proxy_idx > 0 ? proxy_idx - 1 : 0);
+}
+
+static bool label_with_text(GtkWidget *w, const char *text) {
+    if (GTK_IS_LABEL(w) && strcmp(gtk_label_get_text(GTK_LABEL(w)), text) == 0) return true;
+    if (GTK_IS_CONTAINER(w)) {
+        GList *kids = gtk_container_get_children(GTK_CONTAINER(w));
+        bool found = false;
+        for (GList *l = kids; l && !found; l = l->next) found = label_with_text(l->data, text);
+        g_list_free(kids);
+        return found;
+    }
+    return false;
+}
+
+static int combo_count(GtkWidget *d, const char *name) {
+    GtkWidget *w = find_in(d, name);
+    return w ? gtk_tree_model_iter_n_children(gtk_combo_box_get_model(GTK_COMBO_BOX(w)), NULL) : -1;
+}
+
+static char *combo_text_at(GtkWidget *d, const char *name, int idx) {
+    GtkWidget *w = find_in(d, name);
+    GtkTreeIter it;
+    char *t = NULL;
+    GtkTreeModel *m = w ? gtk_combo_box_get_model(GTK_COMBO_BOX(w)) : NULL;
+    if (m && gtk_tree_model_iter_nth_child(m, &it, NULL, idx)) gtk_tree_model_get(m, &it, 0, &t, -1);
+    return t;
+}
+
 static void fill_rule(GtkWidget *d, gpointer arg) {
     RuleForm *f = arg;
     set_text(d, "rule_name", f->name); set_text(d, "rule_process", f->proc); set_text(d, "rule_hosts", f->hosts);
     set_text(d, "rule_ports", f->ports);
-    set_combo(d, "rule_proto", f->proto); set_combo(d, "rule_proxy", f->proxy_idx);
+    set_combo(d, "rule_proto", f->proto);
     set_check(d, "rule_localhost", f->localhost);
-    set_combo(d, "rule_action", f->action);                    // last: the localhost option follows the action
+    set_combo(d, "rule_action", action_idx(f->action, f->proxy_idx));   // last: the localhost option follows the action
 }
 
 static char *rule_error;
@@ -398,7 +407,7 @@ static void check_dialog_shows_web(GtkWidget *d, gpointer arg) {
     char *name = get_text(d, "rule_name"), *proc = get_text(d, "rule_process"), *ports = get_text(d, "rule_ports");
     CHECK_STR(name, "Web"); CHECK_STR(proc, "curl"); CHECK_STR(ports, "80;443");
     CHECK(get_check(d, "rule_localhost") && is_sensitive(d, "rule_localhost"));
-    CHECK(get_combo(d, "rule_proto") == RULE_PROTOCOL_TCP && get_combo(d, "rule_action") == RULE_ACTION_PROXY && get_combo(d, "rule_proxy") == 1);
+    CHECK(get_combo(d, "rule_proto") == RULE_PROTOCOL_TCP && get_combo(d, "rule_action") == 2);   // Direct, Block, Proxy: p1x
     g_free(name); g_free(proc); g_free(ports);
     set_text(d, "rule_name", "Web2");
     set_check(d, "rule_localhost", false);
@@ -406,18 +415,45 @@ static void check_dialog_shows_web(GtkWidget *d, gpointer arg) {
 
 static void check_localhost_follows_action(GtkWidget *d, gpointer arg) {
     RuleForm *f = arg;
-    set_combo(d, "rule_action", RULE_ACTION_PROXY);
-    CHECK(is_sensitive(d, "rule_localhost") && is_sensitive(d, "rule_proxy"));
-    set_combo(d, "rule_action", RULE_ACTION_DIRECT);
-    CHECK(!is_sensitive(d, "rule_localhost") && !is_sensitive(d, "rule_proxy"));
-    set_combo(d, "rule_action", RULE_ACTION_BLOCK);
+    set_combo(d, "rule_action", action_idx(RULE_ACTION_PROXY, 1));
+    CHECK(is_sensitive(d, "rule_localhost"));
+    set_combo(d, "rule_action", 0);
+    CHECK(!is_sensitive(d, "rule_localhost"));
+    set_combo(d, "rule_action", 1);
     CHECK(!is_sensitive(d, "rule_localhost"));
     fill_rule(d, f);
+}
+
+// a new rule: Direct, Block and the proxy; the default proxy is preselected
+static void check_new_rule_choices(GtkWidget *d, gpointer arg) {
+    (void)arg;
+    CHECK(combo_count(d, "rule_action") == 3);
+    char *t0 = combo_text_at(d, "rule_action", 0), *t1 = combo_text_at(d, "rule_action", 1), *t2 = combo_text_at(d, "rule_action", 2);
+    CHECK_STR(t0, "Direct"); CHECK_STR(t1, "Block"); CHECK_STR(t2, "Proxy: p1x");
+    g_free(t0); g_free(t1); g_free(t2);
+    CHECK(get_combo(d, "rule_action") == 2 && is_sensitive(d, "rule_localhost"));
+    CHECK(find_in(d, "rule_proxy") == NULL);                                  // there is no second combo any more
+}
+
+// no proxy configured: only Direct and Block
+static void check_no_proxy_choices(GtkWidget *d, gpointer arg) {
+    (void)arg;
+    CHECK(combo_count(d, "rule_action") == 2 && get_combo(d, "rule_action") == 0 && !is_sensitive(d, "rule_localhost"));
 }
 
 static void rules_scenario(void) {
     GtkWidget *win = find_named("win_rules");
     CHECK(win != NULL);
+    STEP("rule action choices");
+    arm("dlg_rule", check_new_rule_choices, NULL, GTK_RESPONSE_CANCEL);
+    click("rules_add");
+    {
+        GList *saved = g_proxies_list;
+        g_proxies_list = NULL;
+        arm("dlg_rule", check_no_proxy_choices, NULL, GTK_RESPONSE_CANCEL);
+        click("rules_add");
+        g_proxies_list = saved;
+    }
     STEP("rules window: add r1");
 
     arm("dlg_rule", fill_rule, rf("Web", "curl", "10.0.0.0/8;\nexample.com", "80;443", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, 1, true), GTK_RESPONSE_ACCEPT);
@@ -426,6 +462,7 @@ static void rules_scenario(void) {
     CHECK(g_list_length(g_rules_list) == 1 && r1 && r1->id != 0);
     CHECK(r1 && strcmp(r1->name, "Web") == 0 && strcmp(r1->process_name, "curl") == 0 && r1->localhost && r1->enabled);
     CHECK_STR(r1 ? r1->proxy_name : NULL, "p1x");
+    CHECK(label_with_text(win, "Proxy: p1x (+localhost)"));        // the list says which proxy the rule uses, like the Windows app
     CHECK_HAS(r1 ? r1->target_hosts : NULL, "example.com");
     CHECK(r1 && strchr(r1->target_hosts, '\n') == NULL);       // line breaks in the editor are only for reading
 
@@ -549,114 +586,164 @@ static void submit_refused(GtkWidget *d, gpointer arg) {
     arm("msg", msg_then_arm_cancel, NULL, GTK_RESPONSE_OK);
 }
 
-static void profiles_body(GtkWidget *dlg, gpointer arg) {
-    (void)arg;
-    STEP("profiles dialog open");
-    CHECK(model_rows("profile_tree") == 1);
+// Profile > Switch Profile > <name>. The submenu is rebuilt in an idle callback after every change, hence the pumps.
+static void switch_to_profile(const char *name) {
+    pump(150);
+    GtkWidget *sw = menu_item("Switch Profile");
+    CHECK(sw != NULL);
+    GtkWidget *sub = sw ? gtk_menu_item_get_submenu(GTK_MENU_ITEM(sw)) : NULL;
+    GtkWidget *hit = NULL;
+    GList *kids = sub ? gtk_container_get_children(GTK_CONTAINER(sub)) : NULL;
+    for (GList *k = kids; k; k = k->next)
+        if (strcmp(gtk_menu_item_get_label(GTK_MENU_ITEM(k->data)), name) == 0) hit = k->data;
+    g_list_free(kids);
+    CHECK(hit != NULL);
+    if (hit) gtk_menu_item_activate(GTK_MENU_ITEM(hit));
+    pump(150);
+}
+
+// the names in Profile > Switch Profile, in order, and which one is checked
+static char *switch_menu_text(void) {
+    pump(150);
+    GtkWidget *sw = menu_item("Switch Profile");
+    GtkWidget *sub = sw ? gtk_menu_item_get_submenu(GTK_MENU_ITEM(sw)) : NULL;
+    GString *out = g_string_new("");
+    GList *kids = sub ? gtk_container_get_children(GTK_CONTAINER(sub)) : NULL;
+    for (GList *k = kids; k; k = k->next)
+        g_string_append_printf(out, "%s%s;", gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(k->data)) ? "*" : "", gtk_menu_item_get_label(GTK_MENU_ITEM(k->data)));
+    g_list_free(kids);
+    return g_string_free(out, FALSE);
+}
+
+static void profiles_scenario(void) {
+    STEP("profile menu");
+    // like the Windows app: Profile is a menu of its own, and there is no list dialog any more
+    CHECK(menu_item("New Profile...") && menu_item("Duplicate Profile...") && menu_item("Rename Profile...") && menu_item("Delete Profile...") &&
+          menu_item("Import Profile...") && menu_item("Export Profile...") && menu_item("Switch Profile"));
+    CHECK(menu_item("Profiles...") == NULL);
+    char *shown = switch_menu_text();
+    CHECK_STR(shown, "*Default;");
+    g_free(shown);
 
     arm("dlg_profile_name", fill_name, (gpointer)"Work", GTK_RESPONSE_ACCEPT);
-    click("pf_new");
-    CHECK(profile_find("Work") && model_rows("profile_tree") == 2);
+    activate("New Profile...");
+    pump(150);
+    CHECK(profile_find("Work") != NULL);
+    CHECK_STR(g_active_profile, "Work");                      // a new profile becomes the active one at once
+    CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Work");
     struct pbp_profile disk;
     CHECK(load_disk("Work", &disk) && disk.nrules == 0 && disk.nproxies == 0);
     pbp_free(&disk);
+    shown = switch_menu_text();
+    CHECK_STR(shown, "Default;*Work;");                       // the check follows the active profile
+    g_free(shown);
 
     refused_name = "";
     arm("dlg_profile_name", submit_refused, NULL, GTK_RESPONSE_ACCEPT);
-    click("pf_new");
+    activate("New Profile...");
     CHECK_HAS(last_msg, "cannot be empty");
     refused_name = "Work";
     arm("dlg_profile_name", submit_refused, NULL, GTK_RESPONSE_ACCEPT);
-    click("pf_new");
+    activate("New Profile...");
     CHECK_HAS(last_msg, "already exists");
-    CHECK(model_rows("profile_tree") == 2);
-
-    STEP("duplicate");
-    // duplicate copies proxies, rules and switches
-    CHECK(select_by_first_column("profile_tree", "Default"));
-    arm("dlg_profile_name", fill_name, (gpointer)"Home", GTK_RESPONSE_ACCEPT);
-    click("pf_duplicate");
-    Profile *home = profile_find("Home");
-    CHECK(home && g_list_length(home->proxies) == 1 && g_list_length(home->rules) == 1);
-
-    // rename
-    CHECK(select_by_first_column("profile_tree", "Home"));
-    arm("dlg_profile_name", fill_name, (gpointer)"Office", GTK_RESPONSE_ACCEPT);
-    click("pf_rename");
-    CHECK(profile_find("Home") == NULL && profile_find("Office"));
-    struct pbp_profile d2;
-    CHECK(load_disk("Office", &d2));
-    pbp_free(&d2);
-    CHECK(!load_disk("Home", &d2));                              // the old file is gone
+    CHECK(g_list_length(g_profiles) == 2);
 
     STEP("switch");
     // switch: the window title, the engine's rules and the profile's own switches follow
-    GtkWidget *log_item = menu_item("Enable Traffic Logging"), *dns_item = menu_item("DNS via Proxy");
-    CHECK(log_item && dns_item);
+    switch_to_profile("Default");
+    CHECK_STR(g_active_profile, "Default");
+    GtkWidget *log_item = menu_item("Enable Traffic Logging");
+    CHECK(log_item && menu_item("DNS via Proxy") == NULL);     // DNS via proxy is a per-proxy option, not a menu switch
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_item), FALSE);        // Default: logging off
     CHECK(!g_chk_logging);
-    CHECK(select_by_first_column("profile_tree", "Work"));
-    click("pf_switch");
+    switch_to_profile("Work");
     CHECK_STR(g_active_profile, "Work");
     CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Work");
     CHECK(g_chk_logging && gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(log_item)));   // Work has its own, default-on switches
-    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_item), FALSE);                   // Work: DNS off
-    CHECK(select_by_first_column("profile_tree", "Default"));
-    click("pf_switch");
+    g_chk_dns = false; save_config();                                                       // Work: DNS routing off (profile field)
+    switch_to_profile("Default");
     CHECK_STR(g_active_profile, "Default");
-    CHECK(!gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(log_item)) && gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(dns_item)));
+    CHECK(!gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(log_item)) && g_chk_dns);
+    struct pbp_profile d2;
     CHECK(load_disk("Work", &d2) && !d2.dns_via_proxy && d2.logging);
     pbp_free(&d2);
+    switch_to_profile("Default");                              // choosing the active profile again changes nothing
+    CHECK_STR(g_active_profile, "Default");
+
+    STEP("duplicate");
+    // duplicate copies proxies, rules and switches of the active profile, and the copy becomes the active one
+    arm("dlg_profile_name", fill_name, (gpointer)"Home", GTK_RESPONSE_ACCEPT);
+    activate("Duplicate Profile...");
+    pump(150);
+    Profile *home = profile_find("Home");
+    CHECK(home && g_list_length(home->proxies) == 1 && g_list_length(home->rules) == 1);
+    CHECK_STR(g_active_profile, "Home");
+
+    // rename: the active profile
+    arm("dlg_profile_name", fill_name, (gpointer)"Office", GTK_RESPONSE_ACCEPT);
+    activate("Rename Profile...");
+    pump(150);
+    CHECK(profile_find("Home") == NULL && profile_find("Office"));
+    CHECK_STR(g_active_profile, "Office");
+    CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Office");
+    CHECK(load_disk("Office", &d2));
+    pbp_free(&d2);
+    CHECK(!load_disk("Home", &d2));                              // the old file is gone
+    shown = switch_menu_text();
+    CHECK_STR(shown, "Default;Work;*Office;");
+    g_free(shown);
 
     STEP("profile export / import");
-    // export and import through the file chooser
+    // export the active profile and import it again: the import becomes the active profile
     char *file = tmp_path("exported.pbprofile");
     unlink(file);
-    CHECK(select_by_first_column("profile_tree", "Office"));
     arm("chooser", choose_file, file, GTK_RESPONSE_ACCEPT);
     arm_msg(GTK_RESPONSE_OK);
-    click("pf_export");
+    activate("Export Profile...");
     CHECK_HAS(last_msg, "exported");
     struct stat st;
     CHECK(stat(file, &st) == 0 && (st.st_mode & 0777) == 0600);
     arm("chooser", choose_file, file, GTK_RESPONSE_ACCEPT);
-    arm_msg(GTK_RESPONSE_OK);
-    click("pf_import");
-    CHECK_HAS(last_msg, "Imported as profile");
+    activate("Import Profile...");
+    pump(150);
     CHECK(profile_find("Office (2)") != NULL);
+    CHECK_STR(g_active_profile, "Office (2)");
     char *junk = tmp_path("junk.pbprofile");
     g_file_set_contents(junk, "{ nope", -1, NULL);
     arm("chooser", choose_file, junk, GTK_RESPONSE_ACCEPT);
     arm_msg(GTK_RESPONSE_OK);
-    click("pf_import");
+    activate("Import Profile...");
     CHECK_HAS(last_msg, "Import failed");
+    CHECK_STR(g_active_profile, "Office (2)");
     g_free(file); g_free(junk);
 
     STEP("profile delete");
-    // delete: asks first; the last profile stays
-    CHECK(select_by_first_column("profile_tree", "Office (2)"));
-    show_profiles("before deleting");
+    // delete the active profile: asks first, another profile becomes active; the last profile stays
     arm_msg(GTK_RESPONSE_NO);
-    click("pf_delete");
+    activate("Delete Profile...");
     CHECK(profile_find("Office (2)") != NULL);
     arm_msg(GTK_RESPONSE_YES);
-    click("pf_delete");
+    activate("Delete Profile...");
+    pump(150);
     CHECK(profile_find("Office (2)") == NULL);
-    CHECK(select_by_first_column("profile_tree", "Office"));
+    CHECK(g_active_profile && profile_find(g_active_profile) != NULL);          // an existing profile is active
+    switch_to_profile("Office");
     arm_msg(GTK_RESPONSE_YES);
-    click("pf_delete");
-    show_profiles("after deleting Office");
-    CHECK(select_by_first_column("profile_tree", "Work"));
+    activate("Delete Profile...");
+    pump(150);
+    switch_to_profile("Work");
     arm_msg(GTK_RESPONSE_YES);
-    click("pf_delete");
-    show_profiles("after deleting Work");
+    activate("Delete Profile...");
+    pump(150);
     CHECK(g_list_length(g_profiles) == 1);
-    CHECK(select_by_first_column("profile_tree", "Default"));
+    CHECK_STR(g_active_profile, "Default");
+    shown = switch_menu_text();
+    CHECK_STR(shown, "*Default;");
+    g_free(shown);
     arm_msg(GTK_RESPONSE_OK);
-    click("pf_delete");
+    activate("Delete Profile...");
     CHECK_HAS(last_msg, "last profile");
     CHECK(profile_find("Default") != NULL);
-    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
 }
 
 
@@ -679,9 +766,76 @@ static void feed_case(const char *name, const char *content, int first_response,
     g_free(last_msg); last_msg = NULL;
     if (second_ok) arm("msg", msg_then_ok, NULL, first_response);
     else arm_msg(first_response);
-    activate("Check for Updates");
+    activate("Check for Updates...");
     CHECK_HAS(second_ok ? first_msg : last_msg, want);
     g_free(path); g_free(url);
+}
+
+static GtkWidget *find_menubar(GtkWidget *w) {
+    if (GTK_IS_MENU_BAR(w)) return w;
+    if (!GTK_IS_CONTAINER(w)) return NULL;
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(w));
+    GtkWidget *hit = NULL;
+    for (GList *k = kids; k && !hit; k = k->next) hit = find_menubar(k->data);
+    g_list_free(kids);
+    return hit;
+}
+
+// labels of a menu's items joined with ";" (separators as "-"), or of the menu bar's menus
+static char *menu_labels(GtkWidget *shell) {
+    GString *out = g_string_new("");
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(shell));
+    for (GList *k = kids; k; k = k->next) {
+        if (GTK_IS_SEPARATOR_MENU_ITEM(k->data)) g_string_append(out, "-;");
+        else g_string_append_printf(out, "%s;", gtk_menu_item_get_label(GTK_MENU_ITEM(k->data)));
+    }
+    g_list_free(kids);
+    return g_string_free(out, FALSE);
+}
+
+static char *submenu_labels(const char *top) {
+    GtkWidget *bar = find_menubar(window);
+    char *res = NULL;
+    GList *kids = bar ? gtk_container_get_children(GTK_CONTAINER(bar)) : NULL;
+    for (GList *k = kids; k && !res; k = k->next)
+        if (strcmp(gtk_menu_item_get_label(GTK_MENU_ITEM(k->data)), top) == 0)
+            res = menu_labels(gtk_menu_item_get_submenu(GTK_MENU_ITEM(k->data)));
+    g_list_free(kids);
+    return res ? res : g_strdup("(missing)");
+}
+
+// the menu bar is laid out like the Windows app's: Proxy, Profile, Settings, Help
+static void menus_scenario(void) {
+    STEP("menu bar");
+    GtkWidget *bar = find_menubar(window);
+    CHECK(bar != NULL);
+    char *top = bar ? menu_labels(bar) : g_strdup("");
+    CHECK_STR(top, "Proxy;Profile;Settings;Help;");
+    g_free(top);
+    char *m = submenu_labels("Proxy");
+    CHECK_STR(m, "Enable ProxyBridge;Start Engine;Stop Engine;-;Proxy Settings...;Proxy Rules...;Log Filters...;-;Exit;");
+    g_free(m);
+    m = submenu_labels("Profile");
+    CHECK_STR(m, "New Profile...;Duplicate Profile...;Rename Profile...;Delete Profile...;-;Import Profile...;Export Profile...;-;Switch Profile;");
+    g_free(m);
+    m = submenu_labels("Settings");
+    CHECK_STR(m, "Enable Traffic Logging;Start at Boot (systemd service);Auto-clear Logs;Log Every Connection;Check for Updates on Startup;-;Zoom In;Zoom Out;Reset Zoom;");
+    g_free(m);
+    m = submenu_labels("Help");
+    CHECK_STR(m, "Documentation;Check for Updates...;-;About;");
+    g_free(m);
+
+    // Help > Documentation opens the same page as the Windows app (the test build records the address instead of starting a browser)
+    char *log = tmp_path("opened_urls.txt");
+    unlink(log);
+    setenv("PB_OPEN_URL_LOG", log, 1);
+    activate("Documentation");
+    char *seen = NULL;
+    CHECK(g_file_get_contents(log, &seen, NULL, NULL));
+    CHECK_STR(seen, "https://proxybridge.interceptsuite.com/docs/\n");
+    g_free(seen);
+    g_free(log);
+    unsetenv("PB_OPEN_URL_LOG");
 }
 
 static void updates_scenario(void) {
@@ -689,7 +843,8 @@ static void updates_scenario(void) {
     feed_case("feed_missing.json", NULL, GTK_RESPONSE_OK, "Update check failed", false);
     feed_case("feed_empty.json", "", GTK_RESPONSE_OK, "Update check failed", false);
     feed_case("feed_nolinux.json", "{\"windows\": {\"version\": \"9.0.0\"}}", GTK_RESPONSE_OK, "Could not parse linux update info", false);
-    feed_case("feed_noversion.json", "{\"linux\": {\"download\": \"https://example.test/d\"}}", GTK_RESPONSE_OK, "Could not parse version info", false);
+    feed_case("feed_noversion.json", "{\"linux\": {\"download\": \"https://example.test/d\"}}", GTK_RESPONSE_OK, "Could not parse", false);
+    feed_case("feed_escape.json", "{\"linux\": {\"version\": \"9.9.9\\u001b[31m\"}}", GTK_RESPONSE_OK, "Could not parse", false);   // remote text never reaches a dialog raw
     feed_case("feed_same.json", "{\"linux\": {\"version\": \"" PROXYBRIDGE_VERSION "\"}}", GTK_RESPONSE_OK, "latest version", false);
     feed_case("feed_beta_suffix.json", "{\"linux\": {\"version\": \"4.0.0\"}}", GTK_RESPONSE_OK, "latest version", false);
     feed_case("feed_older.json", "{\"linux\": {\"version\": \"3.2.0\"}}", GTK_RESPONSE_OK, "latest version", false);
@@ -698,6 +853,25 @@ static void updates_scenario(void) {
     feed_case("feed_patch.json", "{\"linux\": {\"version\": \"4.0.1\", \"download\": \"https://example.test/d\"}}", GTK_RESPONSE_CANCEL, "Version 4.0.1 is available", false);
     // a feed must never make the program open anything but an https page
     feed_case("feed_unsafe.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"http://insecure.test/x\", \"release_notes\": \"javascript:alert(1)\"}}",
+              GTK_RESPONSE_ACCEPT, "Version 9.9.9 is available", true);
+    CHECK_HAS(last_msg, "No safe https url");
+    // a feed that points at the project's release page: "Open in Browser" opens exactly that page
+    {
+        char *log = tmp_path("opened_release.txt");
+        unlink(log);
+        setenv("PB_OPEN_URL_LOG", log, 1);
+        feed_case("feed_project.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"https://github.com/InterceptSuite/ProxyBridge/releases/download/v9.9.9/x.tar.gz\", \"release_notes\": \"https://github.com/InterceptSuite/ProxyBridge/releases/tag/v9.9.9\"}}",
+                  GTK_RESPONSE_ACCEPT, "Version 9.9.9 is available", false);
+        pump(100);
+        char *seen = NULL;
+        CHECK(g_file_get_contents(log, &seen, NULL, NULL));
+        CHECK_STR(seen, "https://github.com/InterceptSuite/ProxyBridge/releases/tag/v9.9.9\n");
+        g_free(seen);
+        g_free(log);
+        unsetenv("PB_OPEN_URL_LOG");
+    }
+    // ...and, since the browser runs as root, only the project's own pages: a feed pointing elsewhere is not opened
+    feed_case("feed_foreign.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"https://evil.example/x\", \"release_notes\": \"https://evil.example/n\"}}",
               GTK_RESPONSE_ACCEPT, "Version 9.9.9 is available", true);
     CHECK_HAS(last_msg, "No safe https url");
     unsetenv("PB_UPDATE_FEED");
@@ -848,6 +1022,7 @@ static void zoom_scenario(void)
     gui_set_zoom(130);
     CHECK(profile_create("Zoomed", false) != NULL);
     CHECK(profile_activate("Zoomed"));
+    gui_refresh_profile_menu();                                  // (the menu items do this themselves; here the engine calls are used directly)
     gui_sync_switches();
     CHECK(g_zoom == 100 && strstr(gui_zoom_css(), "100%") != NULL);
     gui_set_zoom(180);
@@ -1055,15 +1230,34 @@ static void make_fake_systemctl(const char *path, const char *log)
     g_free(script);
 }
 
-static void switch_to(GtkWidget *dlg, gpointer arg)
+// With the service, Start at Boot is a setting the service keeps in settings.json: it applies the active profile when it starts and
+// keeps routing after the window closes. The unit itself is installed (and enabled) by the installer.
+static bool settings_boot_flag(void)
 {
-    select_by_first_column("profile_tree", arg);
-    click("pf_switch");
-    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
+    char *p = g_build_filename(getenv("PROXYBRIDGE_CONFIG_DIR"), "settings.json", NULL), *text = NULL;
+    bool on = g_file_get_contents(p, &text, NULL, NULL) && strstr(text, "\"StartAtBoot\": true");
+    g_free(text); g_free(p);
+    return on;
+}
+
+static void boot_service_scenario(void)
+{
+    STEP("start at boot (through the service)");
+    GtkWidget *item = menu_item("Start at Boot (systemd service)");
+    CHECK(item != NULL && !gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(item)) && !settings_boot_flag());
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+    CHECK(g_chk_boot && settings_boot_flag());
+    CHECK_STR(g_active_profile, g_active_profile);            // the active profile is kept in the same file
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), FALSE);
+    CHECK(!g_chk_boot && !settings_boot_flag());
+    switch_to_profile("Zoomed");
+    switch_to_profile("Default");
+    CHECK(!settings_boot_flag());                              // switching profiles does not touch it
 }
 
 static void boot_scenario(void)
 {
+    if (pbc_is_service()) { boot_service_scenario(); return; }
     STEP("start at boot");
     char *units = tmp_path("units"), *fake = tmp_path("systemctl"), *calls = tmp_path("systemctl.log");
     g_mkdir_with_parents(units, 0755);
@@ -1078,25 +1272,23 @@ static void boot_scenario(void)
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
     char *text = NULL;
     CHECK(g_file_get_contents(unit, &text, NULL, NULL));
-    CHECK_HAS(text, "ExecStart=\"/usr/local/bin/ProxyBridge\" --profile \"Default\"");
+    // the unit runs the service; which profile it starts is the one the window saved as active (settings.json), so the unit itself
+    // never changes when profiles are switched
+    CHECK_HAS(text, "ExecStart=\"/usr/local/bin/ProxyBridge\" --daemon\n");
+    CHECK(!strstr(text, "--profile") && strstr(text, "LimitNOFILE=1048576") && strstr(text, "NoNewPrivileges=yes") && strstr(text, "RuntimeDirectory=proxybridge"));
     g_free(text);
     char *log = NULL;
     g_file_get_contents(calls, &log, NULL, NULL);
     CHECK_HAS(log, "enable proxybridge.service");
     g_free(log);
 
-    // another active profile is what the service runs after the next boot
-    arm("dlg_profiles", switch_to, (gpointer)"Zoomed", 0);
-    activate("Profiles...");
+    char *before = NULL, *after = NULL;
+    CHECK(g_file_get_contents(unit, &before, NULL, NULL));
+    switch_to_profile("Zoomed");
     CHECK_STR(g_active_profile, "Zoomed");
-    CHECK(g_file_get_contents(unit, &text, NULL, NULL));
-    CHECK_HAS(text, "--profile \"Zoomed\"");
-    g_free(text);
-    arm("dlg_profiles", switch_to, (gpointer)"Default", 0);
-    activate("Profiles...");
-    CHECK(g_file_get_contents(unit, &text, NULL, NULL));
-    CHECK_HAS(text, "--profile \"Default\"");
-    g_free(text);
+    switch_to_profile("Default");
+    CHECK(g_file_get_contents(unit, &after, NULL, NULL) && strcmp(before, after) == 0);
+    g_free(before); g_free(after);
 
     gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), FALSE);
     CHECK(!g_file_test(unit, G_FILE_TEST_EXISTS));
@@ -1178,10 +1370,193 @@ static void startup_update_scenario(void)
 }
 
 // ================================================================================================================================
+// Documentation screenshots: only with PB_SCREENSHOT_DIR set (tests/gui_shots.sh). A demo profile is built through the real
+// dialogs and every window is rendered to a PNG, so the pictures in the documentation are the program's own.
+// ================================================================================================================================
+static const char *shot_dir;
+
+// renders a widget to <dir>/<name>.png; a window gets a plain title bar (Broadway has no window manager to draw one)
+static void snap_titled(GtkWidget *w, const char *name, const char *title) {
+    if (!shot_dir || !w) return;
+    pump(400);
+    int width = gtk_widget_get_allocated_width(w), height = gtk_widget_get_allocated_height(w);
+    int bar = title ? 34 : 0;
+    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height + bar);
+    cairo_t *cr = cairo_create(surf);
+    if (title) {
+        cairo_set_source_rgb(cr, 0.90, 0.89, 0.88);
+        cairo_rectangle(cr, 0, 0, width, bar);
+        cairo_fill(cr);
+        cairo_set_source_rgb(cr, 0.80, 0.79, 0.78);
+        cairo_rectangle(cr, 0, bar - 1, width, 1);
+        cairo_fill(cr);
+        cairo_set_source_rgb(cr, 0.15, 0.15, 0.15);
+        cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, 14);
+        cairo_text_extents_t te;
+        cairo_text_extents(cr, title, &te);
+        cairo_move_to(cr, (width - te.width) / 2, 22);
+        cairo_show_text(cr, title);
+        cairo_translate(cr, 0, bar);
+    }
+    gtk_widget_draw(w, cr);
+    char *path = g_strdup_printf("%s/%s.png", shot_dir, name);
+    cairo_status_t st = cairo_surface_write_to_png(surf, path);
+    printf("  screenshot %s (%dx%d)%s\n", path, width, height + bar, st == CAIRO_STATUS_SUCCESS ? "" : "  FAILED");
+    g_free(path);
+    cairo_destroy(cr);
+    cairo_surface_destroy(surf);
+}
+
+// Broadway draws the window decorations itself, so a window is captured as it is
+static void snap(GtkWidget *w, const char *name) {
+    snap_titled(w, name, NULL);
+}
+
+static GtkWidget *find_notebook(GtkWidget *w) {
+    if (GTK_IS_NOTEBOOK(w)) return w;
+    if (!GTK_IS_CONTAINER(w)) return NULL;
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(w));
+    GtkWidget *hit = NULL;
+    for (GList *k = kids; k && !hit; k = k->next) hit = find_notebook(k->data);
+    g_list_free(kids);
+    return hit;
+}
+
+typedef struct { void *form; const char *shot; } ShotForm;
+static void fill_px_shot(GtkWidget *d, gpointer arg) { ShotForm *s = arg; fill_px(d, s->form); if (s->shot) snap(d, s->shot); }
+static void fill_rule_shot(GtkWidget *d, gpointer arg) { ShotForm *s = arg; fill_rule(d, s->form); if (s->shot) snap(d, s->shot); }
+static void fill_flt_shot(GtkWidget *d, gpointer arg) { ShotForm *s = arg; fill_flt(d, s->form); if (s->shot) snap(d, s->shot); }
+static ShotForm *shot_form(void *form, const char *shot) { ShotForm *s = g_malloc0(sizeof *s); s->form = form; s->shot = shot; return s; }
+
+static void shots_proxies_body(GtkWidget *dlg, gpointer arg) {
+    (void)arg;
+    arm("dlg_proxy", fill_px_shot, shot_form(px("Corporate SOCKS5", 1, "proxy.corp.example.com", "1080", "alice", "s3cret", true), "proxy-editor"), GTK_RESPONSE_ACCEPT);
+    click("px_add");
+    arm("dlg_proxy", fill_px_shot, shot_form(px("Burp Suite", 0, "127.0.0.1", "8080", "", "", true), NULL), GTK_RESPONSE_ACCEPT);
+    click("px_add");
+    arm("dlg_proxy", fill_px_shot, shot_form(px("Tor", 1, "127.0.0.1", "9050", "", "", true), NULL), GTK_RESPONSE_ACCEPT);
+    click("px_add");
+    arm("dlg_proxy", fill_px_shot, shot_form(px("Local SOCKS5", 1, "127.0.0.1", "19080", "", "", true), NULL), GTK_RESPONSE_ACCEPT);
+    click("px_add");
+    select_row("proxy_tree", 3);                                 // Local SOCKS5 answers the test
+    set_text(dlg, "px_test_host", "example.com");
+    set_text(dlg, "px_test_port", "80");
+    click("px_test");
+    for (int i = 0; i < 80; i++) {
+        char *out = buffer_of("px_test_output");
+        bool done = strstr(out, "Result:") != NULL;
+        g_free(out);
+        if (done) break;
+        pump(150);
+    }
+    GtkWidget *out_view = find_named("px_test_output");
+    if (out_view) {                                              // show the end of the report
+        GtkTextBuffer *tb = gtk_text_view_get_buffer(GTK_TEXT_VIEW(out_view));
+        GtkTextIter end;
+        gtk_text_buffer_get_end_iter(tb, &end);
+        gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(out_view), &end, 0.0, FALSE, 0, 0);
+        pump(300);
+    }
+    snap(dlg, "proxy-settings");
+    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
+}
+
+static void shots_filters_body(GtkWidget *dlg, gpointer arg) {
+    (void)arg;
+    arm("dlg_filter", fill_flt_shot, shot_form(ff("Exclude", "systemd-resolved", "", "", "All", "All"), "log-filter-editor"), GTK_RESPONSE_ACCEPT);
+    click("flt_add");
+    arm("dlg_filter", fill_flt_shot, shot_form(ff("Include", "firefox*", "", "443", "TCP", "Proxy"), NULL), GTK_RESPONSE_ACCEPT);
+    click("flt_add");
+    snap(dlg, "log-filters");
+    gtk_dialog_response(GTK_DIALOG(dlg), GTK_RESPONSE_CLOSE);
+}
+
+static void shots_scenario(void) {
+    shot_dir = getenv("PB_SCREENSHOT_DIR");
+    if (!shot_dir || !*shot_dir) return;
+    printf("== documentation screenshots\n");
+    g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", FALSE, NULL);    // the documentation is light
+    gtk_window_resize(GTK_WINDOW(window), 1000, 600);
+
+    // a clean demo profile with proxies and rules made through the dialogs
+    arm("dlg_profile_name", fill_name, (gpointer)"Pentest lab", GTK_RESPONSE_ACCEPT);
+    activate("New Profile...");
+    pump(300);
+    arm("dlg_proxies", shots_proxies_body, NULL, 0);
+    activate("Proxy Settings...");
+    pump(300);
+
+    activate("Proxy Rules...");
+    pump(300);
+    // proxies are listed in the order they were added: 1 Corporate SOCKS5, 2 Burp Suite, 3 Tor, 4 Local SOCKS5
+    arm("dlg_rule", fill_rule_shot, shot_form(rf("Browsers through Burp", "firefox;chromium;google-chrome", "*", "80;443", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, 2, false), "rule-editor"), GTK_RESPONSE_ACCEPT);
+    click("rules_add");
+    arm("dlg_rule", fill_rule_shot, shot_form(rf("Company network", "*", "10.0.0.0/8;*.corp.example.com", "*", RULE_PROTOCOL_BOTH, RULE_ACTION_PROXY, 1, false), "rule-editor-domains"), GTK_RESPONSE_ACCEPT);
+    click("rules_add");
+    arm("dlg_rule", fill_rule_shot, shot_form(rf("curl and wget through Tor", "curl;wget", "*", "*", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, 3, false), NULL), GTK_RESPONSE_ACCEPT);
+    click("rules_add");
+    arm("dlg_rule", fill_rule_shot, shot_form(rf("Block telemetry", "telemetry*", "*", "*", RULE_PROTOCOL_BOTH, RULE_ACTION_BLOCK, 0, false), NULL), GTK_RESPONSE_ACCEPT);
+    click("rules_add");
+    arm("dlg_rule", fill_rule_shot, shot_form(rf("Keep git and ssh direct", "ssh;git", "*", "22;9418", RULE_PROTOCOL_TCP, RULE_ACTION_DIRECT, 0, false), NULL), GTK_RESPONSE_ACCEPT);
+    click("rules_add");
+    pump(500);
+    snap(find_named("win_rules"), "rules-window");
+    gtk_widget_destroy(find_named("win_rules"));
+    pump(300);
+
+    GtkWidget *nb = find_notebook(window);
+    // Live Connections: connections that really go through the proxy
+    char err[256] = "";
+    ProxyData *lab = proxy_named("Local SOCKS5");
+    uint32_t live_rule = lab ? ProxyBridge_AddRule("python3*", "192.0.2.40-192.0.2.60", "80", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY, lab->id, err, sizeof err) : 0;
+    if (live_rule) {
+        g_spawn_command_line_async("python3 -c \"import socket,time; a=socket.create_connection(('192.0.2.40',80)); b=socket.create_connection(('192.0.2.41',80)); a.sendall(b'x'*40000); time.sleep(40)\"", NULL);
+        if (nb) gtk_notebook_set_current_page(GTK_NOTEBOOK(nb), 2);
+        pump(3500);
+        snap(window, "live-connections");
+        ProxyBridge_DeleteRule(live_rule);
+    }
+
+    // the main window: connection lines like the engine reports them. Traffic logging is switched off and the logs cleared first,
+    // so that the real traffic of this machine does not mix with the demo lines
+    ProxyBridge_SetTrafficLoggingEnabled(false);                 // the engine stays up, it just reports nothing
+    pump(800);
+    click("conn_clear");
+    click("log_clear");
+    pump(300);
+    lib_connection_callback_ex("firefox", 21408, "104.18.32.47 (example.com)", 443, "TCP", "HTTP 127.0.0.1:8080");
+    lib_connection_callback_ex("firefox", 21408, "151.101.1.69 (static.example.org)", 443, "TCP", "HTTP 127.0.0.1:8080");
+    lib_connection_callback_ex("curl", 22117, "93.184.216.34 (example.com)", 80, "TCP", "SOCKS5 127.0.0.1:9050");
+    lib_connection_callback_ex("curl", 22140, "140.82.112.3 (github.com)", 443, "TCP", "SOCKS5 127.0.0.1:9050");
+    lib_connection_callback_ex("chromium", 20977, "10.12.4.20 (intranet.corp.example.com)", 443, "TCP", "SOCKS5 proxy.corp.example.com:1080");
+    lib_connection_callback_ex("chromium", 20977, "142.250.74.14", 443, "UDP", "SOCKS5 proxy.corp.example.com:1080");
+    lib_connection_callback_ex("git", 22301, "140.82.112.3 (github.com)", 22, "TCP", "DIRECT");
+    lib_connection_callback_ex("telemetry-agent", 1984, "198.51.100.23 (metrics.vendor.example)", 443, "TCP", "BLOCK");
+    lib_connection_callback_ex("ssh", 22290, "192.168.1.20", 22, "TCP", "DIRECT");
+    gui_log("Rule 'Browsers through Burp' loaded");
+    gui_log("Proxy 'Local SOCKS5' reachable");
+    pump(1500);
+    if (nb) gtk_notebook_set_current_page(GTK_NOTEBOOK(nb), 0);
+    snap(window, "connections");
+    if (nb) gtk_notebook_set_current_page(GTK_NOTEBOOK(nb), 1);
+    pump(300);
+    snap(window, "activity-log");
+
+    arm("dlg_filters", shots_filters_body, NULL, 0);
+    activate("Log Filters...");
+    pump(300);
+
+    printf("  screenshots written to %s\n", shot_dir);
+}
+
+// ================================================================================================================================
 static void ui_main(void) {
     pump(300);
     CHECK_HAS(gtk_window_get_title(GTK_WINDOW(window)), "ProxyBridge - Default");
-    CHECK(menu_item("Proxy Settings...") && menu_item("Proxy Rules...") && menu_item("Profiles..."));
+    CHECK(menu_item("Proxy Settings...") && menu_item("Proxy Rules..."));
+
+    menus_scenario();
 
     printf("== proxy settings\n");
     arm("dlg_proxies", proxies_body, NULL, 0);
@@ -1197,8 +1572,7 @@ static void ui_main(void) {
     rules_scenario();
 
     printf("== profiles\n");
-    arm("dlg_profiles", profiles_body, NULL, 0);
-    activate("Profiles...");
+    profiles_scenario();
 
     printf("== update check\n");
     updates_scenario();
@@ -1236,6 +1610,8 @@ static void ui_main(void) {
     CHECK_STR(g_active_profile, "Default");
     CHECK(g_list_length(g_profiles) == 1 && g_list_length(g_proxies_list) == 1 && g_list_length(g_rules_list) == 1);
     CHECK(strcmp(((RuleData *)g_rules_list->data)->name, "Keep") == 0);
+
+    shots_scenario();                                            // only with PB_SCREENSHOT_DIR
 
     printf("ui_test: %d checks, %d failed\n", checks, fails);
 }

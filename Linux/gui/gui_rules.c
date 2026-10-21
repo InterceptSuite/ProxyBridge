@@ -100,8 +100,20 @@ static void on_browse_clicked(GtkWidget *widget, gpointer data) {
     gtk_widget_destroy(dialog);
 }
 
+// The Action combo lists: 0 Direct, 1 Block, then one entry per proxy (g_proxies_list order). A rule whose proxy no longer
+// exists (or a PROXY rule in a profile without any proxy) gets one extra entry at the end that keeps it as it is.
+enum { ACT_DIRECT_IDX = 0, ACT_BLOCK_IDX = 1, ACT_FIRST_PROXY_IDX = 2 };
+
 static void on_action_changed(GtkComboBox *combo, gpointer data) {
-    gtk_widget_set_sensitive(GTK_WIDGET(data), gtk_combo_box_get_active(combo) == RULE_ACTION_PROXY);
+    gtk_widget_set_sensitive(GTK_WIDGET(data), gtk_combo_box_get_active(combo) >= ACT_FIRST_PROXY_IDX);
+}
+
+// the proxy a PROXY rule uses: the one it names, else the profile's default proxy
+static ProxyData *rule_effective_proxy(const RuleData *r) {
+    ProxyData *p = r->proxy_name && *r->proxy_name ? find_proxy_by_name(r->proxy_name) : NULL;
+    if (!p && (!r->proxy_name || !*r->proxy_name)) p = find_proxy_by_name(g_default_proxy);
+    if (!p && (!r->proxy_name || !*r->proxy_name) && g_proxies_list) p = g_proxies_list->data;
+    return p;
 }
 
 static void set_str(char **dst, const char *src) {
@@ -173,18 +185,29 @@ static void open_rule_dialog(RuleData *rule) {
     gtk_container_add(GTK_CONTAINER(host_entry), host_view);
     GtkWidget *port_entry = gtk_entry_new();
     GtkWidget *proto_combo = combo_new("TCP", "UDP", "BOTH", NULL);
-    GtkWidget *action_combo = combo_new("PROXY", "DIRECT", "BLOCK", NULL);
-
-    // entry 0 = default proxy, then one per proxy in g_proxies_list order
-    GtkWidget *proxy_combo = combo_new("Default proxy", NULL);
-    int proxy_sel = 0, pi = 1;
-    for (GList *l = g_proxies_list; l != NULL; l = l->next, pi++) {
-        ProxyData *p = (ProxyData *)l->data;
-        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(proxy_combo), p->name);
-        if (rule && rule->proxy_name && strcmp(rule->proxy_name, p->name) == 0) proxy_sel = pi;
+    GtkWidget *action_combo = combo_new("Direct", "Block", NULL);
+    int nproxies = 0, action_sel = ACT_DIRECT_IDX, extra_idx = -1;
+    for (GList *l = g_proxies_list; l != NULL; l = l->next, nproxies++) {
+        char *label = g_strdup_printf("Proxy: %s", ((ProxyData *)l->data)->name);
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(action_combo), label);
+        g_free(label);
     }
-    gtk_combo_box_set_active(GTK_COMBO_BOX(proxy_combo), proxy_sel);
-    g_signal_connect(action_combo, "changed", G_CALLBACK(on_action_changed), proxy_combo);
+    if (!rule || rule->action == RULE_ACTION_PROXY) {
+        ProxyData *eff = rule ? rule_effective_proxy(rule) : NULL;
+        if (!rule && g_proxies_list) eff = find_proxy_by_name(g_default_proxy) ? find_proxy_by_name(g_default_proxy) : g_proxies_list->data;
+        int at = eff ? g_list_index(g_proxies_list, eff) : -1;
+        if (at >= 0) {
+            action_sel = ACT_FIRST_PROXY_IDX + at;
+        } else if (rule) {                              // names a proxy that is gone, or the profile has none: keep the rule visible
+            char *label = rule->proxy_name && *rule->proxy_name ? g_strdup_printf("Proxy: %s (not found)", rule->proxy_name) : g_strdup("Proxy: (no proxy configured)");
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(action_combo), label);
+            g_free(label);
+            extra_idx = ACT_FIRST_PROXY_IDX + nproxies;
+            action_sel = extra_idx;
+        }
+    } else {
+        action_sel = rule->action == RULE_ACTION_BLOCK ? ACT_BLOCK_IDX : ACT_DIRECT_IDX;
+    }
 
     gtk_entry_set_text(GTK_ENTRY(proc_entry), rule ? rule->process_name : "");
     {
@@ -194,7 +217,7 @@ static void open_rule_dialog(RuleData *rule) {
     }
     gtk_entry_set_text(GTK_ENTRY(port_entry), rule ? rule->target_ports : "*");
     gtk_combo_box_set_active(GTK_COMBO_BOX(proto_combo), rule ? (int)rule->protocol : RULE_PROTOCOL_BOTH);
-    gtk_combo_box_set_active(GTK_COMBO_BOX(action_combo), rule ? (int)rule->action : RULE_ACTION_PROXY);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(action_combo), action_sel);
 
     GtkWidget *name_entry = gtk_entry_new();
     gtk_entry_set_max_length(GTK_ENTRY(name_entry), 127);
@@ -207,7 +230,7 @@ static void open_rule_dialog(RuleData *rule) {
     // names let the UI test find the widgets
     gtk_widget_set_name(name_entry, "rule_name"); gtk_widget_set_name(proc_entry, "rule_process"); gtk_widget_set_name(host_view, "rule_hosts");
     gtk_widget_set_name(port_entry, "rule_ports"); gtk_widget_set_name(proto_combo, "rule_proto"); gtk_widget_set_name(action_combo, "rule_action");
-    gtk_widget_set_name(proxy_combo, "rule_proxy"); gtk_widget_set_name(localhost_check, "rule_localhost"); gtk_widget_set_name(err_label, "rule_error");
+    gtk_widget_set_name(localhost_check, "rule_localhost"); gtk_widget_set_name(err_label, "rule_error");
     grid_row(grid, 0, "Name:", name_entry);
     grid_row(grid, 1, "Process Name:", proc_box);
     gtk_grid_attach(GTK_GRID(grid), hint_label("Example: firefox; chrome; /usr/bin/wget"), 1, 2, 1, 1);
@@ -217,21 +240,23 @@ static void open_rule_dialog(RuleData *rule) {
     gtk_grid_attach(GTK_GRID(grid), hint_label("Example: 80; 443; 8000-8080; *"), 1, 6, 1, 1);
     grid_row(grid, 7, "Protocol:", proto_combo);
     grid_row(grid, 8, "Action:", action_combo);
-    grid_row(grid, 9, "Proxy:", proxy_combo);
-    gtk_grid_attach(GTK_GRID(grid), localhost_check, 1, 10, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), hint_label("Without this, a PROXY rule leaves connections to this computer (localhost) direct. DNS to a local resolver is never proxied."), 1, 11, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), err_label, 0, 12, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), localhost_check, 1, 9, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), hint_label("Without this, a proxied rule leaves connections to this computer (localhost) direct. DNS to a local resolver is never proxied."), 1, 10, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), err_label, 0, 11, 2, 1);
     gtk_container_add(GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(dialog))), grid);
     gtk_widget_show_all(dialog);
-    on_action_changed(GTK_COMBO_BOX(action_combo), proxy_combo);
     on_action_changed(GTK_COMBO_BOX(action_combo), localhost_check);
 
     bool saved = false;
     while (!saved && gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         int proto = gtk_combo_box_get_active(GTK_COMBO_BOX(proto_combo));
-        int action = gtk_combo_box_get_active(GTK_COMBO_BOX(action_combo));
-        int psel = gtk_combo_box_get_active(GTK_COMBO_BOX(proxy_combo));
-        ProxyData *pd = (action == RULE_ACTION_PROXY && psel > 0) ? g_list_nth_data(g_proxies_list, psel - 1) : NULL;
+        int sel = gtk_combo_box_get_active(GTK_COMBO_BOX(action_combo));
+        RuleAction action = sel == ACT_BLOCK_IDX ? RULE_ACTION_BLOCK : sel == ACT_DIRECT_IDX || sel < 0 ? RULE_ACTION_DIRECT : RULE_ACTION_PROXY;
+        const char *proxy_name = NULL;
+        if (action == RULE_ACTION_PROXY) {
+            ProxyData *pd = sel == extra_idx ? NULL : g_list_nth_data(g_proxies_list, sel - ACT_FIRST_PROXY_IDX);
+            proxy_name = pd ? pd->name : rule ? rule->proxy_name : NULL;
+        }
         char err[256] = "";
 
         GtkTextBuffer *hbuf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(host_view));
@@ -243,7 +268,7 @@ static void open_rule_dialog(RuleData *rule) {
 
         saved = save_rule(rule, gtk_entry_get_text(GTK_ENTRY(name_entry)), gtk_entry_get_text(GTK_ENTRY(proc_entry)), clean_hosts,
                           gtk_entry_get_text(GTK_ENTRY(port_entry)), proto < 0 ? RULE_PROTOCOL_BOTH : (RuleProtocol)proto,
-                          action < 0 ? RULE_ACTION_PROXY : (RuleAction)action, pd ? pd->name : NULL,
+                          action, proxy_name,
                           gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(localhost_check)), err, sizeof(err)) != NULL;
         g_free(clean_hosts);
         if (saved) {
@@ -435,13 +460,13 @@ static void refresh_rules_ui() {
     gtk_grid_set_column_spacing(GTK_GRID(grid), 15);
     gtk_container_add(GTK_CONTAINER(rules_list_box), grid);
 
-    const char *heads[] = {"  ", "Enable", "Actions", "SR", "Name", "Process", "Target Hosts", "Protocol", "Action", "Proxy"};
-    for (int c = 0; c < 10; c++)
+    const char *heads[] = {"  ", "Enable", "Actions", "SR", "Name", "Process", "Target Hosts", "Protocol", "Action"};
+    for (int c = 0; c < 9; c++)
         gtk_grid_attach(GTK_GRID(grid), header_label(heads[c], c == 5 || c == 6), c, 0, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, 1, 10, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, 1, 9, 1);
 
     const char *proto_strs[] = {"TCP", "UDP", "BOTH"};
-    const char *action_strs[] = {"PROXY", "DIRECT", "BLOCK"};
+    const char *action_strs[] = {"Proxy", "Direct", "Block"};
     const char *action_class[] = {"success", "info", "warning"};
     int row = 2, sr = 1;
     for (GList *l = g_rules_list; l != NULL; l = l->next, row += 2) {
@@ -474,17 +499,19 @@ static void refresh_rules_ui() {
         gtk_grid_attach(GTK_GRID(grid), gtk_label_new(proto_strs[r->protocol <= RULE_PROTOCOL_BOTH ? r->protocol : RULE_PROTOCOL_BOTH]), 7, row, 1, 1);
 
         int a = r->action <= RULE_ACTION_BLOCK ? r->action : RULE_ACTION_PROXY;
-        GtkWidget *l_act = gtk_label_new(action_strs[a]);
+        // like the Windows app: a proxied rule shows which proxy it uses
+        char *act_text;
+        if (a == RULE_ACTION_PROXY) {
+            ProxyData *px = rule_effective_proxy(r);
+            act_text = g_strdup_printf("Proxy: %s%s", px ? px->name : r->proxy_name && *r->proxy_name ? r->proxy_name : "(none)", r->localhost ? " (+localhost)" : "");
+        } else {
+            act_text = g_strdup(action_strs[a]);
+        }
+        GtkWidget *l_act = gtk_label_new(act_text);
+        g_free(act_text);
         gtk_style_context_add_class(gtk_widget_get_style_context(l_act), action_class[a]);
         gtk_grid_attach(GTK_GRID(grid), l_act, 8, row, 1, 1);
-
-        const char *proxy_txt = "-";
-        if (r->action == RULE_ACTION_PROXY)
-            proxy_txt = (r->proxy_name && find_proxy_by_name(r->proxy_name)) ? r->proxy_name : "default";
-        char *proxy_cell = g_strdup_printf("%s%s", proxy_txt, r->localhost ? " (+localhost)" : "");
-        gtk_grid_attach(GTK_GRID(grid), cell_label(proxy_cell), 9, row, 1, 1);
-        g_free(proxy_cell);
-        gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row + 1, 10, 1);
+        gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row + 1, 9, 1);
     }
     gtk_widget_show_all(rules_list_box);
 }

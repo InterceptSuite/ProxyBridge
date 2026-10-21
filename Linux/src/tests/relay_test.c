@@ -122,6 +122,12 @@ static uint32_t fnv(const uint8_t *p, size_t n)
     while (n--) { h ^= *p++; h *= 16777619u; }
     return h;
 }
+static atomic_int g_sender_bad;
+int pb_core_udp_sender_ok(const struct pb_orig *o, uint16_t client_port)
+{
+    (void)o; (void)client_port;
+    return !atomic_load(&g_sender_bad);
+}
 int pb_core_is_proxy_process(uint32_t pid, uint32_t proxy_id)
 {
     (void)pid; (void)proxy_id;
@@ -1027,6 +1033,57 @@ static void test_throughput(void)
     }
 }
 
+// A server that streams data until the connection breaks, and one that resets every connection at once.
+static void burst_handler(int fd, const struct srvcfg *c)
+{
+    (void)c;
+    char buf[16384];
+    memset(buf, 'b', sizeof buf);
+    for (int i = 0; i < 400; i++)
+        if (send(fd, buf, sizeof buf, MSG_NOSIGNAL) < 0) break;
+}
+static void reset_handler(int fd, const struct srvcfg *c)
+{
+    (void)c;
+    struct linger lg = { 1, 0 };
+    setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof lg);      // close() sends RST
+}
+
+// splice() into a connection the peer already reset raises SIGPIPE, which would end the process that hosts the relay
+// (GitHub issue 268). Every such write must just fail and close that one connection; other connections keep working.
+static void test_sigpipe(void)
+{
+    struct srv *burst = srv_start(burst_handler, NULL), *rst = srv_start(reset_handler, NULL);
+    CHECK(burst && rst, "SIGPIPE: helper servers started");
+    if (!burst || !rst) return;
+    for (int i = 0; i < 20; i++) {                 // server -> client: the client resets while data is still being forwarded
+        uint16_t src = new_src();
+        set_tcp(src, "127.0.0.1", burst->port, PB_ACT_DIRECT, 0);
+        int fd = relay_connect(src);
+        if (fd < 0) continue;
+        char b[64];
+        recv(fd, b, sizeof b, 0);
+        struct linger lg = { 1, 0 };
+        setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof lg);
+        close(fd);
+    }
+    msleep(300);
+    CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0, 50000, false) == 50000, "SIGPIPE: relay still serves traffic after clients reset mid-transfer");
+    for (int i = 0; i < 20; i++) {                 // client -> server: the server resets, the client keeps sending
+        uint16_t src = new_src();
+        set_tcp(src, "127.0.0.1", rst->port, PB_ACT_DIRECT, 0);
+        int fd = relay_connect(src);
+        if (fd < 0) continue;
+        char buf[65536];
+        memset(buf, 'c', sizeof buf);
+        for (int k = 0; k < 8; k++) if (send(fd, buf, sizeof buf, MSG_NOSIGNAL) < 0) break;
+        close(fd);
+    }
+    msleep(300);
+    CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_DIRECT, 0, 50000, false) == 50000, "SIGPIPE: relay still serves traffic after servers reset mid-transfer");
+    CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_PROXY, 1, 50000, false) == 50000, "SIGPIPE: proxied traffic also unaffected");
+}
+
 static void test_tcp_halfclose(void)
 {
     CHECK(tcp_roundtrip("127.0.0.1", g_echo->port, PB_ACT_PROXY, 1, 300000, true) == 300000, "half-close via SOCKS5: all echoed then EOF");
@@ -1250,6 +1307,35 @@ static void test_handshake_timeout(void)
     close(fd);
 }
 
+// More concurrent UDP sockets of one process than its share of the session table. Sessions are replaced oldest first, but never
+// one that a worker thread is still setting up (that was a use-after-free found by the full end-to-end suite). Under ASan this
+// test fails on the old code; in every build the relay must survive and keep serving.
+static void test_udp_session_cap(void)
+{
+    set_flow("127.1.2.3", "127.0.0.1", g_uecho1, PB_ACT_PROXY, 1);
+    enum { N = 2400 };            // more than the per-process share (half of 4096)
+    int fds[N];
+    for (int i = 0; i < N; i++) {
+        fds[i] = udp_client();
+        char m[16];
+        snprintf(m, sizeof m, "cap%d", i);
+        udp_send_flow(fds[i], "127.1.2.3", m);
+    }
+    msleep(2500);                                    // let the associations finish and the answers arrive
+    int answered = 0;
+    for (int i = 0; i < N; i++) {
+        char b[64], ip[32];
+        uint16_t sp;
+        if (udp_recv_to(fds[i], b, sizeof b, ip, &sp, 20) > 0) answered++;   // sockets whose session was replaced get nothing
+        close(fds[i]);
+    }
+    CHECK(answered >= 1000, "UDP: %d sockets past the per-process session share, the relay survives and answers (%d answered)", (int)N, answered);
+    msleep(500);
+    int c = udp_client();
+    CHECK(udp_echo_ok(c, "127.1.2.3", "after-cap"), "UDP still works after the session table was full");
+    close(c);
+}
+
 static void test_udp(void)
 {
     char b[256], ip[32];
@@ -1261,6 +1347,16 @@ static void test_udp(void)
     CHECK(udp_echo_ok(c, "127.1.2.3", "hello-one"), "UDP via SOCKS5 UDP ASSOCIATE, reply from flow address 127.1.2.3");
     CHECK(udp_echo_ok(c, "127.1.2.4", "hello-two"), "second destination from same client socket, reply from 127.1.2.4");
     CHECK(udp_echo_ok(c, "127.1.2.3", "again"), "first destination again");
+    {   // a datagram that does not come from the flow's own process is dropped, and the flow keeps working for its owner
+        atomic_store(&g_sender_bad, 1);
+        int imp = udp_client();
+        char b[64], ip[32]; uint16_t sp;
+        udp_send_flow(imp, "127.1.2.3", "impostor");
+        CHECK(udp_recv_neg(imp, b, sizeof b, ip, &sp) < 0, "UDP from a process that does not own the flow gets nothing back");
+        atomic_store(&g_sender_bad, 0);
+        close(imp);
+        CHECK(udp_echo_ok(c, "127.1.2.3", "owner-again"), "the owner's datagrams still flow");
+    }
     CHECK(g_assoc_count - a0 == 1, "exactly one UDP ASSOCIATE for the session (got %d)", (int)g_assoc_count - a0);
 
     int c2 = udp_client();
@@ -1899,7 +1995,9 @@ int main(void)
     RUN(test_tcp_identity);
     RUN(test_tcp_bad_proxy);
     RUN(test_tcp_halfclose);
+    RUN(test_sigpipe);
     RUN(test_udp);
+    RUN(test_udp_session_cap);
     RUN(test_flows);
     RUN(test_proxy_process_loop);
     RUN(test_proxy_helper);

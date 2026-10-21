@@ -7,18 +7,22 @@ MULTIARCH := $(shell $(CC) -print-multiarch)
 # BUILD_DIR keeps every generated file out of the source tree; build.sh points it at a temporary directory.
 BUILD_DIR ?= .
 
-# libbpf is linked statically from a pinned release built as position-independent code, so the library does not depend on the
-# distribution's libbpf (Ubuntu 22.04 ships 0.5, and distribution libbpf.a is not PIC). With LIBBPF_DIR unset the system
-# libbpf is used instead.
+# libbpf, libelf and zlib are linked statically from pinned releases built as position-independent code, so the library
+# depends on nothing but glibc: not on the distribution's libbpf (Ubuntu 22.04 ships 0.5), and not on libelf or zlib
+# (distribution .a files are not PIC). With LIBBPF_DIR unset the system libbpf is used instead.
 LIBBPF_VERSION ?= 1.6.3
 LIBBPF_SHA256 ?= 989ed3c1a3db8ff0f7c08dd43953c6b9d0c3ac252653a48d566aaedf98bc80ca
-LIBBPF_RECIPE ?= 2
+ZLIB_VERSION ?= 1.3.1
+ZLIB_SHA256 ?= 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+ELFUTILS_VERSION ?= 0.191
+ELFUTILS_SHA256 ?= df76db71366d1d708365fc7a6c60ca48398f14367eb2b8954efc8897147ad871
+LIBBPF_RECIPE ?= 3
 LIBBPF_CACHE ?= $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/proxybridge/libbpf-$(LIBBPF_VERSION)-r$(LIBBPF_RECIPE)
 LIBBPF_DIR ?=
 
 ifneq ($(LIBBPF_DIR),)
 LIBBPF_INCLUDE = -I$(LIBBPF_DIR)/include
-LIBBPF_LIBS = $(LIBBPF_DIR)/lib/libbpf.a -lelf -lz
+LIBBPF_LIBS = $(LIBBPF_DIR)/lib/libbpf.a $(LIBBPF_DIR)/lib/libelf.a $(LIBBPF_DIR)/lib/libz.a
 else
 LIBBPF_LIBS = -lbpf
 endif
@@ -52,22 +56,33 @@ $(TARGET): $(OBJECTS) exports.map
 $(BUILD_DIR)/%.o: %.c pb_internal.h ProxyBridge.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-test-rules: tests/rules_test.c tests/dns_test.c tests/proc_test.c pb_rules.c pb_rules.h pb_dns.c pb_dns.h pb_proc.c pb_proc.h | $(BUILD_DIR)
+test-rules: tests/rules_test.c tests/dns_test.c tests/proc_test.c tests/ipc_test.c pb_rules.c pb_rules.h pb_dns.c pb_dns.h pb_proc.c pb_proc.h pb_ipc.c pb_ipc.h | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -g -fsanitize=address,undefined -D_GNU_SOURCE tests/rules_test.c pb_rules.c -o $(BUILD_DIR)/rules_test && $(BUILD_DIR)/rules_test
 	$(CC) -Wall -Wextra -g -fsanitize=address,undefined -D_GNU_SOURCE tests/dns_test.c pb_dns.c -o $(BUILD_DIR)/dns_test && $(BUILD_DIR)/dns_test
 	$(CC) -Wall -Wextra -g -fsanitize=address,undefined -D_GNU_SOURCE tests/proc_test.c pb_proc.c -o $(BUILD_DIR)/proc_test && $(BUILD_DIR)/proc_test
+	$(CC) -Wall -Wextra -g -fsanitize=address,undefined -D_GNU_SOURCE tests/ipc_test.c pb_ipc.c -o $(BUILD_DIR)/ipc_test && $(BUILD_DIR)/ipc_test
 
-# Downloads, verifies and builds libbpf (cached); prints nothing. `make -s libbpf-path` prints the directory to use as LIBBPF_DIR.
+# Downloads, verifies and builds zlib, libelf (from elfutils) and libbpf (cached); prints nothing. `make -s libbpf-path` prints
+# the directory to use as LIBBPF_DIR. Every download is checked against a pinned SHA-256.
 libbpf-static: $(LIBBPF_CACHE)/lib/libbpf.a
 
 $(LIBBPF_CACHE)/lib/libbpf.a:
-	@set -e; work=$$(mktemp -d); cd "$$work"; \
-	curl -fsSL -o libbpf.tar.gz https://github.com/libbpf/libbpf/archive/refs/tags/v$(LIBBPF_VERSION).tar.gz; \
-	echo "$(LIBBPF_SHA256)  libbpf.tar.gz" | sha256sum -c --quiet -; \
-	tar xzf libbpf.tar.gz; \
-	$(MAKE) -s -C libbpf-$(LIBBPF_VERSION)/src BUILD_STATIC_ONLY=y OBJDIR="$$work/obj" CFLAGS="-O2 -fPIC -include $(CURDIR)/glibc_compat.h" \
+	@set -e; work=$$(mktemp -d); cd "$$work"; root="$$work/root"; mkdir -p "$$root/include" "$$root/lib"; \
+	fetch() { curl -fsSL -o "$$1" "$$2"; echo "$$3  $$1" | sha256sum -c --quiet -; }; \
+	fetch zlib.tar.gz https://github.com/madler/zlib/releases/download/v$(ZLIB_VERSION)/zlib-$(ZLIB_VERSION).tar.gz $(ZLIB_SHA256); \
+	fetch elfutils.tar.bz2 https://sourceware.org/elfutils/ftp/$(ELFUTILS_VERSION)/elfutils-$(ELFUTILS_VERSION).tar.bz2 $(ELFUTILS_SHA256); \
+	fetch libbpf.tar.gz https://github.com/libbpf/libbpf/archive/refs/tags/v$(LIBBPF_VERSION).tar.gz $(LIBBPF_SHA256); \
+	tar --no-same-owner -xzf zlib.tar.gz; tar --no-same-owner -xjf elfutils.tar.bz2; tar --no-same-owner -xzf libbpf.tar.gz; \
+	( cd zlib-$(ZLIB_VERSION) && CFLAGS="-O2 -fPIC -include $(CURDIR)/glibc_compat.h" ./configure --static --prefix="$$root" >/dev/null && $(MAKE) -s install >/dev/null ); \
+	( cd elfutils-$(ELFUTILS_VERSION) && CFLAGS="-O2 -fPIC -Wno-error -include $(CURDIR)/glibc_compat.h" CPPFLAGS="-I$$root/include" LDFLAGS="-L$$root/lib" \
+	  ./configure --disable-debuginfod --disable-libdebuginfod --disable-nls \
+	  --without-bzlib --without-lzma --without-zstd --disable-demangler --disable-symbol-versioning >/dev/null && \
+	  $(MAKE) -s -C lib >/dev/null && $(MAKE) -s -C libelf libelf.a >/dev/null && \
+	  cp libelf/libelf.a "$$root/lib/" && cp libelf/libelf.h libelf/gelf.h libelf/nlist.h "$$root/include/" ); \
+	$(MAKE) -s -C libbpf-$(LIBBPF_VERSION)/src BUILD_STATIC_ONLY=y OBJDIR="$$work/obj" PKG_CONFIG=true \
+		CFLAGS="-O2 -fPIC -I$$root/include -include $(CURDIR)/glibc_compat.h" \
 		DESTDIR="$$work/root" PREFIX=/ LIBDIR=/lib install >/dev/null; \
-	mkdir -p "$(LIBBPF_CACHE)"; cp -r "$$work/root/include" "$$work/root/lib" "$(LIBBPF_CACHE)/"; \
+	mkdir -p "$(LIBBPF_CACHE)"; cp -r "$$root/include" "$$root/lib" "$(LIBBPF_CACHE)/"; \
 	cd /; rm -rf "$$work"
 
 libbpf-path:

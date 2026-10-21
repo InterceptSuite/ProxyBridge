@@ -9,6 +9,7 @@ set-ups with compact arguments; this script turns them into a .pbprofile (held i
   --rule process:hosts:ports:protocol:action[=proxy][+localhost]    (proxy = name or 1-based index)
   --dns-via-proxy true|false   --log-every-connection true|false   --verbose N
   --profile FILE-OR-NAME       a profile to start from; the other arguments are added to it
+  --write FILE                 write the profile to FILE (mode 0600) and exit instead of running the program
 PB_DIR selects the build (default: Linux/output).
 """
 import json, os, re, sys, tempfile
@@ -75,17 +76,19 @@ def main():
     prof = {"Version": "1.0", "ProxyConfigs": [], "ProxyRules": []}
     verbose = None
     base = None
+    write_to = None
     proxies, rules = [], []
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("--proxy", "--rule", "--profile", "--verbose", "--dns-via-proxy", "--log-every-connection") and i + 1 < len(args):
+        if a in ("--proxy", "--rule", "--profile", "--verbose", "--dns-via-proxy", "--log-every-connection", "--write") and i + 1 < len(args):
             v = args[i + 1]
             i += 2
             if a == "--proxy": proxies.append(parse_proxy(v))
             elif a == "--rule": rules.append(parse_rule(v))
             elif a == "--profile": base = v
             elif a == "--verbose": verbose = v
+            elif a == "--write": write_to = v
             elif a == "--dns-via-proxy": prof["DnsViaProxy"] = boolean(v)
             else: prof["LogEveryConnection"] = boolean(v)
         else:
@@ -123,6 +126,11 @@ def main():
                 r["ProxyConfigId"] = hit[0]
         prof["ProxyRules"].append(r)
 
+    if write_to:
+        fdw = os.open(write_to, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fdw, json.dumps(prof, indent=2).encode())
+        os.close(fdw)
+        return
     fd, tmp = tempfile.mkstemp(prefix="pbl-", suffix=".pbprofile")
     os.write(fd, json.dumps(prof).encode())
     os.unlink(tmp)                                   # the exec'd program reads it through /proc/self/fd/<fd>

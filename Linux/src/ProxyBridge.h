@@ -1,7 +1,7 @@
 #ifndef PROXYBRIDGE_H
 #define PROXYBRIDGE_H
 
-#define PROXYBRIDGE_VERSION "4.0.0-Beta"
+#define PROXYBRIDGE_VERSION "4.0.0"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -80,6 +80,11 @@ PB_API bool ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, uin
 
 /* ---- Runtime --------------------------------------------------------------------------------------------------------- */
 PB_API void ProxyBridge_SetDnsViaProxy(bool enable);
+/* Batch: between BeginBatch and EndBatch, changes to proxies and rules are collected and loaded into the kernel datapath once, at
+ * the end, so replacing a whole configuration never exposes a half-built rule set to new connections. Calls nest; every
+ * BeginBatch needs an EndBatch. */
+PB_API void ProxyBridge_BeginBatch(void);
+PB_API void ProxyBridge_EndBatch(void);
 /* Main switch (default true). False pauses every rule for new connections; existing connections are not touched. */
 PB_API void ProxyBridge_SetEnabled(bool enable);
 /* Connection log: by default a connection is reported once per (application, destination, port, protocol, action); true reports

@@ -118,7 +118,9 @@ if gcc -O1 -I"$ROOT/src" -o "$WORK/probe" "$WORK/probe.c" -L"$PB_DIR" -lproxybri
   chmod 755 "$WORK" "$WORK/probe"
   out=$("$WORK/probe" 2>&1)
   [[ "$out" == *"start=0"* && "$out" == *"no proxy is configured"* ]] && ok "a PROXY rule without any proxy refuses to start and says why" || bad "no proxy: $out"
-  out=$(setpriv --reuid=65534 --regid=65534 --clear-groups env LD_LIBRARY_PATH="$PB_DIR" "$WORK/probe" withproxy 2>&1)
+  # the unprivileged user must be able to reach the library wherever the build lives (a CI runner's home folder is not world-readable)
+  mkdir -p "$WORK/lib"; chmod 755 "$WORK/lib"; install -m 755 "$PB_DIR/libproxybridge.so" "$WORK/lib/libproxybridge.so"
+  out=$(setpriv --reuid=65534 --regid=65534 --clear-groups env LD_LIBRARY_PATH="$WORK/lib" "$WORK/probe" withproxy 2>&1)
   [[ "$out" == *"start=0"* && "$out" == *"needs root"* ]] && ok "without root it fails cleanly and explains" || bad "not root: $out"
   [[ "$out" == *"stop=1"* ]] && ok "Stop after a failed Start is harmless" || bad "stop after failed start: $out"
   [ "$(progs)" = 0 ] && ok "a failed start attaches nothing" || bad "programs attached by a failed start"

@@ -48,6 +48,17 @@ int main(void)
     CHECK(pb_dns_observe(m.b, m.n, &r) == 1);
     CHECK(has(H("198.51.100.7"), "www.shop.test") && has(H("198.51.100.7"), "cdn.edge.net"));
 
+    // 2b. out-of-bailiwick records are ignored: an unrelated A record and a CNAME that the question does not lead to
+    header(&m, 0x8180, 1, 3); q = wname(&m, "q.example"); w16(&m, 1); w16(&m, 1);
+    a_rr(&m, q, "203.0.113.1");
+    { size_t o = wname(&m, "allowed.corp"); (void)o; w16(&m, 1); w16(&m, 1); w32(&m, 60); w16(&m, 4);
+      struct in_addr a; inet_pton(AF_INET, "203.0.113.2", &a); memcpy(m.b + m.n, &a, 4); m.n += 4; }
+    { size_t o = wname(&m, "victim.bank"); (void)o; w16(&m, 5); w16(&m, 1); w32(&m, 60); size_t lp = m.n; w16(&m, 0);
+      wname(&m, "q.example"); m.b[lp + 1] = (uint8_t)(m.n - lp - 2); }
+    CHECK(pb_dns_observe(m.b, m.n, &r) == 1 && r.nips == 1);                                 // only q.example's own address
+    CHECK(has(H("203.0.113.1"), "q.example") && !has(H("203.0.113.1"), "allowed.corp") && !has(H("203.0.113.1"), "victim.bank"));
+    CHECK(!has(H("203.0.113.2"), "allowed.corp") && !has(H("203.0.113.2"), "q.example"));
+
     // 3. rejects: query (QR=0), NXDOMAIN, no answers, loopback answers
     header(&m, 0x0100, 1, 0); q = wname(&m, "x.test"); w16(&m, 1); w16(&m, 1);
     CHECK(pb_dns_observe(m.b, m.n, &r) == 0);

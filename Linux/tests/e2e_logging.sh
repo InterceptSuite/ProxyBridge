@@ -23,6 +23,8 @@ start_pb() {
 }
 stop_pb() { kill -INT "$PB_PID" 2>/dev/null; wait "$PB_PID" 2>/dev/null; PB_PID=""; }
 lines() { grep -c -- "$1" "$WORK/pb.out"; }
+# Wait until the output has stopped growing (not a fixed second: on a loaded machine the lines arrive late, and a count taken too early is wrong)
+settle() { local last=-1 now stable=0 i; for i in $(seq 100); do now=$(wc -c < "$WORK/pb.out"); if [ "$now" = "$last" ]; then stable=$((stable+1)); else stable=0; fi; last=$now; [ $stable -ge 6 ] && return 0; sleep 0.2; done; }
 connects() { python3 - "$@" <<'PY'
 import socket, sys
 ip, port, n = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
@@ -45,28 +47,28 @@ RULES=(--rule "python3*:198.51.100.50:80:TCP:PROXY=a" --rule "python3*:198.51.10
 
 echo "== default: repeats are collapsed"
 start_pb "${RULES[@]}" || bad "start"
-connects 198.51.100.50 80 6; connects 198.51.100.51 80 4; connects 198.51.100.52 80 4; sleep 1
+connects 198.51.100.50 80 6; connects 198.51.100.51 80 4; connects 198.51.100.52 80 4; settle
 [ "$(lines '198.51.100.50:80 via SOCKS5')" = 1 ] && ok "6 proxied connections: one line (not two per connection)" || bad "proxied: $(lines '198.51.100.50:80 via')"
 [ "$(lines '198.51.100.51:80 via BLOCK')" = 1 ] && ok "4 blocked connections: one line" || bad "blocked: $(lines '198.51.100.51:80 via')"
 [ "$(lines '198.51.100.52:80 via DIRECT')" = 1 ] && ok "4 direct connections: one line" || bad "direct: $(lines '198.51.100.52:80 via')"
-connects 198.51.100.61 80 5; sleep 1.5
+connects 198.51.100.61 80 5; settle
 [ "$(lines '198.51.100.61:80 via SOCKS5')" = 1 ] && ok "decided by the relay (long host list), process already gone: one proxied line" || bad "slow path: $(grep '198.51.100.61' "$WORK/pb.out")"
-udp_sends 198.51.100.80 5300 8; sleep 1
+udp_sends 198.51.100.80 5300 8; settle
 [ "$(lines '198.51.100.80:5300 via')" = 1 ] && ok "a UDP flow of 8 datagrams: one line" || bad "udp: $(lines '198.51.100.80:5300 via')"
 stop_pb
 
 echo "== --log-every-connection true"
 start_pb --log-every-connection true "${RULES[@]}" || bad "start"
-connects 198.51.100.50 80 6; connects 198.51.100.51 80 4; connects 198.51.100.52 80 4; sleep 1
+connects 198.51.100.50 80 6; connects 198.51.100.51 80 4; connects 198.51.100.52 80 4; settle
 [ "$(lines '198.51.100.50:80 via SOCKS5')" = 6 ] && ok "every proxied connection is listed, each exactly once" || bad "proxied: $(lines '198.51.100.50:80 via')"
 [ "$(lines '198.51.100.51:80 via BLOCK')" = 4 ] && ok "every blocked connection is listed" || bad "blocked: $(lines '198.51.100.51:80 via')"
 [ "$(lines '198.51.100.52:80 via DIRECT')" = 4 ] && ok "every direct connection is listed" || bad "direct: $(lines '198.51.100.52:80 via')"
-connects 198.51.100.61 80 5; sleep 2
+connects 198.51.100.61 80 5; settle
 [ "$(lines '198.51.100.61:80 via SOCKS5')" = 5 ] && ok "decided by the relay: every connection, once" || bad "slow path: $(lines '198.51.100.61:80 via')"
-udp_sends 198.51.100.80 5300 8; sleep 1
+udp_sends 198.51.100.80 5300 8; settle
 [ "$(lines '198.51.100.80:5300 via')" = 1 ] && ok "a busy UDP flow is still one line" || bad "udp: $(lines '198.51.100.80:5300 via')"
 if [ "${PB_SLOW:-0}" = 1 ]; then
-  sleep 31; udp_sends 198.51.100.80 5300 1; sleep 1
+  sleep 31; udp_sends 198.51.100.80 5300 1; settle
   [ "$(lines '198.51.100.80:5300 via')" = 2 ] && ok "after 30 s of silence the UDP flow is listed again" || bad "udp relog: $(lines '198.51.100.80:5300 via')"
 fi
 stop_pb
@@ -80,14 +82,14 @@ JSON
 chmod 600 "$WORK/le.pbprofile"
 stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 2 --profile "$WORK/le.pbprofile" > "$WORK/pb.out" 2>&1 & PB_PID=$!
 for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/pb.out" && break; sleep 0.25; done
-connects 198.51.100.50 80 3; sleep 1
+connects 198.51.100.50 80 3; settle
 [ "$(lines '198.51.100.50:80 via SOCKS5')" = 3 ] && ok "LogEveryConnection from the profile" || bad "profile: $(lines '198.51.100.50:80 via')"
 stop_pb
 start_pb --log-every-connection false "${RULES[@]}" || bad "start"
 stop_pb
 stdbuf -oL "$PBL" --verbose 2 --profile "$WORK/le.pbprofile" --log-every-connection false > "$WORK/pb.out" 2>&1 & PB_PID=$!
 for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/pb.out" && break; sleep 0.25; done
-connects 198.51.100.50 80 3; sleep 1
+connects 198.51.100.50 80 3; settle
 [ "$(lines '198.51.100.50:80 via SOCKS5')" = 1 ] && ok "the command line overrides the profile" || bad "override: $(lines '198.51.100.50:80 via')"
 stop_pb
 cat > "$WORK/le2.pbprofile" <<'JSON'
@@ -98,7 +100,7 @@ JSON
 chmod 600 "$WORK/le2.pbprofile"
 stdbuf -oL "$PB_DIR/ProxyBridge" --verbose 2 --profile "$WORK/le2.pbprofile" > "$WORK/pb.out" 2>&1 & PB_PID=$!
 for _ in $(seq 40); do grep -q "ProxyBridge started" "$WORK/pb.out" && break; sleep 0.25; done
-connects 198.51.100.50 80 3; sleep 1
+connects 198.51.100.50 80 3; settle
 [ "$(lines '198.51.100.50:80 via SOCKS5')" = 1 ] && ok "LogEveryConnection=false in the profile collapses repeats" || bad "profile false: $(lines '198.51.100.50:80 via')"
 stop_pb
 

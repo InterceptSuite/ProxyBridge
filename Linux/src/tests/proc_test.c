@@ -2,6 +2,7 @@
 #include "../pb_proc.h"
 #include <arpa/inet.h>
 #include <ifaddrs.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,6 +90,44 @@ int main(void)
         freeifaddrs(list);
     }
     CHECK(found > 0 && ok == found);                                              // every configured address is local
+
+    // who owns the UDP sockets bound to a port (the relay compares the owners' uid with the flow's owner)
+    {
+        uint32_t uids[8];
+        int u = socket(AF_INET, SOCK_DGRAM, 0);
+        struct sockaddr_in ua = { .sin_family = AF_INET };
+        inet_pton(AF_INET, "127.0.0.1", &ua.sin_addr);
+        bind(u, (struct sockaddr *)&ua, sizeof ua);
+        socklen_t ul = sizeof ua;
+        getsockname(u, (struct sockaddr *)&ua, &ul);
+        uint16_t up = ntohs(ua.sin_port);
+        CHECK(pb_proc_udp_port_uids(up, uids, 8) == 1 && uids[0] == (uint32_t)getuid());      // our own socket, with our uid
+        CHECK(pb_proc_udp_port_uids((uint16_t)(up == 65535 ? 1 : up + 1), uids, 8) == 0);     // a port nobody holds
+        int u6 = socket(AF_INET6, SOCK_DGRAM, 0);
+        if (u6 >= 0) {
+            struct sockaddr_in6 a6 = { .sin6_family = AF_INET6, .sin6_addr = IN6ADDR_LOOPBACK_INIT };
+            bind(u6, (struct sockaddr *)&a6, sizeof a6);
+            socklen_t l6 = sizeof a6;
+            getsockname(u6, (struct sockaddr *)&a6, &l6);
+            CHECK(pb_proc_udp_port_uids(ntohs(a6.sin6_port), uids, 8) == 1 && uids[0] == (uint32_t)getuid());   // IPv6 sockets are listed too
+            close(u6);
+        }
+        // two sockets on one port (SO_REUSEPORT): both owners are listed, the limit is honoured
+        int r1 = socket(AF_INET, SOCK_DGRAM, 0), r2 = socket(AF_INET, SOCK_DGRAM, 0), one = 1;
+        setsockopt(r1, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+        setsockopt(r2, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+        struct sockaddr_in ra = { .sin_family = AF_INET };
+        inet_pton(AF_INET, "127.0.0.1", &ra.sin_addr);
+        bind(r1, (struct sockaddr *)&ra, sizeof ra);
+        socklen_t rl = sizeof ra;
+        getsockname(r1, (struct sockaddr *)&ra, &rl);
+        CHECK(bind(r2, (struct sockaddr *)&ra, sizeof ra) == 0);
+        CHECK(pb_proc_udp_port_uids(ntohs(ra.sin_port), uids, 8) == 2 && pb_proc_udp_port_uids(ntohs(ra.sin_port), uids, 1) == 1);
+        close(r1);
+        close(r2);
+        CHECK(pb_proc_udp_port_uids(ntohs(ra.sin_port), uids, 8) == 0);                         // gone with the sockets
+        close(u);
+    }
 
     printf("proc_test: %d checks, %d failed\n", checks, fails);
     return fails != 0;

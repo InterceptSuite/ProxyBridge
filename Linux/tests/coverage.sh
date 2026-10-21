@@ -32,7 +32,7 @@ unit_tests() {
         ( cd "$ROOT/gui" &&
           gcc $cf -I../src -I../profile -I. tests/config_test.c gui_config.c ../profile/pb_profile.c -o "$UNIT/config_test" $gtk && "$UNIT/config_test" &&
           gcc $cf -I../src -I. tests/json_test.c gui_json.c -o "$UNIT/json_test" $gtk && "$UNIT/json_test" &&
-          gcc $cf -I. $(pkg-config --cflags glib-2.0) -DPB_TEST_HOOKS tests/boot_test.c gui_boot.c -o "$UNIT/boot_test" $(pkg-config --libs glib-2.0) && "$UNIT/boot_test" &&
+          gcc $cf -I. $(pkg-config --cflags glib-2.0) -DPB_TEST_HOOKS -I../src tests/boot_test.c gui_boot.c ../src/pb_unit.c -o "$UNIT/boot_test" $(pkg-config --libs glib-2.0) && "$UNIT/boot_test" &&
           gcc $cf -I. tests/events_test.c gui_events.c -o "$UNIT/events_test" -pthread && "$UNIT/events_test" ) 2>&1 | grep -E "FAIL|passed" || true
     fi
 }
@@ -48,7 +48,7 @@ PB_BUILD_DIR="$BUILD" AUDIT=0 OUTPUT_DIR="$OUT" EXTRA_CFLAGS="--coverage -O0 -g"
     "$ROOT/build.sh" > "$COV_DIR/build.log" 2>&1 || { tail -20 "$COV_DIR/build.log"; exit 1; }
 
 export PB_DIR="$OUT"
-for t in e2e e2e_rules e2e_domains e2e_security e2e_profile e2e_parity e2e_faults e2e_udp e2e_rules_diff e2e_logging e2e_checker e2e_cli e2e_exempt e2e_lifecycle api_live e2e_openssh; do
+for t in e2e e2e_rules e2e_domains e2e_security e2e_profile e2e_parity e2e_faults e2e_udp e2e_rules_diff e2e_logging e2e_checker e2e_cli e2e_exempt e2e_lifecycle api_live e2e_openssh e2e_daemon; do
     [ -f "$HERE/$t.sh" ] || continue
     echo "== $t"
     timeout 900 bash "$HERE/$t.sh" 2>&1 | grep -E "FAIL|passed=|RESULT" || true

@@ -1,9 +1,11 @@
 #include "gui_boot.h"
+#include "pb_unit.h"
 #include <fcntl.h>
 #include <glib/gstdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <errno.h>
 
 #define UNIT_NAME "proxybridge.service"
 
@@ -25,53 +27,67 @@ static const char *systemctl_cmd() {
 
 static char *unit_path() { return g_strdup_printf("%s/" UNIT_NAME, unit_dir()); }
 
+// A program that systemd will start as root at every boot must not be replaceable by an ordinary user: the file and
+// every directory above it have to belong to root and be writable by root only. A copy run from ~/Downloads fails this.
+bool boot_path_trusted(const char *path, char **why) {
+    if (!path || path[0] != '/') { if (why) *why = g_strdup("not an absolute path"); return false; }
+    char *cur = g_strdup(path);
+    for (;;) {
+        struct stat st;
+        if (lstat(cur, &st) != 0) { if (why) *why = g_strdup_printf("%s: %s", cur, g_strerror(errno)); g_free(cur); return false; }
+        bool file = !strcmp(cur, path);
+        if (S_ISLNK(st.st_mode) || (file ? !S_ISREG(st.st_mode) : !S_ISDIR(st.st_mode))) {
+            if (why) *why = g_strdup_printf("%s is a symbolic link or not a regular %s", cur, file ? "file" : "directory");
+            g_free(cur); return false;
+        }
+        if (st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH))) {
+            if (why) *why = g_strdup_printf("%s is not owned by root or is writable by other users", cur);
+            g_free(cur); return false;
+        }
+        if (!strcmp(cur, "/")) break;
+        char *up = g_path_get_dirname(cur);
+        g_free(cur); cur = up;
+    }
+    g_free(cur);
+    return true;
+}
+
 // The command line program that sits next to this one (an installed pair), otherwise the default install location.
-static char *cli_path() {
+static char *cli_path(char **error) {
 #ifdef PB_TEST_HOOKS
     const char *e = getenv("PROXYBRIDGE_CLI");
     if (e && *e) return g_strdup(e);
 #endif
     char self[4096];
     ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+    char *cli = NULL;
     if (n > 0) {
         self[n] = 0;
-        char *dir = g_path_get_dirname(self), *cli = g_build_filename(dir, "ProxyBridge", NULL);
+        char *dir = g_path_get_dirname(self);
+        cli = g_build_filename(dir, "ProxyBridge", NULL);
         g_free(dir);
-        if (g_file_test(cli, G_FILE_TEST_IS_EXECUTABLE)) return cli;
-        g_free(cli);
+        if (!g_file_test(cli, G_FILE_TEST_IS_EXECUTABLE)) { g_free(cli); cli = NULL; }
     }
-    return g_strdup("/usr/local/bin/ProxyBridge");
+    if (!cli) cli = g_strdup("/usr/local/bin/ProxyBridge");
+    char *why = NULL;
+    if (!boot_path_trusted(cli, &why)) {
+        if (error) *error = g_strdup_printf("%s cannot be started at boot: %s. Install ProxyBridge with setup.sh and start the GUI from there.", cli, why);
+        g_free(why); g_free(cli);
+        return NULL;
+    }
+    return cli;
 }
 
-// systemd's own quoting for one ExecStart word: backslash, double quote, % (specifier) and $ (variable) are escaped
-static void quote_word(GString *out, const char *s) {
-    g_string_append_c(out, '"');
-    for (; *s; s++) {
-        if (*s == '\\' || *s == '"') g_string_append_c(out, '\\');
-        else if (*s == '%') g_string_append_c(out, '%');
-        else if (*s == '$') g_string_append_c(out, '$');
-        g_string_append_c(out, *s);
+char *boot_unit_text(const char *cli, char **error) {
+    const char *why = NULL;
+    char *text = pb_unit_text(cli, &why);
+    if (!text) {
+        if (error) *error = g_strdup(why ? why : "cannot build the unit");
+        return NULL;
     }
-    g_string_append_c(out, '"');
-}
-
-char *boot_unit_text(const char *cli, const char *profile, char **error) {
-    for (const char *p = profile; *p; p++)
-        if ((unsigned char)*p < 0x20 || *p == 0x7f) {
-            if (error) *error = g_strdup("the profile name contains control characters and cannot be used in a service file");
-            return NULL;
-        }
-    for (const char *p = cli; *p; p++)
-        if ((unsigned char)*p < 0x20 || *p == 0x7f) {
-            if (error) *error = g_strdup("the program path contains control characters");
-            return NULL;
-        }
-    GString *s = g_string_new("[Unit]\nDescription=ProxyBridge\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=");
-    quote_word(s, cli);
-    g_string_append(s, " --profile ");
-    quote_word(s, profile);
-    g_string_append(s, "\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n");
-    return g_string_free(s, FALSE);
+    char *out = g_strdup(text);
+    free(text);
+    return out;
 }
 
 bool boot_is_enabled(void) {
@@ -100,9 +116,10 @@ static bool run_systemctl(const char *a, const char *b, char **error) {
     return ok;
 }
 
-static bool write_unit(const char *profile, char **error) {
-    char *cli = cli_path();
-    char *text = boot_unit_text(cli, profile, error);
+static bool write_unit(char **error) {
+    char *cli = cli_path(error);
+    if (!cli) return false;
+    char *text = boot_unit_text(cli, error);
     g_free(cli);
     if (!text) return false;
     char *path = unit_path(), *tmp = g_strdup_printf("%s.tmp", path);
@@ -123,10 +140,10 @@ static bool write_unit(const char *profile, char **error) {
     return ok;
 }
 
-bool boot_set(bool enable, const char *profile, char **error) {
+bool boot_set(bool enable, char **error) {
     if (error) *error = NULL;
     if (enable) {
-        if (!write_unit(profile, error)) return false;
+        if (!write_unit(error)) return false;
         if (!run_systemctl("daemon-reload", NULL, error) || !run_systemctl("enable", UNIT_NAME, error)) {
             char *path = unit_path();
             g_unlink(path);                          // do not leave a unit behind that is not enabled
@@ -145,10 +162,4 @@ bool boot_set(bool enable, const char *profile, char **error) {
     if (ok && existed) run_systemctl("daemon-reload", NULL, NULL);
     g_free(path);
     return ok;
-}
-
-bool boot_refresh(const char *profile, char **error) {
-    if (error) *error = NULL;
-    if (!boot_is_enabled()) return true;
-    return write_unit(profile, error) && run_systemctl("daemon-reload", NULL, error);
 }

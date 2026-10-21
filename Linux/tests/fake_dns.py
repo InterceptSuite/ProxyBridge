@@ -103,11 +103,18 @@ class TCP(socketserver.BaseRequestHandler):
 class TS(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    request_queue_size = 256
 
 
 class US(socketserver.ThreadingMixIn, socketserver.UDPServer):
     allow_reuse_address = True
     daemon_threads = True
+    request_queue_size = 1024
+
+    def server_bind(self):
+        # a burst of a few hundred queries (parallel resolvers) must fit in the receive buffer while the handler threads start
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+        super().server_bind()
 
 
 ip = sys.argv[1]

@@ -32,11 +32,20 @@ detect_distro() {
     echo "Detected distribution: $DISTRO"
 }
 
-# Install dependencies based on distribution
+# The command line program and the library are self-contained (libbpf, libelf and zlib are linked in; only glibc is used), so
+# nothing needs installing for them. The GUI needs GTK3, which cannot be linked statically: install it only if it is missing.
 install_dependencies() {
     echo ""
-    echo "Checking and installing dependencies..."
-    
+    if [ ! -f "$SCRIPT_DIR/ProxyBridgeGUI" ]; then
+        echo "No dependencies to install (the command line program is self-contained)."
+        return
+    fi
+    if ldconfig -p 2>/dev/null | grep -q 'libgtk-3\.so\.0'; then
+        echo "GTK3 is already installed (needed by the GUI)."
+        return
+    fi
+    echo "Installing GTK3 (needed by the GUI)..."
+
     # Normalize distro name using ID_LIKE fallback
     local distro_family="$DISTRO"
     if [ -n "$DISTRO_LIKE" ]; then
@@ -48,51 +57,22 @@ install_dependencies() {
             *suse*) distro_family="opensuse" ;;
         esac
     fi
-    
+
     case "$distro_family" in
         ubuntu|debian|linuxmint|pop|elementary|zorin|kali|raspbian|mx|antix|deepin|lmde)
-            echo "Using apt package manager..."
             apt-get update -qq
-            # libgtk-3-0 is for the GUI, libelf+zlib are what the statically linked libbpf needs
-            apt-get install -y libelf1 zlib1g libgtk-3-0
+            apt-get install -y libgtk-3-0
             ;;
-        fedora)
-            echo "Using dnf package manager..."
-            dnf install -y elfutils-libelf zlib gtk3
-            ;;
-        rhel|centos|rocky|almalinux)
-            echo "Using yum package manager..."
-            yum install -y elfutils-libelf zlib gtk3
-            ;;
-        arch|manjaro|endeavouros|garuda)
-            echo "Using pacman package manager..."
-            pacman -Sy --noconfirm libelf zlib gtk3
-            ;;
-        opensuse*|sles)
-            echo "Using zypper package manager..."
-            zypper install -y libelf1 libz1 gtk3
-            ;;
-        void)
-            echo "Using xbps package manager..."
-            xbps-install -Sy libelf zlib gtk3
-            ;;
+        fedora)         dnf install -y gtk3 ;;
+        rhel|centos|rocky|almalinux) yum install -y gtk3 ;;
+        arch|manjaro|endeavouros|garuda) pacman -Sy --noconfirm gtk3 ;;
+        opensuse*|sles) zypper install -y gtk3 ;;
+        void)           xbps-install -Sy gtk3 ;;
         *)
-            echo "WARNING: Unknown distribution '$DISTRO' (family: '$DISTRO_LIKE')"
-            echo ""
-            echo "Please manually install the following packages:"
-            echo "  Debian/Ubuntu: sudo apt install libelf1 zlib1g libgtk-3-0"
-            echo "  Fedora:        sudo dnf install elfutils-libelf zlib gtk3"
-            echo "  Arch:          sudo pacman -S libelf zlib gtk3"
-            echo ""
-            read -p "Continue anyway? (y/n) " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                exit 1
-            fi
+            echo "WARNING: Unknown distribution '$DISTRO'. The GUI needs GTK3 (Debian/Ubuntu: libgtk-3-0, Fedora: gtk3, Arch: gtk3)."
+            echo "The command line program works without it."
             ;;
     esac
-    
-    echo "Dependencies installed"
 }
 
 # Use /usr/local/lib (matches RPATH in binary)
@@ -130,25 +110,79 @@ install_files() {
     
     # Create directories if they don't exist
     mkdir -p "$LIB_PATH" /usr/local/bin /etc/proxybridge
-    chmod 755 /etc/proxybridge
-    
-    # Copy library
+    chmod 700 /etc/proxybridge                    # holds profiles with proxy passwords
+
+    # install(1) replaces the file and sets owner and mode, so a file left by someone else is never kept
     echo "Installing libproxybridge.so to $LIB_PATH..."
-    cp "$SCRIPT_DIR/libproxybridge.so" "$LIB_PATH/"
-    chmod 755 "$LIB_PATH/libproxybridge.so"
-    
-    # Copy binary
+    install -o root -g root -m 0755 "$SCRIPT_DIR/libproxybridge.so" "$LIB_PATH/libproxybridge.so"
+
     echo "Installing ProxyBridge to /usr/local/bin..."
-    cp "$SCRIPT_DIR/ProxyBridge" /usr/local/bin/
-    chmod 755 /usr/local/bin/ProxyBridge
+    install -o root -g root -m 0755 "$SCRIPT_DIR/ProxyBridge" /usr/local/bin/ProxyBridge
 
     if [ -f "$SCRIPT_DIR/ProxyBridgeGUI" ]; then
         echo "Installing ProxyBridgeGUI to /usr/local/bin..."
-        cp "$SCRIPT_DIR/ProxyBridgeGUI" /usr/local/bin/
-        chmod 755 /usr/local/bin/ProxyBridgeGUI 
+        install -o root -g root -m 0755 "$SCRIPT_DIR/ProxyBridgeGUI" /usr/local/bin/ProxyBridgeGUI
+    fi
+
+    if [ -f "$SCRIPT_DIR/ProxyBridgeGUI" ] && [ -f "$SCRIPT_DIR/proxybridge.desktop" ]; then
+        echo "Installing the launcher entry and icon..."
+        install -d -m 0755 /usr/share/applications /usr/share/icons/hicolor/128x128/apps /usr/share/icons/hicolor/256x256/apps
+        install -o root -g root -m 0644 "$SCRIPT_DIR/proxybridge.desktop" /usr/share/applications/proxybridge.desktop
+        install -o root -g root -m 0644 "$SCRIPT_DIR/proxybridge-128.png" /usr/share/icons/hicolor/128x128/apps/proxybridge.png
+        install -o root -g root -m 0644 "$SCRIPT_DIR/proxybridge-256.png" /usr/share/icons/hicolor/256x256/apps/proxybridge.png
+        command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+        command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications 2>/dev/null || true
     fi
     
     echo "Files installed"
+}
+
+# The ProxyBridge service: the part that runs as root (it owns the engine and the profiles), so the window itself needs no root.
+# Who may use it: root and the members of the group "proxybridge", looked up at every connection (no new login needed).
+install_service() {
+    echo ""
+    echo "Setting up the ProxyBridge service..."
+
+    if ! getent group proxybridge >/dev/null 2>&1; then
+        groupadd --system proxybridge 2>/dev/null || groupadd -r proxybridge 2>/dev/null || addgroup --system proxybridge 2>/dev/null \
+            || echo "WARNING: could not create the group 'proxybridge'; only root will be able to use the window"
+    fi
+    # Membership of the group is administrative power over ProxyBridge: a member can route, block and read the proxy passwords of every
+    # user's traffic. The user who ran sudo is added (that is who just installed it); PB_NO_GROUP_USER=1 skips that.
+    SERVICE_USER=""
+    if [ -n "${SUDO_USER:-}" ] && [ "${PB_NO_GROUP_USER:-0}" != 1 ] && [ "$SUDO_USER" != root ] && [ "$(id -u -- "$SUDO_USER" 2>/dev/null || echo 0)" != 0 ] \
+       && getent group proxybridge >/dev/null 2>&1; then
+        if usermod -aG proxybridge -- "$SUDO_USER" 2>/dev/null || gpasswd -a "$SUDO_USER" proxybridge >/dev/null 2>&1 || adduser "$SUDO_USER" proxybridge >/dev/null 2>&1; then
+            SERVICE_USER="$SUDO_USER"
+            echo "  $SUDO_USER may now use ProxyBridge without root (member of the group 'proxybridge')"
+            echo "  NOTE: members of that group can route, block and read the proxy passwords of every user's traffic."
+            echo "        Add only people you would give sudo for ProxyBridge (sudo usermod -aG proxybridge <user>); remove with: sudo gpasswd -d <user> proxybridge"
+        else
+            echo "WARNING: could not add $SUDO_USER to the group 'proxybridge'. Do it with: sudo usermod -aG proxybridge $SUDO_USER"
+        fi
+    fi
+
+    SERVICE_STARTED=0
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        if /usr/local/bin/ProxyBridge --print-unit /usr/local/bin/ProxyBridge > /etc/systemd/system/proxybridge.service.new; then
+            install -o root -g root -m 0644 /etc/systemd/system/proxybridge.service.new /etc/systemd/system/proxybridge.service
+            rm -f /etc/systemd/system/proxybridge.service.new
+            systemctl daemon-reload
+            systemctl enable proxybridge.service >/dev/null 2>&1 || true
+            if systemctl restart proxybridge.service; then
+                SERVICE_STARTED=1
+                echo "  proxybridge.service is installed, enabled and running"
+            else
+                echo "WARNING: proxybridge.service did not start. See: journalctl -u proxybridge"
+            fi
+        else
+            rm -f /etc/systemd/system/proxybridge.service.new
+            echo "WARNING: could not create the service file"
+        fi
+    else
+        echo "  systemd is not running here, so no service was installed."
+        echo "  Start it yourself with: sudo ProxyBridge --daemon     (or run the window with sudo: it then uses its own engine)"
+    fi
 }
 
 # Update library cache
@@ -207,6 +241,38 @@ verify_installation() {
     fi
 }
 
+# Removes everything setup.sh and the GUI installed, including the boot service. Profiles are kept unless --purge is given.
+uninstall() {
+    echo "Removing ProxyBridge..."
+    if [ -f /etc/systemd/system/proxybridge.service ]; then
+        systemctl disable --now proxybridge.service 2>/dev/null || true
+        rm -f /etc/systemd/system/proxybridge.service
+        systemctl daemon-reload 2>/dev/null || true
+        echo "  service removed"
+    fi
+    rm -f /usr/local/bin/ProxyBridge /usr/local/bin/ProxyBridgeGUI
+    rm -f /usr/share/applications/proxybridge.desktop /usr/share/icons/hicolor/128x128/apps/proxybridge.png /usr/share/icons/hicolor/256x256/apps/proxybridge.png
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+    rm -f /usr/local/lib/libproxybridge.so /usr/local/lib64/libproxybridge.so /usr/lib/libproxybridge.so /usr/lib64/libproxybridge.so
+    rm -f /etc/ld.so.conf.d/proxybridge.conf
+    ldconfig 2>/dev/null || true
+    if [ "$1" = "--purge" ]; then
+        getent group proxybridge >/dev/null 2>&1 && { groupdel proxybridge 2>/dev/null || delgroup proxybridge 2>/dev/null || true; }
+        rm -rf /etc/proxybridge
+        echo "  profiles and settings removed"
+    else
+        echo "  profiles kept in /etc/proxybridge (use --uninstall --purge to remove them)"
+        echo "  the group 'proxybridge' and its members were kept too (--purge removes the group)"
+    fi
+    echo "Done."
+}
+
+if [ "$1" = "--uninstall" ]; then
+    [ "$(id -u)" = 0 ] || { echo "Please run as root: sudo $0 --uninstall"; exit 1; }
+    uninstall "$2"
+    exit 0
+fi
+
 # Main deployment
 main() {
     detect_distro
@@ -216,18 +282,27 @@ main() {
     install_files
     update_ldconfig
     verify_installation
+    install_service
     
     echo ""
     echo "==================================="
     echo "Installation Complete!"
     echo "==================================="
     echo ""
-    echo "You can now run ProxyBridge from anywhere:"
-    echo "  sudo ProxyBridge --help"
     if [ -f /usr/local/bin/ProxyBridgeGUI ]; then
-       echo "  sudo ProxyBridgeGUI      (Graphical Interface)"
+        if [ "${SERVICE_STARTED:-0}" = 1 ]; then
+            echo "Open the window (no sudo needed) from a terminal with:   ProxyBridgeGUI"
+            if [ -n "${SERVICE_USER:-}" ]; then
+                echo "  ($SERVICE_USER can use it right away; other users need: sudo usermod -aG proxybridge <user>)"
+            else
+                echo "  (add each user who may use it to the group: sudo usermod -aG proxybridge <user>)"
+            fi
+        else
+            echo "Open the window with:   sudo ProxyBridgeGUI"
+        fi
     fi
-    echo "  sudo ProxyBridge --profile <name or .pbprofile path>"
+    echo "Command line:                 sudo ProxyBridge --profile <name or .pbprofile path>"
+    echo "Help:                         ProxyBridge --help"
     echo ""
     echo "No cleanup is needed after a crash: the kernel detaches the eBPF programs automatically."
     echo ""

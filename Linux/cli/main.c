@@ -6,8 +6,12 @@
 #include <stdbool.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/auxv.h>
 #include "../src/ProxyBridge.h"
 #include "../profile/pb_profile.h"
+#include "../src/pb_ipc.h"
+#include "daemon.h"
+#include "../src/pb_unit.h"
 
 #define UPDATE_FEED "https://download.interceptsuite.com/proxybridge.json"
 
@@ -20,10 +24,10 @@ static void log_callback(const char* message)
         printf("[LOG] %s\n", message);
 }
 
-static void connection_callback(const char* process_name, uint32_t pid, const char* dest_ip, uint16_t dest_port, const char* proxy_info)
+static void connection_callback(const char* process_name, uint32_t pid, const char* dest_ip, uint16_t dest_port, const char* protocol, const char* proxy_info)
 {
     if (verbose_level == 2 || verbose_level == 3)
-        printf("[CONN] %s (PID:%u) -> %s:%u via %s\n", process_name, pid, dest_ip, dest_port, proxy_info);
+        printf("[CONN] %s (PID:%u) -> %s:%u via %s%s\n", process_name, pid, dest_ip, dest_port, proxy_info, protocol && !strcmp(protocol, "UDP") ? " (UDP)" : "");
 }
 
 static void signal_handler(int sig)
@@ -54,12 +58,16 @@ static void show_help(void)
     show_banner();
     printf("Options:\n");
     printf("  --profile <path>     Path to a .pbprofile file exported from the GUI, or the name of a\n");
-    printf("                       profile saved by the GUI (Proxy > Profiles)\n\n");
+    printf("                       profile saved by the GUI (the Profile menu)\n\n");
     printf("  --verbose <0-3>      Logging verbosity\n");
     printf("                         0 - Silent (default)\n");
     printf("                         1 - Log messages only\n");
     printf("                         2 - Connection events only\n");
     printf("                         3 - Both logs and connections\n\n");
+    printf("  --daemon             Run as the ProxyBridge service: owns the engine and the profiles, and lets the\n");
+    printf("                       window (which then needs no root) control it. Used by proxybridge.service\n");
+    printf("  --print-unit <path>  Print the systemd unit that runs <path> --daemon (used by the installer)\n");
+    printf("  --socket <path>      With --daemon: the control socket (default %s)\n\n", PB_IPC_SOCKET_PATH);
     printf("  --version            Show version information\n");
     printf("  -?, -h, --help       Show help\n\n");
     printf("Commands:\n");
@@ -86,7 +94,7 @@ static bool is_https(const char* url)
 /* --update: ask the feed with curl and print what it says. Nothing is downloaded or run. */
 static int check_update(void)
 {
-    const char* feed = getenv("PROXYBRIDGE_UPDATE_FEED");      /* a mirror, or a local file in tests */
+    const char* feed = getauxval(AT_SECURE) ? NULL : getenv("PROXYBRIDGE_UPDATE_FEED");   /* a mirror, or a local file in tests; never under setuid */
     if (!feed || !*feed)
         feed = UPDATE_FEED;
     int fds[2];
@@ -101,7 +109,7 @@ static int check_update(void)
         dup2(fds[1], STDOUT_FILENO);
         close(fds[0]);
         close(fds[1]);
-        execlp("curl", "curl", "-sS", "-m", "15", "-H", "User-Agent: ProxyBridge-UpdateChecker", feed, (char*)NULL);
+        execlp("curl", "curl", "-sS", "-m", "15", "--proto", "=https,file", "-H", "User-Agent: ProxyBridge-UpdateChecker", "--", feed, (char*)NULL);
         _exit(127);
     }
     close(fds[1]);
@@ -151,6 +159,8 @@ static bool is_root(void)
 int main(int argc, char *argv[])
 {
     const char* profile_arg = NULL;
+    bool daemon_mode = false;
+    const char* socket_arg = PB_IPC_SOCKET_PATH;
 
     for (int i = 1; i < argc; i++)
     {
@@ -167,6 +177,27 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[i], "--update") == 0)
         {
             return check_update();
+        }
+        else if (strcmp(argv[i], "--daemon") == 0)
+        {
+            daemon_mode = true;
+        }
+        else if (strcmp(argv[i], "--print-unit") == 0 && i + 1 < argc)
+        {
+            const char* why = NULL;
+            char* text = pb_unit_text(argv[++i], &why);
+            if (!text)
+            {
+                fprintf(stderr, "ERROR: %s\n", why ? why : "cannot build the unit");
+                return 1;
+            }
+            fputs(text, stdout);
+            free(text);
+            return 0;
+        }
+        else if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc)
+        {
+            socket_arg = argv[++i];
         }
         else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc)
         {
@@ -188,6 +219,16 @@ int main(int argc, char *argv[])
             fprintf(stderr, "Use --help for usage information\n");
             return 1;
         }
+    }
+
+    if (daemon_mode)
+    {
+        if (profile_arg)
+        {
+            fprintf(stderr, "ERROR: --daemon runs the profile the window made active; it does not take --profile.\n");
+            return 1;
+        }
+        return pb_daemon_run(socket_arg, verbose_level);
     }
 
     if (!profile_arg)
@@ -255,7 +296,7 @@ int main(int argc, char *argv[])
     }
 
     ProxyBridge_SetLogCallback(verbose_level == 1 || verbose_level == 3 ? log_callback : NULL);
-    ProxyBridge_SetConnectionCallback(verbose_level == 2 || verbose_level == 3 ? connection_callback : NULL);
+    ProxyBridge_SetConnectionCallbackEx(verbose_level == 2 || verbose_level == 3 ? connection_callback : NULL);
     ProxyBridge_SetTrafficLoggingEnabled(verbose_level > 0);
     ProxyBridge_SetDnsViaProxy(prof.dns_via_proxy);
     ProxyBridge_SetLogEveryConnection(prof.log_every);

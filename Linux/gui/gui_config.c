@@ -1,16 +1,22 @@
 #include "gui.h"
 #include <fcntl.h>
+#include <errno.h>
 #include <dirent.h>
 #include "pb_profile.h"
 
 GList *g_profiles = NULL;
+bool g_chk_boot = false;
 char *g_active_profile = NULL;
+
+static const char *config_dir_path() {
+    return pbp_config_dir();
+}
 
 static char *config_dir() {
     return g_strdup(pbp_config_dir());
 }
 
-static char *profile_path(const char *name) {
+char *profile_path(const char *name) {
     char *file = pbp_filename_for(name);
     if (!file) return NULL;
     char *dir = config_dir();
@@ -20,11 +26,102 @@ static char *profile_path(const char *name) {
     return path;
 }
 
-// the file of a deleted or renamed profile must go, or it would come back at the next start
-static void remove_profile_file(const char *name) {
+// ---- where profiles live ---------------------------------------------------------------------------------------------------
+// The window reads and writes profiles through a small interface: files under /etc/proxybridge when it runs as root with its own
+// engine, or the ProxyBridge service (pb_client.c) when it does not have root. The model and the .pbprofile code are the same.
+static bool ensure_private_dir(const char *dir);
+
+static bool file_list(GPtrArray *names) {
+    char *pdir = g_strdup_printf("%s/profiles", config_dir_path());
+    DIR *d = opendir(pdir);
+    struct dirent *de;
+    while (d && (de = readdir(d)) != NULL) {
+        if (strlen(de->d_name) <= strlen(PBP_EXT)) continue;
+        char *name = pbp_name_from_filename(de->d_name);
+        if (name) { g_ptr_array_add(names, g_strdup(name)); free(name); }
+    }
+    if (d) closedir(d);
+    g_free(pdir);
+    return true;
+}
+
+static char *file_get(const char *name) {
+    char *path = profile_path(name);
+    if (!path) return NULL;
+    chmod(path, 0600);
+    char *data = NULL;
+    gsize len = 0;
+    if (!g_file_get_contents(path, &data, &len, NULL) || len > PBP_MAX_FILE) { g_free(data); data = NULL; }
+    g_free(path);
+    return data;
+}
+
+static bool file_put(const char *name, const char *data, char *err, size_t en) {
+    char *dir = g_strdup(config_dir_path());
+    char *pdir = g_strdup_printf("%s/profiles", dir);
+    char *path = profile_path(name);
+    bool ok = false;
+    if (!path) snprintf(err, en, "the name is too long to be stored");
+    else if (!ensure_private_dir(dir) || !ensure_private_dir(pdir)) snprintf(err, en, "cannot create %s", pdir);
+    else ok = pbp_write_file(path, data, err, en) == 0;
+    g_free(path); g_free(pdir); g_free(dir);
+    return ok;
+}
+
+static bool file_del(const char *name) {
     char *path = profile_path(name);
     if (path) unlink(path);
     g_free(path);
+    return true;
+}
+
+static bool file_exists(const char *name) {
+    char *path = profile_path(name);
+    bool yes = path && access(path, F_OK) == 0;
+    g_free(path);
+    return yes;
+}
+
+static bool file_settings_get(char **active, bool *updates, bool *boot) {
+    char *p = g_strdup_printf("%s/settings.json", config_dir_path());
+    bool ok = pbp_settings_load(p, active, updates, boot) == 0;
+    g_free(p);
+    return ok;
+}
+
+static bool file_settings_set(const char *active, bool updates, bool boot, char *err, size_t en) {
+    char *dir = g_strdup(config_dir_path());
+    char *p = g_strdup_printf("%s/settings.json", dir);
+    bool ok = ensure_private_dir(dir) && pbp_settings_save(p, active, updates, boot, err, en) == 0;
+    g_free(p); g_free(dir);
+    return ok;
+}
+
+static char *file_legacy_get(void) {
+    char *path = g_strdup_printf("%s/config.ini", config_dir_path());
+    chmod(path, 0600);
+    char *data = NULL;
+    gsize len = 0;
+    if (!g_file_get_contents(path, &data, &len, NULL) || len > (1u << 20)) { g_free(data); data = NULL; }
+    g_free(path);
+    return data;
+}
+
+static void file_legacy_done(void) {
+    char *from = g_strdup_printf("%s/config.ini", config_dir_path()), *to = g_strdup_printf("%s/config.ini.bak", config_dir_path());
+    if (rename(from, to) != 0) perror("could not set the old config.ini aside");
+    g_free(from);
+    g_free(to);
+}
+
+const struct gui_store gui_store_files = { file_list, file_get, file_put, file_del, file_exists, file_settings_get, file_settings_set,
+                                           file_legacy_get, file_legacy_done };
+static const struct gui_store *g_store = &gui_store_files;
+void gui_store_use(const struct gui_store *s) { g_store = s ? s : &gui_store_files; }
+
+// the file of a deleted or renamed profile must go, or it would come back at the next start
+static void remove_profile_file(const char *name) {
+    g_store->del(name);
 }
 
 static char *unesc(const char *s) {
@@ -304,12 +401,33 @@ static void fill_profile_from_pbp(Profile *p, const struct pbp_profile *src) {
     p->nfilters = src->nfilters;
 }
 
+// Under sudo or pkexec the file is written by root into the invoking user's directory: hand it to that user, so the
+// "readable by you only" promise means the person at the keyboard. Only when the directory is theirs, never elsewhere.
+static void give_to_invoker(const char *path) {
+    const char *uid_s = getenv("PKEXEC_UID"), *gid_s = getenv("SUDO_GID");
+    if (!uid_s) uid_s = getenv("SUDO_UID");
+    if (!uid_s || !*uid_s) return;
+    char *end = NULL;
+    guint64 uid = g_ascii_strtoull(uid_s, &end, 10);
+    if (!end || *end || uid == 0 || uid > 0xFFFFFFFEull) return;
+    char *dir = g_path_get_dirname(path);
+    struct stat st;
+    bool theirs = stat(dir, &st) == 0 && st.st_uid == (uid_t)uid;
+    g_free(dir);
+    if (!theirs) return;
+    guint64 gid = st.st_gid;
+    if (gid_s && *gid_s) { gid = g_ascii_strtoull(gid_s, &end, 10); if (!end || *end || gid > 0xFFFFFFFEull) gid = st.st_gid; }
+    // lchown: if the invoker swapped the file for a symlink in their own directory, it is the link that changes hands, not its target
+    if (lchown(path, (uid_t)uid, (gid_t)gid) != 0) g_warning("could not hand %s to the invoking user: %s", path, g_strerror(errno));
+}
+
 bool profile_export(const Profile *prof, const char *path, char *err, size_t errlen) {
     profile_sync_active();
     struct pbp_profile view;
     profile_to_pbp(prof, &view);
     bool ok = pbp_save_file(path, &view, err, errlen) == 0;
     free_pbp_view(&view);
+    if (ok) give_to_invoker(path);
     return ok;
 }
 
@@ -361,24 +479,15 @@ static bool ensure_private_dir(const char *dir) {
 void save_config() {
     profile_sync_active();
 
-    char *dir = config_dir();
-    char *pdir = g_strdup_printf("%s/profiles", dir);
-    if (!ensure_private_dir(dir) || !ensure_private_dir(pdir)) goto out;
-
     char err[256];
     for (GList *l = g_profiles; l != NULL; l = l->next) {
         Profile *prof = (Profile *)l->data;
-        char *path = profile_path(prof->name);
-        if (!path) {
-            fprintf(stderr, "profile '%s': the name is too long to be stored\n", prof->name);
-            continue;
-        }
         struct pbp_profile view;
         profile_to_pbp(prof, &view);
         char *json = pbp_serialize(&view);
         free_pbp_view(&view);
-        if (json && !(prof->saved && strcmp(prof->saved, json) == 0 && access(path, F_OK) == 0)) {
-            if (pbp_write_file(path, json, err, sizeof err) == 0) {
+        if (json && !(prof->saved && strcmp(prof->saved, json) == 0 && g_store->exists(prof->name))) {
+            if (g_store->put(prof->name, json, err, sizeof err)) {
                 free(prof->saved);
                 prof->saved = json;
                 json = NULL;
@@ -387,15 +496,9 @@ void save_config() {
             }
         }
         free(json);
-        g_free(path);
     }
-    char *settings = g_strdup_printf("%s/settings.json", dir);
-    if (pbp_settings_save(settings, g_active_profile, g_chk_updates, err, sizeof err) != 0)
+    if (!g_store->settings_set(g_active_profile, g_chk_updates, g_chk_boot, err, sizeof err))
         fprintf(stderr, "failed to save settings: %s\n", err);
-    g_free(settings);
-out:
-    g_free(pdir);
-    g_free(dir);
 }
 
 static ProxyType proxy_type_from_int(int v) {
@@ -449,11 +552,8 @@ static RuleData *parse_rule_line(char *line) {
 
 // config.ini of the previous versions; files without profile blocks end up in a profile called "Default".
 // Returns false when there is no such file.
-static bool load_legacy_ini(const char *dir, char **saved_active_out) {
-    char *path = g_strdup_printf("%s/config.ini", dir);
-    chmod(path, 0600);
-    FILE *f = fopen(path, "r");
-    g_free(path);
+static bool load_legacy_ini(const char *text, char **saved_active_out) {
+    FILE *f = fmemopen((void *)text, strlen(text), "r");
     if (!f) return false;
 
     char line[8192];
@@ -564,52 +664,44 @@ static gint compare_names(gconstpointer a, gconstpointer b) {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-// sorted by file name, so the order is the same on every start
-static void load_profile_files(const char *dir) {
-    char *pdir = g_strdup_printf("%s/profiles", dir);
-    GPtrArray *files = g_ptr_array_new_with_free_func(g_free);
-    DIR *d = opendir(pdir);
-    struct dirent *de;
-    while (d && (de = readdir(d)) != NULL)
-        if (strlen(de->d_name) > strlen(PBP_EXT)) g_ptr_array_add(files, g_strdup(de->d_name));
-    if (d) closedir(d);
-    g_ptr_array_sort(files, compare_names);
+// sorted by name, so the order is the same on every start
+static void load_profile_files() {
+    GPtrArray *names = g_ptr_array_new_with_free_func(g_free);
+    g_store->list(names);
+    g_ptr_array_sort(names, compare_names);
 
-    for (guint i = 0; i < files->len; i++) {
-        const char *file = g_ptr_array_index(files, i);
-        char *name = pbp_name_from_filename(file);
-        if (!name) continue;
-        char *path = g_strdup_printf("%s/%s", pdir, file);
+    for (guint i = 0; i < names->len; i++) {
+        const char *name = g_ptr_array_index(names, i);
+        if (profile_find(name)) continue;               // duplicate name after decoding: keep the first
+        char *data = g_store->get(name);
         struct pbp_profile src;
         char err[256];
-        chmod(path, 0600);
-        if (profile_find(name)) {
-            /* duplicate name after decoding: keep the first */
-        } else if (pbp_load_file(path, &src, err, sizeof err) == 0) {
+        if (!data) {
+            fprintf(stderr, "ignoring profile '%s': cannot be read\n", name);
+        } else if (pbp_parse(data, strlen(data), &src, err, sizeof err) == 0) {
             fill_profile_from_pbp(profile_new_empty(name), &src);
             pbp_free(&src);
         } else {
             fprintf(stderr, "ignoring profile '%s': %s\n", name, err);
         }
-        g_free(path);
-        free(name);
+        g_free(data);
     }
-    g_ptr_array_free(files, TRUE);
-    g_free(pdir);
+    g_ptr_array_free(names, TRUE);
 }
 
 // profiles/<name>.pbprofile + settings.json; a config.ini from an older version is converted on first start
 void load_config() {
-    char *dir = config_dir();
     char *settings_active = NULL, *legacy_active = NULL;
     bool migrate = false;
 
-    load_profile_files(dir);
-    char *settings = g_strdup_printf("%s/settings.json", dir);
-    pbp_settings_load(settings, &settings_active, &g_chk_updates);
-    g_free(settings);
-    if (!g_profiles) {
-        migrate = load_legacy_ini(dir, &legacy_active);
+    load_profile_files();
+    g_store->settings_get(&settings_active, &g_chk_updates, &g_chk_boot);
+    if (!g_profiles) {                                          // a config.ini of an older version (3.2.x, the Linux beta) sits next to the profiles
+        char *old = g_store->legacy_get();
+        if (old) {
+            migrate = load_legacy_ini(old, &legacy_active);
+            g_free(old);
+        }
         for (GList *l = g_profiles; l != NULL; l = l->next) {      // the old file had one pair of switches for all profiles
             ((Profile *)l->data)->logging = g_chk_logging;
             ((Profile *)l->data)->dns = g_chk_dns;
@@ -622,12 +714,8 @@ void load_config() {
 
     if (migrate) {
         save_config();
-        char *from = g_strdup_printf("%s/config.ini", dir), *to = g_strdup_printf("%s/config.ini.bak", dir);
-        if (rename(from, to) != 0) perror("could not set the old config.ini aside");
-        g_free(from);
-        g_free(to);
+        g_store->legacy_done();
     }
-    g_free(dir);
 }
 
 struct pbp_filter *gui_filters(size_t *n) {

@@ -1,5 +1,6 @@
 #include "gui.h"
 #include "gui_boot.h"
+#include "gui_icon.h"
 #include <glib-unix.h>
 #include <signal.h>
 
@@ -16,7 +17,7 @@ bool g_chk_log_every = false;
 bool g_chk_auto_clear = true;
 int g_zoom = 100;
 bool g_chk_updates = true;
-static GtkWidget *log_item, *dns_item, *every_item, *enable_item, *clear_item, *boot_item, *update_item;
+static GtkWidget *log_item, *every_item, *enable_item, *clear_item, *boot_item, *update_item;
 static GtkCssProvider *zoom_provider;
 static char zoom_css[96];
 
@@ -42,11 +43,69 @@ static void on_enable_toggled(GtkCheckMenuItem *item, gpointer data) {
     gui_log("ProxyBridge %s", gtk_check_menu_item_get_active(item) ? "enabled" : "paused: new connections are not redirected");
 }
 
-static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
-    bool active = gtk_check_menu_item_get_active(item);
-    ProxyBridge_SetDnsViaProxy(active);
-    g_chk_dns = active;
-    save_config();
+// the logo for the title bar, task switcher and dock
+static void set_app_icon(void) {
+    GList *icons = NULL;
+    const struct { const unsigned char *data; size_t len; } src[] = { { gui_icon_128, sizeof gui_icon_128 }, { gui_icon_256, sizeof gui_icon_256 } };
+    for (size_t i = 0; i < sizeof src / sizeof *src; i++) {
+        GdkPixbufLoader *loader = gdk_pixbuf_loader_new_with_type("png", NULL);
+        if (!loader) continue;
+        if (gdk_pixbuf_loader_write(loader, src[i].data, src[i].len, NULL) && gdk_pixbuf_loader_close(loader, NULL)) {
+            GdkPixbuf *pb = gdk_pixbuf_loader_get_pixbuf(loader);
+            if (pb) icons = g_list_append(icons, g_object_ref(pb));
+        } else {
+            gdk_pixbuf_loader_close(loader, NULL);
+        }
+        g_object_unref(loader);
+    }
+    if (icons) {
+        gtk_window_set_default_icon_list(icons);
+        g_list_free_full(icons, g_object_unref);
+    }
+}
+
+static void close_open_menus(GtkWidget *menubar) {
+    if (menubar) gtk_menu_shell_cancel(GTK_MENU_SHELL(menubar));
+}
+
+static void on_active_changed(GObject *w, GParamSpec *pspec, gpointer menubar) {
+    if (!gtk_window_is_active(GTK_WINDOW(w))) close_open_menus(menubar);
+}
+
+static gboolean on_focus_out(GtkWidget *w, GdkEvent *ev, gpointer menubar) {
+    close_open_menus(menubar);
+    return FALSE;
+}
+
+// ---- Profile > Switch Profile: one radio item per profile, the active one is checked ----
+static GtkWidget *switch_menu;
+static guint switch_rebuild_source;
+
+static void free_closure_name(gpointer data, GClosure *closure) { g_free(data); }
+
+static gboolean rebuild_switch_menu(gpointer unused) {
+    switch_rebuild_source = 0;
+    if (!switch_menu) return G_SOURCE_REMOVE;
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(switch_menu));
+    for (GList *k = kids; k; k = k->next) gtk_widget_destroy(GTK_WIDGET(k->data));
+    g_list_free(kids);
+    GSList *group = NULL;
+    for (GList *l = g_profiles; l; l = l->next) {
+        Profile *p = l->data;
+        GtkWidget *item = gtk_radio_menu_item_new_with_label(group, p->name);
+        group = gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(item));
+        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), strcmp(p->name, g_active_profile) == 0);   // before the handler exists
+        g_signal_connect_data(item, "toggled", G_CALLBACK(on_profile_switch_item), g_strdup(p->name), free_closure_name, 0);
+        gtk_menu_shell_append(GTK_MENU_SHELL(switch_menu), item);
+    }
+    gtk_widget_show_all(switch_menu);
+    return G_SOURCE_REMOVE;
+}
+
+// called after any change of the profile list or of the active profile. Deferred: it is usually called from the handler of a
+// menu item that the rebuild would destroy.
+void gui_refresh_profile_menu(void) {
+    if (!switch_rebuild_source) switch_rebuild_source = g_idle_add(rebuild_switch_menu, NULL);
 }
 
 static void on_auto_clear_toggled(GtkCheckMenuItem *item, gpointer data) {
@@ -60,15 +119,21 @@ static void on_boot_toggled(GtkCheckMenuItem *item, gpointer data) {
     if (boot_syncing) return;
     bool want = gtk_check_menu_item_get_active(item);
     char *err = NULL;
-    if (!boot_set(want, g_active_profile, &err)) {
+    if (!pbc_boot_set(want, &err)) {
         show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not %s starting at boot: %s", want ? "enable" : "disable", err ? err : "unknown error");
         g_free(err);
         boot_syncing = true;
-        gtk_check_menu_item_set_active(item, boot_is_enabled());
+        gtk_check_menu_item_set_active(item, pbc_boot_is_enabled());
         boot_syncing = false;
         return;
     }
-    gui_log("ProxyBridge %s at boot (service proxybridge.service, profile '%s')", want ? "will start" : "will no longer start", g_active_profile);
+    g_chk_boot = want;
+    save_config();
+    if (pbc_is_service())
+        gui_log(want ? "Start at Boot is on: the service applies profile '%s' when the machine starts and keeps routing after this window is closed" :
+                       "Start at Boot is off: routing stops when this window is closed", g_active_profile);
+    else
+        gui_log("ProxyBridge %s at boot (service proxybridge.service, profile '%s')", want ? "will start" : "will no longer start", g_active_profile);
 }
 
 static void on_update_startup_toggled(GtkCheckMenuItem *item, gpointer data) {
@@ -111,70 +176,10 @@ void gui_sync_switches() {
     if (clear_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(clear_item), g_chk_auto_clear);
     if (every_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(every_item), g_chk_log_every);
     if (log_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_item), g_chk_logging);
-    if (dns_item) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_item), g_chk_dns);
 }
 
 // same feed as windows/mac: https://download.interceptsuite.com/proxybridge.json
 #define UPD_FEED_URL "https://download.interceptsuite.com/proxybridge.json"
-
-// match "linux": { ... } as a key, not a random "linux" string value
-static char *extract_platform_block(const char *json, const char *platform) {
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\"", platform);
-    size_t nlen = strlen(needle);
-    const char *p = json;
-    const char *key = NULL;
-    while ((p = strstr(p, needle)) != NULL) {
-        const char *after = p + nlen;
-        while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r') after++;
-        if (*after == ':') {
-            key = p;
-            break;
-        }
-        p += nlen;
-    }
-    if (!key) return NULL;
-    const char *brace = strchr(key, '{');
-    if (!brace) return NULL;
-    int depth = 0;
-    for (const char *q = brace; *q; q++) {
-        if (*q == '{') depth++;
-        else if (*q == '}') {
-            depth--;
-            if (depth == 0)
-                return g_strndup(brace, (gsize)(q - brace + 1));
-        }
-    }
-    return NULL;
-}
-
-static void parse_ver(const char *s, int out[3]) {
-    out[0] = out[1] = out[2] = 0;
-    if (!s) return;
-    while (*s && (*s < '0' || *s > '9')) s++;
-    int i = 0;
-    while (*s && i < 3) {
-        if (*s >= '0' && *s <= '9') {
-            int n = 0;
-            while (*s >= '0' && *s <= '9') {
-                n = n * 10 + (*s - '0');
-                s++;
-            }
-            out[i++] = n;
-        } else if (*s == '.') {
-            s++;
-        } else {
-            break;
-        }
-    }
-}
-
-static int ver_cmp(const int a[3], const int b[3]) {
-    for (int i = 0; i < 3; i++) {
-        if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
-    }
-    return 0;
-}
 
 static int https_url_ok(const char *url) {
     if (!url || strncmp(url, "https://", 8) != 0) return 0;
@@ -184,6 +189,14 @@ static int https_url_ok(const char *url) {
         if (c == ' ' || c == '"' || c == '\'' || c == '`' || c == '\\') return 0;
     }
     return 1;
+}
+
+// The browser is opened as root: only the project's own release pages are handed to it.
+static int release_host_ok(const char *url) {
+    static const char *const hosts[] = { "https://github.com/InterceptSuite/", "https://download.interceptsuite.com/", "https://interceptsuite.com/", "https://www.interceptsuite.com/" };
+    for (size_t i = 0; i < sizeof hosts / sizeof *hosts; i++)
+        if (g_str_has_prefix(url, hosts[i])) return 1;
+    return 0;
 }
 
 static const char *update_feed_url() {
@@ -211,8 +224,8 @@ static void update_free(UpdateInfo *u) {
 static UpdateInfo *update_lookup(void) {
     UpdateInfo *u = g_malloc0(sizeof *u);
     char *argv[] = {
-        (char *)"curl", (char *)"-sS", (char *)"-m", (char *)"15",
-        (char *)"-H", (char *)"User-Agent: ProxyBridge-UpdateChecker",
+        (char *)"curl", (char *)"-sS", (char *)"-m", (char *)"15", (char *)"--proto", (char *)"=https,file",
+        (char *)"-H", (char *)"User-Agent: ProxyBridge-UpdateChecker", (char *)"--",
         (char *)update_feed_url(),
         NULL
     };
@@ -226,34 +239,43 @@ static UpdateInfo *update_lookup(void) {
         g_free(curl_err);
         return u;
     }
-    if (exit_code != 0 || !json || json[0] == '\0') {
-        u->problem = g_strdup_printf("Update check failed (curl exit %d).", exit_code);
+    if (!g_spawn_check_wait_status(exit_code, NULL) || !json || json[0] == '\0') {
+        u->problem = g_strdup("Update check failed (could not fetch the update feed).");
         u->problem_type = GTK_MESSAGE_ERROR;
         g_free(json); g_free(curl_err);
         return u;
     }
-    char *linux_obj = extract_platform_block(json, "linux");
+    // the same strict parser and version check as the command line program (the feed is remote input)
+    char *version = NULL, *download = NULL, *notes = NULL;
+    int rc = pbp_update_parse(json, strlen(json), &version, &download, &notes);
     g_free(json);
     g_free(curl_err);
-    if (!linux_obj) {
+    if (rc != 0) {
         u->problem = g_strdup("Could not parse linux update info.");
         u->problem_type = GTK_MESSAGE_WARNING;
         return u;
     }
-    u->version = extract_sub_json_str(linux_obj, "version");
-    u->download = extract_sub_json_str(linux_obj, "download");
-    u->notes = extract_sub_json_str(linux_obj, "release_notes");
-    g_free(linux_obj);
-    if (!u->version || !u->version[0]) {
-        u->problem = g_strdup("Could not parse version info.");
-        u->problem_type = GTK_MESSAGE_WARNING;
-        return u;
-    }
-    int cur[3], lat[3];
-    parse_ver(PROXYBRIDGE_VERSION, cur);
-    parse_ver(u->version, lat);
-    u->newer = ver_cmp(lat, cur) > 0;
+    u->version = g_strdup(version); u->download = g_strdup(download ? download : ""); u->notes = g_strdup(notes ? notes : "");
+    free(version); free(download); free(notes);
+    u->newer = pbp_version_newer(u->version, PROXYBRIDGE_VERSION);
     return u;
+}
+
+// Opens an address in the default browser. The tests build records the address in a file instead (no browser in a test display).
+static void open_in_browser(const char *url) {
+#ifdef PB_TEST_HOOKS
+    const char *log = getenv("PB_OPEN_URL_LOG");
+    if (log && *log) {
+        FILE *f = fopen(log, "a");
+        if (f) { fprintf(f, "%s\n", url); fclose(f); }
+        return;
+    }
+#endif
+    GError *uri_err = NULL;
+    if (!gtk_show_uri_on_window(GTK_WINDOW(window), url, GDK_CURRENT_TIME, &uri_err)) {
+        show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not open browser: %s", uri_err ? uri_err->message : "unknown");
+        if (uri_err) g_error_free(uri_err);
+    }
 }
 
 // Main thread. A user-started check reports everything; a start-up check only speaks up when a newer version exists.
@@ -280,19 +302,22 @@ static void update_show(UpdateInfo *u) {
         save_config();
         sync_update_item();
     } else if (resp == GTK_RESPONSE_ACCEPT) {
-        const char *url = NULL;
-        if (https_url_ok(u->notes)) url = u->notes;
-        else if (https_url_ok(u->download)) url = u->download;
+        const char *url = NULL;                   // only pages of the project itself are opened in a browser running as root
+        if (https_url_ok(u->notes) && release_host_ok(u->notes)) url = u->notes;
+        else if (https_url_ok(u->download) && release_host_ok(u->download)) url = u->download;
         if (!url) {
             show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "No safe https url in update feed.");
         } else {
-            GError *uri_err = NULL;
-            if (!gtk_show_uri_on_window(GTK_WINDOW(window), url, GDK_CURRENT_TIME, &uri_err)) {
-                show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Could not open browser: %s", uri_err ? uri_err->message : "unknown");
-                if (uri_err) g_error_free(uri_err);
-            }
+            open_in_browser(url);
         }
     }
+}
+
+// same address as the Windows app's Help > Documentation
+#define DOCS_URL "https://proxybridge.interceptsuite.com/docs/"
+
+static void on_documentation(GtkWidget *widget, gpointer data) {
+    open_in_browser(DOCS_URL);
 }
 
 static void on_check_update(GtkWidget *widget, gpointer data) {
@@ -330,7 +355,7 @@ static void on_about(GtkWidget *widget, gpointer data) {
         "<span size='xx-large' weight='bold'>ProxyBridge</span>\n"
         "<span color='gray'>Version %s</span>\n\n"
         "Universal proxy client for Linux applications\n"
-        "eBPF backend (needs root, kernel 5.11+ with BTF and cgroup v2)\n\n"
+        "eBPF backend, run by the ProxyBridge service (root);\nkernel 5.11+ with BTF and cgroup v2\n\n"
         "Author: Sourav Kalal / InterceptSuite\n\n"
         "Website: <a href=\"https://interceptsuite.com\">interceptsuite.com</a>\n"
         "GitHub: <a href=\"https://github.com/InterceptSuite/ProxyBridge\">InterceptSuite/ProxyBridge</a>\n\n"
@@ -443,8 +468,11 @@ static void shutdown_engine() {
         engine_thread = NULL;
         engine_state = engine_job.start && engine_job.ok ? ENGINE_RUNNING : ENGINE_STOPPED;
     }
-    if (engine_state == ENGINE_RUNNING) ProxyBridge_Stop();
+    // With the service the engine belongs to the service: closing the window must not switch routing off
+    // Start at Boot keeps the service routing after the window closes; without it routing ends with the window, as it always did
+    if (engine_state == ENGINE_RUNNING && (!pbc_is_service() || !g_chk_boot)) ProxyBridge_Stop();
     engine_state = ENGINE_STOPPED;
+    pbc_disconnect();
 }
 
 static GtkWidget *add_menu_item(GtkWidget *menu, const char *label, GCallback cb) {
@@ -567,19 +595,64 @@ static GtkWidget *add_flows_tab(GtkWidget *notebook) {
     return flows_page;
 }
 
+// The service went away (restarted, updated, stopped). Try again every two seconds and send the window's configuration once it is back.
+static guint reconnect_source;
+static bool resume_engine;                      // the engine was running when the connection broke: start it again afterwards
+
+static gboolean reconnect_tick(gpointer data) {
+    if (!pbc_reconnect()) return G_SOURCE_CONTINUE;
+    reconnect_source = 0;
+    pbc_BeginBatch();
+    ProxyBridge_ClearRules();
+    apply_proxies_to_lib();
+    apply_rules_to_lib();
+    pbc_EndBatch();
+    gui_sync_switches();
+    ProxyBridge_SetEnabled(gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(enable_item)));
+    set_engine_state(pbc_service_engine_running() ? ENGINE_RUNNING : ENGINE_STOPPED);
+    if (resume_engine) engine_request(true);          // a restarted service that is not set to start at boot waits for us
+    resume_engine = false;
+    gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "Connected to the ProxyBridge service again.");
+    gui_log("connected to the ProxyBridge service again");
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean service_lost_idle(gpointer data) {
+    if (reconnect_source) return G_SOURCE_REMOVE;
+    gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "Lost the connection to the ProxyBridge service. Trying to reconnect...");
+    gui_log("lost the connection to the ProxyBridge service; trying to reconnect");
+    resume_engine = engine_state == ENGINE_RUNNING;
+    set_engine_state(ENGINE_STOPPED);
+    reconnect_source = g_timeout_add_seconds(2, reconnect_tick, NULL);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_service_lost(void) {            // reader thread
+    g_idle_add(service_lost_idle, NULL);
+}
+
 int main(int argc, char *argv[]) {
-    if (getuid() != 0) {
+    setenv("GSETTINGS_BACKEND", "memory", 1);
+    // Prefer the ProxyBridge service: the window then needs no root. Without a service, a window started as root runs the engine itself.
+    char link_err[256] = "";
+    int link = pbc_connect(NULL, link_err, sizeof link_err);
+    if (link == PBC_CONNECTED) {
+        gui_store_use(&pbc_store);
+    } else if (link == PBC_REFUSED || getuid() != 0) {
         gtk_init(&argc, &argv);
-        show_message(NULL, GTK_MESSAGE_ERROR, "ProxyBridge must be run as root (sudo).");
+        if (link == PBC_REFUSED)
+            show_message(NULL, GTK_MESSAGE_ERROR, "%s\n\nIf this is a permissions problem, add your user to the group that may control ProxyBridge:\n    sudo usermod -aG proxybridge $USER", link_err);
+        else
+            show_message(NULL, GTK_MESSAGE_ERROR, "The ProxyBridge service is not running.\n\nStart it with:\n    sudo systemctl enable --now proxybridge\n\n(or run this window with sudo to use ProxyBridge without the service).");
         return 1;
     }
-    setenv("GSETTINGS_BACKEND", "memory", 1);
     load_config();
     gtk_init(&argc, &argv);
 
     GtkSettings *settings = gtk_settings_get_default();
     if (settings) g_object_set(settings, "gtk-application-prefer-dark-theme", TRUE, NULL);
 
+    set_app_icon();
     window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     char *win_title = g_strdup_printf("ProxyBridge - %s", g_active_profile);
     gtk_window_set_title(GTK_WINDOW(window), win_title);
@@ -591,36 +664,57 @@ int main(int argc, char *argv[]) {
     gtk_container_add(GTK_CONTAINER(window), vbox);
 
     GtkWidget *menubar = gtk_menu_bar_new();
+    // An open menu holds a grab. When the user moves to another program (often a native Wayland window this X11 client
+    // never gets pointer events from) the menu would stay on top of it: close it as soon as this window loses focus.
+    g_signal_connect(window, "notify::is-active", G_CALLBACK(on_active_changed), menubar);
+    g_signal_connect(window, "focus-out-event", G_CALLBACK(on_focus_out), menubar);
+    // The same four menus as the Windows app: Proxy, Profile, Settings, Help
     GtkWidget *proxy_menu = add_submenu(menubar, "Proxy");
-    add_menu_item(proxy_menu, "Proxy Settings...", G_CALLBACK(on_proxy_configure));
-    add_menu_item(proxy_menu, "Proxy Rules...", G_CALLBACK(on_proxy_rules_clicked));
-    add_menu_item(proxy_menu, "Profiles...", G_CALLBACK(on_profiles_clicked));
-    add_separator(proxy_menu);
-    log_item = add_check_item(proxy_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
-    dns_item = add_check_item(proxy_menu, "DNS via Proxy", g_chk_dns, G_CALLBACK(on_dns_proxy_toggled));
-    every_item = add_check_item(proxy_menu, "Log Every Connection", g_chk_log_every, G_CALLBACK(on_log_every_toggled));
-    clear_item = add_check_item(proxy_menu, "Auto-clear Logs", g_chk_auto_clear, G_CALLBACK(on_auto_clear_toggled));
-    add_menu_item(proxy_menu, "Log Filters...", G_CALLBACK(on_log_filters_clicked));
-    enable_item = add_check_item(proxy_menu, "Enable ProxyBridge", true, G_CALLBACK(on_enable_toggled));
-    add_separator(proxy_menu);
-    boot_item = add_check_item(proxy_menu, "Start at Boot (systemd service)", boot_is_enabled(), G_CALLBACK(on_boot_toggled));
+    enable_item = add_check_item(proxy_menu, "Enable ProxyBridge", true, G_CALLBACK(on_enable_toggled));      // the main on/off switch
     start_item = add_menu_item(proxy_menu, "Start Engine", G_CALLBACK(on_start_engine));
     stop_item = add_menu_item(proxy_menu, "Stop Engine", G_CALLBACK(on_stop_engine));
+    add_separator(proxy_menu);
+    add_menu_item(proxy_menu, "Proxy Settings...", G_CALLBACK(on_proxy_configure));
+    add_menu_item(proxy_menu, "Proxy Rules...", G_CALLBACK(on_proxy_rules_clicked));
+    add_menu_item(proxy_menu, "Log Filters...", G_CALLBACK(on_log_filters_clicked));
+    add_separator(proxy_menu);
     add_menu_item(proxy_menu, "Exit", G_CALLBACK(on_window_destroy));
-    GtkWidget *view_menu = add_submenu(menubar, "View");
+    // like the Windows app: Profile is a menu of its own and every item acts at once on the active profile
+    GtkWidget *profile_menu = add_submenu(menubar, "Profile");
+    add_menu_item(profile_menu, "New Profile...", G_CALLBACK(on_profile_new));
+    add_menu_item(profile_menu, "Duplicate Profile...", G_CALLBACK(on_profile_duplicate));
+    add_menu_item(profile_menu, "Rename Profile...", G_CALLBACK(on_profile_rename));
+    add_menu_item(profile_menu, "Delete Profile...", G_CALLBACK(on_profile_delete));
+    add_separator(profile_menu);
+    add_menu_item(profile_menu, "Import Profile...", G_CALLBACK(on_profile_import));
+    add_menu_item(profile_menu, "Export Profile...", G_CALLBACK(on_profile_export));
+    add_separator(profile_menu);
+    GtkWidget *switch_item = gtk_menu_item_new_with_label("Switch Profile");
+    switch_menu = gtk_menu_new();
+    gtk_menu_item_set_submenu(GTK_MENU_ITEM(switch_item), switch_menu);
+    gtk_menu_shell_append(GTK_MENU_SHELL(profile_menu), switch_item);
+    rebuild_switch_menu(NULL);
+    GtkWidget *settings_menu = add_submenu(menubar, "Settings");
+    log_item = add_check_item(settings_menu, "Enable Traffic Logging", g_chk_logging, G_CALLBACK(on_log_traffic_toggled));
+    boot_item = add_check_item(settings_menu, "Start at Boot (systemd service)", pbc_boot_is_enabled(), G_CALLBACK(on_boot_toggled));
+    clear_item = add_check_item(settings_menu, "Auto-clear Logs", g_chk_auto_clear, G_CALLBACK(on_auto_clear_toggled));
+    every_item = add_check_item(settings_menu, "Log Every Connection", g_chk_log_every, G_CALLBACK(on_log_every_toggled));
+    update_item = add_check_item(settings_menu, "Check for Updates on Startup", g_chk_updates, G_CALLBACK(on_update_startup_toggled));
+    add_separator(settings_menu);
     GtkAccelGroup *accel = gtk_accel_group_new();
     gtk_window_add_accel_group(GTK_WINDOW(window), accel);
-    GtkWidget *zin = add_menu_item(view_menu, "Zoom In", G_CALLBACK(on_zoom_in));
-    GtkWidget *zout = add_menu_item(view_menu, "Zoom Out", G_CALLBACK(on_zoom_out));
-    GtkWidget *zreset = add_menu_item(view_menu, "Reset Zoom", G_CALLBACK(on_zoom_reset));
+    GtkWidget *zin = add_menu_item(settings_menu, "Zoom In", G_CALLBACK(on_zoom_in));
+    GtkWidget *zout = add_menu_item(settings_menu, "Zoom Out", G_CALLBACK(on_zoom_out));
+    GtkWidget *zreset = add_menu_item(settings_menu, "Reset Zoom", G_CALLBACK(on_zoom_reset));
     gtk_widget_add_accelerator(zin, "activate", accel, GDK_KEY_plus, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
     gtk_widget_add_accelerator(zin, "activate", accel, GDK_KEY_equal, GDK_CONTROL_MASK, GTK_ACCEL_MASK);
     gtk_widget_add_accelerator(zout, "activate", accel, GDK_KEY_minus, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
     gtk_widget_add_accelerator(zreset, "activate", accel, GDK_KEY_0, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
-    GtkWidget *about_menu = add_submenu(menubar, "About");
-    add_menu_item(about_menu, "About", G_CALLBACK(on_about));
-    add_menu_item(about_menu, "Check for Updates", G_CALLBACK(on_check_update));
-    update_item = add_check_item(about_menu, "Check for Updates on Startup", g_chk_updates, G_CALLBACK(on_update_startup_toggled));
+    GtkWidget *help_menu = add_submenu(menubar, "Help");
+    add_menu_item(help_menu, "Documentation", G_CALLBACK(on_documentation));
+    add_menu_item(help_menu, "Check for Updates...", G_CALLBACK(on_check_update));
+    add_separator(help_menu);
+    add_menu_item(help_menu, "About", G_CALLBACK(on_about));
     gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
 
     GtkWidget *notebook = gtk_notebook_new();
@@ -645,8 +739,16 @@ int main(int argc, char *argv[]) {
     ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
     ProxyBridge_SetDnsViaProxy(g_chk_dns);
     ProxyBridge_SetLogEveryConnection(g_chk_log_every);
+    pbc_BeginBatch();                       // the service loads the whole configuration at once, never half of it
     apply_proxies_to_lib();
     apply_rules_to_lib();
+    pbc_EndBatch();
+    if (pbc_is_service()) {
+        pbc_set_lost_callback(on_service_lost);
+        pbc_replay_history(lib_log_callback);   // what the service did before this window opened
+        ProxyBridge_SetEnabled(true);           // "Enable ProxyBridge" always starts on; the service may have been left paused by an earlier window
+        gui_log("connected to the ProxyBridge service%s", g_chk_boot ? " (Start at Boot is on: it keeps routing when this window is closed)" : "");
+    }
 
     g_unix_signal_add(SIGINT, on_unix_signal, NULL);
     g_unix_signal_add(SIGTERM, on_unix_signal, NULL);
@@ -654,7 +756,8 @@ int main(int argc, char *argv[]) {
     gtk_widget_show_all(window);
     update_status_info();
     status_source = g_timeout_add_seconds(1, status_tick, NULL);
-    engine_request(true);
+    if (pbc_is_service()) set_engine_state(pbc_service_engine_running() ? ENGINE_RUNNING : ENGINE_STOPPED);   // it may already be routing (Start at Boot)
+    engine_request(true);                                                                                       // does nothing when it is
     apply_zoom_css();
     if (g_chk_updates && !pb_gui_ready_hook) gui_check_updates_on_startup();
     if (pb_gui_ready_hook) pb_gui_ready_hook();

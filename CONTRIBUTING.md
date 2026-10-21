@@ -192,6 +192,8 @@ request, before the build. **Please add or update a test when you change behavio
 case in `test_engine.c`, a profile-format change in `test_profile.c`, or a new window feature in `test_rules_ui.c` /
 `test_main_ui.c`.
 
+**Real-traffic end-to-end test:** `Windows/tests/e2e/run_e2e.ps1` is the opposite of the unit tests: it runs the real engine and WinDivert driver (through `ProxyBridge_CLI.exe`) with a real SOCKS5 proxy (Nexus Proxy), a small HTTP proxy and real requests to real servers, and checks that traffic goes where the rules say (SOCKS5, HTTP proxy, login, Direct, Block, domain and CIDR rules, UDP, an HTTPS download with a checksum). Because it loads a kernel driver and redirects the machine's traffic, it runs only on the CI runner (the `Build Windows` workflow, best effort, logs in the `ProxyBridge-E2E-Logs` artifact) and refuses to run anywhere else unless you pass `-IKnowThisLoadsTheKernelDriver` on a throw-away VM.
+
 **Project Structure:**
 - `Windows/src/` - C library core (ProxyBridge.c, ProxyBridge.h)
   - `ProxyBridge.c` - Main packet interception logic

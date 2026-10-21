@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ProxyBridge
+Comment=Universal proxy client for Linux applications
+Exec=/usr/local/bin/ProxyBridgeGUI
+Icon=proxybridge
+Terminal=false
+Categories=Network;Security;
+StartupWMClass=ProxyBridgeGUI
+StartupNotify=false

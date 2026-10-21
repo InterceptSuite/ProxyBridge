@@ -11,13 +11,18 @@ PASS=0; FAIL=0; DNSIP=10.77.0.4
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 has() { [[ "$2" == *"$3"* ]] && ok "$1" || bad "$1 (got: ${2:0:160})"; }
-cleanup() { kill $GUI_PID $FAKE $DNSP $BW $WWW 2>/dev/null; wait 2>/dev/null; ip addr del $DNSIP/32 dev lo 2>/dev/null; rm -rf "$WORK"; }
+cleanup() { kill $GUI_PID 2>/dev/null; wait $GUI_PID 2>/dev/null; kill $FAKE $DNSP $BW $WWW 2>/dev/null; wait 2>/dev/null;   # the client first: the display daemon aborts when its client vanishes
+    ip addr del $DNSIP/32 dev lo 2>/dev/null; rm -rf "$WORK"; }
+GUI_PID=; FAKE=; DNSP=; BW=; WWW=
 trap cleanup EXIT
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
+# A window started as root talks to a running ProxyBridge service instead of loading its own engine, and this test would then change
+# the real service's profiles and routing.
+[ ! -S /run/proxybridge/ctl.sock ] || { echo "SKIP: a ProxyBridge service is running here (stop it first: sudo systemctl stop proxybridge)"; exit 0; }
 ip addr add $DNSIP/32 dev lo 2>/dev/null
 python3 "$HERE/fake_proxies.py" "$PLOG" >/dev/null 2>&1 & FAKE=$!
 python3 "$HERE/fake_dns.py" $DNSIP "$DLOG" >/dev/null 2>&1 & DNSP=$!
-broadwayd :9 >/dev/null 2>&1 & BW=$!
+( ulimit -c 0; exec broadwayd :9 ) >/dev/null 2>&1 & BW=$!   # no core dump (see gui_ui.sh)
 sleep 1.5
 
 # Seeded in the format of the previous GUI versions, so the first start also exercises the migration to .pbprofile files.
@@ -88,7 +93,7 @@ grep -q '"ActiveProfileName": "Alt"' "$WORK/cfg/settings.json" && ok "settings.j
 grep -q '"ProxyConfigs"' "$P/Default.pbprofile" && grep -q '"TargetDomains": "\*.example.test"' "$P/Default.pbprofile" && grep -q '"Version": "1.0"' "$P/Default.pbprofile" \
   && ok "the saved profile uses the Windows/macOS format (domain rule in TargetDomains)" || bad "profile format: $(head -40 "$P/Default.pbprofile")"
 grep -q '"IsTrafficLoggingEnabled": true' "$P/Default.pbprofile" && grep -q '"DnsViaProxy": true' "$P/Default.pbprofile" \
-  && [ "$(grep -c . "$WORK/cfg/settings.json")" -le 4 ] && ! grep -q Dns "$WORK/cfg/settings.json" \
+  && [ "$(grep -c . "$WORK/cfg/settings.json")" -le 5 ] && ! grep -q Dns "$WORK/cfg/settings.json" \
   && ok "logging and DNS switches live in the profile; settings.json only names the active profile" || bad "switches placement"
 [ "$(stat -c %a "$P/Default.pbprofile")" = 600 ] && [ "$(stat -c %a "$P")" = 700 ] && ok "profile files are 0600 in a 0700 directory" || bad "profile permissions"
 

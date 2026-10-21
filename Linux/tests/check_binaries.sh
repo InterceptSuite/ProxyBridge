@@ -35,10 +35,12 @@ audit() { # file kind(lib|exe) allowed-NEEDED-regex
 }
 
 LIBBPF_DEP=''; [ "${ALLOW_DYNAMIC_LIBBPF:-0}" = 1 ] && LIBBPF_DEP='|libbpf\.so\.1'
-audit libproxybridge.so lib "^(libc\.so\.6|libelf\.so\.1|libz\.so\.1|libm\.so\.6|ld-linux.*$LIBBPF_DEP)\$"
+# libbpf, libelf and zlib are linked in: the library and the command line program depend on glibc alone
+audit libproxybridge.so lib "^(libc\.so\.6|libm\.so\.6|ld-linux.*$LIBBPF_DEP)\$"
 exports=$(nm -D --defined-only "$DIR/libproxybridge.so" 2>/dev/null | awk '$2=="T"{print $3}' | grep -v '^ProxyBridge_' | tr '\n' ' ')
 check "library exports only the ProxyBridge_* API${exports:+ (also: $exports)}" '[ -z "$exports" ]'
-audit ProxyBridge exe '^(libc\.so\.6|libproxybridge\.so|libpthread\.so\.0|libm\.so\.6|ld-linux.*)$'
+if [ "${ALLOW_DYNAMIC_LIBBPF:-0}" = 1 ]; then CLI_DEP='|libproxybridge\.so|libbpf\.so\.1|libelf\.so\.1|libz\.so\.1'; else CLI_DEP=''; fi
+audit ProxyBridge exe "^(libc\.so\.6|libpthread\.so\.0|libm\.so\.6|ld-linux.*$CLI_DEP)\$"
 audit ProxyBridgeGUI exe '^(libc\.so\.6|libproxybridge\.so|libpthread\.so\.0|libm\.so\.6|libgtk-3\.so\.0|libgdk-3\.so\.0|libglib-2\.0\.so\.0|libgobject-2\.0\.so\.0|libgio-2\.0\.so\.0|libcairo\.so\.2|libgdk_pixbuf-2\.0\.so\.0|libpango-1\.0\.so\.0|libpangocairo-1\.0\.so\.0|libatk-1\.0\.so\.0|ld-linux.*)$'
 
 echo

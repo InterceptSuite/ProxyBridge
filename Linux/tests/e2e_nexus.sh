@@ -5,9 +5,9 @@
 #
 #   sudo NODE=/path/to/node NEXUS_JS=/path/to/script.js tests/e2e_nexus.sh
 #
-# Note: stock Nexus cannot do UDP ASSOCIATE on Linux (its IPv6 relay socket binds '0.0.0.0' -> EINVAL, IPv4 destinations are not
-# sent as ::ffff: addresses and mapped replies are not matched). Apply tests/nexus-linux-udp.patch to a copy of script.js for the
-# UDP part; without it the UDP tests are reported as SKIP and only TCP/DNS-over-TCP is tested.
+# Nexus Proxy 1.1 and later does UDP ASSOCIATE on Linux. Older copies cannot (their IPv6 relay socket binds '0.0.0.0', IPv4
+# destinations are not sent as ::ffff: addresses and mapped replies are not matched): apply tests/nexus-linux-udp.patch to a copy of
+# their script.js for the UDP part; without it the UDP tests are reported as SKIP and only TCP/DNS-over-TCP is tested.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 PB_DIR="${PB_DIR:-$ROOT/output}"
@@ -62,8 +62,10 @@ print(h.hexdigest())
 PY
 sha_for() { python3 -c "$EXPECT_PY" "$1"; }
 
+# ?dns=local: the proxies are given the address (the zone names of the fake DNS server do not exist for Nexus); the by-name case
+# (DNS via proxy on) is covered by tests/e2e_full.sh, where Nexus can resolve the name
 stdbuf -oL "$PBL" --verbose 2 \
-  --proxy n1=socks5://127.0.0.1:1080 --proxy n2=socks5://nx:secret@127.0.0.1:1081 \
+  --proxy 'n1=socks5://127.0.0.1:1080?dns=local' --proxy 'n2=socks5://nx:secret@127.0.0.1:1081?dns=local' \
   --rule "curl:10.77.1.3:*:TCP:DIRECT" \
   --rule "curl:10.77.1.4:*:TCP:BLOCK" \
   --rule "curl:10.77.1.1:18701-18703:TCP:PROXY=n2" \

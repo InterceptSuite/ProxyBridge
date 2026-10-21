@@ -7,7 +7,7 @@ CF="-Wall -Wextra -Wno-unused-parameter -g -fsanitize=address,undefined -I../src
 LF="$(pkg-config --libs gtk+-3.0)"
 gcc $CF tests/config_test.c gui_config.c ../profile/pb_profile.c -o "$OUT/config_test" $LF
 gcc $CF tests/json_test.c gui_json.c -o "$OUT/json_test" $LF
-gcc -g -Wall -Wextra -fsanitize=address,undefined -DPB_TEST_HOOKS -D_GNU_SOURCE -I. $(pkg-config --cflags glib-2.0) tests/boot_test.c gui_boot.c -o "$OUT/boot_test" $(pkg-config --libs glib-2.0)
+gcc -g -Wall -Wextra -fsanitize=address,undefined -DPB_TEST_HOOKS -D_GNU_SOURCE -I. -I../src $(pkg-config --cflags glib-2.0) tests/boot_test.c gui_boot.c ../src/pb_unit.c -o "$OUT/boot_test" $(pkg-config --libs glib-2.0)
 gcc $CF tests/list_test.c gui_list.c -o "$OUT/list_test" $LF
 gcc -O1 -I../src -I../profile -I. -D_GNU_SOURCE $(pkg-config --cflags gtk+-3.0) tests/config_test.c gui_config.c ../profile/pb_profile.c -o "$OUT/config_plain" $LF
 "$OUT/config_plain"

@@ -13,7 +13,7 @@ LDFLAGS = -pie $(HARDEN_LDFLAGS) -L$(LIBDIR) -Wl,-rpath,'$$ORIGIN' -export-dynam
 LIBS = -lproxybridge -lpthread $(GTK_LIBS)
 
 SOURCES = $(filter-out tests/%,$(wildcard *.c))
-OBJECTS = $(addprefix $(BUILD_DIR)/,$(SOURCES:.c=.o)) $(BUILD_DIR)/pb_profile.o
+OBJECTS = $(addprefix $(BUILD_DIR)/,$(SOURCES:.c=.o)) $(BUILD_DIR)/pb_profile.o $(BUILD_DIR)/pb_ipc.o $(BUILD_DIR)/pb_unit.o
 TARGET = $(BUILD_DIR)/ProxyBridgeGUI
 
 all: $(TARGET)
@@ -28,6 +28,12 @@ $(BUILD_DIR)/%.o: %.c gui.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/pb_profile.o: ../profile/pb_profile.c ../profile/pb_profile.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/pb_ipc.o: ../src/pb_ipc.c ../src/pb_ipc.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/pb_unit.o: ../src/pb_unit.c ../src/pb_unit.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:

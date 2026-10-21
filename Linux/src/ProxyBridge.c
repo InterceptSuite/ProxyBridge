@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
 #include "ProxyBridge.h"
@@ -34,6 +35,7 @@ static struct {
     pthread_mutex_t maint_mu;
     pthread_cond_t maint_cv;
     uint64_t warned[16]; size_t nwarned;
+    int batch; bool batch_dirty;         // BeginBatch/EndBatch: changes reach the kernel datapath once, at the end
     LogCallback log_cb;
     ConnectionCallback conn_cb;
     ConnectionCallbackEx conn_cb_ex;
@@ -52,6 +54,14 @@ static void set_err(char *err, size_t n, const char *fmt, ...)
     va_end(ap);
 }
 
+// Anything shown to the operator may carry bytes chosen by another local user (an executable's name, a DNS answer);
+// a terminal or a log file must not receive control characters from them.
+static void sanitize(char *s)
+{
+    for (unsigned char *p = (unsigned char *)s; *p; p++)
+        if (*p < 0x20 || *p == 0x7F) *p = '?';
+}
+
 void pb_core_log(const char *fmt, ...)
 {
     char buf[1024];
@@ -59,6 +69,7 @@ void pb_core_log(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
+    sanitize(buf);
     pthread_mutex_lock(&cb_lock);
     if (G.log_cb) G.log_cb(buf);
     pthread_mutex_unlock(&cb_lock);
@@ -136,12 +147,15 @@ static bool log_wanted(uint64_t key, bool udp)
 static void emit_connection(uint32_t pid, const char *comm, int family, const uint8_t addr[16], uint16_t port, int proto, int action, uint32_t proxy_id)
 {
     if (!atomic_load(&G.traffic_logging)) return;
-    char path[4096], dest[INET6_ADDRSTRLEN + 280], info[400];
+    char path[4096], dest[INET6_ADDRSTRLEN + 280], info[400], shown[256];
     const char *name = comm && *comm ? comm : "unknown";
     if (exe_path_of_pid(pid, path, sizeof path)) {
         const char *base = strrchr(path, '/');
         name = base ? base + 1 : path;
     }
+    snprintf(shown, sizeof shown, "%s", name);
+    sanitize(shown);
+    name = shown;
     if (!log_wanted(conn_key(name, family, addr, port, proto, action, proxy_id), proto == IPPROTO_UDP)) return;
     if (family == AF_INET) {
         inet_ntop(AF_INET, addr + 12, dest, sizeof dest);
@@ -159,6 +173,7 @@ static void emit_connection(uint32_t pid, const char *comm, int family, const ui
         snprintf(info, sizeof info, "%s %s:%u", p.type == PROXY_TYPE_SOCKS5 ? "SOCKS5" : "HTTP", p.host, p.port);
     else
         snprintf(info, sizeof info, "%s", action == PB_ACT_PROXY ? "PROXY" : action == PB_ACT_BLOCK ? "BLOCK" : "DIRECT");
+    sanitize(dest);
     pthread_mutex_lock(&cb_lock);
     if (G.conn_cb) G.conn_cb(name, pid, dest, port, info);
     if (G.conn_cb_ex) G.conn_cb_ex(name, pid, dest, port, proto == IPPROTO_UDP ? "UDP" : "TCP", info);
@@ -314,6 +329,7 @@ static void sync_locked(void)
 {
     rebuild_views_locked();
     if (!G.running) return;
+    if (G.batch > 0) { G.batch_dirty = true; return; }
     if (pb_bpf_sync(G.views, G.nviews) != 0) pb_core_log("failed to apply rules to the kernel datapath");
     pb_bpf_set_flags(atomic_load(&G.traffic_logging), atomic_load(&G.dns_via_proxy));
     rearm_all_locked();
@@ -349,7 +365,9 @@ int pb_core_name_for(const struct pb_orig *o, char *out, size_t n)
 void pb_core_decide(const struct pb_orig *o, struct pb_decision *out)
 {
     char path[4096];
-    if (!exe_path_of_pid(o->pid, path, sizeof path) && !pb_bpf_exe_path(o->exe_dev, o->exe_ino, path, sizeof path)) path[0] = 0;
+    // The executable the kernel saw at connect() time is authoritative; /proc/<pid>/exe may already belong to another
+    // program if the process exited and its PID was reused before this flow reached the relay.
+    if (!(o->exe_ino && pb_bpf_exe_path(o->exe_dev, o->exe_ino, path, sizeof path)) && !exe_path_of_pid(o->pid, path, sizeof path)) path[0] = 0;
     out->action = PB_ACT_DIRECT;
     out->proxy_id = 0;
 
@@ -427,6 +445,34 @@ static struct { uint32_t pid, proxy_id; int64_t until; bool hit; } loop_cache[LO
 static unsigned loop_next;
 static struct host_cache loop_hosts[4];
 static pthread_mutex_t loop_mu = PTHREAD_MUTEX_INITIALIZER;
+
+int pb_core_udp_sender_ok(const struct pb_orig *o, uint16_t client_port)
+{
+    /* Best effort, not a proof. The datagram is refused only on positive evidence that another USER sent it: a socket bound to the
+     * source port belongs to a uid that is neither the flow's owner nor root. Programs of one user are not a security boundary
+     * and the check never looks into descriptor tables, so it costs the same for a process with ten sockets and with ten
+     * thousand. When nobody holds the port any more (the sender closed its socket or exited right after sending) nothing can be
+     * told and the datagram is delivered: a program that sends one datagram and quits must still get it through. */
+    uint32_t uids[8];
+    size_t n = pb_proc_udp_port_uids(client_port, uids, 8);
+    if (!n) return 1;
+    char dir[32];
+    struct stat st;
+    snprintf(dir, sizeof dir, "/proc/%u", o->pid);
+    if (stat(dir, &st) != 0) return 1;                           /* the flow's owner has exited */
+    if (o->exe_ino) {
+        char link[64];
+        struct stat ex;
+        snprintf(link, sizeof link, "/proc/%u/exe", o->pid);
+        if (stat(link, &ex) == 0) {
+            uint32_t dev = (major(ex.st_dev) << 20) | minor(ex.st_dev);   /* same encoding as the BPF program's exe2class key */
+            if (dev != o->exe_dev || ex.st_ino != o->exe_ino) return 0;   /* the pid now runs another program */
+        }
+    }
+    for (size_t i = 0; i < n; i++)
+        if (uids[i] != 0 && uids[i] != (uint32_t)st.st_uid) return 0;
+    return 1;
+}
 
 int pb_core_is_proxy_process(uint32_t pid, uint32_t proxy_id)
 {
@@ -810,6 +856,23 @@ void ProxyBridge_ClearConnectionLogs(void)
 
 void ProxyBridge_SetLogEveryConnection(bool enable) { atomic_store(&G.log_every, enable); }
 
+void ProxyBridge_BeginBatch(void)
+{
+    pthread_rwlock_wrlock(&G.lock);
+    G.batch++;
+    pthread_rwlock_unlock(&G.lock);
+}
+
+void ProxyBridge_EndBatch(void)
+{
+    pthread_rwlock_wrlock(&G.lock);
+    if (G.batch > 0 && --G.batch == 0 && G.batch_dirty) {
+        G.batch_dirty = false;
+        sync_locked();
+    }
+    pthread_rwlock_unlock(&G.lock);
+}
+
 void ProxyBridge_SetEnabled(bool enable)
 {
     atomic_store(&G.paused, !enable);
@@ -859,7 +922,11 @@ bool ProxyBridge_Start(void)
 
     pb_bpf_set_paused(atomic_load(&G.paused));
     pthread_rwlock_wrlock(&G.lock);
+    int held = G.batch;                // starting always loads everything, even inside a batch
+    G.batch = 0;
     sync_locked();
+    G.batch = held;
+    G.batch_dirty = false;
     pthread_rwlock_unlock(&G.lock);
     pb_core_log("ProxyBridge started (eBPF datapath, relay tcp:%u udp:%u)", pb_relay_tcp_port(), pb_relay_udp_port());
     return true;

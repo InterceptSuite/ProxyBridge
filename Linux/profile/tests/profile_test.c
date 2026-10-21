@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -141,6 +142,23 @@ static void test_gui_fields(void)
 
 static void test_filters(void)
 {
+    {   // a hostile pattern must not backtrack exponentially: the callback runs this for every connection
+        struct pbp_filter evil[] = { flt(true, "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b", "", "", "All", "All") };
+        char subj[200];
+        memset(subj, 'a', sizeof subj - 1); subj[sizeof subj - 1] = 0;
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (int i = 0; i < 1000; i++) CHECK(pbp_filters_pass(evil, 1, subj, "1.2.3.4", "80", "TCP", "Proxy"));
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        CHECK((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 < 2000);
+        struct pbp_filter g[] = { flt(true, "*a*b", "", "", "All", "All") };
+        CHECK(!pbp_filters_pass(g, 1, "xaxbxb", "", "", "TCP", "Proxy"));                   // still a correct glob
+        CHECK(pbp_filters_pass(g, 1, "xaxbxbx", "", "", "TCP", "Proxy"));
+        CHECK(!pbp_filters_pass(g, 1, "ab", "", "", "TCP", "Proxy"));
+        struct pbp_filter q[] = { flt(true, "c?rl", "", "", "All", "All") };
+        CHECK(!pbp_filters_pass(q, 1, "CURL", "", "", "TCP", "Proxy"));
+        CHECK(pbp_filters_pass(q, 1, "crl", "", "", "TCP", "Proxy"));
+    }
     struct pbp_filter none[1] = { { 0 } };
     CHECK(pbp_filters_pass(none, 0, "curl", "1.2.3.4", "80", "TCP", "Proxy"));                  // no filters: everything shows
 
@@ -177,22 +195,23 @@ static void test_settings(void)
     CHECK(mkdtemp(dir) != NULL);
     snprintf(path, sizeof path, "%s/settings.json", dir);
     char *active = NULL;
-    bool upd = false;
-    CHECK(pbp_settings_load(path, &active, &upd) == -1);                                         // no file yet
-    CHECK(pbp_settings_save(path, "Work", true, err, sizeof err) == 0);
-    CHECK(pbp_settings_load(path, &active, &upd) == 0 && active && !strcmp(active, "Work") && upd);
-    CHECK(pbp_settings_save(path, "Home \"x\"", false, err, sizeof err) == 0);
-    upd = true;
-    CHECK(pbp_settings_load(path, &active, &upd) == 0 && !strcmp(active, "Home \"x\"") && !upd);
+    bool upd = false, boot = false;
+    CHECK(pbp_settings_load(path, &active, &upd, &boot) == -1);                                         // no file yet
+    CHECK(pbp_settings_save(path, "Work", true, true, err, sizeof err) == 0);
+    CHECK(pbp_settings_load(path, &active, &upd, &boot) == 0 && active && !strcmp(active, "Work") && upd && boot);
+    CHECK(pbp_settings_save(path, "Home \"x\"", false, false, err, sizeof err) == 0);
+    upd = true; boot = true;
+    CHECK(pbp_settings_load(path, &active, &upd, &boot) == 0 && !strcmp(active, "Home \"x\"") && !upd && !boot);
     FILE *f = fopen(path, "w");
     fputs("{ \"ActiveProfileName\": \"Only\" }", f);                                          // an older file without the switch
     fclose(f);
-    upd = false;
-    CHECK(pbp_settings_load(path, &active, &upd) == 0 && !strcmp(active, "Only") && upd);        // defaults to on
+    upd = false; boot = true;
+    CHECK(pbp_settings_load(path, &active, &upd, &boot) == 0 && !strcmp(active, "Only") && upd && !boot);        // update check defaults to on, start at boot to off
+    CHECK(pbp_settings_load(path, &active, NULL, NULL) == 0);                                              // either switch may be left out
     f = fopen(path, "w");
     fputs("not json", f);
     fclose(f);
-    CHECK(pbp_settings_load(path, &active, &upd) == -1);
+    CHECK(pbp_settings_load(path, &active, &upd, &boot) == -1);
     free(active);
     char cmd[400];
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
@@ -207,6 +226,11 @@ static void test_update_feed(void)
     free(v); free(d); free(n);
     const char *bare = "{ \"linux\": { \"version\": \"9\" } }";
     CHECK(pbp_update_parse(bare, strlen(bare), &v, &d, &n) == 0 && !strcmp(v, "9") && d == NULL && n == NULL);
+    free(v);
+    const char *esc = "{\"linux\":{\"version\":\"9.9\\u001b[31mX\"}}";                   // escapes are refused by the parser
+    CHECK(pbp_update_parse(esc, strlen(esc), &v, &d, &n) == -1 && !v);
+    const char *odd = "{\"linux\":{\"version\":\"9.9 (nightly build!)\"}}";               // and anything but a plain version string
+    CHECK(pbp_update_parse(odd, strlen(odd), &v, &d, &n) == -1 && !v);
     free(v);
     const char *bad[] = { "", "not json", "[]", "{}", "{ \"linux\": 5 }", "{ \"linux\": {} }", "{ \"linux\": { \"version\": \"\" } }", "{ \"windows\": { \"version\": \"1\" } }" };
     for (size_t i = 0; i < sizeof bad / sizeof *bad; i++)
@@ -264,7 +288,15 @@ static void test_errors(void)
     expect_error("{\"Name\": \"abc}", "unterminated");
     expect_error("{\"Name\": \"\\q\"}", "escape");
     expect_error("{\"Name\": \"\\ud800\"}", "surrogate");
-    expect_error("{\"Name\": \"\\u0000\"}", "NUL");
+    expect_error("{\"Name\": \"\\u0000\"}", "control character");
+    expect_error("{\"Name\": \"a\\u001b]0;x\\u0007\"}", "control character");         // terminal escapes never reach a log or screen
+    expect_error("{\"Name\": \"a\\nb\"}", "control character");
+    expect_error("{\"Name\": \"a\tb\"}", "control character");                           // raw tab
+    expect_error("{\"Name\": \"a\x1b" "b\"}", "control character");                        // raw ESC
+    expect_error("{\"ProxyConfigs\":[{\"Type\":\"socks5\",\"Host\":\"h\",\"Port\":1080e1}]}", "whole");   // .NET reads 10800
+    expect_error("{\"ProxyConfigs\":[{\"Type\":\"socks5\",\"Host\":\"h\",\"Port\":8.9}]}", "whole");
+    expect_error("{\"Name\":\"a\",\"name\":\"b\"}", "duplicate");                      // other readers take the last one
+    expect_error("{\"ProxyConfigs\":[{\"Type\":\"socks5\",\"Host\":\"h\",\"Port\":1,\"Id\":4294967295}]}", "Id");
     expect_error("{\"ProxyConfigs\":[{\"Type\":\"socks5\",\"Host\":\"h\",\"Port\":\"0\"}]}", "Port");
     expect_error("{\"ProxyConfigs\":[{\"Type\":\"socks5\",\"Host\":\"\",\"Port\":\"1\"}]}", "Host");
     expect_error("{\"ProxyConfigs\":[{\"Type\":\"ftp\",\"Host\":\"h\",\"Port\":\"1\"}]}", "Type");
@@ -387,6 +419,9 @@ static void test_files(void)
 
     char *r = pbp_resolve("/etc/proxybridge", "Work");
     CHECK(r && !strcmp(r, "/etc/proxybridge/profiles/Work.pbprofile")); free(r);
+    r = pbp_resolve("/etc/proxybridge", "Work.pbprofile");         // a bare name is a GUI profile even when such a file is in the cwd
+    CHECK(r && !strcmp(r, "/etc/proxybridge/profiles/Work.pbprofile"));
+    free(r);
     r = pbp_resolve("/etc/proxybridge", "/tmp/x.pbprofile");
     CHECK(r && !strcmp(r, "/tmp/x.pbprofile")); free(r);
     r = pbp_resolve("/etc/proxybridge", "Work.pbprofile");              // no such file in the cwd: treated as the name
