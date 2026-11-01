@@ -9,6 +9,11 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     @Published var activityLogs: [ActivityLog] = []
     @Published var isProxyActive = false
     @Published var isTrafficLoggingEnabled = true
+    // the system DNS proxy lets the extension learn which names belong to which addresses, which
+    // host name rules and "send hostname" need. per profile, on by default
+    @Published var isDNSEnabled = true
+    // set once the extension is installed, the DNS entry is only touched after that
+    private var extensionReady = false
     
     var tunnelSession: NETunnelProviderSession?
     private var logTimer: Timer?
@@ -99,6 +104,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         connections.reserveCapacity(maxLogEntries)
         activityLogs.reserveCapacity(maxLogEntries)
         loadTrafficLoggingSetting()
+        loadDNSSetting()
         loadProfiles()
         loadProxyConfig()
         NotificationCenter.default.addObserver(
@@ -142,6 +148,16 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         updatePollingState()
     }
     
+    private func loadDNSSetting() {
+        isDNSEnabled = UserDefaults.standard.object(forKey: "dnsEnabled") as? Bool ?? true
+    }
+
+    func toggleDNS() {
+        isDNSEnabled.toggle()
+        UserDefaults.standard.set(isDNSEnabled, forKey: "dnsEnabled")
+        applyDNSProxy()
+    }
+
     private func sendTrafficLoggingToExtension(_ enabled: Bool) {
         guard let session = tunnelSession else { return }
         
@@ -176,6 +192,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     private func profileLoggingKey(_ name: String) -> String { "profile.\(name).trafficLoggingEnabled" }
     private func profileCloseKey(_ name: String) -> String { "profile.\(name).closeToMenuBar" }
     private func profileStartupKey(_ name: String) -> String { "profile.\(name).runAtStartup" }
+    private func profileDNSKey(_ name: String) -> String { "profile.\(name).dnsEnabled" }
 
     private func loadProfiles() {
         let d = UserDefaults.standard
@@ -199,6 +216,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         d.set(isTrafficLoggingEnabled, forKey: profileLoggingKey(name))
         d.set(d.bool(forKey: "closeToMenuBar"), forKey: profileCloseKey(name))
         d.set(d.bool(forKey: "runAtStartup"), forKey: profileStartupKey(name))
+        d.set(isDNSEnabled, forKey: profileDNSKey(name))
     }
 
     // load a profile's snapshot into the live working keys
@@ -215,12 +233,15 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         // window + startup behaviour are per profile too, default off
         d.set(d.object(forKey: profileCloseKey(name)) as? Bool ?? false, forKey: "closeToMenuBar")
         d.set(d.object(forKey: profileStartupKey(name)) as? Bool ?? false, forKey: "runAtStartup")
+        // DNS is on by default, also for profiles saved before the setting existed
+        d.set(d.object(forKey: profileDNSKey(name)) as? Bool ?? true, forKey: "dnsEnabled")
     }
 
     // reload in-memory state from the working keys and push it to the extension
     private func applyActiveProfile() {
         loadProxyConfig()
         loadTrafficLoggingSetting()
+        loadDNSSetting()
         // window-close behaviour is read live from the key, only startup needs applying
         LoginItem.applyToSystem(UserDefaults.standard.bool(forKey: "runAtStartup"))
         if let session = tunnelSession {
@@ -228,6 +249,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             RuleManager.resyncRules(session: session) { _, _ in }
             sendTrafficLoggingToExtension(isTrafficLoggingEnabled)
         }
+        applyDNSProxy()
         updatePollingState()
     }
 
@@ -262,11 +284,13 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         d.set(d.object(forKey: profileLoggingKey(old)), forKey: profileLoggingKey(new))
         d.set(d.object(forKey: profileCloseKey(old)), forKey: profileCloseKey(new))
         d.set(d.object(forKey: profileStartupKey(old)), forKey: profileStartupKey(new))
+        d.set(d.object(forKey: profileDNSKey(old)), forKey: profileDNSKey(new))
         d.removeObject(forKey: profileConfigsKey(old))
         d.removeObject(forKey: profileRulesKey(old))
         d.removeObject(forKey: profileLoggingKey(old))
         d.removeObject(forKey: profileCloseKey(old))
         d.removeObject(forKey: profileStartupKey(old))
+        d.removeObject(forKey: profileDNSKey(old))
         if let i = profiles.firstIndex(of: old) { profiles[i] = new }
         d.set(profiles, forKey: "profiles")
         if activeProfile == old {
@@ -287,6 +311,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         d.removeObject(forKey: profileLoggingKey(name))
         d.removeObject(forKey: profileCloseKey(name))
         d.removeObject(forKey: profileStartupKey(name))
+        d.removeObject(forKey: profileDNSKey(name))
         profiles.removeAll { $0 == name }
         d.set(profiles, forKey: "profiles")
     }
@@ -304,6 +329,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             "trafficLoggingEnabled": d.object(forKey: profileLoggingKey(name)) as? Bool ?? true,
             "closeToMenuBar": d.object(forKey: profileCloseKey(name)) as? Bool ?? false,
             "runAtStartup": d.object(forKey: profileStartupKey(name)) as? Bool ?? false,
+            "dnsEnabled": d.object(forKey: profileDNSKey(name)) as? Bool ?? true,
             "proxyConfigs": configsJSON,
             "proxyRules": d.array(forKey: profileRulesKey(name)) ?? []
         ]
@@ -331,6 +357,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         d.set(obj["trafficLoggingEnabled"] as? Bool ?? true, forKey: profileLoggingKey(name))
         d.set(obj["closeToMenuBar"] as? Bool ?? false, forKey: profileCloseKey(name))
         d.set(obj["runAtStartup"] as? Bool ?? false, forKey: profileStartupKey(name))
+        d.set(obj["dnsEnabled"] as? Bool ?? true, forKey: profileDNSKey(name))
 
         profiles.append(name)
         d.set(profiles, forKey: "profiles")
@@ -455,22 +482,51 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         }
     }
 
-    // enables the dns proxy provider so the extension can see dns resolutions and
-    // build the ip -> domain map used for domain rules
-    func startDNSProxy() {
+    // makes the system DNS proxy entry match the profile's Enable DNS setting. on: the extension sees
+    // the dns answers and can build the ip -> name map used by host name rules and "send hostname".
+    // off: the entry is switched off so macOS sends dns the normal way and another tool can use the
+    // one dns proxy slot macOS has. only our own entry is ever changed.
+    func applyDNSProxy() {
+        guard extensionReady else { return }
+        let enable = isDNSEnabled
         let manager = NEDNSProxyManager.shared()
-        manager.loadFromPreferences { [weak self] _ in
+        manager.loadFromPreferences { [weak self] loadError in
             guard let self = self else { return }
-            let proto = NEDNSProxyProviderProtocol()
-            proto.providerBundleIdentifier = self.extensionIdentifier
-            manager.providerProtocol = proto
-            manager.localizedDescription = "ProxyBridge DNS"
-            manager.isEnabled = true
-            manager.saveToPreferences { error in
-                if let error = error {
-                    self.addLog("ERROR", "DNS proxy setup failed: \(error.localizedDescription)")
-                } else {
-                    self.addLog("INFO", "DNS proxy enabled")
+            let ours = manager.providerProtocol?.providerBundleIdentifier == self.extensionIdentifier
+            if enable {
+                if loadError == nil, ours, manager.isEnabled {
+                    DispatchQueue.main.async { self.addLog("INFO", "DNS proxy enabled") }
+                    return
+                }
+                let proto = NEDNSProxyProviderProtocol()
+                proto.providerBundleIdentifier = self.extensionIdentifier
+                manager.providerProtocol = proto
+                manager.localizedDescription = "ProxyBridge DNS"
+                manager.isEnabled = true
+                manager.saveToPreferences { error in
+                    DispatchQueue.main.async {
+                        if let error = error {
+                            self.addLog("ERROR", "DNS proxy setup failed: \(error.localizedDescription)")
+                        } else {
+                            self.addLog("INFO", "DNS proxy enabled")
+                        }
+                    }
+                }
+            } else {
+                let note = "DNS proxy is off (Enable DNS in the Proxy menu). Host name rules and send hostname do not work."
+                guard loadError == nil, ours, manager.isEnabled else {
+                    DispatchQueue.main.async { self.addLog("INFO", note) }
+                    return
+                }
+                manager.isEnabled = false
+                manager.saveToPreferences { error in
+                    DispatchQueue.main.async {
+                        if let error = error {
+                            self.addLog("ERROR", "Could not switch the DNS proxy off: \(error.localizedDescription)")
+                        } else {
+                            self.addLog("INFO", note)
+                        }
+                    }
                 }
             }
         }
@@ -737,8 +793,9 @@ extension ProxyBridgeViewModel: OSSystemExtensionRequestDelegate {
     func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
         DispatchQueue.main.async {
             self.addLog("INFO", "Extension installed successfully")
+            self.extensionReady = true
             self.startProxy()
-            self.startDNSProxy()
+            self.applyDNSProxy()
         }
     }
     

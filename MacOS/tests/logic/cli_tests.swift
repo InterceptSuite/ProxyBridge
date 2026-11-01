@@ -118,6 +118,33 @@ t("too many rules is an error", CLIProfileLoader.errors(for: profile(rules: Arra
 t("exactly the maximum number of rules is fine", CLIProfileLoader.errors(for: profile(rules: Array(repeating: ["action": "BLOCK"], count: CLIProfileLoader.maxRules))).isEmpty)
 t("too many proxies is an error", CLIProfileLoader.errors(for: profile(proxies: (0...CLIProfileLoader.maxProxies).map { ["id": "p\($0)", "type": "http", "host": "h", "port": 1] })).contains { $0.contains("limit") })
 
+// ---- Enable DNS (per profile)
+func jsonProfile(_ extra: String) -> Data { Data("{\"proxyConfigs\": [], \"proxyRules\": []\(extra)}".utf8) }
+t("DNS is on when the profile has no setting", (try? CLIProfileLoader.parse(json: jsonProfile("")))?.dnsEnabled == true)
+t("dnsEnabled false in a file turns DNS off", (try? CLIProfileLoader.parse(json: jsonProfile(", \"dnsEnabled\": false")))?.dnsEnabled == false)
+t("dnsEnabled true in a file keeps DNS on", (try? CLIProfileLoader.parse(json: jsonProfile(", \"dnsEnabled\": true")))?.dnsEnabled == true)
+t("a wrong type for dnsEnabled means on", (try? CLIProfileLoader.parse(json: jsonProfile(", \"dnsEnabled\": \"no\"")))?.dnsEnabled == true)
+let dnsStore: [String: Any] = ["profiles": ["Default", "work", "legacy"], "activeProfile": "Default",
+                               "dnsEnabled": false, "profile.work.dnsEnabled": true, "profile.legacy.proxyRules": [[String: Any]]()]
+let dnsRead: CLIProfileLoader.Reader = { dnsStore[$0] }
+t("the active saved profile reads the working key", (try? CLIProfileLoader.saved(named: "Default", read: dnsRead))?.dnsEnabled == false)
+t("another saved profile reads its own key", (try? CLIProfileLoader.saved(named: "work", read: dnsRead))?.dnsEnabled == true)
+t("a saved profile without the key has DNS on", (try? CLIProfileLoader.saved(named: "legacy", read: dnsRead))?.dnsEnabled == true)
+t("hasHostName: a domain", CLIProfileLoader.hasHostName("github.com"))
+t("hasHostName: a wildcard domain", CLIProfileLoader.hasHostName("*.github.com"))
+t("hasHostName: a domain among IPs", CLIProfileLoader.hasHostName("10.*.*.*; example.org"))
+t("hasHostName: an IPv4 address is not a name", !CLIProfileLoader.hasHostName("192.168.1.1"))
+t("hasHostName: a range is not a name", !CLIProfileLoader.hasHostName("10.0.0.1-10.0.0.254"))
+t("hasHostName: IPv6 is not a name", !CLIProfileLoader.hasHostName("2001:db8::1; fe80::1-fe80::ff"))
+t("hasHostName: star and empty are not names", !CLIProfileLoader.hasHostName("*") && !CLIProfileLoader.hasHostName(""))
+var noDNS = profile(rules: [["processNames": "*", "targetHosts": "github.com", "protocol": "TCP", "action": "DIRECT"],
+                            ["processNames": "*", "targetHosts": "10.*.*.*", "protocol": "TCP", "action": "DIRECT"]])
+noDNS.dnsEnabled = false
+t("a host name rule with DNS off is warned about", CLIProfileLoader.warnings(for: noDNS).contains { $0.contains("rule 1") && $0.contains("DNS is off") })
+t("an IP rule with DNS off is not warned about", !CLIProfileLoader.warnings(for: noDNS).contains { $0.contains("rule 2") })
+noDNS.dnsEnabled = true
+t("a host name rule with DNS on is not warned about", !CLIProfileLoader.warnings(for: noDNS).contains { $0.contains("DNS is off") })
+
 // ---- terminal safety
 t("plain text is unchanged", CLIText.safe("curl -> example.com:443") == "curl -> example.com:443")
 t("unicode is unchanged", CLIText.safe("caf\u{e9} \u{1F600} \u{4E2D}") == "caf\u{e9} \u{1F600} \u{4E2D}")

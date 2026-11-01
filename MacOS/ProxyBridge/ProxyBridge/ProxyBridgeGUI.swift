@@ -63,6 +63,13 @@ struct ProxyBridgeGUIApp: App {
                     get: { viewModel.isTrafficLoggingEnabled },
                     set: { _ in viewModel.toggleTrafficLogging() }
                 ))
+
+                // saved in the profile. off: ProxyBridge does not use the system DNS proxy, so another
+                // tool can use it, and host name rules and send hostname stop working
+                Toggle("Enable DNS", isOn: Binding(
+                    get: { viewModel.isDNSEnabled },
+                    set: { _ in viewModel.toggleDNS() }
+                ))
             }
 
             CommandMenu("Profile") {

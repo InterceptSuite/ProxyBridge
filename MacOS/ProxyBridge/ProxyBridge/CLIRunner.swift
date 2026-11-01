@@ -269,7 +269,8 @@ final class CLIRunner: NSObject, OSSystemExtensionRequestDelegate {
     private func applyProfile() {
         guard !started, !stopping, let session = session else { return }
         started = true
-        enableDNSProxy()
+        CLI.say(profile.dnsEnabled ? "DNS proxy: on" : "DNS proxy: off (host name rules and send hostname do not work)")
+        applyDNSProxy()
 
         // same messages, same order as the GUI: logging, proxies, then the rules in one step
         send(["action": "setTrafficLogging", "enabled": verbose >= 2]) { _ in
@@ -294,13 +295,24 @@ final class CLIRunner: NSObject, OSSystemExtensionRequestDelegate {
         }
     }
 
-    // the DNS provider is what makes domain rules and hostnames work, the GUI turns it on too.
-    // when it is already set up for this extension it is left alone, saving it again on every
-    // start is a needless system configuration change
-    private func enableDNSProxy() {
+    // the DNS provider is what makes domain rules and hostnames work, the GUI turns it on too, and
+    // the profile's Enable DNS setting decides. when the entry is already in the wanted state it is
+    // left alone, saving it again on every start is a needless system configuration change. only our
+    // own entry is ever switched off.
+    private func applyDNSProxy() {
         let dns = NEDNSProxyManager.shared()
+        let wanted = profile.dnsEnabled
         dns.loadFromPreferences { loadError in
-            if loadError == nil, dns.isEnabled, dns.providerProtocol?.providerBundleIdentifier == CLI.extensionIdentifier { return }
+            let ours = dns.providerProtocol?.providerBundleIdentifier == CLI.extensionIdentifier
+            if !wanted {
+                guard loadError == nil, ours, dns.isEnabled else { return }
+                dns.isEnabled = false
+                dns.saveToPreferences { error in
+                    if let error = error { CLI.warn("Could not switch the DNS proxy off: \(error.localizedDescription)") }
+                }
+                return
+            }
+            if loadError == nil, dns.isEnabled, ours { return }
             let proto = NEDNSProxyProviderProtocol()
             proto.providerBundleIdentifier = CLI.extensionIdentifier
             dns.providerProtocol = proto
