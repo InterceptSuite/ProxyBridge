@@ -34,6 +34,7 @@ struct CLIProfile {
     var name: String
     var proxies: [CLIProxy]
     var rules: [[String: Any]]      // as saved by the app: processNames, targetHosts, targetPorts, protocol, action, enabled
+    var dnsEnabled: Bool = true     // the profile's Enable DNS setting, on when the profile has none
 }
 
 enum CLIProfileError: Error, Equatable {
@@ -61,7 +62,8 @@ enum CLIProfileLoader {
         }
         let proxies = try decodeProxies(obj["proxyConfigs"] ?? [])
         let rules = obj["proxyRules"] as? [[String: Any]] ?? []
-        return CLIProfile(name: (obj["name"] as? String) ?? "profile", proxies: proxies, rules: rules)
+        return CLIProfile(name: (obj["name"] as? String) ?? "profile", proxies: proxies, rules: rules,
+                          dnsEnabled: obj["dnsEnabled"] as? Bool ?? true)
     }
 
     // a profile saved in the app. the active profile lives in the working keys
@@ -75,9 +77,10 @@ enum CLIProfileLoader {
         let active = read("activeProfile") as? String
         let configsKey = name == active ? "proxyConfigs" : "profile.\(name).proxyConfigs"
         let rulesKey = name == active ? "proxyRules" : "profile.\(name).proxyRules"
+        let dnsKey = name == active ? "dnsEnabled" : "profile.\(name).dnsEnabled"
         let proxies = try decodeProxies(read(configsKey) ?? [])
         let rules = read(rulesKey) as? [[String: Any]] ?? []
-        return CLIProfile(name: name, proxies: proxies, rules: rules)
+        return CLIProfile(name: name, proxies: proxies, rules: rules, dnsEnabled: read(dnsKey) as? Bool ?? true)
     }
 
     static func savedNames(read: Reader) -> (names: [String], active: String?) {
@@ -92,6 +95,14 @@ enum CLIProfileLoader {
         else { return [] }
         do { return try JSONDecoder().decode([CLIProxy].self, from: data) }
         catch { throw CLIProfileError.invalid("The proxy list in the profile could not be read: \(error.localizedDescription)") }
+    }
+
+    // true when a target hosts entry is a name and not an IP address, a range or a wildcard of numbers
+    static func hasHostName(_ hosts: String) -> Bool {
+        hosts.split(separator: ";").contains { part in
+            let t = part.trimmingCharacters(in: .whitespaces)
+            return !t.isEmpty && t.range(of: "^[0-9a-fA-F:.*-]+$", options: .regularExpression) == nil
+        }
     }
 
     static let maxProxies = 100
@@ -132,6 +143,11 @@ enum CLIProfileLoader {
             }
         }
         if profile.rules.isEmpty { out.append("the profile has no rules, nothing will be redirected") }
+        if !profile.dnsEnabled {
+            for (i, rule) in profile.rules.enumerated() where hasHostName(rule["targetHosts"] as? String ?? "") {
+                out.append("rule \(i + 1) uses a host name, but DNS is off in this profile, so it will not match")
+            }
+        }
         return out
     }
 }

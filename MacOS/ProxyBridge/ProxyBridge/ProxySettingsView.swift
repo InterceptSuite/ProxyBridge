@@ -236,6 +236,9 @@ struct ProxyConfigEditorView: View {
                         Text("On: the proxy gets the host name the app looked up. Off: it gets the IP address. Turn it off for a proxy that can't resolve the names your Mac can.")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                        Text("Host names are only sent when Enable DNS is on in the Proxy menu.")
+                            .font(.caption)
+                            .foregroundColor(viewModel.isDNSEnabled ? .secondary : .orange)
                     }
                     .padding(.vertical, 8)
 

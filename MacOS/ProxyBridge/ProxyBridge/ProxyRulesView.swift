@@ -445,6 +445,14 @@ struct RuleEditorView: View {
                         text: $targetHosts,
                         hint: "IP: 127.0.0.1; 192.168.1.*; 10.0.0.1-10.0.0.254; ::1   Domain: github.com; *.github.com; *google*"
                     )
+                    HStack(spacing: 4) {
+                        Image(systemName: viewModel.isDNSEnabled ? "info.circle" : "exclamationmark.triangle.fill")
+                            .foregroundColor(viewModel.isDNSEnabled ? .secondary : .orange)
+                        Text(viewModel.isDNSEnabled
+                             ? "Host names only match when Enable DNS is on in the Proxy menu. IP addresses always work."
+                             : "Enable DNS is off in the Proxy menu, so host names do not match. IP addresses still work.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
                     
                     formField(
                         label: "Target ports",
