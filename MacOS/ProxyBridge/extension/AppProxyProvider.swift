@@ -651,8 +651,10 @@ class AppProxyProvider: NETransparentProxyProvider {
         handshakeLock.unlock()
         for (_, entry) in expired {
             entry.connection.cancel()
-            entry.flow.closeReadWithError(nil)
-            entry.flow.closeWriteWithError(nil)
+            // a tcp flow must fail its connect (see FlowFailure), udp flows keep the clean close
+            let reason: Error? = entry.flow is NEAppProxyTCPFlow ? FlowFailure.timedOut : nil
+            entry.flow.closeReadWithError(reason)
+            entry.flow.closeWriteWithError(reason)
         }
     }
 
@@ -1446,8 +1448,8 @@ class AppProxyProvider: NETransparentProxyProvider {
             handleHTTPProxy(clientFlow: flow, proxyConnection: proxyConnection, destination: destination, port: port, username: config.username, password: config.password)
         default:
             log("unsupported proxy type: \(config.type)", level: "ERROR")
-            flow.closeReadWithError(nil)
-            flow.closeWriteWithError(nil)
+            flow.closeReadWithError(FlowFailure.refused)
+            flow.closeWriteWithError(FlowFailure.refused)
         }
     }
     
@@ -1463,8 +1465,8 @@ class AppProxyProvider: NETransparentProxyProvider {
         proxyConnection.write(greetingData) { [weak self] error in
             if let error = error {
                 self?.log("SOCKS5 greeting write failed: \(error.localizedDescription)", level: "ERROR")
-                clientFlow.closeReadWithError(error)
-                clientFlow.closeWriteWithError(error)
+                clientFlow.closeReadWithError(FlowFailure.proxyUnreachable)
+                clientFlow.closeWriteWithError(FlowFailure.proxyUnreachable)
                 proxyConnection.cancel()
                 return
             }
@@ -1474,16 +1476,16 @@ class AppProxyProvider: NETransparentProxyProvider {
                 
                 if let error = error {
                     self.log("SOCKS5 greeting response failed: \(error.localizedDescription)", level: "ERROR")
-                    clientFlow.closeReadWithError(error)
-                    clientFlow.closeWriteWithError(error)
+                    clientFlow.closeReadWithError(FlowFailure.proxyUnreachable)
+                    clientFlow.closeWriteWithError(FlowFailure.proxyUnreachable)
                     proxyConnection.cancel()
                     return
                 }
                 
                 guard let data = data, data.count == 2 else {
                     self.log("SOCKS5 invalid greeting response", level: "ERROR")
-                    clientFlow.closeReadWithError(nil)
-                    clientFlow.closeWriteWithError(nil)
+                    clientFlow.closeReadWithError(FlowFailure.proxyUnreachable)
+                    clientFlow.closeWriteWithError(FlowFailure.proxyUnreachable)
                     proxyConnection.cancel()
                     return
                 }
@@ -1493,8 +1495,8 @@ class AppProxyProvider: NETransparentProxyProvider {
                 
                 if version != 0x05 {
                     self.log("SOCKS5 invalid version: \(version)", level: "ERROR")
-                    clientFlow.closeReadWithError(nil)
-                    clientFlow.closeWriteWithError(nil)
+                    clientFlow.closeReadWithError(FlowFailure.proxyUnreachable)
+                    clientFlow.closeWriteWithError(FlowFailure.proxyUnreachable)
                     proxyConnection.cancel()
                     return
                 }
@@ -1505,8 +1507,8 @@ class AppProxyProvider: NETransparentProxyProvider {
                     self.sendSOCKS5Auth(clientFlow: clientFlow, proxyConnection: proxyConnection, destination: destination, port: port, username: username ?? "", password: password ?? "")
                 } else {
                     self.log("SOCKS5 no acceptable auth method: \(method)", level: "ERROR")
-                    clientFlow.closeReadWithError(nil)
-                    clientFlow.closeWriteWithError(nil)
+                    clientFlow.closeReadWithError(FlowFailure.refused)
+                    clientFlow.closeWriteWithError(FlowFailure.refused)
                     proxyConnection.cancel()
                 }
             }
@@ -1517,7 +1519,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         let user = Array(username.utf8), pass = Array(password.utf8)
         guard user.count <= 255, pass.count <= 255 else {
             log("SOCKS5 credentials too long", level: "ERROR")
-            closeRelay(clientFlow, proxyConnection)
+            closeRelay(clientFlow, proxyConnection, error: FlowFailure.refused)
             return
         }
         var authData = Data()
@@ -1530,8 +1532,8 @@ class AppProxyProvider: NETransparentProxyProvider {
         proxyConnection.write(authData) { [weak self] error in
             if let error = error {
                 self?.log("SOCKS5 auth write failed: \(error.localizedDescription)", level: "ERROR")
-                clientFlow.closeReadWithError(error)
-                clientFlow.closeWriteWithError(error)
+                clientFlow.closeReadWithError(FlowFailure.proxyUnreachable)
+                clientFlow.closeWriteWithError(FlowFailure.proxyUnreachable)
                 proxyConnection.cancel()
                 return
             }
@@ -1541,16 +1543,16 @@ class AppProxyProvider: NETransparentProxyProvider {
                 
                 if let error = error {
                     self.log("SOCKS5 auth response failed: \(error.localizedDescription)", level: "ERROR")
-                    clientFlow.closeReadWithError(error)
-                    clientFlow.closeWriteWithError(error)
+                    clientFlow.closeReadWithError(FlowFailure.proxyUnreachable)
+                    clientFlow.closeWriteWithError(FlowFailure.proxyUnreachable)
                     proxyConnection.cancel()
                     return
                 }
                 
                 guard let data = data, data.count == 2, data[1] == 0x00 else {
                     self.log("SOCKS5 auth failed", level: "ERROR")
-                    clientFlow.closeReadWithError(nil)
-                    clientFlow.closeWriteWithError(nil)
+                    clientFlow.closeReadWithError(FlowFailure.refused)
+                    clientFlow.closeWriteWithError(FlowFailure.refused)
                     proxyConnection.cancel()
                     return
                 }
@@ -1576,7 +1578,7 @@ class AppProxyProvider: NETransparentProxyProvider {
             let hostBytes = Array(destination.utf8)
             guard hostBytes.count <= 255 else {
                 log("SOCKS5 destination name too long", level: "ERROR")
-                closeRelay(clientFlow, proxyConnection)
+                closeRelay(clientFlow, proxyConnection, error: FlowFailure.refused)
                 return
             }
             request.append(0x03)
@@ -1590,8 +1592,8 @@ class AppProxyProvider: NETransparentProxyProvider {
         proxyConnection.write(request) { [weak self] error in
             if let error = error {
                 self?.log("SOCKS5 connect write failed: \(error.localizedDescription)", level: "ERROR")
-                clientFlow.closeReadWithError(error)
-                clientFlow.closeWriteWithError(error)
+                clientFlow.closeReadWithError(FlowFailure.proxyUnreachable)
+                clientFlow.closeWriteWithError(FlowFailure.proxyUnreachable)
                 proxyConnection.cancel()
                 return
             }
@@ -1603,10 +1605,10 @@ class AppProxyProvider: NETransparentProxyProvider {
                     self.relayData(clientFlow: clientFlow, proxyConnection: proxyConnection)
                 case .rejected(let rep):
                     self.log("SOCKS5 connect rejected, REP=0x\(String(format: "%02x", rep)) (\(self.socksReplyReason(rep)))", level: "ERROR")
-                    self.closeRelay(clientFlow, proxyConnection)
+                    self.closeRelay(clientFlow, proxyConnection, error: FlowFailure.socks(rep))
                 case .failed(let reason):
                     self.log("SOCKS5 connect failed: \(reason)", level: "ERROR")
-                    self.closeRelay(clientFlow, proxyConnection)
+                    self.closeRelay(clientFlow, proxyConnection, error: FlowFailure.proxyUnreachable)
                 }
             }
         }
@@ -1630,8 +1632,8 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         guard let requestData = request.data(using: .utf8) else {
             log("HTTP CONNECT request encoding failed", level: "ERROR")
-            clientFlow.closeReadWithError(nil)
-            clientFlow.closeWriteWithError(nil)
+            clientFlow.closeReadWithError(FlowFailure.refused)
+            clientFlow.closeWriteWithError(FlowFailure.refused)
             proxyConnection.cancel()
             return
         }
@@ -1639,8 +1641,8 @@ class AppProxyProvider: NETransparentProxyProvider {
         proxyConnection.write(requestData) { [weak self] error in
             if let error = error {
                 self?.log("HTTP CONNECT write failed: \(error.localizedDescription)", level: "ERROR")
-                clientFlow.closeReadWithError(error)
-                clientFlow.closeWriteWithError(error)
+                clientFlow.closeReadWithError(FlowFailure.proxyUnreachable)
+                clientFlow.closeWriteWithError(FlowFailure.proxyUnreachable)
                 proxyConnection.cancel()
                 return
             }
@@ -1653,7 +1655,7 @@ class AppProxyProvider: NETransparentProxyProvider {
                     self.relayData(clientFlow: clientFlow, proxyConnection: proxyConnection, initialData: leftover)
                 } else {
                     self.log("HTTP CONNECT failed: \(detail)", level: "ERROR")
-                    self.closeRelay(clientFlow, proxyConnection)
+                    self.closeRelay(clientFlow, proxyConnection, error: FlowFailure.http(status))
                 }
             }
         }

@@ -145,7 +145,7 @@
       "name": "",
       "processNames": "nc",
       "protocol": "TCP",
-      "targetHosts": "192.0.2.20;192.0.2.21",
+      "targetHosts": "192.0.2.20;192.0.2.21;192.0.2.31",
       "targetPorts": "22"
     }
   ],

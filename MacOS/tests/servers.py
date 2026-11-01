@@ -12,6 +12,8 @@ Special destinations (documentation addresses, nothing is really contacted):
   192.0.2.10:80  via socks5 1081  reply uses the 22 byte IPv6 address form and a banner right behind it
   192.0.2.20:22  via http   8080  "200" reply with a banner glued to the headers
   192.0.2.21:22  via http   8080  407 whose headers contain "200" (must not count as success)
+  192.0.2.30:80  via socks5 1081  immediate reply REP 0x04 (host unreachable), the connect must fail
+  192.0.2.31:22  via http   8080  immediate 502 Bad Gateway, the connect must fail
 """
 import asyncio, base64, json, os, socket, struct, time
 
@@ -133,6 +135,11 @@ async def socks_client(name, auth, blackhole, r, w):
             await w.drain()
             await r.read()
             return
+        if cmd == 1 and (host, port) == ("192.0.2.30", 80):
+            ev("connect", proxy=name, dest=host, port=port, special="rep04")
+            w.write(b"\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00")
+            await w.drain()
+            return
         if cmd == 1:
             ev("connect", proxy=name, dest=host, port=port)
             try:
@@ -197,6 +204,10 @@ async def http_client(name, auth, r, w):
             w.write(b"HTTP/1.1 200 Connection established\r\n\r\n" + BANNER)
             await w.drain()
             await r.read()
+            return
+        if (host, int(port)) == ("192.0.2.31", 22):
+            w.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+            await w.drain()
             return
         if (host, int(port)) == ("192.0.2.21", 22):
             w.write(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 200\r\n\r\nSSH-2.0-should-not-arrive\r\n")
