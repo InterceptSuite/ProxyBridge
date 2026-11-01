@@ -3,7 +3,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="4.1.0"
+VERSION="4.1.1"
 
 # the pkg name/version here and the version shown in the app (About page, bundle)
 # come from different places, make a mismatch fail the build instead of shipping it
@@ -88,7 +88,7 @@ cat > build/distribution.xml << 'EOF'
     <choice id="com.interceptsuite.ProxyBridge" visible="false">
         <pkg-ref id="com.interceptsuite.ProxyBridge"/>
     </choice>
-    <pkg-ref id="com.interceptsuite.ProxyBridge" version="4.1.0" onConclusion="none">temp.pkg</pkg-ref>
+    <pkg-ref id="com.interceptsuite.ProxyBridge" version="4.1.1" onConclusion="none">temp.pkg</pkg-ref>
 </installer-gui-script>
 EOF
 
