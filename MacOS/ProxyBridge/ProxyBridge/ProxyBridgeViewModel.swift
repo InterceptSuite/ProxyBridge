@@ -14,6 +14,11 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     @Published var isDNSEnabled = true
     // set once the extension is installed, the DNS entry is only touched after that
     private var extensionReady = false
+    // the tunnel start is watched: macOS can stop it again at once without saying why (#282)
+    private var tunnelStartPending = false
+    private var tunnelWatchdog: DispatchWorkItem?
+    private var tunnelFailureObserver: NSObjectProtocol?
+    private var tunnelRepairTried = false
     
     var tunnelSession: NETunnelProviderSession?
     private var logTimer: Timer?
@@ -568,6 +573,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             }
 
             do {
+                DispatchQueue.main.async { self.watchTunnelStart(session: session) }
                 try session.startTunnel()
                 DispatchQueue.main.async {
                     self.isProxyActive = true
@@ -576,7 +582,64 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             } catch {
                 if let obs = observer { NotificationCenter.default.removeObserver(obs) }
                 observer = nil
+                DispatchQueue.main.async { self.tunnelStartPending = false }
                 self.addLog("ERROR", "Failed to start tunnel: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // a start that macOS stops again at once, or that never finishes, is reported with the reason macOS
+    // recorded. the first time, the saved network configuration is removed and created again, a bad one
+    // is the usual cause. the second time the user gets the steps to do by hand.
+    private func watchTunnelStart(session: NETunnelProviderSession) {
+        tunnelStartPending = true
+        tunnelWatchdog?.cancel()
+        if let old = tunnelFailureObserver { NotificationCenter.default.removeObserver(old) }
+        var sawConnecting = false
+        tunnelFailureObserver = NotificationCenter.default.addObserver(forName: .NEVPNStatusDidChange, object: session, queue: .main) { [weak self] _ in
+            guard let self = self, self.tunnelStartPending else { return }
+            switch session.status {
+            case .connecting:
+                sawConnecting = true
+            case .connected:
+                self.tunnelStartPending = false
+                self.tunnelWatchdog?.cancel()
+            case .disconnected, .invalid:
+                if sawConnecting { self.tunnelStartFailed(session: session, why: "The tunnel stopped before it was ready") }
+            default:
+                break
+            }
+        }
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self = self, self.tunnelStartPending, session.status != .connected else { return }
+            self.tunnelStartFailed(session: session, why: "The tunnel did not start in 30 seconds")
+        }
+        tunnelWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: watchdog)
+    }
+
+    private func tunnelStartFailed(session: NETunnelProviderSession, why: String) {
+        guard tunnelStartPending else { return }
+        tunnelStartPending = false
+        tunnelWatchdog?.cancel()
+        isProxyActive = false
+        TunnelRepair.lastDisconnectReason(session) { [weak self] reason in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.addLog("ERROR", "\(why). macOS says: \(reason)")
+                if self.tunnelRepairTried {
+                    self.addLog("ERROR", "Remove the ProxyBridge entries in System Settings, Network, restart the Mac and open ProxyBridge again. If it still fails, report it with the output of: systemextensionsctl list")
+                    return
+                }
+                self.tunnelRepairTried = true
+                self.addLog("INFO", "Removing the saved network configuration and creating a new one. macOS may ask you to allow it again")
+                TunnelRepair.removeSavedConfigurations(extensionIdentifier: self.extensionIdentifier) { summary in
+                    DispatchQueue.main.async {
+                        self.addLog("INFO", summary)
+                        self.startProxy()
+                        self.applyDNSProxy()
+                    }
+                }
             }
         }
     }
