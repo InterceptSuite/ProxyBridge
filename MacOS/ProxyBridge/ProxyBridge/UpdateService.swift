@@ -162,7 +162,7 @@ class UpdateService {
         if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
             return "v\(version)"
         }
-        return "v4.1.1"
+        return "v4.1.2"
     }
 
     private func isNewerVersion(_ latest: String, _ current: String) -> Bool {
