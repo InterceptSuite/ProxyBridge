@@ -500,6 +500,13 @@ class AppProxyProvider: NETransparentProxyProvider {
         appendLog(.activity(timestamp: dateFormatter.string(from: Date()), level: level, message: message))
     }
 
+    // the extension's own life cycle: to the unified log, which survives the extension, and to the
+    // activity log, which the app shows while it is connected
+    private func diag(_ message: String, level: String = "INFO") {
+        ProviderDiagnostics.note(message, error: level == "ERROR")
+        log(message, level: level)
+    }
+
     private func appendLog(_ entry: LogEntry) {
         logQueueLock.lock()
         logBuffer[logTail] = entry
@@ -528,13 +535,20 @@ class AppProxyProvider: NETransparentProxyProvider {
         settings.includedNetworkRules = [allTrafficRule]
 
         startUDPSweepTimer()
-        
-        self.setTunnelNetworkSettings(settings) { error in
+        diag("Tunnel starting")
+
+        self.setTunnelNetworkSettings(settings) { [weak self] error in
+            if let error = error {
+                self?.diag("Could not apply the tunnel network settings: \(error.localizedDescription)", level: "ERROR")
+            } else {
+                self?.diag("Tunnel started")
+            }
             completionHandler(error)
         }
     }
     
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        diag("Tunnel stopping: \(ProviderDiagnostics.text(for: reason))")
         udpSweepTimer?.cancel()
         udpSweepTimer = nil
         sweepHandshakes(all: true)

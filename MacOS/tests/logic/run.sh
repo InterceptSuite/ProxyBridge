@@ -16,7 +16,8 @@ run_test() {   # <test file> <extension sources...>
     "$TMP/test"
 }
 
-run_test matcher_tests.swift "$EXT/AppProxyProvider.swift" "$EXT/DNSMapStore.swift" "$EXT/FlowFailure.swift"
+run_test matcher_tests.swift "$EXT/AppProxyProvider.swift" "$EXT/DNSMapStore.swift" "$EXT/FlowFailure.swift" "$EXT/ProviderDiagnostics.swift"
 run_test dnsmap_tests.swift "$EXT/DNSMapStore.swift"
 run_test flowfailure_tests.swift "$EXT/FlowFailure.swift"
+run_test diagnostics_tests.swift "$EXT/ProviderDiagnostics.swift"
 run_test cli_tests.swift "$APP/CLIArguments.swift" "$APP/CLIProfile.swift" "$APP/CLIText.swift"

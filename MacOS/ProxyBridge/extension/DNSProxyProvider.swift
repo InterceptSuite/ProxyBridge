@@ -43,10 +43,12 @@ class DNSProxyProvider: NEDNSProxyProvider {
     override func startProxy(options: [String: Any]?, completionHandler: @escaping (Error?) -> Void) {
         // start with a clean map so old browsing domains don't linger on disk
         DNSMapStore.shared.clear()
+        ProviderDiagnostics.note("DNS proxy starting")
         completionHandler(nil)
     }
 
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        ProviderDiagnostics.note("DNS proxy stopping: \(ProviderDiagnostics.text(for: reason))")
         statesLock.lock()
         let all = Array(flowStates.values)
         flowStates.removeAll()
