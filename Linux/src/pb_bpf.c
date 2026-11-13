@@ -18,6 +18,7 @@
 #include <sys/sysmacros.h>
 #include <unistd.h>
 #include "pb_bpf.h"
+#include "pb_proc.h"
 #include "proxybridge.skel.h"
 
 #ifndef CGROUP2_SUPER_MAGIC
@@ -254,8 +255,6 @@ void pb_bpf_set_flags(bool log, bool dns_via_proxy)
     pthread_mutex_unlock(&G.lock);
 }
 
-static uint32_t kernel_dev(dev_t d) { return (major(d) << 20) | minor(d); }
-
 static struct exe_ent *exe_find(uint32_t dev, uint64_t ino)
 {
     for (size_t i = 0; i < G.nexes; i++)
@@ -291,14 +290,16 @@ static void scan_proc(void)
     while ((de = readdir(d))) {
         if (de->d_name[0] < '1' || de->d_name[0] > '9') continue;
         char link[300], path[4096];
-        struct stat st;
+        uint32_t pid = 0, dev;
+        uint64_t ino;
+        for (const char *q = de->d_name; *q >= '0' && *q <= '9' && pid < 100000000u; q++) pid = pid * 10 + (uint32_t)(*q - '0');
         snprintf(link, sizeof link, "/proc/%.200s/exe", de->d_name);
-        if (stat(link, &st) != 0) continue;
+        if (pb_proc_exe_identity(pid, &dev, &ino) != 0) continue;       /* the kernel's own notion of the file system's device, not stat()'s */
         ssize_t n = readlink(link, path, sizeof path - 1);
         if (n <= 0) continue;
         path[n] = 0;
         strip_deleted(path);
-        exe_add(kernel_dev(st.st_dev), st.st_ino, path);
+        exe_add(dev, ino, path);
     }
     closedir(d);
 }

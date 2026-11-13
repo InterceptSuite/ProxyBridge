@@ -523,6 +523,7 @@ sudo ./e2e_rules_diff.sh                          # random rule sets vs an indep
 sudo ./e2e_logging.sh                             # connection log: de-duplication, log-every-connection, one line per decision (root)
 ./e2e_checker.sh                                  # the proxy check against working and broken proxies (no root)
 sudo ./gui_ui.sh                                  # drives the real windows and dialogs: proxies, rules, profiles, file choosers, menus, engine - once with its own engine and once through a service (root, needs broadwayd)
+sudo ./e2e_btrfs.sh                               # programs that live on Btrfs (Fedora's default): its per-subvolume stat() device must not defeat rules, DIRECT and the UDP sender check (root, needs mkfs.btrfs and a loop device; skips otherwise)
 sudo ./e2e_daemon.sh                              # the service: protocol and random garbage, access control by group, profile store, engine control, live connections, batch, Start at Boot (root)
 sudo ./e2e_service.sh                             # the service under real systemd with the installer's exact unit: sandbox, eBPF, crash and restart, stop (root, systemd)
 sudo ./gui_service.sh                             # the shipped GUI run by an unprivileged user in front of a real service (root, needs broadwayd and setpriv)

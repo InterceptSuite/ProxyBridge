@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -127,6 +130,37 @@ int main(void)
         close(r2);
         CHECK(pb_proc_udp_port_uids(ntohs(ra.sin_port), uids, 8) == 0);                         // gone with the sockets
         close(u);
+    }
+
+    // executable identity: the file system's own device number, as the BPF program records it (issues #281 and #283, Btrfs)
+    {
+        // A Btrfs system's /proc/self/mountinfo: the root and the home subvolume are mounts of the same file system, so the same device
+        // (0:36) even though stat() gives every subvolume its own number
+        const char *mi =
+            "25 1 0:36 /root / rw,relatime shared:1 - btrfs /dev/nvme0n1p3 rw,seclabel,compress=zstd:1,ssd,subvol=/root\n"
+            "26 25 0:36 /home /home rw,relatime shared:2 - btrfs /dev/nvme0n1p3 rw,seclabel,subvol=/home\n"
+            "27 25 259:1 / /boot rw,relatime shared:3 - ext4 /dev/nvme0n1p1 rw\n"
+            "28 25 0:25 / /tmp rw,nosuid,nodev shared:4 - tmpfs tmpfs rw\n"
+            "1234 25 8:17 / /mnt/x rw - ext4 /dev/sdb1 rw\n";
+        uint32_t dev = 0;
+        CHECK(pb_mountinfo_dev(mi, 25, &dev) && dev == ((0u << 20) | 36));
+        CHECK(pb_mountinfo_dev(mi, 26, &dev) && dev == ((0u << 20) | 36));                      // another subvolume: the same device
+        CHECK(pb_mountinfo_dev(mi, 27, &dev) && dev == ((259u << 20) | 1));
+        CHECK(pb_mountinfo_dev(mi, 28, &dev) && dev == ((0u << 20) | 25));
+        CHECK(pb_mountinfo_dev(mi, 1234, &dev) && dev == ((8u << 20) | 17));
+        CHECK(!pb_mountinfo_dev(mi, 2, &dev) && !pb_mountinfo_dev(mi, 123, &dev) && !pb_mountinfo_dev(mi, 99999, &dev));   // ids are matched whole, not as prefixes
+        CHECK(!pb_mountinfo_dev("", 25, &dev) && !pb_mountinfo_dev(NULL, 25, &dev));
+        CHECK(!pb_mountinfo_dev("garbage\n25\n25 1\n25 1 0\n25 1 0:\n25 1 x:y\n", 25, &dev));  // malformed lines are skipped, never read past
+        CHECK(!pb_mountinfo_dev("25 1 99999:1 / / rw - ext4 x rw\n", 25, &dev));                 // an impossible major is refused
+
+        uint64_t ino = 0;
+        CHECK(pb_proc_exe_identity((uint32_t)getpid(), &dev, &ino) == 0);
+        struct stat st;
+        CHECK(stat("/proc/self/exe", &st) == 0 && st.st_ino == ino);
+        struct statfs sf;
+        if (statfs("/proc/self/exe", &sf) == 0 && sf.f_type != 0x9123683E)                      // anywhere but Btrfs the two agree
+            CHECK(dev == ((major(st.st_dev) << 20) | minor(st.st_dev)));
+        CHECK(pb_proc_exe_identity(0x7ffffff0u, &dev, &ino) == -1);                             // no such process
     }
 
     printf("proc_test: %d checks, %d failed\n", checks, fails);
