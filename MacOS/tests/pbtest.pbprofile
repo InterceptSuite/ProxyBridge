@@ -147,6 +147,24 @@
       "protocol": "TCP",
       "targetHosts": "192.0.2.20;192.0.2.21;192.0.2.31",
       "targetPorts": "22"
+    },
+    {
+      "action": "pbtest-socks-1080",
+      "enabled": true,
+      "name": "",
+      "processNames": "/usr/bin/nc",
+      "protocol": "TCP",
+      "targetHosts": "192.0.2.40",
+      "targetPorts": "22"
+    },
+    {
+      "action": "pbtest-socks-1080",
+      "enabled": true,
+      "name": "",
+      "processNames": "/opt/pbtest-nope/nc",
+      "protocol": "TCP",
+      "targetHosts": "192.0.2.41",
+      "targetPorts": "22"
     }
   ],
   "runAtStartup": false,

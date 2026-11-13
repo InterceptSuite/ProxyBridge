@@ -12,7 +12,8 @@ approved and the pbtest.pbprofile imported (see README.md). The runner starts th
 
 suites: functional  rule routing, SOCKS5/HTTP/auth, DIRECT, BLOCK, UDP, stuck-handshake cut
         replies     SOCKS5 reply in IPv6 form + banner, HTTP 200 + banner, 407 with "200" in the headers,
-                    a SOCKS5 REP 0x04 and an HTTP 502 must fail the program's connect
+                    a SOCKS5 REP 0x04 and an HTTP 502 must fail the program's connect, a rule with the
+                    program's full path must match (and one with another path must not)
         hostnames   proxies receive host names (option on) or IPs (option off), per proxy
         stress      300 parallel TCP connections, three bursts of 300 UDP flows (memory must stay flat)
         dns         200 uncached DNS lookups through the DNS proxy
@@ -215,9 +216,14 @@ def replies():
     print("\n== reply parsing ==")
     def banner(name, ip, port, proxy, want):
         t0 = time.time()
-        p = subprocess.run(["bash", "-c", f"(sleep 2) | nc -w 4 {ip} {port}"], capture_output=True, timeout=20)
+        # -G: give up connecting after 3 s, so a connection that is not proxied (an unreachable test
+        # address) ends this check as a FAIL instead of hanging it
+        try:
+            out = subprocess.run(["bash", "-c", f"(sleep 2) | nc -G 3 -w 4 {ip} {port}"], capture_output=True, timeout=30).stdout
+        except subprocess.TimeoutExpired:
+            out = b""
         seen = bool(hits(events(t0), "connect", proxy, port))
-        check(name, seen and p.stdout == want, f"{proxy} connect={seen}; client got {p.stdout[:40]!r}")
+        check(name, seen and out == want, f"{proxy} connect={seen}; client got {out[:40]!r}")
     banner("B2 SOCKS5 reply in IPv6 form + immediate banner", "192.0.2.10", 80, "socks1081", b"SSH-2.0-pbtest\r\n")
     banner("B1 HTTP 200 with a banner glued to the headers", "192.0.2.20", 22, "http8080", b"SSH-2.0-pbtest\r\n")
     banner("B1 HTTP 407 with '200' in its headers is not success", "192.0.2.21", 22, "http8080", b"")
@@ -229,6 +235,16 @@ def replies():
         p = subprocess.run(["nc", "-z", "-w", "6", ip, str(port)], capture_output=True, timeout=20)
         seen = bool(hits(events(t0), "connect", proxy, port))
         check(name, seen and p.returncode != 0, f"{proxy} connect={seen}; nc exit {p.returncode} {p.stderr.decode().strip()[:60]!r}")
+    # a rule written with the program's full path (issue #288). nc is /usr/bin/nc, the second rule names a
+    # folder nc is not in, so only the first may match.
+    banner("B5 a rule with the program's full path matches", "192.0.2.40", 22, "socks1080", b"SSH-2.0-pbtest\r\n")
+    t0 = time.time()
+    try:
+        subprocess.run(["bash", "-c", "(sleep 1) | nc -G 3 -w 3 192.0.2.41 22"], capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
+    wrong = [h for h in hits(events(t0), "connect", "socks1080", 22) if h.get("dest") == "192.0.2.41"]
+    check("B6 a rule with another program's path does not match", not wrong, f"{len(wrong)} connects to socks1080")
     must_fail_connect("B3 SOCKS5 REP 0x04 fails the connect", "192.0.2.30", 80, "socks1081")
     must_fail_connect("B4 HTTP 502 fails the connect", "192.0.2.31", 22, "http8080")
 
