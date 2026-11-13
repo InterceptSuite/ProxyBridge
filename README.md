@@ -89,7 +89,7 @@ Visit our **[Official Download Page](https://interceptsuite.com/download/proxybr
 | :--- | :--- | :--- | :--- |
 | **Windows** | [**Download Installer**](https://interceptsuite.com/download/proxybridge) | `.exe` | Windows 10+ (64-bit), Admin privileges |
 | **macOS** | [**Download Installer**](https://interceptsuite.com/download/proxybridge) | `.pkg` (Universal) | macOS 13.0+ ARM/x64 (Ventura or later) |
-| **Linux** | [**Download Tarball**](https://interceptsuite.com/download/proxybridge) | `.tar.gz` | x64 Kernel with NFQUEUE support |
+| **Linux** | [**Download Tarball**](https://interceptsuite.com/download/proxybridge) | `.tar.gz` | x64, kernel 5.11+ with BTF and cgroup v2, root to install |
 
 #### Linux One-Command Quick Install:
 ```bash
@@ -231,35 +231,41 @@ winget install InterceptSuite.ProxyBridge
 #### GUI
 
 <p align="center">
-  <img src="img/ProxyBridge-linux.png" alt="ProxyBridge Linux Main Interface" width="800"/>
+  <img src="img/Linux/Connections.png" alt="ProxyBridge Linux Main Interface" width="800"/>
   <br/>
   <em>ProxyBridge GUI - Main Interface</em>
 </p>
 
 <p align="center">
-  <img src="img/proxy-setting-linux.png" alt="Proxy Settings Linux" width="800"/>
+  <img src="img/Linux/Proxy-Server.png" alt="Proxy Settings Linux" width="800"/>
   <br/>
-  <em>Proxy Settings Configuration</em>
+  <em>Proxy Settings Configuration and the five-step proxy test</em>
 </p>
 
 <p align="center">
-  <img src="img/proxy-rule-linux.png" alt="Proxy Rules Linux" width="800"/>
+  <img src="img/Linux/Proxy-Rules.png" alt="Proxy Rules Linux" width="800"/>
   <br/>
   <em>Proxy Rules Management</em>
 </p>
 
 <p align="center">
-  <img src="img/proxy-rule2-linux.png" alt="Add/Edit Rule Linux" width="800"/>
+  <img src="img/Linux/Rule-Editor.png" alt="Add/Edit Rule Linux" width="500"/>
   <br/>
-  <em>Add/Edit Proxy Rule</em>
+  <em>Add/Edit Proxy Rule - IP networks and domain names in one list</em>
+</p>
+
+<p align="center">
+  <img src="img/Linux/Live-Connection.png" alt="Live Connections Linux" width="800"/>
+  <br/>
+  <em>Live Connections - proxied connections and UDP flows right now</em>
 </p>
 
 #### CLI
 
 <p align="center">
-  <img src="img/ProxyBridge_CLI-linux.png" alt="ProxyBridge Linux CLI" width="800"/>
+  <img src="img/Linux/Proxy-CLI.png" alt="ProxyBridge Linux CLI" width="700"/>
   <br/>
-  <em>ProxyBridge CLI Interface</em>
+  <em>ProxyBridge CLI running a profile</em>
 </p>
 
 ## Use Cases
@@ -307,4 +313,4 @@ The Windows GUI and CLI are written in native C using the Win32 API, keeping the
 Built using Apple's Network Extension framework for transparent proxy capabilities on macOS.
 
 **Linux Implementation:**
-Built using Linux Netfilter NFQUEUE for kernel-level packet interception and iptables for traffic redirection. The GUI uses GTK3 for native Linux desktop integration.
+Built on eBPF: programs attached to the root cgroup hook the socket calls of applications (`connect`, `sendmsg`, `recvmsg`) and send only the connections your rules select to a local relay, which talks SOCKS5 or HTTP to your proxy. No packets are queued and no iptables rules are added; if ProxyBridge stops, traffic simply goes direct. A root service owns the engine and the window runs as the normal user. The GUI uses GTK3 for native Linux desktop integration. See [Linux/README.md](Linux/README.md).
