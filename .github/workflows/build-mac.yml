@@ -2,11 +2,18 @@ name: Build macOS
 permissions:
   contents: read
 
+# runs only when something in MacOS/ (or this workflow) changes
 on:
   push:
-    branches: [ dev, main, master ]
+    branches: [ master, dev ]
+    paths:
+      - 'MacOS/**'
+      - '.github/workflows/build-mac.yml'
   pull_request:
-    branches: [ dev, main, master ]
+    branches: [ master, dev ]
+    paths:
+      - 'MacOS/**'
+      - '.github/workflows/build-mac.yml'
   workflow_dispatch:
 
 jobs:

@@ -4,8 +4,14 @@ name: Label issue by platform
 # answer of a dropdown. This workflow reads the "Platform" answer of the bug report and feature request forms and adds
 # the matching platform label: Windows -> `Windows`, macOS -> `MacOS`, Linux -> `Linux`, All platforms -> all three.
 #
-# It only ever ADDS labels. If a maintainer has already put a platform label on the issue, later edits of the issue
-# do not change anything. It does not check out or run any code from the issue; it only reads the issue text.
+# It also adds the kind label when the issue has none. An issue made through the web form already carries `bug` or
+# `enhancement`, but one made through the API or the command line does not get the form's labels, so the title prefix
+# decides: "[Bug]" -> `bug`, "[Feature]" -> `enhancement`. This only happens when the issue is opened, never on edits,
+# so a label a maintainer removed later stays removed.
+#
+# It only ever ADDS labels. It never removes or replaces one, so the labels a reporter or a maintainer chose are
+# kept. If a maintainer has already put a platform label on the issue, later edits of the issue do not change anything.
+# It does not check out or run any code from the issue; it only reads the issue text.
 
 on:
   issues:
@@ -30,26 +36,63 @@ jobs:
           script: |
             const issue = context.payload.issue;
             const { owner, repo } = context.repo;
+            const title = issue.title || '';
+            const body = issue.body || '';
+            const current = (issue.labels || []).map((l) => l.name);
+            const toAdd = [];
 
+            // ---- kind: bug or enhancement, only for a new issue that has neither
+            if (context.payload.action === 'opened' && !current.includes('bug') && !current.includes('enhancement')) {
+              if (/^\s*\[(bug|issue)\]/i.test(title)) toAdd.push('bug');
+              else if (/^\s*\[(feature|enhancement)\]/i.test(title)) toAdd.push('enhancement');
+            }
+
+            // ---- platform
             // the label names that exist in this repository
             const PLATFORM_LABELS = { 'windows': ['Windows'], 'macos': ['MacOS'], 'linux': ['Linux'],
                                       'all platforms': ['Windows', 'MacOS', 'Linux'] };
             const ALL = ['Windows', 'MacOS', 'Linux'];
 
-            // issue forms render each answer as "### <label>" followed by the answer on its own line
-            const m = /^###\s+Platform\s*\r?\n+\s*([^\r\n]+)/im.exec(issue.body || '');
-            if (!m) { core.info('No Platform answer in the issue body: nothing to label'); return; }
-            const wanted = PLATFORM_LABELS[m[1].trim().toLowerCase()];
-            if (!wanted) { core.info(`Unknown platform "${m[1].trim()}": nothing to label`); return; }
-
-            // edits: respect labels that are already there (a maintainer may have set them on purpose)
-            const current = (issue.labels || []).map((l) => l.name);
-            if (context.payload.action === 'edited' && current.some((n) => ALL.includes(n))) {
-              core.info('A platform label is already set: leaving it alone');
-              return;
+            // "macOS 26.5", "Mac OS", "darwin", "Windows 11" ... -> the key of PLATFORM_LABELS
+            function platformKey(text) {
+              const t = (text || '').trim().toLowerCase();
+              if (!t) return null;
+              if (PLATFORM_LABELS[t]) return t;
+              if (/^(all|every)/.test(t)) return 'all platforms';
+              if (/^(mac|darwin|os\s*x)/.test(t)) return 'macos';
+              if (/^win/.test(t)) return 'windows';
+              if (/^(linux|ubuntu|debian|fedora|arch)/.test(t)) return 'linux';
+              return null;
             }
 
-            const toAdd = wanted.filter((n) => !current.includes(n));
-            if (!toAdd.length) { core.info('Labels already present'); return; }
+            // 1. issue forms render each answer as "### <label>" followed by the answer on its own line
+            let key = null;
+            const form = /^###\s+Platform\s*\r?\n+\s*([^\r\n]+)/im.exec(body);
+            if (form) key = platformKey(form[1]);
+            // 2. an issue written without the form, with a line such as "Platform: macOS" or "**Platform:** macOS"
+            if (!key) {
+              const line = /^[\s*_>#-]*platform[\s*_]*[:|][\s*_]*([^\r\n|]+)/im.exec(body);
+              if (line) key = platformKey(line[1]);
+            }
+            // 3. a platform in square brackets in the title, "[Bug][macOS 26.5] ..."
+            if (!key) {
+              for (const m of title.matchAll(/\[\s*([^\]]+?)\s*\]/g)) {
+                key = platformKey(m[1]);
+                if (key) break;
+              }
+            }
+
+            if (key) {
+              // edits: respect labels that are already there (a maintainer may have set them on purpose)
+              if (context.payload.action === 'edited' && current.some((n) => ALL.includes(n))) {
+                core.info('A platform label is already set: leaving it alone');
+              } else {
+                for (const n of PLATFORM_LABELS[key]) if (!current.includes(n) && !toAdd.includes(n)) toAdd.push(n);
+              }
+            } else {
+              core.info('No platform found in the issue: no platform label');
+            }
+
+            if (!toAdd.length) { core.info('Nothing to add'); return; }
             await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: toAdd });
             core.info(`Added: ${toAdd.join(', ')}`);

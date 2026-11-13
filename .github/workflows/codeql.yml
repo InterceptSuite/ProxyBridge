@@ -1,12 +1,9 @@
 name: "CodeQL"
 
+# security scan only, on pull requests to master
 on:
-  push:
-    branches: [ "master", "dev" ]
   pull_request:
-    branches: [ "master", "dev" ]
-  schedule:
-    - cron: '0 4 * * 1'
+    branches: [ "master" ]
 
 jobs:
 

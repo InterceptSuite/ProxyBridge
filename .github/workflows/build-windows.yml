@@ -1,10 +1,17 @@
 name: Build Windows
 
+# runs only when something in Windows/ (or this workflow) changes
 on:
   push:
     branches: [ master, dev ]
+    paths:
+      - 'Windows/**'
+      - '.github/workflows/build-windows.yml'
   pull_request:
     branches: [ master, dev ]
+    paths:
+      - 'Windows/**'
+      - '.github/workflows/build-windows.yml'
   workflow_dispatch:
 
 permissions:

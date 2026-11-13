@@ -1,19 +1,49 @@
 name: Build Linux
 
+# The same checks on x64 and on a native arm64 (aarch64) runner: unit tests, the official build.sh, the binary audit, the
+# command line program, the library and the GUI, the installer logic and the end-to-end suite against the real kernel
+# datapath. There is no arm64 machine to test on by hand, so this is where arm64 is proven.
+
 permissions:
   contents: read
 
+# runs only when something in Linux/ (or this workflow) changes
 on:
   push:
-    branches: [ master, dev, Linux-ebpf ]
+    branches: [ master, dev ]
+    paths:
+      - 'Linux/**'
+      - '.github/workflows/build-linux.yml'
   pull_request:
-    branches: [ master, dev, Linux-ebpf ]
+    branches: [ master, dev ]
+    paths:
+      - 'Linux/**'
+      - '.github/workflows/build-linux.yml'
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false      # one architecture failing must not hide the result of the other
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+            uname: x86_64
+            readelf_machine: 'Advanced Micro Devices X86-64'
+            file_arch: 'x86-64'
+            clang_targets: 'bpf|x86'
+            artifact: ProxyBridge-Linux-Build
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            uname: aarch64
+            readelf_machine: 'AArch64'
+            file_arch: 'ARM aarch64'
+            clang_targets: 'bpf|aarch64'
+            artifact: ProxyBridge-Linux-arm64-Build
     permissions:
       contents: read
       actions: read
@@ -21,6 +51,17 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    - name: Confirm the architecture of this runner
+      run: |
+        uname -a
+        [ "$(uname -m)" = "${{ matrix.uname }}" ] || { echo "✗ expected ${{ matrix.uname }}, this is $(uname -m)"; exit 1; }
+        echo "✓ ${{ matrix.uname }}"
+        echo "kernel: $(uname -r)"
+        ls -l /sys/kernel/btf/vmlinux 2>&1 || true
+        mount | grep "type cgroup2" || true
+        gcc -dumpmachine
+      shell: bash
 
     - name: Install build dependencies
       run: |
@@ -66,10 +107,13 @@ jobs:
         echo ""
         echo "=== Checking libbpf ==="
         pkg-config --modversion libbpf
+        echo ""
+        echo "=== clang can target bpf and this machine ==="
+        clang --print-targets | grep -E "${{ matrix.clang_targets }}"
       shell: bash
 
-    - name: Unit tests (rule engine, DNS parser, relay)
-      timeout-minutes: 15
+    - name: Unit tests (rule engine, DNS parser, relay, profiles, GUI, installer logic)
+      timeout-minutes: 20
       run: |
         Linux/profile/tests/run_tests.sh
         Linux/gui/tests/run_tests.sh
@@ -118,12 +162,22 @@ jobs:
         fi
       shell: bash
 
+    - name: Verify the binaries are built for this architecture
+      run: |
+        for f in libproxybridge.so ProxyBridge ProxyBridgeGUI; do
+          readelf -h "Linux/output/$f" | grep -q "Machine:.*${{ matrix.readelf_machine }}" || { echo "✗ $f is not a ${{ matrix.readelf_machine }} binary"; exit 1; }
+          echo "✓ $f is ${{ matrix.readelf_machine }}"
+        done
+        readelf -n Linux/output/ProxyBridge | grep -i -E "BTI|PAC" || echo "(no BTI/PAC marking)"
+      shell: bash
+
     - name: Smoke test the built binaries
       run: |
         cd Linux/output
         # capture output first: `cmd | grep -q` can fail under pipefail when grep exits early (SIGPIPE)
         help_out="$(LD_LIBRARY_PATH="$PWD" ./ProxyBridge --help)"
         grep -q -- "--profile" <<<"$help_out" && echo "✓ CLI runs and shows its help"
+        grep -q "4\." <<<"$(LD_LIBRARY_PATH="$PWD" ./ProxyBridge --version 2>&1 || true)" && echo "✓ CLI reports a version" || true
         cli_deps="$(LD_LIBRARY_PATH="$PWD" ldd ./ProxyBridge)"
         grep -q libproxybridge <<<"$cli_deps" && echo "✓ CLI links libproxybridge.so"
         # the GUI must carry an $ORIGIN runpath so it finds the library in its own directory
@@ -164,6 +218,25 @@ jobs:
         run_in fedora:40 "dnf install -y gtk3"
       shell: bash
 
+    - name: Release archive installs with the official setup.sh (files, not the service)
+      run: |
+        set -e
+        ARCHIVE="$RUNNER_TEMP/ProxyBridge-Linux-${{ matrix.arch }}-vtest.tar.gz"
+        tar -czf "$ARCHIVE" -C Linux/output .
+        mkdir "$RUNNER_TEMP/unpacked"
+        tar -xzf "$ARCHIVE" -C "$RUNNER_TEMP/unpacked"
+        ls "$RUNNER_TEMP/unpacked"
+        # setup.sh must accept this archive on this machine (the architecture check) and install the programs
+        sudo env PB_NO_GROUP_USER=1 bash "$RUNNER_TEMP/unpacked/setup.sh"
+        command -v ProxyBridge && command -v ProxyBridgeGUI
+        file "$(command -v ProxyBridge)" | grep -q "${{ matrix.file_arch }}" && echo "✓ installed ProxyBridge is ${{ matrix.arch }}"
+        ProxyBridge --help | grep -q -- "--profile" && echo "✓ installed CLI runs"
+        systemctl is-enabled proxybridge || true
+        systemctl is-active proxybridge || true
+        sudo journalctl -u proxybridge --no-pager -n 20 || true
+      shell: bash
+      continue-on-error: true
+
     - name: Verify the build left the source tree clean
       run: |
         # build.sh compiles in a temp directory: no untracked or ignored file may appear outside Linux/output/
@@ -179,31 +252,34 @@ jobs:
 
     - name: End-to-end tests with the real kernel datapath (best effort)
       # Needs root, cgroup v2 and a BTF kernel. GitHub-hosted runners usually have them, but this is not guaranteed,
-      # so a failure here is reported without failing the build.
+      # so a failure here is reported in the job summary without failing the build.
       continue-on-error: true
-      timeout-minutes: 15
+      timeout-minutes: 30
       run: |
         sudo apt-get install -y dnsutils libgtk-3-bin btrfs-progs >/dev/null
+        sudo systemctl stop proxybridge 2>/dev/null || true   # the install step above left a service running
+        sudo systemctl disable proxybridge 2>/dev/null || true
         uname -r
-        ls /sys/kernel/btf/vmlinux && mount | grep -q "type cgroup2" || { echo "kernel lacks BTF or cgroup2: skipping"; exit 0; }
-        fail=0
+        { ls /sys/kernel/btf/vmlinux && mount | grep -q "type cgroup2"; } || { echo "kernel lacks BTF or cgroup2: skipping"; echo "### ${{ matrix.arch }} end-to-end: skipped (no BTF or cgroup v2)" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+        fail=0; passed=""; failed=""
         for t in e2e e2e_rules e2e_domains e2e_security e2e_profile e2e_parity e2e_cli e2e_faults e2e_udp e2e_rules_diff e2e_logging e2e_exempt e2e_lifecycle api_live e2e_btrfs e2e_daemon e2e_service; do
           echo "::group::$t"
-          sudo env PB_DIR="$PWD/Linux/output" BPFTOOL="$BPFTOOL" bash "Linux/tests/$t.sh" || fail=1
+          if sudo env PB_DIR="$PWD/Linux/output" BPFTOOL="$BPFTOOL" bash "Linux/tests/$t.sh"; then passed="$passed $t"; else failed="$failed $t"; fail=1; fi
           echo "::endgroup::"
         done
         echo "::group::e2e_checker"
-        env PB_DIR="$PWD/Linux/output" bash Linux/tests/e2e_checker.sh || fail=1
+        if env PB_DIR="$PWD/Linux/output" bash Linux/tests/e2e_checker.sh; then passed="$passed e2e_checker"; else failed="$failed e2e_checker"; fail=1; fi
         echo "::endgroup::"
         for t in gui_headless gui_ui gui_service; do
           echo "::group::$t"
           if command -v broadwayd > /dev/null; then
-            if [ "$t" = gui_headless ]; then sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_headless.sh "$PWD/Linux/output/ProxyBridgeGUI" "$PWD/Linux/output" || fail=1
-            elif [ "$t" = gui_service ]; then sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_service.sh "$PWD/Linux/output" || fail=1
-            else sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_ui.sh "$PWD/Linux/output" || fail=1; fi
+            if [ "$t" = gui_headless ]; then sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_headless.sh "$PWD/Linux/output/ProxyBridgeGUI" "$PWD/Linux/output"
+            elif [ "$t" = gui_service ]; then sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_service.sh "$PWD/Linux/output"
+            else sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_ui.sh "$PWD/Linux/output"; fi && passed="$passed $t" || { failed="$failed $t"; fail=1; }
           else echo "broadwayd not available: skipped"; fi
           echo "::endgroup::"
         done
+        { echo "### ${{ matrix.arch }} end-to-end"; echo "passed:$passed"; echo ""; echo "failed:${failed:- none}"; } >> "$GITHUB_STEP_SUMMARY"
         exit $fail
       shell: bash
 
@@ -218,7 +294,7 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
-        name: ProxyBridge-Linux-Build-${{ github.sha }}
+        name: ${{ matrix.artifact }}-${{ github.sha }}
         path: Linux/output/
         retention-days: 30
 
