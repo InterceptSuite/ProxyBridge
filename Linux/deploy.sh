@@ -2,7 +2,7 @@
 # Downloads the latest ProxyBridge release for Linux, checks it, and installs it with the setup.sh that is inside the archive:
 #   curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh && sudo bash deploy.sh
 # Everything that is installed (programs, the ProxyBridge service, the group) is done by setup.sh, so there is one installer.
-#   PB_ALLOW_UNVERIFIED=1   install a release that has no .sha256 file next to the archive (nothing else is skipped)
+#   PB_ALLOW_UNVERIFIED=1   install a release whose archive has no SHA-256 digest in the GitHub API (nothing else is skipped)
 set -euo pipefail
 
 GITHUB_REPO="InterceptSuite/ProxyBridge"
@@ -44,9 +44,12 @@ fetch() { curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 "$@"; }
 echo "Fetching latest release information..."
 api_response="$(fetch "$GITHUB_API")" || { echo "ERROR: Failed to fetch release information from GitHub"; exit 1; }
 
+expected=""
 if command -v jq >/dev/null 2>&1; then
+    expected="$(printf '%s' "$api_response" | jq -r '.assets[] | select(.name | test("^ProxyBridge-Linux-.*\\.tar\\.gz$")) | .digest // empty' | head -1)"
     download_url="$(printf '%s' "$api_response" | jq -r '.assets[] | select(.name | test("^ProxyBridge-Linux-.*\\.tar\\.gz$")) | .browser_download_url' | head -1)"
 else
+    expected="$(printf '%s\n' "$api_response" | awk '/"digest":/ { d=$0 } /"browser_download_url":.*ProxyBridge-Linux-[^"\/]*\.tar\.gz"/ { print d; exit }' | sed -n 's/.*"digest": *"\([^"]*\)".*/\1/p')"
     download_url="$(printf '%s' "$api_response" | grep -o '"browser_download_url": *"[^"]*ProxyBridge-Linux-[^"/]*\.tar\.gz"' | head -1 | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')"
 fi
 if [ -z "$download_url" ] || [ "${download_url#"$DOWNLOAD_PREFIX"}" = "$download_url" ]; then
@@ -65,18 +68,18 @@ echo "Downloading $filename..."
 fetch -o "$WORK/$filename" "$download_url" || { echo "ERROR: Failed to download the release archive"; exit 1; }
 
 echo "Checking the download..."
-if fetch -o "$WORK/$filename.sha256" "$download_url.sha256" 2>/dev/null; then
-    expected="$(awk '{print $1; exit}' "$WORK/$filename.sha256")"
+expected="${expected#sha256:}"
+if [ -n "$expected" ]; then
     actual="$(sha256sum "$WORK/$filename" | awk '{print $1}')"
-    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
-        echo "ERROR: the checksum of the download does not match ($filename.sha256). Nothing was installed."
+    if [ "$expected" != "$actual" ]; then
+        echo "ERROR: the checksum of the download does not match the one GitHub reports for the release. Nothing was installed."
         exit 1
     fi
     echo "  SHA-256 matches"
 elif [ "${PB_ALLOW_UNVERIFIED:-0}" = 1 ]; then
-    echo "WARNING: this release has no .sha256 file; installing without checking it (PB_ALLOW_UNVERIFIED=1)"
+    echo "WARNING: GitHub reports no SHA-256 digest for this release; installing without checking it (PB_ALLOW_UNVERIFIED=1)"
 else
-    echo "ERROR: this release has no .sha256 file to check the download against."
+    echo "ERROR: GitHub reports no SHA-256 digest for this release to check the download against."
     echo "       Verify the archive yourself and run again with PB_ALLOW_UNVERIFIED=1, or install from the downloaded archive by hand."
     exit 1
 fi

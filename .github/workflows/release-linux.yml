@@ -121,8 +121,7 @@ jobs:
         # Move archive to root for upload
         mv "../$ARCHIVE_NAME" "../../$ARCHIVE_NAME"
         cd ../..
-        sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
-        cat "$ARCHIVE_NAME.sha256"
+        sha256sum "$ARCHIVE_NAME"
       shell: bash
       env:
         VERSION: ${{ steps.version.outputs.version }}
@@ -142,7 +141,7 @@ jobs:
 
     - name: Upload archive to release
       run: |
-        gh release upload "$TAG" ProxyBridge-Linux-v*.tar.gz ProxyBridge-Linux-v*.tar.gz.sha256 --clobber
+        gh release upload "$TAG" ProxyBridge-Linux-v*.tar.gz --clobber
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -154,5 +153,4 @@ jobs:
         name: ProxyBridge-Linux-Release-${{ steps.version.outputs.version }}
         path: |
           ProxyBridge-Linux-*.tar.gz
-          ProxyBridge-Linux-*.tar.gz.sha256
         retention-days: 90

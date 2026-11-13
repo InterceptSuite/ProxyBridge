@@ -33,7 +33,7 @@ curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/
 ```
 
 This script will:
-- Download the latest release from GitHub into a private temporary directory and check its SHA-256 against the `.sha256` file of the release (it stops if they differ, or if the release has none, unless run as `sudo env PB_ALLOW_UNVERIFIED=1 bash deploy.sh`)
+- Download the latest release from GitHub into a private temporary directory and check its SHA-256 against the digest GitHub shows for the release asset (it stops if they differ, or if there is none, unless run as `sudo env PB_ALLOW_UNVERIFIED=1 bash deploy.sh`)
 - Refuse an archive with absolute paths or `..`
 - Run the archive's own `setup.sh`, which does the rest (so there is one installer): detect your distribution, install GTK3 if the GUI is included and it is missing, copy the programs and library, create the group and the service, update the library cache and verify
 - `sudo env PB_NO_GROUP_USER=1 ./setup.sh` keeps the installer from adding the invoking user to the group `proxybridge`
@@ -494,7 +494,7 @@ sudo ldconfig
 
 **Cleanup after crash:** nothing to do. ProxyBridge attaches its eBPF programs through BPF links, which the kernel removes when the process exits or crashes (traffic then flows normally, see [Security model](#security-model)). To check: `sudo bpftool cgroup tree /sys/fs/cgroup` should list no `pb_*` programs.
 
-**Verifying a download:** every release carries a `.sha256` file next to the tarball: `sha256sum -c ProxyBridge-Linux-v*.tar.gz.sha256`.
+**Verifying a download:** GitHub shows a SHA-256 digest next to each release asset; compare it with `sha256sum ProxyBridge-Linux-v*.tar.gz`.
 
 ## License
 
