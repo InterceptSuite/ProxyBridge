@@ -12,6 +12,9 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     // the system DNS proxy lets the extension learn which names belong to which addresses, which
     // host name rules and "send hostname" need. per profile, on by default
     @Published var isDNSEnabled = true
+    // the proxy rules set to "Default" use (issue #274). per profile. nil, or an id that no longer exists,
+    // means the first proxy. see DefaultProxy
+    @Published private(set) var defaultProxyId: String?
     // set once the extension is installed, the DNS entry is only touched after that
     private var extensionReady = false
     // the tunnel start is watched: macOS can stop it again at once without saying why (#282)
@@ -110,6 +113,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         activityLogs.reserveCapacity(maxLogEntries)
         loadTrafficLoggingSetting()
         loadDNSSetting()
+        loadDefaultProxySetting()
         loadProfiles()
         loadProxyConfig()
         NotificationCenter.default.addObserver(
@@ -198,6 +202,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     private func profileCloseKey(_ name: String) -> String { "profile.\(name).closeToMenuBar" }
     private func profileStartupKey(_ name: String) -> String { "profile.\(name).runAtStartup" }
     private func profileDNSKey(_ name: String) -> String { "profile.\(name).dnsEnabled" }
+    private func profileDefaultProxyKey(_ name: String) -> String { "profile.\(name).defaultProxyId" }
 
     private func loadProfiles() {
         let d = UserDefaults.standard
@@ -222,6 +227,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         d.set(d.bool(forKey: "closeToMenuBar"), forKey: profileCloseKey(name))
         d.set(d.bool(forKey: "runAtStartup"), forKey: profileStartupKey(name))
         d.set(isDNSEnabled, forKey: profileDNSKey(name))
+        if let id = defaultProxyId { d.set(id, forKey: profileDefaultProxyKey(name)) } else { d.removeObject(forKey: profileDefaultProxyKey(name)) }
     }
 
     // load a profile's snapshot into the live working keys
@@ -240,6 +246,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         d.set(d.object(forKey: profileStartupKey(name)) as? Bool ?? false, forKey: "runAtStartup")
         // DNS is on by default, also for profiles saved before the setting existed
         d.set(d.object(forKey: profileDNSKey(name)) as? Bool ?? true, forKey: "dnsEnabled")
+        if let id = d.string(forKey: profileDefaultProxyKey(name)) { d.set(id, forKey: "defaultProxyId") } else { d.removeObject(forKey: "defaultProxyId") }
     }
 
     // reload in-memory state from the working keys and push it to the extension
@@ -247,6 +254,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         loadProxyConfig()
         loadTrafficLoggingSetting()
         loadDNSSetting()
+        loadDefaultProxySetting()
         // window-close behaviour is read live from the key, only startup needs applying
         LoginItem.applyToSystem(UserDefaults.standard.bool(forKey: "runAtStartup"))
         if let session = tunnelSession {
@@ -290,12 +298,14 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         d.set(d.object(forKey: profileCloseKey(old)), forKey: profileCloseKey(new))
         d.set(d.object(forKey: profileStartupKey(old)), forKey: profileStartupKey(new))
         d.set(d.object(forKey: profileDNSKey(old)), forKey: profileDNSKey(new))
+        d.set(d.object(forKey: profileDefaultProxyKey(old)), forKey: profileDefaultProxyKey(new))
         d.removeObject(forKey: profileConfigsKey(old))
         d.removeObject(forKey: profileRulesKey(old))
         d.removeObject(forKey: profileLoggingKey(old))
         d.removeObject(forKey: profileCloseKey(old))
         d.removeObject(forKey: profileStartupKey(old))
         d.removeObject(forKey: profileDNSKey(old))
+        d.removeObject(forKey: profileDefaultProxyKey(old))
         if let i = profiles.firstIndex(of: old) { profiles[i] = new }
         d.set(profiles, forKey: "profiles")
         if activeProfile == old {
@@ -317,6 +327,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         d.removeObject(forKey: profileCloseKey(name))
         d.removeObject(forKey: profileStartupKey(name))
         d.removeObject(forKey: profileDNSKey(name))
+        d.removeObject(forKey: profileDefaultProxyKey(name))
         profiles.removeAll { $0 == name }
         d.set(profiles, forKey: "profiles")
     }
@@ -335,6 +346,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             "closeToMenuBar": d.object(forKey: profileCloseKey(name)) as? Bool ?? false,
             "runAtStartup": d.object(forKey: profileStartupKey(name)) as? Bool ?? false,
             "dnsEnabled": d.object(forKey: profileDNSKey(name)) as? Bool ?? true,
+            "defaultProxyId": d.string(forKey: profileDefaultProxyKey(name)) ?? NSNull(),
             "proxyConfigs": configsJSON,
             "proxyRules": d.array(forKey: profileRulesKey(name)) ?? []
         ]
@@ -363,6 +375,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         d.set(obj["closeToMenuBar"] as? Bool ?? false, forKey: profileCloseKey(name))
         d.set(obj["runAtStartup"] as? Bool ?? false, forKey: profileStartupKey(name))
         d.set(obj["dnsEnabled"] as? Bool ?? true, forKey: profileDNSKey(name))
+        if let id = obj["defaultProxyId"] as? String, !id.isEmpty { d.set(id, forKey: profileDefaultProxyKey(name)) } else { d.removeObject(forKey: profileDefaultProxyKey(name)) }
 
         profiles.append(name)
         d.set(profiles, forKey: "profiles")
@@ -388,6 +401,32 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         saveProxyConfigs()
         if let session = tunnelSession {
             sendProxyConfigsToExtension(session: session)
+            // the first proxy becomes the default, rules set to Default follow it
+            RuleManager.resyncRules(session: session) { _, _ in }
+        }
+    }
+
+    // MARK: - Default proxy
+
+    private func loadDefaultProxySetting() {
+        defaultProxyId = UserDefaults.standard.string(forKey: "defaultProxyId")
+    }
+
+    // the proxy rules set to "Default" use right now, nil when there is no proxy
+    var effectiveDefaultProxy: ProxyConfig? {
+        guard let id = DefaultProxy.effectiveId(defaultId: defaultProxyId, proxyIds: proxyConfigs.map { $0.id }) else { return nil }
+        return proxyConfigs.first { $0.id == id }
+    }
+
+    func setDefaultProxy(_ id: String) {
+        guard proxyConfigs.contains(where: { $0.id == id }) else { return }
+        // marking the proxy that is already the default (the first one) still saves the choice, so a
+        // later change in the list order does not move it
+        let changes = effectiveDefaultProxy?.id != id
+        defaultProxyId = id
+        UserDefaults.standard.set(id, forKey: "defaultProxyId")
+        if changes, let session = tunnelSession {
+            RuleManager.resyncRules(session: session) { _, _ in }
         }
     }
 
@@ -423,8 +462,14 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         }
         proxyConfigs.removeAll { $0.id == config.id }
         saveProxyConfigs()
+        if defaultProxyId == config.id {
+            // the next proxy takes over as the default
+            defaultProxyId = nil
+            UserDefaults.standard.removeObject(forKey: "defaultProxyId")
+        }
         if let session = tunnelSession {
             sendProxyConfigsToExtension(session: session)
+            RuleManager.resyncRules(session: session) { _, _ in }
         }
     }
     

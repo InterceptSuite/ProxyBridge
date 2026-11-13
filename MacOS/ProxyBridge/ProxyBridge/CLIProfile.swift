@@ -35,6 +35,7 @@ struct CLIProfile {
     var proxies: [CLIProxy]
     var rules: [[String: Any]]      // as saved by the app: processNames, targetHosts, targetPorts, protocol, action, enabled
     var dnsEnabled: Bool = true     // the profile's Enable DNS setting, on when the profile has none
+    var defaultProxyId: String?     // the proxy rules set to "DEFAULT" use, the first proxy when missing
 }
 
 enum CLIProfileError: Error, Equatable {
@@ -63,7 +64,8 @@ enum CLIProfileLoader {
         let proxies = try decodeProxies(obj["proxyConfigs"] ?? [])
         let rules = obj["proxyRules"] as? [[String: Any]] ?? []
         return CLIProfile(name: (obj["name"] as? String) ?? "profile", proxies: proxies, rules: rules,
-                          dnsEnabled: obj["dnsEnabled"] as? Bool ?? true)
+                          dnsEnabled: obj["dnsEnabled"] as? Bool ?? true,
+                          defaultProxyId: obj["defaultProxyId"] as? String)
     }
 
     // a profile saved in the app. the active profile lives in the working keys
@@ -78,9 +80,11 @@ enum CLIProfileLoader {
         let configsKey = name == active ? "proxyConfigs" : "profile.\(name).proxyConfigs"
         let rulesKey = name == active ? "proxyRules" : "profile.\(name).proxyRules"
         let dnsKey = name == active ? "dnsEnabled" : "profile.\(name).dnsEnabled"
+        let defaultKey = name == active ? "defaultProxyId" : "profile.\(name).defaultProxyId"
         let proxies = try decodeProxies(read(configsKey) ?? [])
         let rules = read(rulesKey) as? [[String: Any]] ?? []
-        return CLIProfile(name: name, proxies: proxies, rules: rules, dnsEnabled: read(dnsKey) as? Bool ?? true)
+        return CLIProfile(name: name, proxies: proxies, rules: rules, dnsEnabled: read(dnsKey) as? Bool ?? true,
+                          defaultProxyId: read(defaultKey) as? String)
     }
 
     static func savedNames(read: Reader) -> (names: [String], active: String?) {
@@ -117,6 +121,7 @@ enum CLIProfileLoader {
         var ids = Set<String>()
         for p in profile.proxies {
             if !ids.insert(p.id).inserted { out.append("two proxies have the same id '\(p.id)'") }
+            if DefaultProxy.reservedActions.contains(p.id) { out.append("a proxy has the id '\(p.id)', which is a rule action and cannot be a proxy id") }
             if p.host.trimmingCharacters(in: .whitespaces).isEmpty { out.append("a \(p.type) proxy has no host") }
             if !(1...65535).contains(p.port) { out.append("proxy \(p.host) has the port \(p.port), it must be 1-65535") }
             let type = p.type.lowercased()
@@ -138,11 +143,18 @@ enum CLIProfileLoader {
         let ids = Set(profile.proxies.map { $0.id })
         for (i, rule) in profile.rules.enumerated() {
             let action = rule["action"] as? String ?? "DIRECT"
-            if action != "DIRECT" && action != "BLOCK" && !ids.contains(action) {
+            if action != "DIRECT" && action != "BLOCK" && action != DefaultProxy.action && !ids.contains(action) {
                 out.append("rule \(i + 1) sends traffic to a proxy that is not in this profile, it will go direct")
             }
         }
         if profile.rules.isEmpty { out.append("the profile has no rules, nothing will be redirected") }
+        if DefaultProxy.usesDefault(profile.rules) {
+            if profile.proxies.isEmpty {
+                out.append("rules use the default proxy, but the profile has no proxy, so they will go direct")
+            } else if let id = profile.defaultProxyId, !ids.contains(id) {
+                out.append("defaultProxyId '\(id)' is not a proxy in this profile, the first proxy is used as the default")
+            }
+        }
         if !profile.dnsEnabled {
             for (i, rule) in profile.rules.enumerated() where hasHostName(rule["targetHosts"] as? String ?? "") {
                 out.append("rule \(i + 1) uses a host name, but DNS is off in this profile, so it will not match")

@@ -23,6 +23,29 @@ t("bundle id glob", matcher("com.google.*", "*", "*").matchesProcess(chrome), tr
 t("case insensitive", matcher("CURL", "*", "*").matchesProcess(curl), true)
 t("no match", matcher("firefox", "*", "*").matchesProcess(curl), false)
 
+// full executable paths (issue #288): a rule written with a path is compared with the program's path
+let workerA = ProxyRule.FlowProcess(bundleId: "-", processName: "worker", executablePath: "/opt/example-app-a/bin/worker")
+let workerB = ProxyRule.FlowProcess(bundleId: "-", processName: "worker", executablePath: "/opt/example-app-b/bin/worker")
+let nameOnly = ProxyRule.FlowProcess(bundleId: "-", processName: "worker")
+let chromeHelper = ProxyRule.FlowProcess(bundleId: "com.google.Chrome.helper", processName: "Google Chrome Helper",
+    executablePath: "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper")
+t("a path rule matches that program", matcher("/opt/example-app-a/bin/worker", "*", "*").matchesProcess(workerA), true)
+t("a path rule does not match a same-named program elsewhere", matcher("/opt/example-app-a/bin/worker", "*", "*").matchesProcess(workerB), false)
+t("a file name rule matches both programs", matcher("worker", "*", "*").matchesProcess(workerA) && matcher("worker", "*", "*").matchesProcess(workerB), true)
+t("a path with a folder wildcard", matcher("/opt/example-app-a/*", "*", "*").matchesProcess(workerA), true)
+t("a path with a folder wildcard leaves the other folder out", matcher("/opt/example-app-a/*", "*", "*").matchesProcess(workerB), false)
+t("a wildcard in the middle of a path", matcher("/opt/*/bin/worker", "*", "*").matchesProcess(workerA) && matcher("/opt/*/bin/worker", "*", "*").matchesProcess(workerB), true)
+t("a path rule is not case sensitive", matcher("/OPT/Example-App-A/BIN/Worker", "*", "*").matchesProcess(workerA), true)
+t("a path rule for a whole app bundle, with spaces in the path", matcher("/Applications/Google Chrome.app/*", "*", "*").matchesProcess(chromeHelper), true)
+t("a path rule for another app does not match", matcher("/Applications/Firefox.app/*", "*", "*").matchesProcess(chromeHelper), false)
+t("a path rule cannot match when only the name is known", matcher("/opt/example-app-a/bin/worker", "*", "*").matchesProcess(nameOnly), false)
+t("a path pattern is not compared with the bundle id", matcher("/com.google.Chrome.helper", "*", "*").matchesProcess(chromeHelper), false)
+t("a bundle id rule still matches when the path is known", matcher("com.google.Chrome.*", "*", "*").matchesProcess(chromeHelper), true)
+t("a name rule with a wildcard still matches when the path is known", matcher("*chrome helper*", "*", "*").matchesProcess(chromeHelper), true)
+t("a list can mix a path and a name", matcher("/opt/example-app-a/bin/worker; curl", "*", "*").matchesProcess(workerA), true)
+t("a list can mix a path and a name, other entry", matcher("/opt/example-app-a/bin/worker; curl", "*", "*").matchesProcess(curl), true)
+t("a path is not cut at a folder name that looks like the file name", matcher("/opt/example-app-a/bin", "*", "*").matchesProcess(workerA), false)
+
 // ports
 t("port in list", matcher("*", "*", "80,443,8000-8100").matchesPort(8050), true)
 t("port exact", matcher("*", "*", "80,443").matchesPort(443), true)

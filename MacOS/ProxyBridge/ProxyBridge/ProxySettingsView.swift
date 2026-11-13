@@ -31,6 +31,8 @@ struct ProxySettingsView: View {
         } message: {
             if affectedRulesCount > 0 {
                 Text(verbatim: "\(affectedRulesCount) rule\(affectedRulesCount == 1 ? "" : "s") use this proxy and will be set to Direct.")
+            } else if deletingConfig?.id == viewModel.effectiveDefaultProxy?.id, viewModel.proxyConfigs.count > 1 {
+                Text("This is the default proxy. The next proxy in the list becomes the default.")
             } else {
                 Text("This proxy will be permanently removed.")
             }
@@ -92,6 +94,18 @@ struct ProxySettingsView: View {
                         .foregroundColor(config.name.isEmpty ? .secondary : .primary)
                 }
                 .width(140)
+
+                TableColumn("Default") { config in
+                    // the proxy that rules set to "Default" use. clicking another one moves it
+                    let isDefault = viewModel.effectiveDefaultProxy?.id == config.id
+                    Button(action: { viewModel.setDefaultProxy(config.id) }) {
+                        Image(systemName: isDefault ? "star.fill" : "star")
+                            .foregroundColor(isDefault ? .yellow : .secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(isDefault ? "This is the default proxy" : "Make this the default proxy")
+                }
+                .width(54)
 
                 TableColumn("Type") { config in
                     Text(config.type.uppercased())
