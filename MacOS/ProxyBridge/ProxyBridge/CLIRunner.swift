@@ -315,7 +315,14 @@ final class CLIRunner: NSObject, OSSystemExtensionRequestDelegate {
         // same messages, same order as the GUI: logging, proxies, then the rules in one step
         send(["action": "setTrafficLogging", "enabled": verbose >= 2]) { _ in
             self.send(["action": "setProxyConfigs", "configs": self.proxyMessages()]) { _ in
-                RuleManager.applyRules(session: session, rules: self.profile.rules) { _, count in
+                let proxyIds = self.profile.proxies.map { $0.id }
+                if DefaultProxy.usesDefault(self.profile.rules) {
+                    let chosen = DefaultProxy.effectiveId(defaultId: self.profile.defaultProxyId, proxyIds: proxyIds)
+                    let label = self.profile.proxies.first { $0.id == chosen }?.label ?? "none, those rules go direct"
+                    CLI.say("Default proxy: \(CLIText.safe(label))")
+                }
+                let defaultAction = DefaultProxy.effectiveAction(defaultId: self.profile.defaultProxyId, proxyIds: proxyIds)
+                RuleManager.applyRules(session: session, rules: self.profile.rules, defaultAction: defaultAction) { _, count in
                     CLI.say("Profile \"\(CLIText.safe(self.profile.name))\": \(self.profile.proxies.count) proxies, \(count) rules applied")
                     // the extension skips a rule it can't read, don't let that pass silently
                     if count < self.profile.rules.count { CLI.warn("\(self.profile.rules.count - count) rule(s) were rejected by the extension (invalid fields)") }
