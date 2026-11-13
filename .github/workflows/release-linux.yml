@@ -15,7 +15,18 @@ permissions:
 
 jobs:
   build-and-release:
-    runs-on: ubuntu-latest
+    # one archive per architecture: ProxyBridge-Linux-v<version>.tar.gz (x86_64) and ProxyBridge-Linux-arm64-v<version>.tar.gz
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+            archive_prefix: ProxyBridge-Linux
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            archive_prefix: ProxyBridge-Linux-arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
       contents: write
@@ -27,6 +38,14 @@ jobs:
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       with:
         ref: ${{ inputs.tag }}
+
+    - name: Confirm the architecture
+      run: |
+        [ "$(uname -m)" = "$ARCH" ] || { echo "✗ expected $ARCH, this runner is $(uname -m)"; exit 1; }
+        echo "✓ $ARCH"
+      shell: bash
+      env:
+        ARCH: ${{ matrix.arch }}
 
     - name: Install build dependencies
       run: |
@@ -108,7 +127,7 @@ jobs:
 
     - name: Create release archive
       run: |
-        ARCHIVE_NAME="ProxyBridge-Linux-v${VERSION}.tar.gz"
+        ARCHIVE_NAME="${ARCHIVE_PREFIX}-v${VERSION}.tar.gz"
 
         echo "Creating archive: $ARCHIVE_NAME"
         cd Linux/output
@@ -121,11 +140,11 @@ jobs:
         # Move archive to root for upload
         mv "../$ARCHIVE_NAME" "../../$ARCHIVE_NAME"
         cd ../..
-        sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
-        cat "$ARCHIVE_NAME.sha256"
+        sha256sum "$ARCHIVE_NAME"
       shell: bash
       env:
         VERSION: ${{ steps.version.outputs.version }}
+        ARCHIVE_PREFIX: ${{ matrix.archive_prefix }}
 
     - name: List release files
       run: |
@@ -133,26 +152,26 @@ jobs:
         echo "==================================="
         echo "Release Files:"
         echo "==================================="
-        ls -lh ProxyBridge-Linux-*.tar.gz
+        ls -lh ProxyBridge-Linux*.tar.gz
 
         echo ""
         echo "Archive contents:"
-        tar -tzf ProxyBridge-Linux-*.tar.gz
+        tar -tzf ProxyBridge-Linux*-v*.tar.gz
       shell: bash
 
     - name: Upload archive to release
       run: |
-        gh release upload "$TAG" ProxyBridge-Linux-v*.tar.gz ProxyBridge-Linux-v*.tar.gz.sha256 --clobber
+        gh release upload "$TAG" "${ARCHIVE_PREFIX}-v"*.tar.gz --clobber
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ inputs.tag }}
+        ARCHIVE_PREFIX: ${{ matrix.archive_prefix }}
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
-        name: ProxyBridge-Linux-Release-${{ steps.version.outputs.version }}
+        name: ProxyBridge-Linux-${{ matrix.arch }}-Release-${{ steps.version.outputs.version }}
         path: |
-          ProxyBridge-Linux-*.tar.gz
-          ProxyBridge-Linux-*.tar.gz.sha256
+          ProxyBridge-Linux*-v*.tar.gz
         retention-days: 90

@@ -33,7 +33,7 @@ curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/
 ```
 
 This script will:
-- Download the latest release from GitHub into a private temporary directory and check its SHA-256 against the `.sha256` file of the release (it stops if they differ, or if the release has none, unless run as `sudo env PB_ALLOW_UNVERIFIED=1 bash deploy.sh`)
+- Download the latest release from GitHub into a private temporary directory and check its SHA-256 against the digest GitHub shows for the release asset (it stops if they differ, or if there is none, unless run as `sudo env PB_ALLOW_UNVERIFIED=1 bash deploy.sh`)
 - Refuse an archive with absolute paths or `..`
 - Run the archive's own `setup.sh`, which does the rest (so there is one installer): detect your distribution, install GTK3 if the GUI is included and it is missing, copy the programs and library, create the group and the service, update the library cache and verify
 - `sudo env PB_NO_GROUP_USER=1 ./setup.sh` keeps the installer from adding the invoking user to the group `proxybridge`
@@ -50,7 +50,7 @@ This script will:
 
 **From GitHub Releases:**
 
-1. Download the latest `ProxyBridge-Linux-vX.X.X.tar.gz` from the [Releases](https://github.com/InterceptSuite/ProxyBridge/releases) page
+1. Download the latest archive for your machine from the [Releases](https://github.com/InterceptSuite/ProxyBridge/releases) page: `ProxyBridge-Linux-vX.X.X.tar.gz` for x86_64, `ProxyBridge-Linux-arm64-vX.X.X.tar.gz` for arm64 (aarch64). `deploy.sh` picks the right one by itself; `setup.sh` refuses an archive built for the other architecture.
 2. Extract the archive:
    ```bash
    tar -xzf ProxyBridge-Linux-vX.X.X.tar.gz
@@ -360,7 +360,7 @@ ProxyBridge hooks the **socket calls** (`connect()`, `sendmsg()`, `recvmsg()`) w
 
 ### Requirements
 
-- Linux kernel 5.11+ with BTF and cgroup v2 (to run); GCC, Make, **clang** and **bpftool** (to build the eBPF object and skeleton)
+- x86_64 or arm64 (aarch64) machine; Linux kernel 5.11+ with BTF and cgroup v2 (to run); GCC, Make, **clang** and **bpftool** (to build the eBPF object and skeleton)
 - Development libraries:
   - curl and bzip2 (the first build downloads pinned, checksum-verified libbpf, libelf (elfutils) and zlib sources, builds them
     as static libraries into `~/.cache/proxybridge`, and links them in: the library and the command line program need only glibc
@@ -369,7 +369,7 @@ ProxyBridge hooks the **socket calls** (`connect()`, `sendmsg()`, `recvmsg()`) w
   - pkg-config
 
 Binaries are built against a glibc 2.34 baseline (Ubuntu 22.04, Debian 12, RHEL 9 and newer run them), with LTO, FORTIFY_SOURCE=3,
-full RELRO, BIND_NOW, PIE, stack protector and CET flags; `Linux/tests/check_binaries.sh` audits this on every build (issue #146).
+full RELRO, BIND_NOW, PIE, stack protector and CET (x86_64) or branch-protection (arm64) flags; `Linux/tests/check_binaries.sh` audits this on every build (issue #146).
 
 ### Building
 
@@ -494,7 +494,7 @@ sudo ldconfig
 
 **Cleanup after crash:** nothing to do. ProxyBridge attaches its eBPF programs through BPF links, which the kernel removes when the process exits or crashes (traffic then flows normally, see [Security model](#security-model)). To check: `sudo bpftool cgroup tree /sys/fs/cgroup` should list no `pb_*` programs.
 
-**Verifying a download:** every release carries a `.sha256` file next to the tarball: `sha256sum -c ProxyBridge-Linux-v*.tar.gz.sha256`.
+**Verifying a download:** GitHub shows a SHA-256 digest next to each release asset; compare it with `sha256sum ProxyBridge-Linux*-v*.tar.gz`.
 
 ## License
 

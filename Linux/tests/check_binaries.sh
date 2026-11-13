@@ -24,6 +24,10 @@ audit() { # file kind(lib|exe) allowed-NEEDED-regex
     check "stack protector in use" 'grep -q __stack_chk_fail <<<"$syms"'
     check "fortified libc calls in use" 'grep -q "_chk" <<<"$syms"'
     if [ "$(uname -m)" = x86_64 ]; then check "CET (IBT + SHSTK) marked" 'readelf -n "$f" | grep -q IBT && readelf -n "$f" | grep -q SHSTK'; fi
+    # arm64: BTI and pointer authentication are marked when every object was built with -mbranch-protection (reported, not required)
+    if [ "$(uname -m)" = aarch64 ]; then
+        if readelf -n "$f" | grep -q BTI; then ok "BTI marked"; else echo "  note  BTI is not marked (some linked object lacks -mbranch-protection)"; fi
+    fi
     need=$(grep NEEDED <<<"$dyn" | sed 's/.*\[\(.*\)\]/\1/' | tr '\n' ' ')
     check "dependencies are only portable libraries ($need)" '! tr " " "\n" <<<"$need" | grep -v "^$" | grep -q -v -E "$needed_ok"'
     local top
