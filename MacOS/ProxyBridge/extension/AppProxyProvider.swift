@@ -281,9 +281,17 @@ extension ProxyRule {
     struct FlowProcess {
         let candidates: [(path: [Character], file: [Character])]
 
-        init(bundleId: String, processName: String?) {
+        // the names a rule can match: the bundle identifier, and the program itself. when the full path of
+        // the program is known a rule written with a path (/opt/tool/bin/worker, /Applications/Foo.app/*)
+        // is compared with it, and a rule written with a file name with its last part. without the path
+        // only the file name is known and a rule with a path cannot match (issue #288).
+        init(bundleId: String, processName: String?, executablePath: String? = nil) {
             var list = [bundleId]
-            if let processName = processName { list.append(processName) }
+            if let executablePath = executablePath {
+                list.append(executablePath)
+            } else if let processName = processName {
+                list.append(processName)
+            }
             candidates = list.map {
                 (Array($0.lowercased()), Array((($0 as NSString).lastPathComponent).lowercased()))
             }
@@ -415,11 +423,15 @@ class AppProxyProvider: NETransparentProxyProvider {
     // cache by pid + pid version so we don't call proc_pidpath on every
     // connection. the version changes when a pid is reused, so a new process
     // never inherits the previous owner's name
-    private var pidCache: [UInt64: String] = [:]
+    private struct ProcessIdentity {
+        let name: String   // file name of the executable, what the logs show
+        let path: String   // full path of the executable, what a rule with a path is compared with
+    }
+    private var pidCache: [UInt64: ProcessIdentity] = [:]
     private let pidCacheLock = NSLock()
     private static let pidCacheMaxSize = 256
     
-    private func getProcessName(from metaData: NEFlowMetaData) -> String? {
+    private func getProcessIdentity(from metaData: NEFlowMetaData) -> ProcessIdentity? {
         guard let auditTokenData = metaData.sourceAppAuditToken else {
             return nil
         }
@@ -449,17 +461,17 @@ class AppProxyProvider: NETransparentProxyProvider {
         }
         
         let fullPath = String(cString: pathBuffer)
-        let processName = (fullPath as NSString).lastPathComponent
+        let identity = ProcessIdentity(name: (fullPath as NSString).lastPathComponent, path: fullPath)
         
         // store in cache, evict everything if full - processes rarely hit this
         pidCacheLock.lock()
         if pidCache.count >= AppProxyProvider.pidCacheMaxSize {
             pidCache.removeAll(keepingCapacity: true)
         }
-        pidCache[key] = processName
+        pidCache[key] = identity
         pidCacheLock.unlock()
         
-        return processName
+        return identity
     }
     
     // guarded by its own lock, the old OSAtomic compare-and-swap setter could
@@ -847,7 +859,8 @@ class AppProxyProvider: NETransparentProxyProvider {
             portStr = "unknown"
         }
         
-        let processName = getProcessName(from: metaData)
+        let identity = getProcessIdentity(from: metaData)
+        let processName = identity?.name
         let displayName = processName ?? processPath
         
         // domains that resolved to this ip (from the dns proxy), used for domain
@@ -858,7 +871,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         // rules are always evaluated. a proxy config is only needed by a rule that
         // routes to one, BLOCK and DIRECT rules work without any (they used to be
         // skipped whenever no proxy was configured, so a lone BLOCK rule did nothing)
-        let matchedRule = findMatchingRule(bundleId: processPath, processName: processName, destination: destination, port: portNum, connectionProtocol: .tcp, checkIpPort: true, domains: domains)
+        let matchedRule = findMatchingRule(bundleId: processPath, processName: processName, executablePath: identity?.path, destination: destination, port: portNum, connectionProtocol: .tcp, checkIpPort: true, domains: domains)
 
         if let rule = matchedRule {
             switch rule.action {
@@ -899,7 +912,8 @@ class AppProxyProvider: NETransparentProxyProvider {
     private func handleUDPFlow(_ flow: NEAppProxyUDPFlow) -> Bool {
         let metaData = flow.metaData
         let processPath = metaData.sourceAppSigningIdentifier
-        let processName = getProcessName(from: metaData)
+        let identity = getProcessIdentity(from: metaData)
+        let processName = identity?.name
         let displayName = processName ?? processPath
         
         if processPath == "com.interceptsuite.ProxyBridge" || processPath == "com.interceptsuite.ProxyBridge.extension" {
@@ -912,7 +926,7 @@ class AppProxyProvider: NETransparentProxyProvider {
         let hasAnySocks5 = storedProxyConfigs.values.contains { $0.type.lowercased() == "socks5" }
         proxyLock.unlock()
 
-        let matchedRule = findMatchingRule(bundleId: processPath, processName: processName, destination: "", port: 0, connectionProtocol: .udp, checkIpPort: false)
+        let matchedRule = findMatchingRule(bundleId: processPath, processName: processName, executablePath: identity?.path, destination: "", port: 0, connectionProtocol: .udp, checkIpPort: false)
 
         if let rule = matchedRule {
             let action = rule.action
@@ -1766,13 +1780,13 @@ class AppProxyProvider: NETransparentProxyProvider {
         }
     }
     
-    private func findMatchingRule(bundleId: String, processName: String?, destination: String, port: UInt16, connectionProtocol: RuleProtocol, checkIpPort: Bool, domains: [String] = []) -> ProxyRule? {
+    private func findMatchingRule(bundleId: String, processName: String?, executablePath: String? = nil, destination: String, port: UInt16, connectionProtocol: RuleProtocol, checkIpPort: Bool, domains: [String] = []) -> ProxyRule? {
         rulesLock.lock()
         let currentRules = rules
         rulesLock.unlock()
         if currentRules.isEmpty { return nil }
 
-        let flowProcess = ProxyRule.FlowProcess(bundleId: bundleId, processName: processName)
+        let flowProcess = ProxyRule.FlowProcess(bundleId: bundleId, processName: processName, executablePath: executablePath)
         let domainChars = domains.map { (name: $0, chars: Array($0)) }
 
         var wildcardRule: ProxyRule? = nil
