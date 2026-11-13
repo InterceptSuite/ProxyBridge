@@ -48,9 +48,12 @@ int main(void)
     g_free(why); why = NULL;
     CHECK(!boot_path_trusted("relative/ProxyBridge", &why) && why); g_free(why); why = NULL;
     CHECK(!boot_path_trusted("/nonexistent/ProxyBridge", &why) && why); g_free(why); why = NULL;
-    if (access("/usr/bin/true", X_OK) == 0) CHECK(boot_path_trusted("/usr/bin/true", &why) && why == NULL);
+    // a real program of the system: /usr/bin/true may itself be a symlink (newer distributions), which is exactly what is refused
+    char *real = realpath("/usr/bin/true", NULL);
+    if (real && access(real, X_OK) == 0) { bool trusted = boot_path_trusted(real, &why); CHECK(trusted && why == NULL); g_free(why); why = NULL; }
     char *lnk = g_build_filename(dir, "lnk", NULL);
-    CHECK(symlink("/usr/bin/true", lnk) == 0 && !boot_path_trusted(lnk, &why)); g_free(why); why = NULL; g_free(lnk);
+    CHECK(symlink(real ? real : "/usr/bin/true", lnk) == 0 && !boot_path_trusted(lnk, &why)); g_free(why); why = NULL; g_free(lnk);
+    free(real);
 
     t = boot_unit_text("/usr/local/bin/ProxyBridge", &err);
     CHECK(t && strstr(t, "ExecStart=\"/usr/local/bin/ProxyBridge\" --daemon\n") && strstr(t, "WantedBy=multi-user.target") &&

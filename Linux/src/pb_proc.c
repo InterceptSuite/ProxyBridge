@@ -1,4 +1,12 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <time.h>
 #include <dirent.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
@@ -155,4 +163,90 @@ bool pb_proc_is_local_ip(uint32_t ip_be)
         local = a->ifa_addr && a->ifa_addr->sa_family == AF_INET && ((struct sockaddr_in *)a->ifa_addr)->sin_addr.s_addr == ip_be;
     freeifaddrs(list);
     return local;
+}
+
+// ---- executable identity -------------------------------------------------------------------------------------------------------
+#ifndef STATX_MNT_ID
+#define STATX_MNT_ID 0x00001000U
+#endif
+
+bool pb_mountinfo_dev(const char *text, unsigned mnt_id, uint32_t *dev)
+{
+    for (const char *line = text; line && *line;) {
+        unsigned long long id, parent, maj, min;
+        const char *p = line;
+        if (parse_number(p, 10, &id, &p) && *p == ' ' && parse_number(p + 1, 10, &parent, &p) && *p == ' ' &&
+            parse_number(p + 1, 10, &maj, &p) && *p == ':' && parse_number(p + 1, 10, &min, &p) && id == mnt_id && maj < 4096 && min < (1u << 20)) {
+            *dev = (uint32_t)((maj << 20) | min);
+            return true;
+        }
+        const char *nl = strchr(line, '\n');
+        line = nl ? nl + 1 : NULL;
+    }
+    return false;
+}
+
+static char *read_all(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    size_t cap = 1 << 16, n = 0;
+    char *buf = malloc(cap + 1);
+    while (buf) {
+        size_t r = fread(buf + n, 1, cap - n, f);
+        n += r;
+        if (n < cap) break;
+        if (cap >= (16u << 20)) break;
+        char *bigger = realloc(buf, cap * 2 + 1);
+        if (!bigger) { free(buf); buf = NULL; break; }
+        buf = bigger;
+        cap *= 2;
+    }
+    fclose(f);
+    if (buf) buf[n] = 0;
+    return buf;
+}
+
+// The mountinfo of this process, kept for a moment: a scan of /proc asks for every process, and most share the same mounts. A mount that
+// is not in it (another mount namespace, or a mount made since) is looked up in that process's own mountinfo.
+static pthread_mutex_t mnt_mu = PTHREAD_MUTEX_INITIALIZER;
+static char *mnt_text;
+static time_t mnt_loaded;
+
+static bool mount_dev(unsigned mnt_id, uint32_t pid, uint32_t *dev)
+{
+    pthread_mutex_lock(&mnt_mu);
+    time_t now = time(NULL);
+    bool found = mnt_text && pb_mountinfo_dev(mnt_text, mnt_id, dev);
+    if (!found && (!mnt_text || now != mnt_loaded)) {              /* a new mount: look again, at most once a second */
+        char *fresh = read_all("/proc/self/mountinfo");
+        if (fresh) {
+            free(mnt_text);
+            mnt_text = fresh;
+            mnt_loaded = now;
+            found = pb_mountinfo_dev(mnt_text, mnt_id, dev);
+        }
+    }
+    pthread_mutex_unlock(&mnt_mu);
+    if (found) return true;
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%u/mountinfo", pid);
+    char *theirs = read_all(path);
+    found = theirs && pb_mountinfo_dev(theirs, mnt_id, dev);
+    free(theirs);
+    return found;
+}
+
+int pb_proc_exe_identity(uint32_t pid, uint32_t *dev, uint64_t *ino)
+{
+    char link[64];
+    struct statx sx;
+    snprintf(link, sizeof link, "/proc/%u/exe", pid);
+    if (statx(AT_FDCWD, link, 0, STATX_INO | STATX_MNT_ID, &sx) != 0) return -1;
+    *ino = sx.stx_ino;
+    uint32_t d = (sx.stx_dev_major << 20) | sx.stx_dev_minor;        /* what stat() says: right on most file systems */
+    uint32_t sb;
+    if ((sx.stx_mask & STATX_MNT_ID) && mount_dev(sx.stx_mnt_id, pid, &sb)) d = sb;
+    *dev = d;
+    return 0;
 }

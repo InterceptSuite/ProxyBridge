@@ -39,14 +39,9 @@ jobs:
       shell: bash
 
     - name: Locate bpftool
-      # On Ubuntu "bpftool" is only a virtual package; the real binary ships in linux-tools-* and is not on PATH
-      # for the runner's cloud kernel, so find it explicitly.
-      run: |
-        shopt -s nullglob
-        candidates=(/usr/lib/linux-tools/*/bpftool)
-        [ ${#candidates[@]} -gt 0 ] || { echo "bpftool binary not found"; ls /usr/lib/linux-tools 2>&1 || true; exit 1; }
-        echo "BPFTOOL=${candidates[0]}" >> "$GITHUB_ENV"
-        "${candidates[0]}" version | head -1
+      # the runner image's kernel tools can lack the bpftool binary; the script looks everywhere, installs the package
+      # for the running kernel if needed, and prints what is on the machine when it fails (Linux/ci/find-bpftool.sh)
+      run: bash Linux/ci/find-bpftool.sh
       shell: bash
 
     - name: Verify dependencies
@@ -186,11 +181,11 @@ jobs:
       continue-on-error: true
       timeout-minutes: 15
       run: |
-        sudo apt-get install -y dnsutils libgtk-3-bin >/dev/null
+        sudo apt-get install -y dnsutils libgtk-3-bin btrfs-progs >/dev/null
         uname -r
         ls /sys/kernel/btf/vmlinux && mount | grep -q "type cgroup2" || { echo "kernel lacks BTF or cgroup2: skipping"; exit 0; }
         fail=0
-        for t in e2e e2e_rules e2e_domains e2e_security e2e_profile e2e_parity e2e_cli e2e_faults e2e_udp e2e_rules_diff e2e_logging e2e_exempt e2e_lifecycle api_live e2e_daemon e2e_service; do
+        for t in e2e e2e_rules e2e_domains e2e_security e2e_profile e2e_parity e2e_cli e2e_faults e2e_udp e2e_rules_diff e2e_logging e2e_exempt e2e_lifecycle api_live e2e_btrfs e2e_daemon e2e_service; do
           echo "::group::$t"
           sudo env PB_DIR="$PWD/Linux/output" BPFTOOL="$BPFTOOL" bash "Linux/tests/$t.sh" || fail=1
           echo "::endgroup::"

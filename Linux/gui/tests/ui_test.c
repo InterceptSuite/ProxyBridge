@@ -846,11 +846,11 @@ static void updates_scenario(void) {
     feed_case("feed_noversion.json", "{\"linux\": {\"download\": \"https://example.test/d\"}}", GTK_RESPONSE_OK, "Could not parse", false);
     feed_case("feed_escape.json", "{\"linux\": {\"version\": \"9.9.9\\u001b[31m\"}}", GTK_RESPONSE_OK, "Could not parse", false);   // remote text never reaches a dialog raw
     feed_case("feed_same.json", "{\"linux\": {\"version\": \"" PROXYBRIDGE_VERSION "\"}}", GTK_RESPONSE_OK, "latest version", false);
-    feed_case("feed_beta_suffix.json", "{\"linux\": {\"version\": \"4.0.0\"}}", GTK_RESPONSE_OK, "latest version", false);
+    feed_case("feed_suffix.json", "{\"linux\": {\"version\": \"" PROXYBRIDGE_VERSION "-Beta\"}}", GTK_RESPONSE_OK, "latest version", false);     // a suffix is ignored
     feed_case("feed_older.json", "{\"linux\": {\"version\": \"3.2.0\"}}", GTK_RESPONSE_OK, "latest version", false);
     feed_case("feed_newer.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"https://example.test/d\", \"release_notes\": \"https://example.test/n\"}}",
               GTK_RESPONSE_CANCEL, "Version 9.9.9 is available", false);
-    feed_case("feed_patch.json", "{\"linux\": {\"version\": \"4.0.1\", \"download\": \"https://example.test/d\"}}", GTK_RESPONSE_CANCEL, "Version 4.0.1 is available", false);
+    feed_case("feed_minor.json", "{\"linux\": {\"version\": \"4.99.0\", \"download\": \"https://example.test/d\"}}", GTK_RESPONSE_CANCEL, "Version 4.99.0 is available", false);
     // a feed must never make the program open anything but an https page
     feed_case("feed_unsafe.json", "{\"linux\": {\"version\": \"9.9.9\", \"download\": \"http://insecure.test/x\", \"release_notes\": \"javascript:alert(1)\"}}",
               GTK_RESPONSE_ACCEPT, "Version 9.9.9 is available", true);

@@ -461,13 +461,9 @@ int pb_core_udp_sender_ok(const struct pb_orig *o, uint16_t client_port)
     snprintf(dir, sizeof dir, "/proc/%u", o->pid);
     if (stat(dir, &st) != 0) return 1;                           /* the flow's owner has exited */
     if (o->exe_ino) {
-        char link[64];
-        struct stat ex;
-        snprintf(link, sizeof link, "/proc/%u/exe", o->pid);
-        if (stat(link, &ex) == 0) {
-            uint32_t dev = (major(ex.st_dev) << 20) | minor(ex.st_dev);   /* same encoding as the BPF program's exe2class key */
-            if (dev != o->exe_dev || ex.st_ino != o->exe_ino) return 0;   /* the pid now runs another program */
-        }
+        uint32_t dev;
+        uint64_t ino;
+        if (pb_proc_exe_identity(o->pid, &dev, &ino) == 0 && (dev != o->exe_dev || ino != o->exe_ino)) return 0;   /* the pid now runs another program */
     }
     for (size_t i = 0; i < n; i++)
         if (uids[i] != 0 && uids[i] != (uint32_t)st.st_uid) return 0;
