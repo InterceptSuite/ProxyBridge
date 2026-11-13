@@ -1,0 +1,220 @@
+name: Build and test Linux arm64
+
+# The same checks as "Build Linux", on a native arm64 (aarch64) runner: unit tests, the official build.sh, the binary audit, the
+# command line program, the library and the GUI, the installer logic, and the end-to-end suite against the real kernel datapath.
+# There is no arm64 machine to test on by hand, so this workflow is where arm64 is proven.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ master, dev, Linux-ebpf ]
+    paths:
+      - 'Linux/**'
+      - '.github/workflows/build-linux-arm64.yml'
+  pull_request:
+    branches: [ master, dev, Linux-ebpf ]
+    paths:
+      - 'Linux/**'
+      - '.github/workflows/build-linux-arm64.yml'
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    - name: Confirm this is arm64
+      run: |
+        uname -a
+        [ "$(uname -m)" = aarch64 ] || { echo "✗ not an arm64 machine"; exit 1; }
+        echo "✓ aarch64"
+        echo "kernel: $(uname -r)"
+        ls -l /sys/kernel/btf/vmlinux 2>&1 || true
+        mount | grep "type cgroup2" || true
+        gcc -dumpmachine
+      shell: bash
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          gcc \
+          make \
+          bzip2 \
+          clang \
+          linux-tools-common \
+          linux-tools-generic \
+          libbpf-dev \
+          libgtk-3-dev \
+          pkg-config
+      shell: bash
+
+    - name: Locate bpftool
+      run: bash Linux/ci/find-bpftool.sh
+      shell: bash
+
+    - name: Verify dependencies
+      run: |
+        gcc --version | head -1
+        make --version | head -1
+        pkg-config --modversion gtk+-3.0
+        clang --version | head -1
+        "$BPFTOOL" version | head -1
+        pkg-config --modversion libbpf
+        echo "clang can target bpf and the host:"
+        clang --print-targets | grep -E "bpf|aarch64"
+      shell: bash
+
+    - name: Unit tests (rule engine, DNS parser, relay, profiles, GUI, installer logic)
+      timeout-minutes: 20
+      run: |
+        Linux/profile/tests/run_tests.sh
+        Linux/gui/tests/run_tests.sh
+        Linux/tests/deploy_select_test.sh
+        Linux/tests/setup_arch_test.sh
+        cd Linux/src
+        make test-rules BUILD_DIR="$RUNNER_TEMP/pb-tests"
+        cd tests
+        TMPDIR="$RUNNER_TEMP" ./run_relay_test.sh plain
+      shell: bash
+
+    - name: Build project (official build.sh)
+      run: |
+        cd Linux
+        chmod +x build.sh
+        WERROR=1 ./build.sh
+      shell: bash
+
+    - name: Verify build output is arm64
+      run: |
+        ls -lh Linux/output/
+        for f in libproxybridge.so ProxyBridge ProxyBridgeGUI; do
+          [ -f "Linux/output/$f" ] || { echo "✗ $f was not built"; exit 1; }
+          file "Linux/output/$f"
+          readelf -h "Linux/output/$f" | grep -q "Machine:.*AArch64" || { echo "✗ $f is not an AArch64 binary"; exit 1; }
+          echo "✓ $f is AArch64"
+        done
+        readelf -n Linux/output/ProxyBridge | grep -i -E "BTI|PAC" || echo "(no BTI/PAC marking)"
+      shell: bash
+
+    - name: Smoke test the built binaries
+      run: |
+        cd Linux/output
+        help_out="$(LD_LIBRARY_PATH="$PWD" ./ProxyBridge --help)"
+        grep -q -- "--profile" <<<"$help_out" && echo "✓ CLI runs and shows its help"
+        grep -q "4\." <<<"$(LD_LIBRARY_PATH="$PWD" ./ProxyBridge --version 2>&1 || true)" && echo "✓ CLI reports a version" || true
+        cli_deps="$(LD_LIBRARY_PATH="$PWD" ldd ./ProxyBridge)"
+        grep -q libproxybridge <<<"$cli_deps" && echo "✓ CLI links libproxybridge.so"
+        gui_dyn="$(readelf -d ./ProxyBridgeGUI)"
+        grep -q 'RUNPATH.*\$ORIGIN' <<<"$gui_dyn" && echo "✓ GUI runpath is \$ORIGIN"
+        exports="$(nm -D libproxybridge.so)"
+        for sym in ProxyBridge_Start ProxyBridge_Stop ProxyBridge_AddRule ProxyBridge_AddProxy ProxyBridge_ValidateRule; do
+          grep -q " T $sym" <<<"$exports" || { echo "✗ missing export $sym"; exit 1; }
+        done
+        echo "✓ public API exported"
+        lib_deps="$(ldd libproxybridge.so)"
+        if grep -qi netfilter <<<"$lib_deps"; then echo "✗ libnetfilter dependency is back"; exit 1; fi
+        echo "✓ no libnetfilter dependency"
+      shell: bash
+
+    - name: Portability - run the binaries on older arm64 distributions
+      # The runner is arm64, so these are the native arm64 images.
+      run: |
+        set -e
+        out="$PWD/Linux/output"
+        run_in() {
+          echo "::group::$1"
+          docker run --rm -v "$out:/out:ro" "$1" sh -c "
+            /out/ProxyBridge --help | grep -q -- '--profile' && echo 'CLI starts with nothing installed' &&
+            missing=\$(ldd /out/ProxyBridge /out/libproxybridge.so 2>&1 | grep 'not found' || true) &&
+            if [ -n \"\$missing\" ]; then echo \"missing: \$missing\"; exit 1; fi && echo 'CLI and library: all libraries resolve' &&
+            $2 >/dev/null 2>&1 &&
+            missing=\$(LD_LIBRARY_PATH=/out ldd /out/ProxyBridgeGUI 2>&1 | grep 'not found' || true) &&
+            if [ -n \"\$missing\" ]; then echo \"missing: \$missing\"; exit 1; fi && echo 'GUI: all libraries resolve with GTK3'"
+          echo "::endgroup::"
+        }
+        run_in ubuntu:22.04 "apt-get update && apt-get install -y libgtk-3-0"
+        run_in debian:12 "apt-get update && apt-get install -y libgtk-3-0"
+        run_in fedora:40 "dnf install -y gtk3"
+      shell: bash
+
+    - name: Release archive installs with the official setup.sh (files, not the service)
+      run: |
+        set -e
+        ARCHIVE="$RUNNER_TEMP/ProxyBridge-Linux-arm64-vtest.tar.gz"
+        tar -czf "$ARCHIVE" -C Linux/output .
+        mkdir "$RUNNER_TEMP/unpacked"
+        tar -xzf "$ARCHIVE" -C "$RUNNER_TEMP/unpacked"
+        ls "$RUNNER_TEMP/unpacked"
+        # setup.sh must accept this archive on this machine (the architecture check) and install the programs
+        sudo env PB_NO_GROUP_USER=1 bash "$RUNNER_TEMP/unpacked/setup.sh"
+        command -v ProxyBridge && command -v ProxyBridgeGUI
+        file "$(command -v ProxyBridge)" | grep -q "ARM aarch64" && echo "✓ installed ProxyBridge is arm64"
+        ProxyBridge --help | grep -q -- "--profile" && echo "✓ installed CLI runs"
+        systemctl is-enabled proxybridge || true
+        systemctl is-active proxybridge || true
+        sudo journalctl -u proxybridge --no-pager -n 20 || true
+      shell: bash
+      continue-on-error: true
+
+    - name: Verify the build left the source tree clean
+      run: |
+        status="$(git status --porcelain --ignored)"
+        dirty="$(grep -E '^(\?\?|!!)' <<<"$status" | grep -v 'Linux/output' || true)"
+        if [ -n "$dirty" ]; then
+          echo "✗ build left files outside Linux/output:"
+          echo "$dirty"
+          exit 1
+        fi
+        echo "✓ source tree clean (only Linux/output/ was written)"
+      shell: bash
+
+    - name: End-to-end tests with the real kernel datapath (best effort)
+      # Needs root, cgroup v2 and a BTF kernel. If the hosted runner does not allow loading eBPF this says so and is skipped;
+      # a failing test is listed in the job summary without failing the build.
+      continue-on-error: true
+      timeout-minutes: 30
+      run: |
+        sudo apt-get install -y dnsutils libgtk-3-bin btrfs-progs >/dev/null
+        sudo systemctl stop proxybridge 2>/dev/null || true   # the install step above left a service running
+        sudo systemctl disable proxybridge 2>/dev/null || true
+        uname -r
+        { ls /sys/kernel/btf/vmlinux && mount | grep -q "type cgroup2"; } || { echo "kernel lacks BTF or cgroup2: skipping"; echo "### arm64 end-to-end: skipped (no BTF or cgroup v2)" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+        fail=0; passed=""; failed=""
+        for t in e2e e2e_rules e2e_domains e2e_security e2e_profile e2e_parity e2e_cli e2e_faults e2e_udp e2e_rules_diff e2e_logging e2e_exempt e2e_lifecycle api_live e2e_btrfs e2e_daemon e2e_service; do
+          echo "::group::$t"
+          if sudo env PB_DIR="$PWD/Linux/output" BPFTOOL="$BPFTOOL" bash "Linux/tests/$t.sh"; then passed="$passed $t"; else failed="$failed $t"; fail=1; fi
+          echo "::endgroup::"
+        done
+        echo "::group::e2e_checker"
+        if env PB_DIR="$PWD/Linux/output" bash Linux/tests/e2e_checker.sh; then passed="$passed e2e_checker"; else failed="$failed e2e_checker"; fail=1; fi
+        echo "::endgroup::"
+        for t in gui_headless gui_ui gui_service; do
+          echo "::group::$t"
+          if command -v broadwayd > /dev/null; then
+            if [ "$t" = gui_headless ]; then sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_headless.sh "$PWD/Linux/output/ProxyBridgeGUI" "$PWD/Linux/output"
+            elif [ "$t" = gui_service ]; then sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_service.sh "$PWD/Linux/output"
+            else sudo env BPFTOOL="$BPFTOOL" bash Linux/tests/gui_ui.sh "$PWD/Linux/output"; fi && passed="$passed $t" || { failed="$failed $t"; fail=1; }
+          else echo "broadwayd not available: skipped"; fi
+          echo "::endgroup::"
+        done
+        { echo "### arm64 end-to-end"; echo "passed:$passed"; echo ""; echo "failed:${failed:- none}"; } >> "$GITHUB_STEP_SUMMARY"
+        exit $fail
+      shell: bash
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ProxyBridge-Linux-arm64-Build-${{ github.sha }}
+        path: Linux/output/
+        retention-days: 30

@@ -17,6 +17,29 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# The programs in this folder are built for one architecture (e_machine of the ELF header: 0x3e x86_64, 0xb7 aarch64). Stop
+# with a clear message instead of "Exec format error" when the archive is for the other one.
+check_architecture() {
+    local f="$SCRIPT_DIR/ProxyBridge" machine built
+    [ -f "$f" ] || return 0
+    case "$(uname -m)" in
+        x86_64|amd64)  machine=x86_64 ;;
+        aarch64|arm64) machine=aarch64 ;;
+        *) echo "ERROR: ProxyBridge for Linux is built for x86_64 and arm64 (aarch64); this machine is $(uname -m)"; exit 1 ;;
+    esac
+    built="$(od -An -tx1 -j18 -N1 "$f" 2>/dev/null | tr -d ' \n')"
+    case "$built" in
+        3e) built=x86_64 ;;
+        b7) built=aarch64 ;;
+    esac
+    if [ -n "$built" ] && [ "$built" != "$machine" ]; then
+        echo "ERROR: these programs are for $built, this machine is $machine."
+        echo "       Download the archive for $machine: ProxyBridge-Linux-v*.tar.gz (x86_64) or ProxyBridge-Linux-arm64-v*.tar.gz (arm64)."
+        exit 1
+    fi
+}
+check_architecture
+
 # Detect Linux distribution
 detect_distro() {
     if [ -f /etc/os-release ]; then

@@ -73,6 +73,8 @@ jobs:
       run: |
         Linux/profile/tests/run_tests.sh
         Linux/gui/tests/run_tests.sh
+        Linux/tests/deploy_select_test.sh
+        Linux/tests/setup_arch_test.sh
         cd Linux/src
         make test-rules BUILD_DIR="$RUNNER_TEMP/pb-tests"
         cd tests
