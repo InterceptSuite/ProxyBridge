@@ -1,5 +1,6 @@
 {
   "closeToMenuBar": false,
+  "defaultProxyId": "pbtest-socks-1080",
   "name": "PBTest",
   "proxyConfigs": [
     {
@@ -164,6 +165,15 @@
       "processNames": "/opt/pbtest-nope/nc",
       "protocol": "TCP",
       "targetHosts": "192.0.2.41",
+      "targetPorts": "22"
+    },
+    {
+      "action": "DEFAULT",
+      "enabled": true,
+      "name": "",
+      "processNames": "nc",
+      "protocol": "TCP",
+      "targetHosts": "192.0.2.50",
       "targetPorts": "22"
     }
   ],

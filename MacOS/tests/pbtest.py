@@ -13,7 +13,8 @@ approved and the pbtest.pbprofile imported (see README.md). The runner starts th
 suites: functional  rule routing, SOCKS5/HTTP/auth, DIRECT, BLOCK, UDP, stuck-handshake cut
         replies     SOCKS5 reply in IPv6 form + banner, HTTP 200 + banner, 407 with "200" in the headers,
                     a SOCKS5 REP 0x04 and an HTTP 502 must fail the program's connect, a rule with the
-                    program's full path must match (and one with another path must not)
+                    program's full path must match (and one with another path must not),
+                    a rule whose action is Default must use the default proxy
         hostnames   proxies receive host names (option on) or IPs (option off), per proxy
         stress      300 parallel TCP connections, three bursts of 300 UDP flows (memory must stay flat)
         dns         200 uncached DNS lookups through the DNS proxy
@@ -245,6 +246,8 @@ def replies():
         pass
     wrong = [h for h in hits(events(t0), "connect", "socks1080", 22) if h.get("dest") == "192.0.2.41"]
     check("B6 a rule with another program's path does not match", not wrong, f"{len(wrong)} connects to socks1080")
+    # a rule whose action is Default follows the profile's default proxy (issue #274), here SOCKS5 1080
+    banner("B7 a rule set to Default uses the default proxy", "192.0.2.50", 22, "socks1080", b"SSH-2.0-pbtest\r\n")
     must_fail_connect("B3 SOCKS5 REP 0x04 fails the connect", "192.0.2.30", 80, "socks1081")
     must_fail_connect("B4 HTTP 502 fails the connect", "192.0.2.31", 22, "http8080")
 
