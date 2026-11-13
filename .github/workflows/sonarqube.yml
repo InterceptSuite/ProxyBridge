@@ -117,11 +117,9 @@ jobs:
         shell: bash
 
       - name: Locate bpftool
-        run: |
-          shopt -s nullglob
-          candidates=(/usr/lib/linux-tools/*/bpftool)
-          [ ${#candidates[@]} -gt 0 ] || { echo "bpftool binary not found"; ls /usr/lib/linux-tools 2>&1 || true; exit 1; }
-          echo "BPFTOOL=${candidates[0]}" >> "$GITHUB_ENV"
+        # the runner image's kernel tools can lack the bpftool binary; the script looks everywhere, installs the package
+        # for the running kernel if needed, and prints what is on the machine when it fails (Linux/ci/find-bpftool.sh)
+        run: bash Linux/ci/find-bpftool.sh
         shell: bash
 
       - name: Install Build Wrapper
