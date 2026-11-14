@@ -27,7 +27,7 @@ out="$(run aarch64 3e)"; st=$?
 [ $st != 0 ] && grep -q 'these programs are for x86_64, this machine is aarch64' <<<"$out" && ok "x86_64 program on an arm64 machine is refused" || bad "x86_64 on arm64 ($st): $out"
 out="$(run x86_64 b7)"; st=$?
 [ $st != 0 ] && grep -q 'these programs are for aarch64, this machine is x86_64' <<<"$out" && ok "arm64 program on an x86_64 machine is refused" || bad "arm64 on x86_64 ($st): $out"
-grep -q 'ProxyBridge-Linux-arm64-v' <<<"$out" && ok "the message names the archive to download" || bad "no download hint: $out"
+grep -q 'ProxyBridge-Linux-arm64-v' <<<"$out" && grep -q 'ProxyBridge-Linux-x64-v' <<<"$out" && ok "the message names both archives to download" || bad "no download hint: $out"
 out="$(run riscv64 3e)"; st=$?
 [ $st != 0 ] && ok "an unsupported machine is refused" || bad "riscv64 accepted: $out"
 

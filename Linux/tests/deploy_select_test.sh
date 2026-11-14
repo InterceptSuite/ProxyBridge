@@ -17,16 +17,23 @@ asset() { # name digest
 {
     echo '{ "assets": ['
     asset ProxyBridge-Linux-arm64-v9.9.9.tar.gz aaaa; echo ','
-    asset ProxyBridge-Linux-v9.9.9.tar.gz bbbb; echo ','
+    asset ProxyBridge-Linux-x64-v9.9.9.tar.gz bbbb; echo ','
     asset ProxyBridge-Windows-v9.9.9.zip cccc
     echo '] }'
 } > "$W/api.json"
 {
     echo '{ "assets": ['
     asset ProxyBridge-Windows-v9.9.9.zip cccc; echo ','
-    asset ProxyBridge-Linux-v9.9.9.tar.gz bbbb
+    asset ProxyBridge-Linux-x64-v9.9.9.tar.gz bbbb
     echo '] }'
 } > "$W/api_x86_only.json"
+# a release made before the arm64 build: the x86_64 archive has the plain name
+{
+    echo '{ "assets": ['
+    asset ProxyBridge-Windows-v9.9.9.zip cccc; echo ','
+    asset ProxyBridge-Linux-v9.9.9.tar.gz dddd
+    echo '] }'
+} > "$W/api_legacy.json"
 
 # a PATH without jq: links to every tool the script needs
 mkdir "$W/nojq"
@@ -43,7 +50,7 @@ for mode in jq nojq; do
     m=""; [ "$mode" = nojq ] && m=nojq
     echo "== $mode"
     out="$(sel x86_64 "$W/api.json" $m)"
-    eq "x86_64 takes the plain archive" "$(grep '^url=' <<<"$out")" "url=$P/ProxyBridge-Linux-v9.9.9.tar.gz"
+    eq "x86_64 takes the x64 archive" "$(grep '^url=' <<<"$out")" "url=$P/ProxyBridge-Linux-x64-v9.9.9.tar.gz"
     eq "x86_64 gets its own digest" "$(grep '^digest=' <<<"$out")" "digest=sha256:bbbb"
     out="$(sel aarch64 "$W/api.json" $m)"
     eq "aarch64 takes the arm64 archive" "$(grep '^url=' <<<"$out")" "url=$P/ProxyBridge-Linux-arm64-v9.9.9.tar.gz"
@@ -53,7 +60,12 @@ for mode in jq nojq; do
     out="$(sel aarch64 "$W/api_x86_only.json" $m)"
     eq "no arm64 archive in the release: an error, never the x86_64 one" "$(grep -c 'ERROR: Could not find' <<<"$out")" "1"
     out="$(sel x86_64 "$W/api_x86_only.json" $m)"
-    eq "x86_64 release without arm64 still works" "$(grep '^url=' <<<"$out")" "url=$P/ProxyBridge-Linux-v9.9.9.tar.gz"
+    eq "x86_64 release without arm64 still works" "$(grep '^url=' <<<"$out")" "url=$P/ProxyBridge-Linux-x64-v9.9.9.tar.gz"
+    out="$(sel x86_64 "$W/api_legacy.json" $m)"
+    eq "an older release with the plain name still installs on x86_64" "$(grep '^url=' <<<"$out")" "url=$P/ProxyBridge-Linux-v9.9.9.tar.gz"
+    eq "an older release gives its own digest" "$(grep '^digest=' <<<"$out")" "digest=sha256:dddd"
+    out="$(sel aarch64 "$W/api_legacy.json" $m)"
+    eq "an older release has no arm64 archive: an error, never the x86_64 one" "$(grep -c 'ERROR: Could not find' <<<"$out")" "1"
 done
 echo "== other machines"
 out="$(sel riscv64 "$W/api.json")"
