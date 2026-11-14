@@ -2,7 +2,8 @@
 # Downloads the latest ProxyBridge release for Linux, checks it, and installs it with the setup.sh that is inside the archive:
 #   curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh && sudo bash deploy.sh
 # Everything that is installed (programs, the ProxyBridge service, the group) is done by setup.sh, so there is one installer.
-# It picks the archive for this machine: ProxyBridge-Linux-v*.tar.gz on x86_64, ProxyBridge-Linux-arm64-v*.tar.gz on aarch64.
+# It picks the archive for this machine: ProxyBridge-Linux-x64-v*.tar.gz on x86_64, ProxyBridge-Linux-arm64-v*.tar.gz on aarch64.
+# (Releases made before the arm64 build name the x86_64 archive ProxyBridge-Linux-v*.tar.gz; that is still accepted.)
 #   PB_ALLOW_UNVERIFIED=1   install a release whose archive has no SHA-256 digest in the GitHub API (nothing else is skipped)
 set -euo pipefail
 
@@ -26,7 +27,7 @@ if [ "$SELECT_ONLY" != 1 ] && [ "$EUID" -ne 0 ]; then
 fi
 
 case "${PB_ARCH:-$(uname -m)}" in
-    x86_64|amd64)  ASSET_RE='^ProxyBridge-Linux-v[0-9].*\.tar\.gz$' ;;
+    x86_64|amd64)  ASSET_RE='^ProxyBridge-Linux-(x64-)?v[0-9].*\.tar\.gz$' ;;
     aarch64|arm64) ASSET_RE='^ProxyBridge-Linux-arm64-v[0-9].*\.tar\.gz$' ;;
     *) echo "ERROR: ProxyBridge for Linux is built for x86_64 and arm64 (aarch64); this machine is $(uname -m)"; exit 1 ;;
 esac

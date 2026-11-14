@@ -34,7 +34,7 @@ check_architecture() {
     esac
     if [ -n "$built" ] && [ "$built" != "$machine" ]; then
         echo "ERROR: these programs are for $built, this machine is $machine."
-        echo "       Download the archive for $machine: ProxyBridge-Linux-v*.tar.gz (x86_64) or ProxyBridge-Linux-arm64-v*.tar.gz (arm64)."
+        echo "       Download the archive for $machine: ProxyBridge-Linux-x64-v*.tar.gz (x86_64) or ProxyBridge-Linux-arm64-v*.tar.gz (arm64)."
         exit 1
     fi
 }

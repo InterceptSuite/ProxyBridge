@@ -791,8 +791,24 @@ int pbp_settings_save(const char *path, const char *active, bool check_updates, 
 
 // ---- update feed ----
 
+const char *pbp_machine_arch(void)
+{
+#if defined(__aarch64__) || defined(__arm64__)
+    return "arm64";
+#else
+    return "x64";
+#endif
+}
+
 int pbp_update_parse(const char *json, size_t len, char **version, char **download, char **notes)
 {
+    return pbp_update_parse_arch(json, len, "x64", version, download, notes);
+}
+
+int pbp_update_parse_arch(const char *json, size_t len, const char *arch, char **version, char **download, char **notes)
+{
+    // the download link of this architecture. the plain "download" is the x64 archive, so an arm64 machine must not fall back to it
+    const char *download_key = (arch && !strcmp(arch, "arm64")) ? "download_arm64" : "download";
     char err[100];
     char *copy = malloc(len + 1);
     if (!copy) return -1;
@@ -805,7 +821,7 @@ int pbp_update_parse(const char *json, size_t len, char **version, char **downlo
     *version = *download = *notes = NULL;
     if (lin && lin->t == J_OBJ) {
         *version = jtext(lin, "version");
-        *download = jtext(lin, "download");
+        *download = jtext(lin, download_key);
         *notes = jtext(lin, "release_notes");
     }
     if (*version && (strlen(*version) > 32 || strspn(*version, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.+-") != strlen(*version)))

@@ -15,14 +15,14 @@ permissions:
 
 jobs:
   build-and-release:
-    # one archive per architecture: ProxyBridge-Linux-v<version>.tar.gz (x86_64) and ProxyBridge-Linux-arm64-v<version>.tar.gz
+    # one archive per architecture: ProxyBridge-Linux-x64-v<version>.tar.gz (x86_64) and ProxyBridge-Linux-arm64-v<version>.tar.gz
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
             arch: x86_64
-            archive_prefix: ProxyBridge-Linux
+            archive_prefix: ProxyBridge-Linux-x64
           - runner: ubuntu-24.04-arm
             arch: aarch64
             archive_prefix: ProxyBridge-Linux-arm64

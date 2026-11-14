@@ -224,6 +224,30 @@ static void test_update_feed(void)
     const char *feed = "{ \"windows\": { \"version\": \"4.3.0\" }, \"linux\": { \"version\": \"4.1.0\", \"download\": \"https://x/d\", \"release_notes\": \"https://x/n\" } }";
     CHECK(pbp_update_parse(feed, strlen(feed), &v, &d, &n) == 0 && !strcmp(v, "4.1.0") && !strcmp(d, "https://x/d") && !strcmp(n, "https://x/n"));
     free(v); free(d); free(n);
+    // arm64 (the first arm release): "download" is the x64 archive, "download_arm64" the arm64 one
+    const char *both = "{ \"linux\": { \"version\": \"4.2.0\", \"download\": \"https://x/x64\", \"download_arm64\": \"https://x/arm\", \"release_notes\": \"https://x/n\" } }";
+    CHECK(pbp_update_parse_arch(both, strlen(both), "arm64", &v, &d, &n) == 0 && !strcmp(v, "4.2.0") && !strcmp(d, "https://x/arm") && !strcmp(n, "https://x/n"));
+    free(v); free(d); free(n);
+    CHECK(pbp_update_parse_arch(both, strlen(both), "x64", &v, &d, &n) == 0 && !strcmp(d, "https://x/x64"));
+    free(v); free(d); free(n);
+    CHECK(pbp_update_parse_arch(both, strlen(both), NULL, &v, &d, &n) == 0 && !strcmp(d, "https://x/x64"));
+    free(v); free(d); free(n);
+    CHECK(pbp_update_parse(both, strlen(both), &v, &d, &n) == 0 && !strcmp(d, "https://x/x64"));      // the old entry point is the x64 one
+    free(v); free(d); free(n);
+    const char *no_arm = "{ \"linux\": { \"version\": \"4.2.0\", \"download\": \"https://x/x64\", \"release_notes\": \"https://x/n\" } }";
+    CHECK(pbp_update_parse_arch(no_arm, strlen(no_arm), "arm64", &v, &d, &n) == 0 && !strcmp(v, "4.2.0") && d == NULL && !strcmp(n, "https://x/n"));   // never the x64 link
+    free(v); free(n);
+    CHECK(pbp_update_parse_arch(no_arm, strlen(no_arm), "x64", &v, &d, &n) == 0 && !strcmp(d, "https://x/x64"));
+    free(v); free(d); free(n);
+    const char *arm_only = "{ \"linux\": { \"version\": \"4.2.0\", \"download_arm64\": \"https://x/arm\" } }";
+    CHECK(pbp_update_parse_arch(arm_only, strlen(arm_only), "x64", &v, &d, &n) == 0 && d == NULL);    // and an x64 machine never gets the arm link
+    free(v);
+    CHECK(!strcmp(pbp_machine_arch(), "arm64") || !strcmp(pbp_machine_arch(), "x64"));
+#if defined(__aarch64__) || defined(__arm64__)
+    CHECK(!strcmp(pbp_machine_arch(), "arm64"));
+#else
+    CHECK(!strcmp(pbp_machine_arch(), "x64"));
+#endif
     const char *bare = "{ \"linux\": { \"version\": \"9\" } }";
     CHECK(pbp_update_parse(bare, strlen(bare), &v, &d, &n) == 0 && !strcmp(v, "9") && d == NULL && n == NULL);
     free(v);

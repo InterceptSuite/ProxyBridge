@@ -103,6 +103,11 @@ char *pbp_merge_hosts(const char *ips, const char *domains);
 
 // The update feed: {"linux": {"version": "...", "download": "...", "release_notes": "..."}, ...}. 0 if there is a linux version.
 int   pbp_update_parse(const char *json, size_t len, char **version, char **download, char **notes);
+// The same for a machine of the given architecture. "arm64" takes "download_arm64" and never the x64 link: when the feed has
+// no such key `download` stays NULL and the caller shows the release notes instead. Anything else takes "download".
+int   pbp_update_parse_arch(const char *json, size_t len, const char *arch, char **version, char **download, char **notes);
+// The architecture this program was built for: "arm64" or "x64".
+const char *pbp_machine_arch(void);
 // Is `candidate` a higher version than `current`? Numeric parts only (4.0.0-Beta equals 4.0.0).
 bool  pbp_version_newer(const char *candidate, const char *current);
 

@@ -50,11 +50,11 @@ This script will:
 
 **From GitHub Releases:**
 
-1. Download the latest archive for your machine from the [Releases](https://github.com/InterceptSuite/ProxyBridge/releases) page: `ProxyBridge-Linux-vX.X.X.tar.gz` for x86_64, `ProxyBridge-Linux-arm64-vX.X.X.tar.gz` for arm64 (aarch64). `deploy.sh` picks the right one by itself; `setup.sh` refuses an archive built for the other architecture.
+1. Download the latest archive for your machine from the [Releases](https://github.com/InterceptSuite/ProxyBridge/releases) page: `ProxyBridge-Linux-x64-vX.X.X.tar.gz` for x86_64, `ProxyBridge-Linux-arm64-vX.X.X.tar.gz` for arm64 (aarch64). `deploy.sh` picks the right one by itself; `setup.sh` refuses an archive built for the other architecture.
 2. Extract the archive:
    ```bash
-   tar -xzf ProxyBridge-Linux-vX.X.X.tar.gz
-   cd ProxyBridge-Linux-vX.X.X
+   tar -xzf ProxyBridge-Linux-x64-vX.X.X.tar.gz
+   cd ProxyBridge-Linux-x64-vX.X.X
    ```
 3. Run the setup script with root privileges:
    ```bash
