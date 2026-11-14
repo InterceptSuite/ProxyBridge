@@ -126,7 +126,7 @@ static int check_update(void)
         return 1;
     }
     char *version, *download, *notes;
-    if (pbp_update_parse(json, n, &version, &download, &notes) != 0)
+    if (pbp_update_parse_arch(json, n, pbp_machine_arch(), &version, &download, &notes) != 0)
     {
         fprintf(stderr, "ERROR: Update check failed (the feed has no Linux version)\n");
         return 1;

@@ -247,7 +247,7 @@ static UpdateInfo *update_lookup(void) {
     }
     // the same strict parser and version check as the command line program (the feed is remote input)
     char *version = NULL, *download = NULL, *notes = NULL;
-    int rc = pbp_update_parse(json, strlen(json), &version, &download, &notes);
+    int rc = pbp_update_parse_arch(json, strlen(json), pbp_machine_arch(), &version, &download, &notes);
     g_free(json);
     g_free(curl_err);
     if (rc != 0) {
