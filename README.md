@@ -89,7 +89,7 @@ Visit our **[Official Download Page](https://interceptsuite.com/download/proxybr
 | :--- | :--- | :--- | :--- |
 | **Windows** | [**Download Installer**](https://interceptsuite.com/download/proxybridge) | `.exe` | Windows 10+ (64-bit), Admin privileges |
 | **macOS** | [**Download Installer**](https://interceptsuite.com/download/proxybridge) | `.pkg` (Universal) | macOS 13.0+ ARM/x64 (Ventura or later) |
-| **Linux** | [**Download Tarball**](https://interceptsuite.com/download/proxybridge) | `.tar.gz` | x64, kernel 5.11+ with BTF and cgroup v2, root to install |
+| **Linux** | [**Download Tarball**](https://interceptsuite.com/download/proxybridge) | `.tar.gz` (x64 and arm64) | x64 or arm64, kernel 5.11+ with BTF and cgroup v2, root to install |
 
 #### Linux One-Command Quick Install:
 ```bash
