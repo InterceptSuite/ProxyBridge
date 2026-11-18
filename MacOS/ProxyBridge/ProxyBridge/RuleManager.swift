@@ -11,6 +11,7 @@ struct RuleManager {
         protocol: String,
         action: String,
         enabled: Bool = true,
+        includeLocalhost: Bool = false,
         completion: @escaping (Bool, String, UInt32?) -> Void
     ) {
         sendMessage(
@@ -22,7 +23,8 @@ struct RuleManager {
                 "targetPorts": targetPorts,
                 "ruleProtocol": `protocol`,
                 "ruleAction": action,
-                "enabled": enabled
+                "enabled": enabled,
+                "includeLocalhost": includeLocalhost
             ]
         ) { success, result in
             if success, let result = result, result["status"] as? String == "ok" {
@@ -124,7 +126,8 @@ struct RuleManager {
                 "targetPorts": rule["targetPorts"] as? String ?? "",
                 "ruleProtocol": rule["protocol"] as? String ?? "BOTH",
                 "ruleAction": rule["action"] as? String ?? "DIRECT",
-                "enabled": rule["enabled"] as? Bool ?? true
+                "enabled": rule["enabled"] as? Bool ?? true,
+                "includeLocalhost": rule["includeLocalhost"] as? Bool ?? false
             ]
         }
 
@@ -165,7 +168,8 @@ struct RuleManager {
             targetPorts: rule["targetPorts"] as? String ?? "",
             protocol: rule["protocol"] as? String ?? "BOTH",
             action: rule["action"] as? String ?? "DIRECT",
-            enabled: rule["enabled"] as? Bool ?? true
+            enabled: rule["enabled"] as? Bool ?? true,
+            includeLocalhost: rule["includeLocalhost"] as? Bool ?? false
         ) { success, _, _ in
             addRulesInOrder(
                 session: session,

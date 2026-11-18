@@ -12,6 +12,8 @@ struct ProxyRule: Identifiable, Codable {
     let ruleProtocol: String
     let action: String
     var enabled: Bool
+    // opt in to rules matching connections to 127.0.0.0/8 and ::1 (off by default)
+    var includeLocalhost: Bool = false
 
     // localId is the stable gui side identity, ruleId in the extension is not stable
     var id: String { localId }
@@ -25,6 +27,7 @@ struct ProxyRule: Identifiable, Codable {
         case ruleProtocol = "protocol"
         case action
         case enabled
+        case includeLocalhost
     }
 
     init(from decoder: Decoder) throws {
@@ -37,6 +40,7 @@ struct ProxyRule: Identifiable, Codable {
         self.ruleProtocol = try c.decode(String.self, forKey: .ruleProtocol)
         self.action = try c.decode(String.self, forKey: .action)
         self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        self.includeLocalhost = try c.decodeIfPresent(Bool.self, forKey: .includeLocalhost) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -49,9 +53,10 @@ struct ProxyRule: Identifiable, Codable {
         try c.encode(ruleProtocol, forKey: .ruleProtocol)
         try c.encode(action, forKey: .action)
         try c.encode(enabled, forKey: .enabled)
+        try c.encode(includeLocalhost, forKey: .includeLocalhost)
     }
 
-    init(localId: String = UUID().uuidString, name: String = "", processNames: String, targetHosts: String, targetPorts: String, ruleProtocol: String, action: String, enabled: Bool) {
+    init(localId: String = UUID().uuidString, name: String = "", processNames: String, targetHosts: String, targetPorts: String, ruleProtocol: String, action: String, enabled: Bool, includeLocalhost: Bool = false) {
         self.localId = localId
         self.name = name
         self.processNames = processNames
@@ -60,6 +65,7 @@ struct ProxyRule: Identifiable, Codable {
         self.ruleProtocol = ruleProtocol
         self.action = action
         self.enabled = enabled
+        self.includeLocalhost = includeLocalhost
     }
 
     // UserDefaults stores rules as plain dictionaries, these bridge to that
@@ -72,6 +78,7 @@ struct ProxyRule: Identifiable, Codable {
         self.ruleProtocol = dict["protocol"] as? String ?? "BOTH"
         self.action = dict["action"] as? String ?? "DIRECT"
         self.enabled = dict["enabled"] as? Bool ?? true
+        self.includeLocalhost = dict["includeLocalhost"] as? Bool ?? false
     }
 
     func toDict() -> [String: Any] {
@@ -83,7 +90,8 @@ struct ProxyRule: Identifiable, Codable {
             "targetPorts": targetPorts,
             "protocol": ruleProtocol,
             "action": action,
-            "enabled": enabled
+            "enabled": enabled,
+            "includeLocalhost": includeLocalhost
         ]
     }
 }
@@ -227,7 +235,7 @@ struct ProxyRulesView: View {
                     .width(min: 100, ideal: 140)
 
                     TableColumn("Target Hosts") { rule in
-                        Text(rule.targetHosts.isEmpty ? "Any" : rule.targetHosts)
+                        Text((rule.targetHosts.isEmpty ? "Any" : rule.targetHosts) + (rule.includeLocalhost ? " + localhost" : ""))
                     }
                     .width(min: 100, ideal: 150)
 
@@ -403,6 +411,7 @@ struct RuleEditorView: View {
     @State private var targetPorts: String
     @State private var selectedProtocol: String
     @State private var selectedAction: String
+    @State private var includeLocalhost: Bool
 
     private var isEditMode: Bool { existingRule != nil }
 
@@ -419,6 +428,7 @@ struct RuleEditorView: View {
         // a new rule follows the default proxy when there is a proxy, otherwise it is direct
         let defaultAction = existingRule?.action ?? (viewModel.proxyConfigs.isEmpty ? "DIRECT" : DefaultProxy.action)
         _selectedAction = State(initialValue: defaultAction)
+        _includeLocalhost = State(initialValue: existingRule?.includeLocalhost ?? false)
     }
 
     var body: some View {
@@ -464,6 +474,13 @@ struct RuleEditorView: View {
                         text: $targetPorts,
                         hint: "Example: 80; 8000-9000; 3128"
                     )
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Include localhost traffic (127.0.0.1, ::1)", isOn: $includeLocalhost)
+                            .fontWeight(.medium)
+                        Text("Off: connections to this Mac itself are never touched by this rule. On: they can match it too, so a browser can be sent to a local server through the proxy. TCP only. Do not use it with * on a proxy that runs on this Mac, that proxy's own traffic would loop.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
 
                     HStack(spacing: 4) {
                         Image(systemName: "info.circle").foregroundColor(.secondary)
@@ -545,7 +562,7 @@ struct RuleEditorView: View {
             .padding(.horizontal)
         }
         .padding()
-        .frame(width: 600, height: 620)
+        .frame(width: 600, height: 700)
     }
     
     @ViewBuilder
@@ -570,7 +587,8 @@ struct RuleEditorView: View {
             targetPorts: targetPorts,
             ruleProtocol: selectedProtocol,
             action: selectedAction,
-            enabled: existingRule?.enabled ?? true
+            enabled: existingRule?.enabled ?? true,
+            includeLocalhost: includeLocalhost
         )
         onCommit(rule)
         dismiss()

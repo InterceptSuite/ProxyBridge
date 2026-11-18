@@ -15,6 +15,9 @@ struct ProxyRule: Codable {
     let ruleProtocol: RuleProtocol
     let action: String  // "DIRECT", "BLOCK", or a proxy config UUID
     var enabled: Bool
+    // a connection to 127.0.0.0/8 or ::1 only matches rules that opt in. default off, so a `*` rule
+    // never starts catching a local proxy tool or a local service by surprise
+    var includeLocalhost: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case ruleId
@@ -24,6 +27,7 @@ struct ProxyRule: Codable {
         case ruleProtocol
         case action = "ruleAction"
         case enabled
+        case includeLocalhost
     }
 
     init(from decoder: Decoder) throws {
@@ -35,9 +39,10 @@ struct ProxyRule: Codable {
         self.ruleProtocol = try container.decode(RuleProtocol.self, forKey: .ruleProtocol)
         self.action = try container.decode(String.self, forKey: .action)
         self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        self.includeLocalhost = try container.decodeIfPresent(Bool.self, forKey: .includeLocalhost) ?? false
     }
 
-    init(ruleId: UInt32, processNames: String, targetHosts: String, targetPorts: String, ruleProtocol: RuleProtocol, action: String, enabled: Bool) {
+    init(ruleId: UInt32, processNames: String, targetHosts: String, targetPorts: String, ruleProtocol: RuleProtocol, action: String, enabled: Bool, includeLocalhost: Bool = false) {
         self.ruleId = ruleId
         self.processNames = processNames
         self.targetHosts = targetHosts
@@ -45,8 +50,20 @@ struct ProxyRule: Codable {
         self.ruleProtocol = ruleProtocol
         self.action = action
         self.enabled = enabled
+        self.includeLocalhost = includeLocalhost
     }
-    
+
+    // 127.0.0.0/8, ::1 and the v4-mapped form of 127.x
+    static func isLoopback(_ ip: String) -> Bool {
+        guard let bytes = ipToBytes(ip) else { return false }
+        if bytes.count == 4 { return bytes[0] == 127 }
+        if bytes.count == 16 {
+            if bytes[0..<15].allSatisfy({ $0 == 0 }) && bytes[15] == 1 { return true }
+            if bytes[0..<10].allSatisfy({ $0 == 0 }) && bytes[10] == 0xff && bytes[11] == 0xff && bytes[12] == 127 { return true }
+        }
+        return false
+    }
+
     func matchesProcess(bundleId: String, processName: String?) -> Bool {
         if Self.matchProcessList(processNames, processPath: bundleId) {
             return true
@@ -374,8 +391,10 @@ extension ProxyRule {
 
         func matchesHost(ip: String, domains: [(name: String, chars: [Character])]) -> Bool {
             if hostAll { return true }
+            let loopback = ProxyRule.isLoopback(ip)
             for p in hostPatterns {
                 if ProxyRule.matchIPPattern(p.raw, ipString: ip) { return true }
+                if loopback && p.glob == Array("localhost") { return true }
                 for d in domains {
                     if ProxyRule.globMatch(p.glob, d.chars) { return true }
                     if let apex = p.apex, d.name == apex { return true }
@@ -544,7 +563,28 @@ class AppProxyProvider: NETransparentProxyProvider {
             direction: .outbound
         )
         
-        settings.includedNetworkRules = [allTrafficRule]
+        // a rule with no address matches everything except loopback, so the loopback networks are named
+        // explicitly. TCP only: a udp flow has no destination when it arrives, so it could not be told
+        // apart from other udp. A loopback connection only matches a rule that has "include localhost"
+        // ticked, anything else goes direct and shows up in the connection log.
+        let loopbackV4 = NENetworkRule(
+            remoteNetwork: NWHostEndpoint(hostname: "127.0.0.0", port: "0"),
+            remotePrefix: 8,
+            localNetwork: nil,
+            localPrefix: 0,
+            protocol: .TCP,
+            direction: .outbound
+        )
+        let loopbackV6 = NENetworkRule(
+            remoteNetwork: NWHostEndpoint(hostname: "::1", port: "0"),
+            remotePrefix: 128,
+            localNetwork: nil,
+            localPrefix: 0,
+            protocol: .TCP,
+            direction: .outbound
+        )
+
+        settings.includedNetworkRules = [allTrafficRule, loopbackV4, loopbackV6]
 
         startUDPSweepTimer()
         diag("Tunnel starting")
@@ -766,7 +806,8 @@ class AppProxyProvider: NETransparentProxyProvider {
                     "targetPorts": rule.targetPorts,
                     "protocol": rule.ruleProtocol.rawValue,
                     "action": rule.action,
-                    "enabled": rule.enabled
+                    "enabled": rule.enabled,
+                    "includeLocalhost": rule.includeLocalhost
                 ]
                 completionHandler?(try? JSONSerialization.data(withJSONObject: response))
             } else {
@@ -1790,9 +1831,14 @@ class AppProxyProvider: NETransparentProxyProvider {
         let domainChars = domains.map { (name: $0, chars: Array($0)) }
 
         var wildcardRule: ProxyRule? = nil
+        let isLoopbackDestination = checkIpPort && ProxyRule.isLoopback(destination)
 
         for (rule, m) in currentRules {
             guard rule.enabled else { continue }
+
+            // a loopback destination only matches rules that opt in (udp has no destination here and
+            // loopback udp is never delivered, see startProxy)
+            if checkIpPort && !rule.includeLocalhost && isLoopbackDestination { continue }
 
             if rule.ruleProtocol != .both && rule.ruleProtocol != connectionProtocol {
                 continue
