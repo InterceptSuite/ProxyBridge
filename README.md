@@ -21,7 +21,7 @@ ProxyBridge is a free, open-source proxy client (Proxifier alternative) for **Wi
 
 > [!TIP]
 > **ProxyBridge routes your traffic - [InterceptSuite](https://interceptsuite.com) lets you see inside it.**
-> Full MITM proxy with SSL/TLS inspection, live request editing, scripting, and support for TCP, UDP, StartTLS, DTLS and more. Built by the same team. [**Try InterceptSuite →**](https://interceptsuite.com)
+> Full MITM proxy with SSL/TLS inspection, live request editing, scripting, and support for TCP, UDP, StartTLS, DTLS, QUIC and more. Built by the same team. [**Try InterceptSuite →**](https://interceptsuite.com)
 
 ## Table of Contents
 
