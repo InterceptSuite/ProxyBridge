@@ -98,6 +98,36 @@ Loading eBPF programs needs root, but the window does not. ProxyBridge is split 
 ProxyBridgeGUI              # as yourself; no sudo
 ```
 
+<p align="center">
+  <img src="../img/Linux/Connections.png" alt="ProxyBridge Linux main window" width="800"/>
+  <br/>
+  <em>Main window: connection log</em>
+</p>
+
+<p align="center">
+  <img src="../img/Linux/Proxy-Server.png" alt="Proxy settings" width="800"/>
+  <br/>
+  <em>Proxy settings and the five-step proxy test</em>
+</p>
+
+<p align="center">
+  <img src="../img/Linux/Proxy-Rules.png" alt="Proxy rules" width="800"/>
+  <br/>
+  <em>Proxy rules</em>
+</p>
+
+<p align="center">
+  <img src="../img/Linux/Rule-Editor.png" alt="Rule editor" width="500"/>
+  <br/>
+  <em>Add or edit a rule: IP networks and domain names in one list</em>
+</p>
+
+<p align="center">
+  <img src="../img/Linux/Live-Connection.png" alt="Live connections" width="800"/>
+  <br/>
+  <em>Live Connections: proxied connections and UDP flows right now</em>
+</p>
+
 The GTK3-based GUI provides:
 - Proxy configuration (SOCKS5/HTTP with authentication)
 - Visual rule management with process selection
@@ -111,6 +141,12 @@ The GTK3-based GUI provides:
 
 
 ### Command Line Interface (CLI)
+
+<p align="center">
+  <img src="../img/Linux/Proxy-CLI.png" alt="ProxyBridge Linux CLI" width="700"/>
+  <br/>
+  <em>The CLI running a profile</em>
+</p>
 
 The CLI takes the same options as the Windows CLI. Everything else (proxies, rules, DNS via proxy, connection-log setting) lives in a **profile**, which you build in the GUI (or write by hand) and run with `--profile`.
 

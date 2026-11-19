@@ -248,6 +248,12 @@ saved per profile. It only changes what is listed: rules are applied to the same
 
 ### Command Line Interface (CLI)
 
+<p align="center">
+  <img src="../img/Windows/Proxy-CLI.png" alt="ProxyBridge CLI" width="700"/>
+  <br/>
+  <em>The CLI running a profile</em>
+</p>
+
 `ProxyBridge_CLI.exe` is a lightweight native CLI that loads a `.pbprofile` exported from the GUI and runs ProxyBridge headlessly - no GUI required.
 
 #### Profile Format
