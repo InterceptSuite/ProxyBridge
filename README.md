@@ -17,35 +17,21 @@
   <a href="https://trendshift.io/repositories/19916?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-19916" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/19916/monthly?language=C" alt="InterceptSuite%2FProxyBridge | Trendshift" width="250" height="55"/></a>
 </p>
 
-ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alternative) that provides transparent proxy routing for applications on **Windows**, **macOS**, and **Linux**. It redirects TCP and UDP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. ProxyBridge fully supports both TCP and UDP proxy routing and works at the system level, making it compatible with proxy-unaware applications without requiring any configuration changes.
+ProxyBridge is a free, open-source proxy client (Proxifier alternative) for **Windows**, **macOS** and **Linux**. It forces the applications you choose to use a SOCKS5 or HTTP proxy for their TCP and UDP traffic, even apps with no proxy settings or that ignore them, with no changes to the app.
 
 > [!TIP]
 > **ProxyBridge routes your traffic - [InterceptSuite](https://interceptsuite.com) lets you see inside it.**
-> Full MITM proxy with SSL/TLS inspection, live request editing, scripting, and support for TCP, UDP, StartTLS, DTLS and more. Built by the same team. [**Try InterceptSuite →**](https://interceptsuite.com)
+> Full MITM proxy with SSL/TLS inspection, live request editing, scripting, and support for TCP, UDP, StartTLS, DTLS, QUIC and more. Built by the same team. [**Try InterceptSuite →**](https://interceptsuite.com)
 
 ## Table of Contents
 
-- [ProxyBridge](#proxybridge)
-  - [Table of Contents](#table-of-contents)
-  - [Download](#download)
-    - [🌐 Official Download Portal](#-official-download-portal)
-    - [📦 Release Packages](#-release-packages)
-      - [Linux One-Command Quick Install:](#linux-one-command-quick-install)
-  - [Features](#features)
-  - [Documentation](#documentation)
-  - [Screenshots](#screenshots)
-    - [macOS](#macos)
-    - [Windows](#windows)
-      - [GUI](#gui)
-      - [CLI](#cli)
-    - [Linux](#linux)
-      - [GUI](#gui-1)
-      - [CLI](#cli-1)
-  - [Use Cases](#use-cases)
-  - [InterceptSuite](#interceptsuite)
-  - [License](#license)
-  - [Author](#author)
-  - [Credits](#credits)
+- [Download](#download)
+- [Features](#features)
+- [Screenshots](#screenshots)
+- [InterceptSuite](#interceptsuite)
+- [License](#license)
+- [Author](#author)
+- [Credits](#credits)
 
 <p align="center">
   <strong>💖 Support ProxyBridge Development</strong><br/>
@@ -80,201 +66,42 @@ ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alte
 
 ## Download
 
-### 🌐 Official Download Portal
-Visit our **[Official Download Page](https://interceptsuite.com/download/proxybridge)** for the latest automated builds and platform detection.
+<p align="center">
+  <a href="https://proxybridge.interceptsuite.com/download/"><img src="https://img.shields.io/badge/Download-ProxyBridge-2ea44f?style=for-the-badge" alt="Download ProxyBridge" height="56"/></a>
+  &nbsp;
+  <a href="https://proxybridge.interceptsuite.com/docs/"><img src="https://img.shields.io/badge/Documentation-Read%20the%20docs-1f6feb?style=for-the-badge" alt="ProxyBridge documentation" height="56"/></a>
+  <br/>
+  <sub>Windows, macOS and Linux (x64 and arm64). Older versions: <a href="https://github.com/InterceptSuite/ProxyBridge/releases">GitHub Releases</a>. Per-platform guides: <a href="Windows/README.md">Windows</a>, <a href="MacOS/README.md">macOS</a>, <a href="Linux/README.md">Linux</a></sub>
+</p>
 
-### 📦 Release Packages
+**macOS (Homebrew):**
 
-| Platform | Download Link | Package Type | System Requirements |
-| :--- | :--- | :--- | :--- |
-| **Windows** | [**Download Installer**](https://interceptsuite.com/download/proxybridge) | `.exe` | Windows 10+ (64-bit), Admin privileges |
-| **macOS** | [**Download Installer**](https://interceptsuite.com/download/proxybridge) | `.pkg` (Universal) | macOS 13.0+ ARM/x64 (Ventura or later) |
-| **Linux** | [**Download Tarball**](https://interceptsuite.com/download/proxybridge) | `.tar.gz` (x64 and arm64) | x64 or arm64, kernel 5.11+ with BTF and cgroup v2, root to install |
-
-#### Linux One-Command Quick Install:
-```bash
-curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh && sudo bash deploy.sh
-```
-
-#### macOS via Homebrew (official):
 ```bash
 brew install --cask proxybridge
 ```
 
-#### Windows via winget:
-```powershell
-winget install InterceptSuite.ProxyBridge
+**Linux (one-command install):**
+
+```bash
+curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh && sudo bash deploy.sh
 ```
-
-> [!WARNING]
-> The winget package is **community-maintained and not official**. It may lag behind releases or be unverified. For guaranteed-latest, verified builds always use the [Official Download Page](https://interceptsuite.com/download/proxybridge).
-
-
-
-
-> [!NOTE]
-> For historical versions, change logs, and direct access to raw assets, visit the [GitHub Releases](https://github.com/InterceptSuite/ProxyBridge/releases) page.
 
 ## Features
 
-- **Cross-platform** - Available for Windows, macOS and Linux
-- **Dual interface** - Feature-rich GUI and powerful CLI for all use cases
-- **Process-based traffic control** - Route, block, or allow traffic for specific applications
-- **Universal compatibility** - Works with proxy-unaware applications
-- **Multiple proxy protocols** - Supports SOCKS5 and HTTP proxies
-- **System-level interception** - Reliable packet capture at kernel/network extension level
-- **No configuration needed** - Applications work without any modifications
-- **Protocol agnostic** - Compatible with TCP and UDP protocols (HTTP/HTTPS, HTTP/3, databases, RDP, SSH, games, DTLS, DNS, etc.)
-- **Traffic blocking** - Block specific applications from accessing the internet or any network (LAN, localhost, etc.)
-- **Flexible rules** - Direct connection, proxy routing, or complete blocking per process
-- **Advanced rule configuration** - Target specific processes, IPs, ports, protocols (TCP/UDP), and hostnames with wildcard support - full IPv4 and IPv6 support on Windows
-- **Process exclusion** - Prevent proxy loops by excluding proxy applications
-- **Import/Export rules** - Share rule configurations across systems with JSON-based import/export
+- **Per-process routing** - send traffic from chosen applications through SOCKS5 or HTTP proxies, or direct, or block it
+- **Works with proxy-unaware apps** - system-level interception, no changes to the application
+- **TCP and UDP** - HTTP/HTTPS, HTTP/3, SSH, RDP, databases, games, DTLS, DNS and more
+- **Flexible rules** - match processes, IPs, ports, protocols and host names, with wildcards and IPv4/IPv6
+- **GUI and CLI** on Windows, macOS and Linux, with profiles and rule import/export
 
 > [!CAUTION]
-> **Beware of Fake ProxyBridge Downloads**
->
-> Multiple **fake ProxyBridge download sources** have been identified. Some of these sources distribute **unwanted binaries** and **malicious software**.
->
-> ❌ **Do NOT download ProxyBridge from any third-party or unofficial sources.**
->
-> ✅ **Official ProxyBridge sources (only):**
-> - GitHub Repository: https://github.com/InterceptSuite/ProxyBridge/
-> - Official Website: [https://interceptsuite.com/download/proxybridge](https://interceptsuite.com/download/proxybridge)
->
-> If you prefer not to use prebuilt binaries, you may safely build ProxyBridge yourself by following the **Contribution Guide** and compiling directly from the **official source code**.
->
-> ProxyBridge does not communicate with any external servers except its own update feed at `https://download.interceptsuite.com/proxybridge.json` for update checks (triggered only on app launch or manual update checks);
-
-
-
-## Documentation
-
-> [!IMPORTANT]
-> **[📖 Full Documentation](https://interceptsuite.com/docs/proxybridge/)**
->
-> Everything you need to get started and go deep:
-> - Installation and setup guides
-> - Proxy rules and rule configuration
-> - CLI reference
-> - UDP, IPv6, HTTP/3, DTLS setup
-> - Troubleshooting and advanced usage
->
-> **[interceptsuite.com/docs/proxybridge](https://interceptsuite.com/docs/proxybridge/)**
+> **Beware of fake ProxyBridge downloads.** Some unofficial sites distribute malware under the ProxyBridge name. Download only from this repository or [interceptsuite.com/download/proxybridge](https://proxybridge.interceptsuite.com/download/), or build from source. ProxyBridge contacts no server except its update feed (`download.interceptsuite.com/proxybridge.json`), on launch or when you check for updates.
 
 ## Screenshots
 
-### macOS
-
-<p align="center">
-  <img src="img/ProxyBridge-mac.png" alt="ProxyBridge macOS Main Interface" width="800"/>
-  <br/>
-  <em>ProxyBridge GUI - Main Interface</em>
-</p>
-
-<p align="center">
-  <img src="img/proxy-setting-mac.png" alt="Proxy Settings macOS" width="800"/>
-  <br/>
-  <em>Proxy Settings Configuration</em>
-</p>
-
-<p align="center">
-  <img src="img/proxy-rule-mac.png" alt="Proxy Rules macOS" width="800"/>
-  <br/>
-  <em>Proxy Rules Management</em>
-</p>
-
-<p align="center">
-  <img src="img/proxy-rule2-mac.png" alt="Add/Edit Rule macOS" width="800"/>
-  <br/>
-  <em>Add/Edit Proxy Rule</em>
-</p>
-
-### Windows
-
-#### GUI
-
-<p align="center">
-  <img src="img/Windows/Connections.png" alt="ProxyBridge Windows Main Interface" width="800"/>
-  <br/>
-  <em>ProxyBridge GUI - Main Interface</em>
-</p>
-
-<p align="center">
-  <img src="img/Windows/Proxy-Server.png" alt="Proxy Settings" width="800"/>
-  <br/>
-  <em>Proxy Settings Configuration</em>
-</p>
-
-<p align="center">
-  <img src="img/Windows/Proxy-Rules.png" alt="Proxy Rules" width="800"/>
-  <br/>
-  <em>Proxy Rules Management</em>
-</p>
-
-<p align="center">
-  <img src="img/Windows/Live%20Connection.png" alt="Live Connections" width="800"/>
-  <br/>
-  <em>Live Connections - proxied connections and UDP flows right now</em>
-</p>
-
-#### CLI
-
-<p align="center">
-  <img src="img/Windows/Proxy-CLI.png" alt="ProxyBridge CLI" width="800"/>
-  <br/>
-  <em>ProxyBridge CLI Interface</em>
-</p>
-
-### Linux
-
-#### GUI
-
-<p align="center">
-  <img src="img/Linux/Connections.png" alt="ProxyBridge Linux Main Interface" width="800"/>
-  <br/>
-  <em>ProxyBridge GUI - Main Interface</em>
-</p>
-
-<p align="center">
-  <img src="img/Linux/Proxy-Server.png" alt="Proxy Settings Linux" width="800"/>
-  <br/>
-  <em>Proxy Settings Configuration and the five-step proxy test</em>
-</p>
-
-<p align="center">
-  <img src="img/Linux/Proxy-Rules.png" alt="Proxy Rules Linux" width="800"/>
-  <br/>
-  <em>Proxy Rules Management</em>
-</p>
-
-<p align="center">
-  <img src="img/Linux/Rule-Editor.png" alt="Add/Edit Rule Linux" width="500"/>
-  <br/>
-  <em>Add/Edit Proxy Rule - IP networks and domain names in one list</em>
-</p>
-
-<p align="center">
-  <img src="img/Linux/Live-Connection.png" alt="Live Connections Linux" width="800"/>
-  <br/>
-  <em>Live Connections - proxied connections and UDP flows right now</em>
-</p>
-
-#### CLI
-
-<p align="center">
-  <img src="img/Linux/Proxy-CLI.png" alt="ProxyBridge Linux CLI" width="700"/>
-  <br/>
-  <em>ProxyBridge CLI running a profile</em>
-</p>
-
-## Use Cases
-
-- Redirect proxy-unaware applications (games, desktop apps) through InterceptSuite/Burp Suite for security testing
-- Route specific applications through Tor, SOCKS5 or HTTP proxies
-- Intercept and analyze traffic from applications that don't support proxy configuration
-- Test application behavior under different network conditions
-- Analyze protocols and communication patterns
+- [macOS screenshots](MacOS/README.md#overview)
+- [Windows screenshots](Windows/README.md#usage)
+- [Linux screenshots](Linux/README.md#gui-application)
 
 ## InterceptSuite
 
@@ -297,7 +124,7 @@ MIT License - See LICENSE file for details
 
 ## Author
 
-Sourav Kalal / InterceptSuite
+Sourav Kalal ([X](https://x.com/Ano_F_), [LinkedIn](https://www.linkedin.com/in/sourav-kalal/)) / InterceptSuite ([X](https://x.com/InterceptSuite), [LinkedIn](https://www.linkedin.com/company/interceptsuite/))
 
 ## Credits
 
@@ -313,4 +140,4 @@ The Windows GUI and CLI are written in native C using the Win32 API, keeping the
 Built using Apple's Network Extension framework for transparent proxy capabilities on macOS.
 
 **Linux Implementation:**
-Built on eBPF: programs attached to the root cgroup hook the socket calls of applications (`connect`, `sendmsg`, `recvmsg`) and send only the connections your rules select to a local relay, which talks SOCKS5 or HTTP to your proxy. No packets are queued and no iptables rules are added; if ProxyBridge stops, traffic simply goes direct. A root service owns the engine and the window runs as the normal user. The GUI uses GTK3 for native Linux desktop integration. See [Linux/README.md](Linux/README.md).
+Built on eBPF with a GTK3 GUI. See [Linux/README.md](Linux/README.md).
