@@ -30,13 +30,18 @@ struct ProxyEditor: View {
                     .pickerStyle(.segmented)
                 }
 
-                Section("Server") {
+                Section {
                     TextField("Host", text: $proxy.host)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                     TextField("Port", text: $portText)
                         .keyboardType(.numberPad)
+                    Toggle("Send host name to proxy", isOn: $proxy.sendHostname)
+                } header: {
+                    Text("Server")
+                } footer: {
+                    Text("On: the proxy gets the site's name when the phone looked it up through the system DNS, and the IP address otherwise. Off: the proxy always gets the IP address.")
                 }
 
                 Section {

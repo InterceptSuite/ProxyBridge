@@ -112,7 +112,8 @@ final class LocalSocks5Server {
                 ready ? self.relay(connection, upstream) : self.refuse(connection, .failure)
             }
         case .proxy(let proxy):
-            ProxyClient.connect(to: target.host, port: target.port, via: proxy, queue: queue) { result in
+            let destination = proxy.sendHostname ? DNSMapStore.shared.hostname(forIP: target.host) ?? target.host : target.host
+            ProxyClient.connect(to: destination, port: target.port, via: proxy, queue: queue) { result in
                 switch result {
                 case .success(let upstream): self.relay(connection, upstream)
                 case .failure(let error):
