@@ -5,6 +5,7 @@ Sends the traffic of your iPhone or iPad through a SOCKS5 or HTTP proxy. You cho
 ## What it does
 
 - Proxies: SOCKS5 and HTTP (CONNECT), with optional user name and password. TCP and UDP work with SOCKS5, HTTP proxies carry TCP only.
+- Per proxy, "Send host name to proxy" (on by default, like the macOS and Windows apps): when the phone looked a site up through the system DNS, the proxy is given its name instead of its IP address, which is what a tool such as InterceptSuite or Burp shows. The name is only used for five minutes after the DNS answer, and only if it is a plain host name.
 - Rules: match a destination by domain (wildcards allowed), IP address or CIDR block, plus ports and protocol. The first matching rule wins and its action is proxy, direct or block.
 - A default action for traffic that matches no rule. The first proxy in the list is the default proxy.
 - Traffic to devices on the same Wi-Fi or local network goes through the tunnel too, so an app that controls an IoT or local network can be routed and inspected like any other.
@@ -36,7 +37,18 @@ ProxyBridge/App      SwiftUI app: status, rules, proxies
 ProxyBridge/Shared   config model and storage, used by the app and the extension
 ProxyBridge/Tunnel   packet tunnel provider, router, rule engine, proxy client, UDP relay, DNS
 Vendor               script that builds hev-socks5-tunnel
+tests                unit and end-to-end checks that run on a Mac
 ```
+
+## Tests
+
+`tests/run.sh` builds the router and the rule logic for the Mac from the real tunnel sources and runs them, with no phone and no signing. It runs unit checks, then end-to-end checks that drive the router the way hev does against local test proxies (they come from `MacOS/tests/servers.py`). The end-to-end part needs ports 1080, 1081 and 8080 free, and network access for the DNS check.
+
+```bash
+bash tests/run.sh
+```
+
+The tunnel library, the iOS VPN prompt and the extension memory limit can only be tested on a device.
 
 ## Building
 
