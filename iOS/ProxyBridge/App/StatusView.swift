@@ -39,6 +39,7 @@ struct StatusView: View {
                 Section {
                     LabeledContent("Version", value: version)
                     Link("Website", destination: Links.website)
+                    Link("GitHub", destination: Links.github)
                     Link("Privacy Policy", destination: Links.privacyPolicy)
                 } header: {
                     Text("About")
