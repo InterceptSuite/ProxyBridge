@@ -121,6 +121,7 @@ Linux/tests/thrbench
 Linux/tests/api_live_test
 Linux/**/__pycache__/
 !Linux/tests/*.py
+!iOS/tests/*.py
 Android/**
 # iOS: only sources and project.yml are tracked
 iOS/Signing.xcconfig
