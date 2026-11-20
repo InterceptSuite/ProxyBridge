@@ -1,0 +1,59 @@
+name: Build iOS
+permissions:
+  contents: read
+
+# runs only when something in iOS/ (or this workflow) changes. Nothing is signed: it compiles the app and the
+# tunnel extension for a device, then runs the unit and end-to-end checks on the runner
+on:
+  push:
+    branches: [ master, dev ]
+    paths:
+      - 'iOS/**'
+      - '.github/workflows/build-ios.yml'
+  pull_request:
+    branches: [ master, dev ]
+    paths:
+      - 'iOS/**'
+      - '.github/workflows/build-ios.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    - name: Set up Xcode
+      uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+      with:
+        xcode-version: latest-stable
+
+    - name: Install XcodeGen
+      run: brew install xcodegen
+
+    - name: Build the tunnel library (hev-socks5-tunnel)
+      run: bash iOS/Vendor/build-hev.sh
+
+    - name: Generate the Xcode project
+      run: |
+        cd iOS
+        xcodegen generate
+
+    - name: Build the app and the tunnel extension, no signing
+      run: |
+        cd iOS
+        for configuration in Debug Release; do
+          xcodebuild -project ProxyBridge.xcodeproj -target ProxyBridge \
+            -configuration "$configuration" -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO SYMROOT="$RUNNER_TEMP/build-$configuration" build
+          test -d "$RUNNER_TEMP/build-$configuration/$configuration-iphoneos/ProxyBridge.app/PlugIns/Tunnel.appex"
+        done
+
+    - name: Run the unit and end-to-end checks
+      run: bash iOS/tests/run.sh

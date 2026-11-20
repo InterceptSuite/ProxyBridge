@@ -1,0 +1,2 @@
+#include "Signing.example.xcconfig"
+#include? "Signing.xcconfig"

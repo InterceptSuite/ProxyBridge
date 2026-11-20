@@ -1,0 +1,79 @@
+name: ProxyBridge
+options:
+  bundleIdPrefix: com.interceptsuite.ProxyBridge.ios
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+configFiles:
+  Debug: Config.xcconfig
+  Release: Config.xcconfig
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "2"
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+schemes:
+  ProxyBridge:
+    build:
+      targets:
+        ProxyBridge: all
+        Tunnel: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
+targets:
+  ProxyBridge:
+    type: application
+    platform: iOS
+    sources:
+      - path: ProxyBridge/App
+      - path: ProxyBridge/Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.interceptsuite.ProxyBridge.ios
+        CODE_SIGN_ENTITLEMENTS: ProxyBridge/App/ProxyBridge.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: ProxyBridge
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+    dependencies:
+      - target: Tunnel
+        embed: true
+
+  Tunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ProxyBridge/Tunnel
+      - path: ProxyBridge/Shared
+    info:
+      path: ProxyBridge/Tunnel/Info.plist
+      properties:
+        CFBundleDisplayName: ProxyBridge Tunnel
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    dependencies:
+      # produced by Vendor/build-hev.sh
+      - framework: Vendor/HevSocks5Tunnel.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.interceptsuite.ProxyBridge.ios.tunnel
+        CODE_SIGN_ENTITLEMENTS: ProxyBridge/Tunnel/Tunnel.entitlements
+        OTHER_LDFLAGS: "-lresolv"
+        SWIFT_OBJC_BRIDGING_HEADER: ProxyBridge/Tunnel/Tunnel-Bridging-Header.h

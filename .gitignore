@@ -121,8 +121,26 @@ Linux/tests/thrbench
 Linux/tests/api_live_test
 Linux/**/__pycache__/
 !Linux/tests/*.py
+!iOS/tests/*.py
 Android/**
-iOS/**
+# iOS: only sources and project.yml are tracked
+iOS/Signing.xcconfig
+iOS/ProxyBridge.xcodeproj/
+iOS/ProxyBridge/Tunnel/Info.plist
+iOS/Vendor/build/
+iOS/Vendor/hev-socks5-tunnel/
+iOS/Vendor/HevSocks5Tunnel.xcframework/
+iOS/build/
+iOS/DerivedData/
+iOS/**/xcuserdata/
+iOS/**/*.xcuserstate
+iOS/**/*.mobileprovision
+iOS/**/*.p12
+iOS/**/*.cer
+iOS/**/*.certSigningRequest
+iOS/**/*.ipa
+iOS/**/*.dSYM/
+iOS/**/.DS_Store
 # Windows build intermediates (MSVC import lib / export file / objects)
 Windows/*.exp
 Windows/*.lib
