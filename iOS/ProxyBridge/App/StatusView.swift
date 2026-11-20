@@ -38,7 +38,8 @@ struct StatusView: View {
 
                 Section {
                     LabeledContent("Version", value: version)
-                    Link("Website", destination: URL(string: "https://proxybridge.interceptsuite.com/")!)
+                    Link("Website", destination: Links.website)
+                    Link("Privacy Policy", destination: Links.privacyPolicy)
                 } header: {
                     Text("About")
                 } footer: {
