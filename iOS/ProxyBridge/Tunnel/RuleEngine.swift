@@ -8,10 +8,18 @@ struct FlowInfo {
     let domains: [String]
 }
 
-enum Route {
+enum Route: CustomStringConvertible {
     case direct
     case block
     case proxy(ProxyConfig)
+
+    var description: String {
+        switch self {
+        case .direct: return "direct"
+        case .block: return "block"
+        case .proxy(let proxy): return "proxy \(proxy.displayName)"
+        }
+    }
 }
 
 /// Picks a route for a flow. Rules are parsed once when the engine is built, the first matching rule wins.
@@ -94,7 +102,7 @@ private struct CompiledRule {
         hosts = patterns.isEmpty ? [.any] : patterns
 
         let portItems = Self.items(rule.ports, lowercase: false)
-        ports = portItems.isEmpty ? nil : Set(portItems.compactMap { Int($0) })
+        ports = portItems.isEmpty || portItems.contains("*") ? nil : Set(portItems.compactMap { Int($0) })
     }
 
     func matches(_ flow: FlowInfo, ip: [UInt8]?) -> Bool {
