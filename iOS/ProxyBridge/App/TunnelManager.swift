@@ -52,6 +52,10 @@ final class TunnelManager: ObservableObject {
         configuration.providerBundleIdentifier = Self.providerBundleId
         // required by the API, the tunnel never connects to it
         configuration.serverAddress = "ProxyBridge"
+        // A default route does not catch traffic to the local network, the connected subnet has its own route. These
+        // two send that traffic through the tunnel as well, for apps that talk to devices on the same Wi-Fi.
+        configuration.includeAllNetworks = true
+        configuration.excludeLocalNetworks = false
         manager.protocolConfiguration = configuration
         manager.localizedDescription = "ProxyBridge"
         manager.isEnabled = true
