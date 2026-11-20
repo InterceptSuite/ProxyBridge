@@ -7,11 +7,14 @@ Sends the traffic of your iPhone or iPad through a SOCKS5 or HTTP proxy. You cho
 - Proxies: SOCKS5 and HTTP (CONNECT), with optional user name and password. TCP and UDP work with SOCKS5, HTTP proxies carry TCP only.
 - Rules: match a destination by domain (wildcards allowed), IP address or CIDR block, plus ports and protocol. The first matching rule wins and its action is proxy, direct or block.
 - A default action for traffic that matches no rule. The first proxy in the list is the default proxy.
+- Traffic to devices on the same Wi-Fi or local network goes through the tunnel too, so an app that controls an IoT or local network can be routed and inspected like any other.
 - Changes apply to a running tunnel without turning it off.
 
 ## What it cannot do
 
 iOS does not tell a VPN which app sent a packet, so unlike the macOS app a rule cannot name an app or process. Rules apply to the whole device and match the destination only. Per-app routing exists only for managed devices (MDM Per-App VPN).
+
+Broadcast and multicast packets, which apps use to find devices on a network, cannot be carried by a SOCKS5 or HTTP proxy.
 
 A domain rule needs the name to be known. ProxyBridge learns names from DNS answers, so apps that use their own encrypted DNS or connect to a fixed IP address match by IP only.
 
@@ -21,7 +24,7 @@ A domain rule needs the name to be known. ProxyBridge learns names from DNS answ
 all apps -> iOS packet tunnel -> hev-socks5-tunnel -> local router -> proxy / direct / block
 ```
 
-The extension is a packet tunnel (`NEPacketTunnelProvider`). It receives raw IP packets, and [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) (MIT) turns them into TCP connections and UDP flows. hev sends each one as a SOCKS5 request to a router that listens on loopback inside the extension. The router is the only place where rules are applied:
+The extension is a packet tunnel (`NEPacketTunnelProvider`). It receives raw IP packets, and [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) (MIT) turns them into TCP connections and UDP flows. hev sends each one as a SOCKS5 request to a router that listens on the IPv6 loopback address (`::1`) inside the extension, because hev's connection to an IPv4 address fails on iOS. The router is the only place where rules are applied:
 
 - DNS queries are answered by forwarding them to the network's real DNS servers. The answers are read to learn which names belong to which addresses.
 - Each connection or UDP flow is looked up in the rules, then relayed through the proxy, relayed directly, or refused.
@@ -62,6 +65,7 @@ Bundle identifiers: `com.interceptsuite.ProxyBridge.ios` (app) and `com.intercep
 - The app and the extension each include a privacy manifest that declares no tracking and no collected data.
 - `ITSAppUsesNonExemptEncryption` is set to `NO` because the app does not implement any encryption itself. Confirm this matches your export compliance answers.
 - Apple has extra review rules for VPN apps (guideline 5.4), including the account type that may publish them. Describe the proxy behaviour clearly in the review notes and provide a privacy policy URL in App Store Connect.
+- The tunnel is configured with `includeAllNetworks` on and `excludeLocalNetworks` off. That is what sends local network traffic through it. Apps still ask the user for Local Network access on their own.
 - The system shows the VPN icon whenever the tunnel is on, and only one packet tunnel can run at a time, so it replaces other VPNs while active.
 - The tunnel extension has a memory limit of about 50 MB, which is why the packet stack is a small C library.
 
