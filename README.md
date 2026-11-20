@@ -102,6 +102,7 @@ curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/
 - [macOS screenshots](MacOS/README.md#overview)
 - [Windows screenshots](Windows/README.md#usage)
 - [Linux screenshots](Linux/README.md#gui-application)
+- [iOS screenshots](iOS/README.md#screenshots)
 
 ## InterceptSuite
 

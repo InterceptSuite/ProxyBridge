@@ -2,6 +2,18 @@
 
 Sends the traffic of your iPhone or iPad through a SOCKS5 or HTTP proxy. You choose per destination what goes through a proxy, what goes direct and what is blocked. The app has no analytics and collects no data.
 
+## Screenshots
+
+<p align="center">
+  <img src="../img/iOS/Status.png" alt="Status tab" width="250"/>
+  &nbsp;
+  <img src="../img/iOS/Rule-Editor.png" alt="Rule editor" width="250"/>
+  &nbsp;
+  <img src="../img/iOS/Proxy-Editor.png" alt="Proxy editor" width="250"/>
+  <br/>
+  <em>Status, rule editor and proxy editor</em>
+</p>
+
 ## What it does
 
 - Proxies: SOCKS5 and HTTP (CONNECT), with optional user name and password. TCP and UDP work with SOCKS5, HTTP proxies carry TCP only.
