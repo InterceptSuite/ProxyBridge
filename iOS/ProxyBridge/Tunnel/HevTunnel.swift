@@ -8,23 +8,27 @@ enum HevTunnel {
     private static let controlProtocol: Int32 = 2
     private static let utunInterfaceNameOption: Int32 = 2
 
-    /// hev blocks until `stop` is called, so it gets its own thread.
-    static func start(tunFd: Int32, socksPort: UInt16, mtu: Int) {
+    /// The server address is the IPv6 loopback and the misc values are the low memory settings from hev's README for
+    /// iOS. hev blocks until `stop` is called, so it gets its own thread.
+    static func start(tunFd: Int32, socksPort: UInt16, mtu: Int, onExit: @escaping (Int32) -> Void) {
         let config = """
         tunnel:
           mtu: \(mtu)
         socks5:
-          address: 127.0.0.1
+          address: '::1'
           port: \(socksPort)
           udp: 'udp'
         misc:
-          task-stack-size: 20480
+          task-stack-size: 24576
+          tcp-buffer-size: 4096
+          max-session-count: 1200
         """
         let bytes = Array(config.utf8)
         Thread.detachNewThread {
-            bytes.withUnsafeBufferPointer { buffer in
-                _ = hev_socks5_tunnel_main_from_str(buffer.baseAddress, UInt32(buffer.count), tunFd)
+            let result = bytes.withUnsafeBufferPointer { buffer in
+                hev_socks5_tunnel_main_from_str(buffer.baseAddress, UInt32(buffer.count), tunFd)
             }
+            onExit(result)
         }
     }
 

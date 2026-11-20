@@ -1,10 +1,12 @@
 import Foundation
 import Network
+import os
 
 /// A SOCKS5 server on the loopback interface inside the extension. hev turns every connection and UDP flow of
 /// the device into a request to this server, which makes it the one place where the rules are applied.
 final class LocalSocks5Server {
     private let queue = DispatchQueue(label: "com.interceptsuite.proxybridge.router")
+    private let log = TunnelLogger(category: "router")
     private let lock = NSLock()
     private var engine = RuleEngine(config: AppConfig())
     private var listener: NWListener?
@@ -45,11 +47,9 @@ final class LocalSocks5Server {
     }
 
     private func listen(ready: @escaping (Result<UInt16, Error>) -> Void) {
-        let parameters = NWParameters.tcp
-        parameters.requiredInterfaceType = .loopback
         let listener: NWListener
         do {
-            listener = try NWListener(using: parameters, on: .any)
+            listener = try NWListener(using: NWParameters.tcp.listeningOnLoopback())
         } catch {
             return ready(.failure(error))
         }
@@ -108,13 +108,16 @@ final class LocalSocks5Server {
         case .direct:
             let upstream = NWConnection(to: .hostPort(target.host, target.port), using: .tcp)
             upstream.open(on: queue) { ready in
+                if !ready { self.log.error("direct connection failed") }
                 ready ? self.relay(connection, upstream) : self.refuse(connection, .failure)
             }
         case .proxy(let proxy):
             ProxyClient.connect(to: target.host, port: target.port, via: proxy, queue: queue) { result in
                 switch result {
                 case .success(let upstream): self.relay(connection, upstream)
-                case .failure: self.refuse(connection, .failure)
+                case .failure(let error):
+                    self.log.error("proxy connection failed: \(String(describing: error))")
+                    self.refuse(connection, .failure)
                 }
             }
         }

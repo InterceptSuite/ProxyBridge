@@ -181,6 +181,16 @@ extension NWConnection {
     }
 }
 
+extension NWParameters {
+    /// For a listener that is only reachable on the IPv6 loopback address. hev turns an IPv4 server address into a
+    /// mapped IPv6 one, and that connection fails on iOS, so its documented iOS setup uses ::1.
+    func listeningOnLoopback() -> NWParameters {
+        requiredInterfaceType = .loopback
+        requiredLocalEndpoint = .hostPort(host: "::1", port: .any)
+        return self
+    }
+}
+
 extension NWEndpoint {
     static func hostPort(_ host: String, _ port: Int) -> NWEndpoint {
         .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: UInt16(clamping: port)) ?? .any)

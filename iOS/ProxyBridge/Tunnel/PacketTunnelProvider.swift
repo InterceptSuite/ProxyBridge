@@ -3,21 +3,26 @@ import os
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let server = LocalSocks5Server()
-    private let log = Logger(subsystem: "com.interceptsuite.ProxyBridge.ios.tunnel", category: "tunnel")
+    private let log = TunnelLogger(category: "tunnel")
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         // the physical network's DNS servers are only visible before the tunnel changes the resolver
         server.dnsUpstreams = SystemResolvers.current()
+        log.info("starting")
         reloadConfig()
         DNSMapStore.shared.clear()
 
         setTunnelNetworkSettings(Self.networkSettings()) { [weak self] error in
-            if let error { return completionHandler(error) }
+            if let error {
+                self?.log.error("network settings failed: \(error.localizedDescription)")
+                return completionHandler(error)
+            }
             self?.startStack(completionHandler: completionHandler)
         }
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        log.info("stopping: \(String(describing: reason))")
         HevTunnel.stop()
         server.stop()
         DNSMapStore.shared.clear()
@@ -42,7 +47,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         server.start { result in
             switch result {
             case .success(let port):
-                HevTunnel.start(tunFd: tunFd, socksPort: port, mtu: TunnelNetwork.mtu)
+                HevTunnel.start(tunFd: tunFd, socksPort: port, mtu: TunnelNetwork.mtu) { [weak self] code in
+                    if code != 0 { self?.log.error("hev stopped with code \(code)") }
+                }
                 completionHandler(nil)
             case .failure(let error):
                 self.log.error("router failed to start: \(error.localizedDescription)")

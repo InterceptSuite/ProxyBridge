@@ -29,7 +29,7 @@ final class UDPRelay {
     private var sweeper: DispatchSourceTimer?
     private var sessions: [SessionKey: UDPUpstream] = [:]
     private var warnedProxies: Set<UUID> = []
-    private let log = Logger(subsystem: "com.interceptsuite.ProxyBridge.ios.tunnel", category: "udp")
+    private let log = TunnelLogger(category: "udp")
     private(set) var port: UInt16 = 0
 
     init(server: LocalSocks5Server, queue: DispatchQueue) {
@@ -38,11 +38,9 @@ final class UDPRelay {
     }
 
     func start(ready: @escaping (Error?) -> Void) {
-        let parameters = NWParameters.udp
-        parameters.requiredInterfaceType = .loopback
         let listener: NWListener
         do {
-            listener = try NWListener(using: parameters, on: .any)
+            listener = try NWListener(using: NWParameters.udp.listeningOnLoopback())
         } catch {
             return ready(error)
         }
@@ -84,8 +82,7 @@ final class UDPRelay {
 
     /// Answers a UDP ASSOCIATE request with the address of this relay.
     func associate(_ control: NWConnection) {
-        control.write([Socks5.version, Socks5.Reply.succeeded.rawValue, 0, Socks5.AddressType.ipv4.rawValue, 127, 0, 0, 1,
-                       UInt8(port >> 8), UInt8(port & 0xFF)])
+        control.write([Socks5.version, Socks5.Reply.succeeded.rawValue, 0] + Socks5.encode(host: "::1", port: Int(port)))
         watch(control)
     }
 
@@ -155,7 +152,7 @@ final class UDPRelay {
     /// An HTTP proxy cannot carry UDP, so that traffic goes direct. Say so once per proxy.
     private func warnOnce(about proxy: ProxyConfig) {
         guard warnedProxies.insert(proxy.id).inserted else { return }
-        log.warning("UDP cannot go through the HTTP proxy \(proxy.displayName, privacy: .public), sending it direct")
+        log.warning("UDP cannot go through an HTTP proxy, sending it direct")
     }
 
     private func session(for source: NWConnection, target: String, make: (SessionKey) -> UDPUpstream) -> UDPUpstream {
@@ -175,7 +172,10 @@ final class UDPRelay {
 
     /// Asks the servers one after the other until one answers, and remembers the names in the answer.
     private func resolve(_ query: Socks5.Datagram, from source: NWConnection, using servers: ArraySlice<String>) {
-        guard let address = servers.first else { return }
+        guard let address = servers.first else {
+            log.error("no DNS server answered")
+            return
+        }
         let connection = NWConnection(to: .hostPort(address, 53), using: .udp)
         var finished = false
         let finish = { (answer: Data?) in
