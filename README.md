@@ -142,3 +142,6 @@ Built using Apple's Network Extension framework for transparent proxy capabiliti
 
 **Linux Implementation:**
 Built on eBPF with a GTK3 GUI. See [Linux/README.md](Linux/README.md).
+
+**iOS Implementation:**
+Built on a Network Extension packet tunnel. The packet stack that turns the device's packets into TCP connections and UDP flows is [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) by heiher (MIT licence), which includes lwIP and other open-source libraries. Special thanks to the hev-socks5-tunnel project. See [iOS/README.md](iOS/README.md).

@@ -84,15 +84,6 @@ Requirements: Xcode 15 or later, [XcodeGen](https://github.com/yonaskolb/XcodeGe
 
 Bundle identifiers: `com.interceptsuite.ProxyBridge.ios` (app) and `com.interceptsuite.ProxyBridge.ios.tunnel` (extension).
 
-## App Store
-
-- The app and the extension each include a privacy manifest that declares no tracking and no collected data.
-- `ITSAppUsesNonExemptEncryption` is set to `NO` because the app does not implement any encryption itself. Confirm this matches your export compliance answers.
-- Apple has extra review rules for VPN apps (guideline 5.4), including the account type that may publish them. Describe the proxy behaviour clearly in the review notes and provide a privacy policy URL in App Store Connect.
-- The tunnel is configured with `includeAllNetworks` on and `excludeLocalNetworks` off. That is what sends local network traffic through it. Apps still ask the user for Local Network access on their own.
-- The system shows the VPN icon whenever the tunnel is on, and only one packet tunnel can run at a time, so it replaces other VPNs while active.
-- The tunnel extension has a memory limit of about 50 MB, which is why the packet stack is a small C library.
-
 ## Data
 
 Proxy settings, including passwords, are stored in the app group container. The file is only protected until the first unlock after a restart, because the tunnel must be able to read it while the device is locked.
