@@ -1,0 +1,5 @@
+// Signing settings. Copy this file to Signing.xcconfig (ignored by git) and replace the values.
+// Signing.xcconfig overrides what is set here.
+
+// Your Apple Developer Team ID, shown in the Apple Developer portal under Membership details.
+DEVELOPMENT_TEAM = XXXXXXXXXX
