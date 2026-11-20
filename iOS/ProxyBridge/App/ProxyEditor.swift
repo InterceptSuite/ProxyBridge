@@ -4,13 +4,19 @@ struct ProxyEditor: View {
     @EnvironmentObject private var model: ConfigModel
     @Environment(\.dismiss) private var dismiss
     @State private var proxy: ProxyConfig
+    @State private var portText: String
 
     init(proxy: ProxyConfig) {
         _proxy = State(initialValue: proxy)
+        _portText = State(initialValue: String(proxy.port))
+    }
+
+    private var port: Int? {
+        Int(portText).flatMap { (1...65535).contains($0) ? $0 : nil }
     }
 
     private var isValid: Bool {
-        !proxy.host.trimmingCharacters(in: .whitespaces).isEmpty && (1...65535).contains(proxy.port)
+        !proxy.host.trimmingCharacters(in: .whitespaces).isEmpty && port != nil
     }
 
     var body: some View {
@@ -29,7 +35,7 @@ struct ProxyEditor: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
-                    TextField("Port", value: $proxy.port, format: .number.grouping(.never))
+                    TextField("Port", text: $portText)
                         .keyboardType(.numberPad)
                 }
 
@@ -51,6 +57,7 @@ struct ProxyEditor: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         proxy.host = proxy.host.trimmingCharacters(in: .whitespaces)
+                        proxy.port = port ?? proxy.port
                         model.save(proxy)
                         dismiss()
                     }
