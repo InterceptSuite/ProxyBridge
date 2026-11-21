@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="rule_actions">
+        <item>Proxy</item>
+        <item>Direct</item>
+        <item>Block</item>
+    </string-array>
+    <string-array name="rule_protocols">
+        <item>TCP and UDP</item>
+        <item>TCP</item>
+        <item>UDP</item>
+    </string-array>
+</resources>
