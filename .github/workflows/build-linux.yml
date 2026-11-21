@@ -13,11 +13,13 @@ on:
     branches: [ master, dev ]
     paths:
       - 'Linux/**'
+      - '!Linux/**.md'
       - '.github/workflows/build-linux.yml'
   pull_request:
     branches: [ master, dev ]
     paths:
       - 'Linux/**'
+      - '!Linux/**.md'
       - '.github/workflows/build-linux.yml'
   workflow_dispatch:
 

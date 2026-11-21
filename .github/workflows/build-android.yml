@@ -1,0 +1,54 @@
+name: Build Android
+permissions:
+  contents: read
+
+# runs only when something in Android/ (or this workflow) changes. Nothing is signed: it fetches hev-socks5-tunnel,
+# compiles the app with the native library for debug and release, and runs the unit tests
+on:
+  push:
+    branches: [ master, dev ]
+    paths:
+      - 'Android/**'
+      - '!Android/**.md'
+      - '.github/workflows/build-android.yml'
+  pull_request:
+    branches: [ master, dev ]
+    paths:
+      - 'Android/**'
+      - '!Android/**.md'
+      - '.github/workflows/build-android.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    - name: Set up Java
+      uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+      with:
+        distribution: temurin
+        java-version: '25'
+
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      with:
+        gradle-version: '9.6.0'
+
+    - name: Accept the Android SDK licenses
+      run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+
+    - name: Fetch the tunnel library source (hev-socks5-tunnel)
+      run: bash Android/fetch-hev.sh
+
+    - name: Compile the app, debug and release, no signing
+      run: gradle -p Android assembleDebug assembleRelease
+
+    - name: Run the unit tests
+      run: gradle -p Android testDebugUnitTest

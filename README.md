@@ -8,7 +8,10 @@
   <a href="https://github.com/InterceptSuite/ProxyBridge/actions/workflows/build-windows.yml"><img src="https://github.com/InterceptSuite/ProxyBridge/actions/workflows/build-windows.yml/badge.svg" alt="Build Windows" /></a>
   <a href="https://github.com/InterceptSuite/ProxyBridge/actions/workflows/build-mac.yml"><img src="https://github.com/InterceptSuite/ProxyBridge/actions/workflows/build-mac.yml/badge.svg" alt="Build macOS" /></a>
   <a href="https://github.com/InterceptSuite/ProxyBridge/actions/workflows/build-linux.yml"><img src="https://github.com/InterceptSuite/ProxyBridge/actions/workflows/build-linux.yml/badge.svg" alt="Build Linux" /></a>
+  <a href="https://github.com/InterceptSuite/ProxyBridge/actions/workflows/build-ios.yml"><img src="https://github.com/InterceptSuite/ProxyBridge/actions/workflows/build-ios.yml/badge.svg" alt="Build iOS" /></a>
+  <a href="https://github.com/InterceptSuite/ProxyBridge/actions/workflows/build-android.yml"><img src="https://github.com/InterceptSuite/ProxyBridge/actions/workflows/build-android.yml/badge.svg" alt="Build Android" /></a>
   <a href="https://github.com/InterceptSuite/ProxyBridge/releases"><img src="https://img.shields.io/github/downloads/InterceptSuite/ProxyBridge/total?style=flat-square&logo=github&color=blue" alt="Total Downloads" /></a>
+  
 </p>
 
 <p align="center">
@@ -17,7 +20,7 @@
   <a href="https://trendshift.io/repositories/19916?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-19916" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/19916/monthly?language=C" alt="InterceptSuite%2FProxyBridge | Trendshift" width="250" height="55"/></a>
 </p>
 
-ProxyBridge is a free, open-source proxy client (Proxifier alternative) for **Windows**, **macOS** and **Linux**. It forces the applications you choose to use a SOCKS5 or HTTP proxy for their TCP and UDP traffic, even apps with no proxy settings or that ignore them, with no changes to the app.
+ProxyBridge is a free, open-source proxy client (Proxifier alternative) for **Windows**, **macOS**, **Linux**, **iOS** and **Android**. It forces the applications you choose to use a SOCKS5 or HTTP proxy for their TCP and UDP traffic, even apps with no proxy settings or that ignore them, with no changes to the app.
 
 > [!TIP]
 > **ProxyBridge routes your traffic - [InterceptSuite](https://interceptsuite.com) lets you see inside it.**
@@ -67,24 +70,19 @@ ProxyBridge is a free, open-source proxy client (Proxifier alternative) for **Wi
 ## Download
 
 <p align="center">
-  <a href="https://proxybridge.interceptsuite.com/download/"><img src="https://img.shields.io/badge/Download-ProxyBridge-2ea44f?style=for-the-badge" alt="Download ProxyBridge" height="56"/></a>
-  &nbsp;
-  <a href="https://proxybridge.interceptsuite.com/docs/"><img src="https://img.shields.io/badge/Documentation-Read%20the%20docs-1f6feb?style=for-the-badge" alt="ProxyBridge documentation" height="56"/></a>
+  <a href="https://proxybridge.interceptsuite.com/download/">
+    <strong>Download ProxyBridge</strong>
+  </a>
   <br/>
-  <sub>Windows, macOS and Linux (x64 and arm64). Older versions: <a href="https://github.com/InterceptSuite/ProxyBridge/releases">GitHub Releases</a>. Per-platform guides: <a href="Windows/README.md">Windows</a>, <a href="MacOS/README.md">macOS</a>, <a href="Linux/README.md">Linux</a></sub>
+  <sub>Windows x64 · macOS (x64 & arm64) · Linux (x64 & ARM64)</sub>
 </p>
 
-**macOS (Homebrew):**
+The Android and iOS are under testing right now, hence build version is not yet availabe till final release.
+The iOS and Android apps are in [iOS](iOS/README.md) and [Android](Android/README.md), with build steps in each README if you want to try. 
 
-```bash
-brew install --cask proxybridge
-```
-
-**Linux (one-command install):**
-
-```bash
-curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh && sudo bash deploy.sh
-```
+<p align="center">
+  <a href="https://github.com/InterceptSuite/ProxyBridge/releases">Older versions</a>
+</p>
 
 ## Features
 
@@ -93,6 +91,7 @@ curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/
 - **TCP and UDP** - HTTP/HTTPS, HTTP/3, SSH, RDP, databases, games, DTLS, DNS and more
 - **Flexible rules** - match processes, IPs, ports, protocols and host names, with wildcards and IPv4/IPv6
 - **GUI and CLI** on Windows, macOS and Linux, with profiles and rule import/export
+- **iOS and Android apps** - route a phone's traffic through a proxy by destination: domain, IP or CIDR, port and protocol
 
 > [!CAUTION]
 > **Beware of fake ProxyBridge downloads.** Some unofficial sites distribute malware under the ProxyBridge name. Download only from this repository or [interceptsuite.com/download/proxybridge](https://proxybridge.interceptsuite.com/download/), or build from source. ProxyBridge contacts no server except its update feed (`download.interceptsuite.com/proxybridge.json`), on launch or when you check for updates.
@@ -103,6 +102,7 @@ curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/
 - [Windows screenshots](Windows/README.md#usage)
 - [Linux screenshots](Linux/README.md#gui-application)
 - [iOS screenshots](iOS/README.md#screenshots)
+- [Android app](Android/README.md)
 
 ## InterceptSuite
 

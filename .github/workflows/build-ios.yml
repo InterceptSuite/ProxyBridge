@@ -9,11 +9,13 @@ on:
     branches: [ master, dev ]
     paths:
       - 'iOS/**'
+      - '!iOS/**.md'
       - '.github/workflows/build-ios.yml'
   pull_request:
     branches: [ master, dev ]
     paths:
       - 'iOS/**'
+      - '!iOS/**.md'
       - '.github/workflows/build-ios.yml'
   workflow_dispatch:
 
