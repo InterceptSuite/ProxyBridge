@@ -31,7 +31,7 @@ ProxyBridge is a free, open-source proxy client (Proxifier alternative) for **Wi
 - [Download](#download)
 - [Features](#features)
 - [Screenshots](#screenshots)
-- [InterceptSuite](#interceptsuite)
+- [Inspect redirected traffic with InterceptSuite](#inspect-redirected-traffic-with-interceptsuite)
 - [License](#license)
 - [Author](#author)
 - [Credits](#credits)
@@ -84,6 +84,10 @@ The iOS and Android apps are in [iOS](iOS/README.md) and [Android](Android/READM
   <a href="https://github.com/InterceptSuite/ProxyBridge/releases">Older versions</a>
 </p>
 
+
+> [!CAUTION]
+> **Beware of fake ProxyBridge downloads.** Some unofficial sites distribute malware under the ProxyBridge name. Download only from this repository or [interceptsuite.com/download/proxybridge](https://proxybridge.interceptsuite.com/download/), or build from source. ProxyBridge contacts no server except its update feed (`download.interceptsuite.com/proxybridge.json`), on launch or when you check for updates.
+
 ## Features
 
 - **Per-process routing** - send traffic from chosen applications through SOCKS5 or HTTP proxies, or direct, or block it
@@ -93,9 +97,6 @@ The iOS and Android apps are in [iOS](iOS/README.md) and [Android](Android/READM
 - **GUI and CLI** on Windows, macOS and Linux, with profiles and rule import/export
 - **iOS and Android apps** - route a phone's traffic through a proxy by destination: domain, IP or CIDR, port and protocol
 
-> [!CAUTION]
-> **Beware of fake ProxyBridge downloads.** Some unofficial sites distribute malware under the ProxyBridge name. Download only from this repository or [interceptsuite.com/download/proxybridge](https://proxybridge.interceptsuite.com/download/), or build from source. ProxyBridge contacts no server except its update feed (`download.interceptsuite.com/proxybridge.json`), on launch or when you check for updates.
-
 ## Screenshots
 
 - [macOS screenshots](MacOS/README.md#overview)
@@ -104,20 +105,22 @@ The iOS and Android apps are in [iOS](iOS/README.md) and [Android](Android/READM
 - [iOS screenshots](iOS/README.md#screenshots)
 - [Android app](Android/README.md)
 
-## InterceptSuite
 
-ProxyBridge is a **proxy client** - it routes your application traffic through any SOCKS5 or HTTP proxy. It does not inspect or modify the traffic itself.
+## Inspect redirected traffic with InterceptSuite
 
-**[InterceptSuite](https://interceptsuite.com)** is a **MITM SOCKS5 proxy server** built for traffic interception and analysis. Point ProxyBridge at InterceptSuite and you can inspect everything:
+**[InterceptSuite](https://interceptsuite.com)** is a cross-platform MITM proxy for inspecting, intercepting, and modifying network traffic. Use ProxyBridge to redirect application or system traffic to InterceptSuite's SOCKS5 proxy and inspect supported protocols in real time.
 
-- Full TLS/SSL interception and certificate spoofing
-- TCP, UDP, StartTLS, DTLS traffic analysis
-- Live request and response editing
-- Scripting and automation
+With InterceptSuite, you can:
 
-ProxyBridge routes the traffic in. InterceptSuite sees inside it.
+- **Intercept TLS/SSL:** Decrypt and inspect encrypted connections using MITM.
+- **Inspect multiple protocols:** Work with TCP, UDP, STARTTLS, DTLS, QUIC, and custom protocols.
+- **Modify traffic live:** Edit requests and responses before forwarding them.
+- **Analyze and replay:** Inspect traffic and replay captured data during testing.
+- **Automate workflows:** Use scripting to customize traffic handling and analysis.
 
-[**Try InterceptSuite →**](https://interceptsuite.com)
+**ProxyBridge gets the traffic to the proxy. InterceptSuite gives you the tools to inspect and work with it.**
+
+[**Start your free trial — no credit card required →**](https://interceptsuite.com)
 
 ## License
 
