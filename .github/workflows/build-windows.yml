@@ -6,11 +6,13 @@ on:
     branches: [ master, dev ]
     paths:
       - 'Windows/**'
+      - '!Windows/**.md'
       - '.github/workflows/build-windows.yml'
   pull_request:
     branches: [ master, dev ]
     paths:
       - 'Windows/**'
+      - '!Windows/**.md'
       - '.github/workflows/build-windows.yml'
   workflow_dispatch:
 

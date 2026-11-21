@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/tab_status"
+        android:icon="@drawable/ic_power"
+        android:title="@string/tab_status" />
+    <item
+        android:id="@+id/tab_rules"
+        android:icon="@drawable/ic_list"
+        android:title="@string/tab_rules" />
+    <item
+        android:id="@+id/tab_proxies"
+        android:icon="@drawable/ic_server"
+        android:title="@string/tab_proxies" />
+</menu>

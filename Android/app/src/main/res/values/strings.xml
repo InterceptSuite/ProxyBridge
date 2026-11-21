@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ProxyBridge</string>
+
+    <string name="tab_status">Status</string>
+    <string name="tab_rules">Rules</string>
+    <string name="tab_proxies">Proxies</string>
+
+    <string name="status_off">Off</string>
+    <string name="status_starting">Connecting</string>
+    <string name="status_on">On</string>
+    <string name="status_hint_empty">Add a proxy in the Proxies tab, then create rules to choose which traffic uses it.</string>
+    <string name="status_hint">Rules apply to every app that is in the tunnel. Android does not say which app made a connection, so rules match the destination. Choose the apps below.</string>
+    <string name="apps">Apps</string>
+    <string name="apps_all">All apps</string>
+    <string name="apps_only">Only selected apps</string>
+    <string name="apps_except">All apps except selected</string>
+    <string name="apps_summary_only">Only %1$d selected</string>
+    <string name="apps_summary_except">All except %1$d selected</string>
+    <string name="about">About</string>
+    <string name="version">Version</string>
+    <string name="website">Website</string>
+    <string name="github">GitHub</string>
+    <string name="privacy_policy">Privacy Policy</string>
+    <string name="about_footer">Traffic is sent only to the proxies you add. ProxyBridge collects no data and has no analytics.</string>
+
+    <string name="rules_title">Rules</string>
+    <string name="rules_empty">No rules yet</string>
+    <string name="rules_footer">Rules are checked from top to bottom. Hold and drag to reorder, swipe to delete.</string>
+    <string name="default_action">When no rule matches</string>
+    <string name="proxies_title">Proxies</string>
+    <string name="proxies_empty">No proxies yet</string>
+    <string name="proxies_footer">The first proxy is the default one, used by rules that do not name a proxy. Hold and drag to reorder, swipe to delete.</string>
+    <string name="add">Add</string>
+    <string name="deleted">Deleted</string>
+    <string name="undo">Undo</string>
+
+    <string name="rule_all_traffic">All traffic</string>
+    <string name="rule_any_port">any port</string>
+    <string name="rule_proxy">Proxy: %1$s</string>
+    <string name="rule_default_proxy">Default proxy</string>
+    <string name="no_proxy">no proxy</string>
+
+    <string name="editor_save">Save</string>
+    <string name="editor_delete">Delete</string>
+    <string name="proxy_add">Add proxy</string>
+    <string name="proxy_edit">Edit proxy</string>
+    <string name="proxy_name">Name (optional)</string>
+    <string name="proxy_host">Host</string>
+    <string name="proxy_port">Port</string>
+    <string name="proxy_send_hostname">Send host name to proxy</string>
+    <string name="proxy_send_hostname_hint">On: the proxy gets the site\'s name when the device looked it up through the system DNS, and the IP address otherwise. Off: the proxy always gets the IP address.</string>
+    <string name="proxy_user">User name</string>
+    <string name="proxy_password">Password</string>
+    <string name="proxy_auth_hint">Optional. Leave the user name empty if the proxy needs no login.</string>
+    <string name="proxy_invalid">Enter a host and a port from 1 to 65535.</string>
+
+    <string name="rule_add">Add rule</string>
+    <string name="rule_edit">Edit rule</string>
+    <string name="rule_name">Name (optional)</string>
+    <string name="rule_enabled">Enabled</string>
+    <string name="rule_hosts">Hosts</string>
+    <string name="rule_hosts_hint">github.com; *.example.com; 10.0.0.0/8</string>
+    <string name="rule_hosts_help">Domains, IP addresses or CIDR blocks separated by semicolons. Leave empty to match any host. A domain only matches when the app looked it up through the system DNS, so apps with their own encrypted DNS are matched by IP only.</string>
+    <string name="rule_ports">Ports</string>
+    <string name="rule_ports_hint">443; 80; 8000-9000</string>
+    <string name="rule_ports_help">Leave the ports empty to match any port.</string>
+    <string name="rule_protocol">Protocol</string>
+    <string name="rule_action">Action</string>
+    <string name="rule_proxy_label">Proxy</string>
+    <string name="rule_http_udp">An HTTP proxy cannot carry UDP. UDP traffic matched by this rule goes direct.</string>
+
+    <string name="apps_title">Apps</string>
+    <string name="apps_help">Only the apps in the tunnel are affected by ProxyBridge. Other apps connect as usual.</string>
+    <string name="apps_loading">Loading apps</string>
+
+    <string name="disclosure_title">Before you start</string>
+    <string name="disclosure_what_title">What it does</string>
+    <string name="disclosure_what">ProxyBridge sends the network traffic of this device through the SOCKS5 or HTTP proxies you add, using an Android VPN connection. Android asks you to allow it the first time you turn it on.</string>
+    <string name="disclosure_traffic_title">Your traffic</string>
+    <string name="disclosure_traffic">Traffic you send through a proxy goes to that proxy, and whoever runs it can see it. Traffic you send direct goes straight to its destination. None of it is sent to us. Name lookups go to the DNS servers of your network, or to public ones if none can be found.</string>
+    <string name="disclosure_data_title">Data we collect</string>
+    <string name="disclosure_data">None. ProxyBridge has no account, no analytics, no advertising and no tracking. Your proxies, passwords and rules stay on this device.</string>
+    <string name="disclosure_sharing_title">Sharing</string>
+    <string name="disclosure_sharing">We do not sell, use or disclose any data to third parties.</string>
+    <string name="disclosure_names_title">Site names</string>
+    <string name="disclosure_names">To match rules written for a domain, ProxyBridge reads the names in this device\'s DNS lookups while it is on. They are kept in memory only and are never stored or sent anywhere.</string>
+    <string name="disclosure_policy">Read the privacy policy</string>
+    <string name="disclosure_continue">Continue</string>
+
+    <string name="error_permission">The VPN permission was not given.</string>
+    <string name="error_hev">The packet stack could not be started.</string>
+    <string name="error_no_apps">Choose at least one app, or switch to all apps.</string>
+</resources>

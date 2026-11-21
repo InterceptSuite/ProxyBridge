@@ -122,7 +122,21 @@ Linux/tests/api_live_test
 Linux/**/__pycache__/
 !Linux/tests/*.py
 !iOS/tests/*.py
-Android/**
+# Android: only sources and Gradle files are tracked
+Android/.gradle/
+Android/.idea/
+Android/**/build/
+Android/**/.cxx/
+Android/**/*.iml
+Android/local.properties
+Android/captures/
+Android/app/src/main/jni/hev-socks5-tunnel/
+Android/**/*.jks
+Android/**/*.keystore
+Android/keystore.properties
+Android/**/*.apk
+Android/**/*.aab
+Android/**/.DS_Store
 # iOS: only sources and project.yml are tracked
 iOS/Signing.xcconfig
 iOS/ProxyBridge.xcodeproj/

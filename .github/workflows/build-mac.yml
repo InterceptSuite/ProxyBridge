@@ -8,11 +8,13 @@ on:
     branches: [ master, dev ]
     paths:
       - 'MacOS/**'
+      - '!MacOS/**.md'
       - '.github/workflows/build-mac.yml'
   pull_request:
     branches: [ master, dev ]
     paths:
       - 'MacOS/**'
+      - '!MacOS/**.md'
       - '.github/workflows/build-mac.yml'
   workflow_dispatch:
 
