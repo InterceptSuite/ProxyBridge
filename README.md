@@ -44,29 +44,6 @@ ProxyBridge is a free, open-source proxy client (Proxifier alternative) for **Wi
   </a>
 </p>
 
-<p align="center">
-  <sub>Sponsored</sub><br/>
-  <a href="https://go.nodemaven.com/proxybridgeoct">
-    <img src="img/sponsors/nodemaven.jpg" alt="NodeMaven" width="800"/>
-  </a>
-</p>
-
-[**NodeMaven**](https://go.nodemaven.com/proxybridgeoct): The most efficient proxy provider for Web Scraping and Automation with the Highest Quality IP on the market.
-
-**Why NodeMaven?**
-
-- ZIP targeting
-- 99.9% uptime
-- IP filtering: all proxies have fraud score <97%
-- No KYC required
-- Unique free tools: Proxy Bandwidth Checker, Meta Tag Checker, IP Lookup and others!
-
-**Special codes for ProxyBridge users:**
-
-- `PB2X` - 2X traffic for Black Friday
-- `PB35` - 35% off Mobile and Residential Proxies
-- `PB25` - 25% off ISP (Static) Proxies
-
 ## Download
 
 <p align="center">
