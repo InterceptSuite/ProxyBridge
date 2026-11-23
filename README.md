@@ -85,7 +85,7 @@ The iOS app is still in testing, so there is no public release for it yet. You c
 - [Windows screenshots](Windows/README.md#usage)
 - [Linux screenshots](Linux/README.md#gui-application)
 - [iOS screenshots](iOS/README.md#screenshots)
-- [Android app](Android/README.md)
+- [Android screenshots](Android/README.md#screenshots)
 
 
 ## Inspect redirected traffic with InterceptSuite
