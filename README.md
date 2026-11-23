@@ -55,7 +55,7 @@ ProxyBridge is a free, open-source proxy client (Proxifier alternative) for **Wi
 </p>
 
 <p align="center">
-  <a href="https://play.google.com/store/apps/details?id=com.interceptsuite.ProxyBridge">
+  <a href="https://play.google.com/apps/testing/com.interceptsuite.ProxyBridge">
     <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play" height="80" />
   </a>
 </p>
