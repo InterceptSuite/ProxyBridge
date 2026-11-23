@@ -54,8 +54,13 @@ ProxyBridge is a free, open-source proxy client (Proxifier alternative) for **Wi
   <sub>Windows x64 · macOS (x64 & arm64) · Linux (x64 & ARM64)</sub>
 </p>
 
-The Android and iOS are under testing right now, hence build version is not yet availabe till final release.
-The iOS and Android apps are in [iOS](iOS/README.md) and [Android](Android/README.md), with build steps in each README if you want to try. 
+<p align="center">
+  <a href="https://play.google.com/store/apps/details?id=com.interceptsuite.ProxyBridge">
+    <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play" height="80" />
+  </a>
+</p>
+
+The iOS app is still in testing, so there is no public release for it yet. You can build it from source, see [iOS](iOS/README.md). The Android app is in [Android](Android/README.md).
 
 <p align="center">
   <a href="https://github.com/InterceptSuite/ProxyBridge/releases">Older versions</a>

@@ -136,6 +136,7 @@ Android/**/*.keystore
 Android/keystore.properties
 Android/**/*.apk
 Android/**/*.aab
+Android/app/release/
 Android/**/.DS_Store
 # iOS: only sources and project.yml are tracked
 iOS/Signing.xcconfig
