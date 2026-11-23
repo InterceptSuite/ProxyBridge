@@ -2,6 +2,20 @@
 
 Sends the traffic of your Android phone through a SOCKS5 or HTTP proxy. You choose per destination what goes through a proxy, what goes direct and what is blocked. The app has no analytics and collects no data.
 
+## Screenshots
+
+<p align="center">
+  <img src="../img/Android/Status.png" alt="Status tab" width="200"/>
+  &nbsp;
+  <img src="../img/Android/Rule-Editor.png" alt="Rule editor" width="200"/>
+  &nbsp;
+  <img src="../img/Android/Proxy-Editor.png" alt="Proxy editor" width="200"/>
+  &nbsp;
+  <img src="../img/Android/Apps.png" alt="App selection" width="200"/>
+  <br/>
+  <em>Status, rule editor, proxy editor and app selection</em>
+</p>
+
 ## What it does
 
 - Proxies: SOCKS5 and HTTP (CONNECT), with optional user name and password. TCP and UDP work with SOCKS5, HTTP proxies carry TCP only.
